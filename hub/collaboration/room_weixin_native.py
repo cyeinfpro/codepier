@@ -621,17 +621,17 @@ class RoomWeixin:
         self.c.room_goal_recovery.eligible_base(goal,owner)
         return self._author(message,project_ids=project_ids,goal=goal,recovery_owner=owner)
 
-    def author(self,message,*,project_ids=None,goal=None):
+    def author(self,message,*,project_ids=None,goal=None,allow_disconnected=False):
         authority = self.c.room_work_bridge.native.input_authority
         if authority.proof(message, goal=goal):
             if not goal:
-                *_, member = self.source_binding(message)
+                *_, member = self.source_binding(message, allow_disconnected=allow_disconnected)
                 if not member or member['status'] in {'removed', 'paused'}:
                     raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已暂停或移出',403)
             return authority.author(message, project_ids=project_ids, goal=goal)
-        return self._author(message,project_ids=project_ids,goal=goal)
+        return self._author(message,project_ids=project_ids,goal=goal,allow_disconnected=allow_disconnected)
 
-    def _author(self,message,*,project_ids=None,goal=None,recovery_owner=None):
+    def _author(self,message,*,project_ids=None,goal=None,recovery_owner=None,allow_disconnected=False):
         body=json.loads(message['body']);origin=body.get('external_origin',{})
         record=self.store.one('SELECT * FROM room_channel_owner_inputs WHERE message_id=?',(message['id'],))
         auth=self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?',(record['authorization_id'],)) if record else None
@@ -654,7 +654,7 @@ class RoomWeixin:
             recovered=True
         else:
             recovered=self.recovered_goal(goal,message,binding) if goal else None
-        _,_,owner,_,member=self.source_binding(message)
+        _,_,owner,_,member=self.source_binding(message,allow_disconnected=allow_disconnected)
         if not recovered and (not member or member['status'] in {'removed','paused'}):
             raise DevError('WEIXIN_MEMBER_REMOVED','原消息指定的成员已暂停或移出',403)
         authorized=json.loads(auth['scope'])
@@ -928,7 +928,7 @@ class RoomWeixin:
 
     def reply_binding(self,binding,message,source,*,allow_disconnected=False):
         identity = self.source_binding(source, allow_disconnected=allow_disconnected)
-        if identity[0]['id'] != binding['id']:
+        if not binding or identity[0]['id'] != binding['id']:
             raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED','原微信回复绑定已改变',403)
         member = identity[-1]
         if not member or member['status'] in {'removed', 'paused'}:
@@ -937,11 +937,48 @@ class RoomWeixin:
                 raise DevError('WEIXIN_MEMBER_REMOVED','原主责 dot 已暂停或移出',403)
         return identity
 
-    def reply_author(self,message,source):
+    def current_conversation_reply(self, message, source):
+        """The explicit protocol can reply to a new input about existing work."""
+        body = json.loads(message['body'])
+        if (type(body.get('publish_work')) is not bool
+                or source['id'] != message.get('reply_to_id')
+                or source['id'] != body.get('source_message_id')):
+            return False
+        if not body['publish_work']:
+            return True
+        goal = self.store.one('SELECT * FROM coordination_goals WHERE id=?', (message.get('goal_id'),))
+        native = self.c.room_work_bridge.native
+        reference = native.reference(goal) if goal else None
+        return bool(reference and native.original(reference)['source_message_id'] != source['id'])
+
+    def conversation_reply_author(self, body, source, *, allow_disconnected=False):
+        projects = set(body.get('provenance_project_ids', []))
+        scopes = {(scope['project_id'], scope['environment_id']) for scope in body.get('provenance_scopes', [])}
+        author = self.author(source, project_ids=projects or None, allow_disconnected=allow_disconnected)
+        if not author['authenticated']:
+            raise DevError('CHANNEL_OWNER_NOT_APPROVED', '此微信来源没有有效的工作回传授权', 403)
+        if not projects:
+            return author
+        binding, _, owner, _, member = self.source_binding(source, allow_disconnected=allow_disconnected)
+        authority = self.c.room_work_bridge.native.input_authority
+        proof = authority.proof(source, member)
+        if proof:
+            rules = authority.rules(source, member, proof=proof, keys=scopes)
+            readable = {key for key, rule in rules.items() if 'read' in rule['capabilities']}
+        else:
+            auth = self.store.one('SELECT * FROM room_channel_owner_authorizations WHERE id=?',
+                                  (author['authorization_id'],))
+            current = self.current_scope(binding, owner, json.loads(auth['scope']))
+            readable = {(rule['project_id'], rule['environment_id']) for rule in current['projects']
+                        if 'read' in rule['capabilities']}
+        if projects != {project for project, _ in scopes} or not scopes <= readable:
+            raise DevError('WEIXIN_DELIVERY_SCOPE_CHANGED', '原微信回复未获这些项目环境的外发许可', 403)
+        return author
+
+    def reply_author(self,message,source,*,allow_disconnected=False):
         goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
         native=self.c.room_work_bridge.native
-        if (goal and json.loads(message['body']).get('publish_work') is not False
-                and (reference := native.reference(goal))):
+        if goal and (reference := native.reference(goal)):
             original = native.original(reference)
             if (source['id']!=original['source_message_id'] or source['conversation_id']!=original['conversation_id']
                     or source['version']!=original['source_version']
@@ -954,14 +991,14 @@ class RoomWeixin:
                 native.require_delivery_projects(goal, source, projects)
             return native.owner_author(goal, source)
         if self.store.one('SELECT 1 FROM room_channel_owner_inputs WHERE message_id=?',(source['id'],)):
-            return self.author(source)
+            return self.author(source, allow_disconnected=allow_disconnected)
         return self.c.channel_owner.author(source)
 
     def sender_matches(self,binding,message,source=None,*,allow_disconnected=False):
         body=json.loads(message['body'])
         goal=self.store.one('SELECT * FROM coordination_goals WHERE id=?',(message.get('goal_id'),)) if message.get('goal_id') else None
-        if (goal and body.get('publish_work') is not False
-                and self.c.room_work_bridge.native.reference(goal)):
+        if (goal and self.c.room_work_bridge.native.reference(goal)
+                and not (source and self.current_conversation_reply(message, source))):
             source=source or self.c.weixin.delivery.root_source(message)
             if not source:
                 return False
@@ -984,6 +1021,11 @@ class RoomWeixin:
                         and item['member_id']==lead['member_id'] and item['intent_revision']==revision)
                 intent=self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',
                     (goal['id'],revision))
+                if (body.get('publish_work') is True and message['reply_to_id'] == body.get('source_message_id')
+                        and self.store.one('''SELECT 1 FROM room_goal_publications
+                            WHERE goal_id=? AND intent_revision=? AND message_id=?''',
+                            (goal['id'], revision, message['id']))):
+                    return True
                 return bool(intent and body.get('source_message_id')==intent['source_message_id']
                     and message['reply_to_id']==intent['source_message_id'])
         if source and json.loads(source['body']).get('external_origin', {}).get('native_room'):

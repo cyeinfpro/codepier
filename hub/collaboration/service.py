@@ -1144,6 +1144,8 @@ class CollaborationService:
             return self.room_runtime.work_read(args['work_id'], principal)
         if name == 'collaboration_room_message':
             return self.room_runtime.send(raw, principal)
+        if name == 'collaboration_room_reply_receipt':
+            return self.room_runtime.reply_receipt(raw, principal)
         if name == 'collaboration_room_reply':
             return self.room_runtime.reply(raw, principal)
         if name == 'collaboration_room_work_start':

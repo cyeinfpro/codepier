@@ -16,6 +16,8 @@ def migrate(db):
         recipient_member_id TEXT NOT NULL REFERENCES room_members(id),
         author_generation INTEGER NOT NULL,recipient_generation INTEGER NOT NULL,
         provenance_project_ids TEXT NOT NULL)''')
+    if 'provenance_scopes' not in {row[1] for row in db.execute('PRAGMA table_info(room_goal_handoff_members)')}:
+        db.execute("ALTER TABLE room_goal_handoff_members ADD COLUMN provenance_scopes TEXT NOT NULL DEFAULT '[]'")
 
 
 class RoomGoalHandoffs:
@@ -33,13 +35,14 @@ class RoomGoalHandoffs:
                 author=bool(side and side['author_member_id']==member['id'])),
                 'read_only':True,'read_is_consumption':False,'grants_authority':False}
 
-    def saved_member(self, spec, identifier):
+    def saved_member(self, spec, identifier, *, require_route=True):
         saved = next((m for m in spec['members'] if m['member_id']==identifier),None)
         if not saved:
             raise DevError('ROOM_WORK_MEMBER_REQUIRED','交接成员不在当前原工作范围内',403)
         current = self.c.rooms.member(identifier,spec['conversation_id'])
         actor = self.c.rooms.principal(current)
-        self.c.room_consumers.binding(self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(spec['conversation_id'],)),current,actor)
+        if require_route:
+            self.c.room_consumers.binding(self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(spec['conversation_id'],)),current,actor)
         valid = []
         for rule in saved['projects']:
             try:
@@ -54,7 +57,7 @@ class RoomGoalHandoffs:
     def handoff(self, raw, principal):
         args = validate(RoomWorkHandoff,raw)
         with self.store.transaction():
-            member = self.c.room_consumers.authorize_member(args,principal,require_revision=True)
+            member = self.c.room_consumers.authorize_member(args,principal,action='handoff')
             goal = self.c.room_runtime.goal(args['goal_id'])
             if goal['conversation_id'] != member['conversation_id']:
                 raise DevError('ROOM_WORK_NOT_FOUND','当前房间没有这个原工作',404)
@@ -65,16 +68,23 @@ class RoomGoalHandoffs:
             partition = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(goal['room_id'],))
             self.c.coordination.authorize(principal,partition,goal,active=True)
             item = self.c.coordination.work(goal,args['work_item_id']) if args['work_item_id'] else None
-            native.guard(args,principal,goal,item,action='handoff')
+            session = native.guard(args,principal,goal,item,action='handoff')
             spec = native.record(native.reference(goal))
-            author,_,author_rules = self.saved_member(spec,member['id'])
+            author,_,author_rules = self.saved_member(spec,member['id'],
+                require_route=not session or session.get('turn_policy')!='decoupled')
             recipient,target,recipient_rules = self.saved_member(spec,args['recipient_member_id'])
             if recipient['member_id']==author['member_id']:
                 raise DevError('TEAM_HANDOFF_RECIPIENT','交接需要另一位已批准的工作成员',403)
             refs = self.c.coordination.teams.artifacts(goal,args['artifact_refs'])
             revision = self.c.room_runtime.intent_revision(goal['id'])
             epoch = self.c.room_goal_recovery.require_epoch(goal,args['coordinator_epoch'])
-            provenance = sorted({r['project_id'] for r in author_rules})
+            author_scopes = native.visible_scope_keys(goal,principal,member['id'])
+            recipient_scopes = native.visible_scope_keys(goal,self.c.rooms.principal(target),target['id'])
+            ref_scopes={native.artifact_scope_key(goal,ref['work_item_id']) for ref in refs}
+            if not ref_scopes <= author_scopes & recipient_scopes:
+                raise DevError('TEAM_HANDOFF_ARTIFACT_NOT_VISIBLE','交接产物须在双方当前可读的项目和环境内',403)
+            provenance_keys = {native.scope_key(rule) for rule in author_rules} | ref_scopes
+            provenance = sorted({project for project,_ in provenance_keys})
             if args['causation_id']:
                 ancestor = self.store.one('''SELECT h.*,m.author_member_id,m.recipient_member_id FROM team_handoffs h
                     JOIN room_goal_handoff_members m ON m.handoff_id=h.id WHERE h.id=? AND h.goal_id=?
@@ -111,8 +121,11 @@ class RoomGoalHandoffs:
                     (identifier,goal['id'],goal['approval_id'],revision,epoch,author_rules[0]['legacy_dot_id'],
                      recipient_rules[0]['legacy_dot_id'],args['work_item_id'],redact(args['purpose']),
                      redact(args['decision_needed']),canonical(refs),args['causation_id'],args['hop_count'],fingerprint,now))
-                self.store.execute('INSERT INTO room_goal_handoff_members VALUES (?,?,?,?,?,?)',
-                    (identifier,member['id'],target['id'],member['binding_generation'],target['binding_generation'],canonical(provenance)))
+                self.store.execute('''INSERT INTO room_goal_handoff_members
+                    (handoff_id,author_member_id,recipient_member_id,author_generation,recipient_generation,
+                     provenance_project_ids,provenance_scopes) VALUES (?,?,?,?,?,?,?)''',
+                    (identifier,member['id'],target['id'],member['binding_generation'],target['binding_generation'],
+                     canonical(provenance),canonical(sorted(provenance_keys))))
                 self.store.execute('''INSERT INTO coordination_messages
                     (id,goal_id,approval_id,author_grant_id,body,mention_grant_ids,provenance_project_ids,created)
                     VALUES (?,?,?,?,?,?,?,?)''',(identifier,goal['id'],goal['approval_id'],principal.grant_id,
@@ -129,7 +142,7 @@ class RoomGoalHandoffs:
 
     def read(self, member, identifier, principal, *, author=False):
         row = self.store.one('''SELECT h.*,m.author_member_id,m.recipient_member_id,m.author_generation,
-            m.recipient_generation,m.provenance_project_ids FROM team_handoffs h
+            m.recipient_generation,m.provenance_project_ids,m.provenance_scopes FROM team_handoffs h
             JOIN room_goal_handoff_members m ON m.handoff_id=h.id WHERE h.id=?''',(identifier,))
         expected = 'author_member_id' if author else 'recipient_member_id'
         generation = 'author_generation' if author else 'recipient_generation'
@@ -143,14 +156,19 @@ class RoomGoalHandoffs:
         self.c.coordination.authorize(principal,partition,goal,active=True)
         native = self.c.room_work_bridge.native
         spec = native.record(native.reference(goal))
-        self.saved_member(spec,row['author_member_id'])
-        self.saved_member(spec,row['recipient_member_id'])
+        self.saved_member(spec,row['author_member_id'],require_route=False)
+        self.saved_member(spec,row['recipient_member_id'],require_route=False)
         if (row['approval_id']!=goal['approval_id'] or row['intent_revision']!=self.c.room_runtime.intent_revision(goal['id'])
                 or row['coordinator_epoch']!=self.c.room_goal_recovery.epoch(goal['id'])):
             raise DevError('TEAM_HANDOFF_STALE','此交接不再属于当前批准、本人意图或主责世代',409)
         refs = self.c.coordination.teams.artifacts(goal,json.loads(row['artifact_refs']))
-        visible = native.visible_projects(goal,principal,member['id'])
-        limited = not set(json.loads(row['provenance_project_ids']))<=visible
+        visible = native.visible_scope_keys(goal,principal,member['id'])
+        provenance={tuple(key) for key in json.loads(row['provenance_scopes'])}
+        if not provenance:
+            old_projects=set(json.loads(row['provenance_project_ids']))
+            provenance={native.scope_key(rule) for rule in spec['projects'] if rule['project_id'] in old_projects}
+        limited = not provenance<=visible
+        refs=[ref for ref in refs if native.artifact_scope_key(goal,ref['work_item_id']) in visible]
         original = native.source(goal,principal)
         intent = self.store.one('SELECT * FROM room_work_intent_sources WHERE goal_id=? AND intent_revision=?',
             (goal['id'],row['intent_revision']))
@@ -166,11 +184,11 @@ class RoomGoalHandoffs:
                 'digest':digest(json.loads(current['body']).get('body_text','')),
                 'body_text':json.loads(current['body']).get('body_text','')},
             'member_projects':[{k:r[k] for k in ('project_id','environment_id','capabilities','execution_targets')}
-                for r in recipient['projects'] if r['project_id'] in visible],
+                for r in recipient['projects'] if native.scope_key(r) in visible],
             'work_item':None}
         if row['work_item_id']:
             item = self.c.coordination.work(goal,row['work_item_id'])
-            if item['project_id'] in visible:
+            if native.work_is_visible(goal,item,visible):
                 context['work_item'] = {k:item[k] for k in ('id','project_id','objective','acceptance','state')}
                 context['work_item']['dependencies'] = json.loads(item['dependencies'])
         # References remain opaque evidence; no result text or operation body

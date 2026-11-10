@@ -475,8 +475,9 @@ async def test_reply_disposition_keeps_authority_and_transport_separate(collab, 
         assert s.store.one('SELECT 1 FROM weixin_deliveries WHERE id=? AND message_id=?', (channel['id'], reply_id))
     plan = s.store.all("""EXPLAIN QUERY PLAN SELECT result FROM room_runtime_receipts
         WHERE owner_user_id=? AND conversation_id=? AND json_valid(result)
-          AND json_extract(result,'$.message_id')=?""", (owner.user_id, identity['conversation_id'], reply_id))
-    assert any('room_runtime_receipts_message' in row['detail'] for row in plan)
+          AND action LIKE 'room_reply:%' AND json_extract(result,'$.message_id')=?""",
+        (owner.user_id, identity['conversation_id'], reply_id))
+    assert any('room_reply_receipt_message' in row['detail'] for row in plan)
 
 
 @pytest.mark.asyncio

@@ -92,14 +92,15 @@ class ChannelRouter:
     def queue_reply(self, message):
         return self.queue(message)
 
-    def queue_reply_dispositions(self, message, *, delivery_dependency=None):
+    def queue_reply_dispositions(self, message, *, reply_sources=None, delivery_dependency=None):
         dispositions = []
-        self.queue(message, dispositions=dispositions, delivery_dependency=delivery_dependency)
+        self.queue(message, dispositions=dispositions, reply_sources=reply_sources,
+                   delivery_dependency=delivery_dependency)
         return dispositions[:24] or [{
             "channel": "weixin", "disposition": "not_requested", "reason_code": "no_external_reply"
         }]
 
-    def queue(self, message, *, dispositions=None, delivery_dependency=None):
+    def queue(self, message, *, dispositions=None, reply_sources=None, delivery_dependency=None):
         self.store.require_transaction()
         body = json.loads(message["body"])
         if message["origin"] not in {
@@ -110,16 +111,25 @@ class ChannelRouter:
             return []
         # Legacy source reply remains byte-for-byte compatible until explicit
         # full-mirror consent is recorded for that exact binding version.
-        source = self.c.weixin.delivery.root_source(message)
-        origin = json.loads(source["body"]).get("external_origin", {}) if source else {}
-        legacy = None
-        if origin.get("channel") == "weixin":
-            direct_reply = self.c.weixin.delivery.queue_reply_result(message, **(delivery_dependency or {}))
-            legacy = direct_reply.delivery
-            if dispositions is not None and direct_reply.disposition != "not_requested":
-                dispositions.append(direct_reply.view())
-        elif delivery_dependency:
+        weixin = self.c.weixin.delivery
+        sources = [weixin.root_source(message)] if reply_sources is None else reply_sources
+        direct_sources = {}
+        for source in sources:
+            origin = json.loads(source["body"]).get("external_origin", {}) if source else {}
+            if origin.get("channel") == "weixin":
+                recipient = (origin.get("account_id"), origin.get("peer_id"))
+                direct_sources.setdefault(recipient, source)
+        required_recipient, dependency = delivery_dependency or (None, {})
+        if required_recipient is not None and required_recipient not in direct_sources:
             raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前回复没有可承接原依赖的微信收件人', 409)
+        direct_replies = {}
+        for recipient, source in direct_sources.items():
+            options = dependency if recipient == required_recipient else {}
+            result = weixin.queue_reply_result(message, source=source, **options)
+            if result.disposition != "not_requested":
+                direct_replies[recipient] = result
+                if dispositions is not None:
+                    dispositions.append(result.view())
         targets = []
         if self.c.config.enabled:
             targets += [
@@ -144,16 +154,15 @@ class ChannelRouter:
         for channel, binding in targets:
             # Keep the original Weixin source-reply/file ledger as the single
             # transport owner; full mirroring must not add a duplicate text.
-            if (channel == "weixin" and origin.get("channel") == "weixin"
-                    and origin.get("binding_id") == binding["id"]
-                    and direct_reply.disposition != "not_requested"):
+            direct_reply = direct_replies.get((binding["account_id"], binding["peer_id"])) if channel == "weixin" else None
+            if direct_reply:
                 older = self.store.all(
                     """SELECT d.id FROM channel_mirrors d JOIN collaboration_messages m ON m.id=d.message_id
                     WHERE d.channel='weixin' AND d.binding_id=? AND m.reply_to_id=?
                     AND json_extract(m.body,'$.sender_dot_id')=? AND json_extract(m.body,'$.dot_reply_complete')=0""",
                     (binding["id"], message["reply_to_id"], body.get("sender_dot_id")),
                 )
-                for prior in older if legacy else ():
+                for prior in older if direct_reply.delivery else ():
                     self.store.execute(
                         "UPDATE channel_mirror_parts SET state='superseded' WHERE delivery_id=? AND state IN ('queued','waiting_context','preparing')",
                         (prior["id"],),
@@ -324,7 +333,7 @@ class ChannelRouter:
             if dispositions is not None:
                 dispositions.append({"channel": channel, "binding_id": binding["id"],
                                      "disposition": "queued", "reason_code": "", "delivery_id": did})
-        return queued or legacy
+        return queued or next((reply.delivery for reply in direct_replies.values() if reply.delivery), None)
 
     def validate(self, delivery):
         message = self.store.one(

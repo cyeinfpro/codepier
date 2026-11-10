@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 
-from hub.collaboration.projection_cache import project as projected_project
 from hub.collaboration.room_input_authority import RoomInputAuthority, intersect_grants, migrate as migrate_input_authority
 from hub.collaboration.common import canonical, digest
 from hub.principal import Principal, refresh_principal
@@ -254,6 +253,7 @@ class RoomGoalScopes:
                 or policy['version']!=rule['policy_version'] or policy['digest']!=rule['policy_digest']
                 or not self.bridge.authorized(policy)):
             raise DevError('ROOM_WORK_SCOPE_CHANGED','原工作项目范围已移出、撤销或重新批准',403)
+        self.require_work_partition(policy)
         for capability in rule['capabilities']:
             self.c.coordination.require_capability(actor,capability,rule['project_id'])
         return member,actor
@@ -300,49 +300,69 @@ class RoomGoalScopes:
             raise DevError('ROOM_WORK_MEMBER_CHANGED','原成员绑定已改变',403)
         return self.c.rooms.principal(member)
 
-    def visible_projects(self,goal,principal,member_id=''):
+    @staticmethod
+    def scope_key(rule):
+        return rule['project_id'], rule['environment_id']
+
+    def work_scope_key(self, goal, item):
+        return item['project_id'], self.work_environment(goal, item)
+
+    def artifact_scope_key(self, goal, work_item_id):
+        return self.work_scope_key(goal, self.c.coordination.work(goal, work_item_id))
+
+    def work_is_visible(self, goal, item, scope_keys):
+        try:
+            return self.work_scope_key(goal, item) in scope_keys
+        except DevError:
+            # Unverifiable historical assignments cannot expose work payloads.
+            return False
+
+    def visible_scope_keys(self,goal,principal,member_id=''):
         spec=self.record(self.reference(goal))
         if not principal.grant_id:
-            return set(spec['project_ids'])
+            return {self.scope_key(rule) for rule in spec['projects']}
         candidates=[m for m in spec['members'] if m['grant_id']==principal.grant_id and (not member_id or m['member_id']==member_id)]
         source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (spec['source_message_id'],))
         proof = self.input_authority.proof(source, goal=goal) if source else None
         permitted=[]
         for saved in candidates:
             member=self.c.rooms.member(saved['member_id'],spec['conversation_id'])
-            if (member['status'] in {'removed','paused','invited'} or member['grant_id']!=saved['grant_id']
+            if (member['status'] in {'removed','paused','invited','legacy'} or member['grant_id']!=saved['grant_id']
                     or member['binding_generation']!=saved['binding_generation']):
                 continue
-            current={(row['project_id'],row['environment_id']): row for row in self.bridge.scopes(member)}
+            current={self.scope_key(row): row for row in self.bridge.scopes(member)}
+            readable=self.c.rooms.read_scope_keys(member,principal)
             visible=set()
             for rule in saved['projects']:
-                scope = current.get((rule['project_id'], rule['environment_id']))
-                try:
-                    # History is a room read. Its visibility follows the
-                    # current exact member/project access; the source's
-                    # execution and WeChat return grants are checked separately.
-                    original = scope and scope['version'] == rule['scope_version'] and self.bridge.fingerprint([scope]) == rule['scope_digest']
-                    if scope and (proof or original) and self.c.rooms.member_scope_authorized(scope):
-                        projected_project(self.c, rule['project_id'],principal)
-                        visible.add(rule['project_id'])
-                except DevError:
+                key=self.scope_key(rule)
+                scope=current.get(key)
+                if key not in readable or not scope:
                     continue
+                # Legacy work retains its original approval boundary; new work
+                # uses live room read access independently of execution consent.
+                original = scope['version'] == rule['scope_version'] and self.bridge.fingerprint([scope]) == rule['scope_digest']
+                if proof or original:
+                    visible.add(key)
             permitted.append(visible)
-        # A shared grant without an explicit validated member credential gets
-        # only common visibility; it cannot union two room identities.
+        # Shared grants without a selected member get the intersection.
         return set.intersection(*permitted) if permitted else set()
+
+    def visible_projects(self,goal,principal,member_id=''):
+        return {project for project,_ in self.visible_scope_keys(goal,principal,member_id)}
 
     def public_scope(self,goal,principal,member_id=''):
         spec=self.record(self.reference(goal))
-        visible=self.visible_projects(goal,principal,member_id)
+        visible=self.visible_scope_keys(goal,principal,member_id)
         return {k:spec[k] for k in ('schema_version','conversation_id','source_message_id','source_version','source_digest',
             'coordinator_member_id','coordinator_grant_id','coordinator_epoch')} | {
-            'project_ids':sorted(visible),'projects':[r for r in spec['projects'] if r['project_id'] in visible],
+            'project_ids':sorted({project for project,_ in visible}),
+            'projects':[r for r in spec['projects'] if self.scope_key(r) in visible],
             'members':[{'member_id':m['member_id'],'name':m['name'],'grant_id':m['grant_id'],
-                'projects':[r for r in m['projects'] if r['project_id'] in visible]} for m in spec['members']],
+                'projects':[r for r in m['projects'] if self.scope_key(r) in visible]} for m in spec['members']],
             'work_routes':[{'member_id':m['member_id'],'grant_id':m['grant_id'],'project_id':r['project_id'],
-                'environment_id':r['environment_id'],'capabilities':r['capabilities']} for m in spec['members'] for r in m['projects']],
-            'visibility_limited':visible!=set(spec['project_ids'])}
+                'environment_id':r['environment_id'],'capabilities':r['capabilities']}
+                for m in spec['members'] for r in m['projects'] if self.scope_key(r) in visible],
+            'visibility_limited':visible!={self.scope_key(rule) for rule in spec['projects']}}
 
     def project_capabilities(self,goal,project_id):
         reference=self.reference(goal)
@@ -388,7 +408,14 @@ class RoomGoalScopes:
         policy = self.store.one('SELECT * FROM delegation_policies WHERE id=?', (adapter['policy_id'],))
         if not policy or not self.bridge.authorized(policy):
             raise DevError('ROOM_WORK_SCOPE_CHANGED', '原工作步骤的当前项目授权已不可用', 403)
+        self.require_work_partition(policy)
         return member, effective
+
+    def require_work_partition(self, policy):
+        partition=self.store.one('SELECT * FROM collaboration_rooms WHERE id=?',(policy['room_id'],))
+        if not partition:
+            raise DevError('ROOM_WORK_PARTITION_CHANGED','原工作项目分区证据不存在',403)
+        self.c.live_room(partition)
 
     def continuous_rules(self, goal, source, current, proof, *, keys):
         if current['status'] in {'removed','paused','invited','legacy'}:
@@ -455,7 +482,7 @@ class RoomGoalScopes:
         if not member or member['id'] not in {m['member_id'] for m in spec['members']}:
             raise DevError('ROOM_WORK_MEMBER_REQUIRED','工作需要原参与成员的真实消费回合',403)
         conversation=self.store.one('SELECT * FROM conversation_rooms WHERE id=?',(goal['conversation_id'],))
-        self.c.room_consumers.guard_session(raw,principal,conversation,member,require_revision=require_revision)
+        self.c.room_consumers.guard_session(raw,principal,conversation,member,require_revision=require_revision,action=action)
         if action in {'create','assign','claim','execute','takeover'} and self.store.one(
                 'SELECT 1 FROM room_goal_publications WHERE goal_id=? AND intent_revision=?',(goal['id'],revision)):
             raise DevError('ROOM_WORK_ALREADY_PUBLISHED','本次原工作已发表最终汇总，新步骤需要本人新的明确输入',409)
