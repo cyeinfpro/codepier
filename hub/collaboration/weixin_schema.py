@@ -141,6 +141,10 @@ def migrate_delivery_order(db):
         ON weixin_deliveries(id) WHERE ordering_checked_version<2''')
     db.execute('''CREATE INDEX IF NOT EXISTS weixin_order_dependency
         ON weixin_deliveries(depends_on_delivery_id) WHERE depends_on_delivery_id IS NOT NULL''')
+    db.execute('''CREATE TABLE IF NOT EXISTS weixin_part_route_recoveries(
+        part_id TEXT NOT NULL REFERENCES weixin_parts(id),channel_generation INTEGER NOT NULL,
+        evidence TEXT NOT NULL,approved_by TEXT NOT NULL,approved_at REAL NOT NULL,
+        PRIMARY KEY(part_id,channel_generation))''')
     db.execute('''CREATE TABLE IF NOT EXISTS weixin_order_migrations(
         name TEXT PRIMARY KEY,last_delivery_id TEXT NOT NULL DEFAULT '',
         checked_count INTEGER NOT NULL DEFAULT 0,changed_count INTEGER NOT NULL DEFAULT 0,

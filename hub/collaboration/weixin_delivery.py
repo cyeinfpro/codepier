@@ -12,6 +12,7 @@ from httpx import NetworkError, TimeoutException
 
 from hub import iam
 from hub.collaboration import weixin_delivery_order as order
+from hub.collaboration import weixin_delivery_routes as routes
 from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.common import canonical, digest, redact
@@ -36,6 +37,7 @@ TERMINAL_SOURCE = frozenset(TASK_STATUSES) | {
     'CHANNEL_OWNER_SOURCE_CHANGED', 'CHANNEL_OWNER_SOURCE_SUPERSEDED', 'CHANNEL_OWNER_PEER_CHANGED',
     'WEIXIN_DELIVERY_SOURCE_CHANGED', 'WEIXIN_DELIVERY_CONTENT_CHANGED', 'WEIXIN_DELIVERY_SCOPE_CHANGED',
     'WEIXIN_BINDING_INACTIVE', 'WEIXIN_CREDENTIAL_CHANGED', 'WEIXIN_RECOVERY_SOURCE_CHANGED',
+    'WEIXIN_RECOVERY_SCOPE_CHANGED',
 }
 RATE_LIMITED = 'WEIXIN_RATE_LIMITED'
 REQUEST_LIMIT = 'WEIXIN_REQUEST_LIMIT'
@@ -326,7 +328,10 @@ class WeixinDelivery:
                 (identifier, part_id, delivery['binding_id']))
         self.refresh(delivery['id'])
 
-    def validate(self, delivery):
+    def validate(self, delivery, *, part=None):
+        recovered = routes.validate_part(self, delivery, part)
+        if recovered:
+            return recovered
         if delivery['kind'] == 'status':
             source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
             if not source:
@@ -446,14 +451,15 @@ class WeixinDelivery:
                 return None
             if dependency == 'waiting':
                 return None
-            binding, account, owner, message = self.validate(delivery)
+            binding, account, owner, message = self.validate(delivery, part=part)
+            route_recovery = binding['generation'] != delivery['generation']
             context = self.store.one('SELECT * FROM weixin_contexts WHERE account_id=? AND generation=? AND peer_id=?',
                                      (account['id'], binding['generation'], delivery['peer_id']))
             if not context:
                 self.store.execute("UPDATE weixin_parts SET state='waiting_context',next_attempt=?,reason_code='context_missing',updated=? WHERE id=?", (now + 5, now, identifier))
                 self.refresh(delivery['id'])
                 return None
-            if part['kind'] == 'attachment':
+            if part['kind'] == 'attachment' and not route_recovery:
                 source = json.loads(self.store.decrypt(part['body']))
                 try:
                     attachment = self.w.media.row(source['attachment_id'], owner)
@@ -476,7 +482,8 @@ class WeixinDelivery:
                                (claim_owner, fence, now + (960 if part['kind'] == 'attachment' else 180), now, identifier))
             transport.admit(self.store, account['id'], delivery['peer_id'])
             return {**part, 'lease_owner': claim_owner, 'lease_fence': fence, 'delivery': delivery,
-                    'binding': binding, 'account': account, 'context': context}
+                    'binding': binding, 'account': account, 'context': context,
+                    'owner': owner, 'message': message, 'route_recovery': route_recovery}
 
     def reject_failed_dependency(self, delivery_id, now):
         self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='dependency_failed',
@@ -490,8 +497,9 @@ class WeixinDelivery:
         if (not part or part['lease_owner'] != claim['lease_owner'] or part['lease_fence'] != claim['lease_fence']
                 or (part['lease_until'] or 0) <= self.c.clock() or part['state'] not in {'preparing', 'sending'}):
             raise DevError('WEIXIN_SEND_FENCE_LOST', '原微信投递世代已失效，不重发同一分项', 409)
-        binding, *_ = self.validate(claim['delivery'])
-        if binding['version'] != claim['binding']['version']:
+        binding, *_ = self.validate(claim['delivery'], part=part)
+        if (binding['id'], binding['generation'], binding['version']) != (
+                claim['binding']['id'], claim['binding']['generation'], claim['binding']['version']):
             raise DevError('WEIXIN_BINDING_CHANGED', '发送准备期间原绑定版本已变化，旧工作者不能继续发送', 409)
         return part
 
@@ -503,6 +511,14 @@ class WeixinDelivery:
                 saved = {'upload_key': secrets.token_hex(16), 'filekey': 'cpw-' + part['id']}
                 self.store.execute('UPDATE weixin_parts SET wire_body=? WHERE id=?', (self.store.encrypt(canonical(saved)), part['id']))
             return saved
+
+    def recovered_attachment(self, claim):
+        with self.store.transaction():
+            part = self.current(claim)
+            scope = (claim['binding'], claim['account'], claim['owner'], claim['message'])
+            row = routes.attachment(self, claim['delivery'], part, scope)
+            content, attachment, *_ = self.w.media.decode_range(row)
+            return content, attachment
 
     def check_upload(self, claim):
         with self.store.transaction():
@@ -595,7 +611,7 @@ class WeixinDelivery:
                 encode_request(send_payload(wire['peer'], wire['context'], wire['client_id'], wire['items']))
             except DevError as exc:
                 if (exc.code == REQUEST_LIMIT and not status and part['kind'] == 'text' and not part['attempts']
-                        and self.split_unsent_text(part, wire)):
+                        and not claim['route_recovery'] and self.split_unsent_text(part, wire)):
                     return None
                 raise
             now = self.c.clock()
@@ -721,7 +737,10 @@ class WeixinDelivery:
                 items = text_items(body['text'])
             else:
                 saved = await self.store.run(self.upload_identity, claim)
-                content, attachment = await self.store.run(self.w.media.outbound_content, body['attachment_id'], claim['binding']['id'])
+                if claim['route_recovery']:
+                    content, attachment = await self.store.run(self.recovered_attachment, claim)
+                else:
+                    content, attachment = await self.store.run(self.w.media.outbound_content, body['attachment_id'], claim['binding']['id'])
                 await self.store.run(self.check_upload, claim)
                 item = await client.upload_media(claim['delivery']['peer_id'], content, attachment['kind'], attachment['name'],
                                                  filekey=saved['filekey'], key=bytes.fromhex(saved['upload_key']))
@@ -926,7 +945,7 @@ class WeixinDelivery:
                     row, args, principal, room, conversation_id, require_preview=True))
 
     def retry_room(self, conversation_id, delivery_id, args, principal):
-        """Requeue only parts whose send was never attempted."""
+        """Recover only proven-unsent parts, optionally on a verified new route."""
         with self.store.transaction():
             principal, room = self.c.rooms.owner(principal, conversation_id)
             self.c.rooms.require_native(room)
@@ -942,6 +961,14 @@ class WeixinDelivery:
                     raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '此房间没有这条消息的发送记录。', 404)
                 if delivery['version'] != args['expected_version']:
                     raise DevError('STALE_VERSION', '发送状态已变化，请刷新。', 409)
+                if part_ids := args.get('part_ids'):
+                    if args.get('expected_ordering_revision') != delivery['ordering_revision']:
+                        raise DevError('STALE_VERSION', '原回复的前置关系已变化，请刷新。', 409)
+                    if len(set(part_ids)) != len(part_ids):
+                        raise DevError('WEIXIN_RECOVERY_PART_UNAVAILABLE', '每个原分项只可选择一次', 409)
+                    count = routes.authorize_parts(self, delivery, part_ids, principal)
+                    self.refresh(delivery_id)
+                    return {'delivery_id': delivery_id, 'queued_parts': count, 'route_recovery': True}
                 self.validate(delivery)
                 parts = self.store.all("""SELECT id FROM weixin_parts
                     WHERE delivery_id=? AND state='attention' AND attempts=0""", (delivery_id,))
@@ -976,7 +1003,11 @@ class WeixinDelivery:
             by_delivery.setdefault(part['delivery_id'], []).append(part)
         for row in rows:
             ordering_reason = order.ordering_reason(row.pop('ordering_key'), row.pop('ordering_evidence'))
-            grouped.setdefault(row['message_id'], []).append({**row, 'parts': by_delivery.get(row['id'], []),
+            row_parts = by_delivery.get(row['id'], [])
+            next_part = next((part for part in row_parts if part['state'] not in routes.SUCCESSFUL), None)
+            if next_part and routes.unsent_quarantined(next_part) and routes.available_part(self, row['id']) == next_part['id']:
+                next_part['route_recovery_available'] = True
+            grouped.setdefault(row['message_id'], []).append({**row, 'parts': row_parts,
                 'ordering_reason': ordering_reason, 'provider_delivery_verified': False, 'read_verified': False})
         return grouped
 

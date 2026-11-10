@@ -9,6 +9,9 @@ from shared.util import DevError
 
 class RoomDeliveryRetry(Model):
     expected_version: int = Field(strict=True, ge=1)
+    expected_ordering_revision: int | None = Field(default=None, strict=True, ge=1)
+    part_ids: list[Annotated[str, Field(min_length=1, max_length=100)]] | None = Field(
+        default=None, min_length=1, max_length=32)
     idempotency_key: Key
 
 
@@ -79,7 +82,7 @@ def install_routes(router, auth, runtime):
     @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/retry')
     async def retry_weixin_delivery(request: Request, identifier: str, delivery_id: str, body: RoomDeliveryRetry):
         return await store.run(lambda: service.weixin.delivery.retry_room(
-            identifier, delivery_id, body.model_dump(), auth.admin(request, True)))
+            identifier, delivery_id, body.model_dump(exclude_none=True), auth.admin(request, True)))
 
     @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/control-preview')
     async def preview_weixin_delivery(request: Request, response: Response, identifier: str,
