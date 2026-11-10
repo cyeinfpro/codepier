@@ -7,7 +7,7 @@ from hub.collaboration import room_waiting_inputs, room_weixin_native
 from hub.collaboration.common import canonical
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
-from tests.test_dot_weixin_channel import packet
+from tests.test_dot_weixin_channel import message, packet
 from tests.test_room_consumer_sessions import connect, send, verify
 from tests.test_room_managed_work import connected, save_room_permissions
 from tests.test_room_members_rebuild import rooms as rooms
@@ -99,8 +99,14 @@ async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab
     occupied = s.room_runtime.send({'conversation_id': room_id, 'body_text': '占用一个输入位置',
         'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
     response = packet(2, '检查原项目说明', create_time_ms=int(clock[0] * 1000))
-    deferred = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), response)
-    assert deferred['cursor_persisted'] and not deferred['message_ids']
+    account_id = flow['account_id']
+    before = s.store.one('SELECT cursor,last_sync_at FROM weixin_accounts WHERE id=?', (account_id,))
+    deferred = s.weixin.commit_updates(s.weixin.claim_poll(account_id), response)
+    assert not deferred['committed'] and not deferred['accepted'] and not deferred['message_ids']
+    assert not deferred['cursor_persisted'] and deferred['reason_code'] == 'WEIXIN_INBOX_QUOTA'
+    assert deferred['deferred_count'] == 1 and deferred['next_poll_at'] > clock[0]
+    assert s.store.one('SELECT cursor,last_sync_at FROM weixin_accounts WHERE id=?', (account_id,)) == before
+    assert not s.store.one("SELECT 1 FROM weixin_inbound WHERE external_id='2'")
     failure = s.store.one("SELECT * FROM channel_inbound_failures WHERE state='deferred'")
     saved = json.loads(s.store.decrypt(failure['body']))
     first_policy = saved['authority']['evidence']['policy_version']
@@ -129,6 +135,41 @@ async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab
         assert proof['policy_version'] == first_policy
         assert proof['room_rules'][0]['capabilities'] == ['read']
         assert s.channel_owner.author(source)['authenticated']
+
+
+@pytest.mark.asyncio
+async def test_weixin_mixed_capacity_batch_recovers_with_original_cursor_and_no_duplicates(collab, monkeypatch):
+    monkeypatch.setattr(room_weixin_native, 'MAX_PENDING_NATIVE_INPUTS', 1)
+    (s, _, _, clock, identity, _), flow, _, _ = await setup_channel(collab)
+    account_id = flow['account_id']
+    member_id = identity['member_id']
+    prior_cursor = s.store.one('SELECT cursor FROM weixin_accounts WHERE id=?', (account_id,))['cursor']
+    created = int(clock[0] * 1000)
+    response = {'ret': 0, 'get_updates_buf': 'after-mixed-batch', 'msgs': [
+        message(2, '已接收', create_time_ms=created),
+        message(3, '达到容量', create_time_ms=created),
+    ]}
+
+    result = s.weixin.commit_updates(s.weixin.claim_poll(account_id), response)
+    first, = result['message_ids']
+    assert not result['accepted'] and not result['cursor_persisted']
+    assert inbox_messages(s, member_id) == [first]
+    assert s.store.one('SELECT cursor FROM weixin_accounts WHERE id=?', (account_id,))['cursor'] == prior_cursor
+
+    clock[0] += 3
+    monkeypatch.setattr(s.weixin, 'client_factory', lambda *_: pytest.fail('No poll while admission is full'))
+    await s.weixin.poll_once(account_id)
+    with s.store.transaction():
+        s.room_consumers.ack_message(s.rooms.member(member_id), first)
+    clock[0] += 3
+    s.weixin.replay_deferred(account_id)
+    second = s.store.one("SELECT message_id FROM weixin_inbound WHERE external_id='3'")['message_id']
+    response['msgs'][1]['context_token'] = 'rotated-context'
+    replay = s.weixin.commit_updates(s.weixin.claim_poll(account_id), response)
+    assert replay['committed'] and replay['cursor_persisted']
+    assert replay['message_ids'] == [first, second]
+    assert inbox_messages(s, member_id) == [first, second]
+    assert s.store.decrypt(s.store.one('SELECT cursor FROM weixin_accounts WHERE id=?', (account_id,))['cursor']) == 'after-mixed-batch'
 
 
 @pytest.mark.asyncio

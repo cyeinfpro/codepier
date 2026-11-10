@@ -26,6 +26,21 @@ MAX_DAILY_INBOUND_VERSIONS = 5000
 MAX_PENDING_INBOUND = 500
 
 
+def backpressure_key(account, binding, message):
+    """Recognize a deferred input after cursor replay or a binding version change."""
+    if not isinstance(message, dict):
+        return None
+    try:
+        peer = text(message.get('from_user_id'), 256)
+        external_id = uint64(message.get('message_id'))
+        version = max(int(uint64(message.get(field, 0)))
+                      for field in ('create_time_ms', 'update_time_ms', 'delete_time_ms'))
+    except DevError:
+        return None  # The normal per-message validator handles malformed packets.
+    source = {key: value for key, value in message.items() if key not in {'context_token', 'seq'}}
+    return digest(['weixin-backpressure', account['id'], binding['generation'], peer, external_id, version]), digest(source)
+
+
 def principal_record(principal):
     value = asdict(principal)
     value['scopes'] = sorted(value['scopes'])
@@ -364,6 +379,11 @@ class WeixinService:
                 self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?',
                     (exc.code, now + 60, now, account_id))
                 return None
+            if self.store.one("""SELECT 1 FROM channel_inbound_failures
+                    WHERE channel='weixin' AND account_id=? AND state='deferred' LIMIT 1""", (account_id,)):
+                self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?',
+                    ('WEIXIN_INBOX_QUOTA', now + 2, now, account_id))
+                return None
             owner, fence = uuid.uuid4().hex, account['poll_fence'] + 1
             self.store.execute('UPDATE weixin_accounts SET poll_owner=?,poll_fence=?,poll_until=? WHERE id=?', (owner, fence, now + 55, account_id))
             return {**account, 'poll_owner': owner, 'poll_fence': fence, 'binding_id': current['id'],
@@ -388,6 +408,7 @@ class WeixinService:
             if len(canonical(response).encode()) > MAX_JSON:
                 raise DevError('WEIXIN_BATCH_LIMIT', '收件批次字节超过上限', 413)
             received = []
+            deferred_count = 0
             for message in messages:
                 binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding['id'],))
                 scope = {'binding_id': binding['id'], 'version': binding['version'], 'generation': binding['generation']}
@@ -395,11 +416,24 @@ class WeixinService:
                 if binding.get('native_member_id'):
                     capture = lambda: self.c.room_channels.native.deferred_evidence(
                         binding, owner, room, dot, message)
-                receipt, _ = channel_inbound.isolate(self, 'weixin', account, scope, message,
+                receipt, failure = channel_inbound.isolate(self, 'weixin', account, scope, message,
                     lambda: self.ingest_one(binding, account, owner, room, dot, message),
-                    deferred_evidence=capture)
+                    deferred_evidence=capture, backpressure_key=backpressure_key(account, binding, message))
                 if receipt:
                     received.append(receipt)
+                if failure == 'deferred:WEIXIN_INBOX_QUOTA':
+                    deferred_count += 1
+            if deferred_count:
+                # Retain the exact provider cursor. The encrypted deferred entries
+                # only preserve source evidence and are not admitted room messages.
+                # Already committed inputs are deduplicated when the batch returns.
+                now = self.c.clock()
+                self.store.execute('''UPDATE weixin_accounts SET poll_until=0,reason_code=?,
+                    next_poll=?,updated=? WHERE id=? AND poll_owner=? AND poll_fence=?''',
+                    ('WEIXIN_INBOX_QUOTA', now + 2, now, account['id'], claim['poll_owner'], claim['poll_fence']))
+                return {'committed': False, 'accepted': False, 'message_ids': received, 'cursor_persisted': False,
+                        'reason_code': 'WEIXIN_INBOX_QUOTA', 'deferred_count': deferred_count,
+                        'next_poll_at': now + 2}
             # Canonical message, ordered attachment jobs, Dot inbox, dedup and
             # opaque cursor commit together. Network/media work never runs here.
             self.store.execute('''UPDATE weixin_accounts SET cursor=?,poll_until=0,failures=0,reason_code='',
@@ -601,7 +635,8 @@ class WeixinService:
                 def ingest():
                     return self.ingest_one(current, current_account, owner, room, dot, saved['source'],
                                            deferred=saved.get('authority') or {})
-                _, failure = channel_inbound.isolate(self, 'weixin', account, scope, saved['source'], ingest, replay=True)
+                _, failure = channel_inbound.isolate(self, 'weixin', account, scope, saved['source'], ingest,
+                    replay=True, replay_id=row['id'])
                 if failure.startswith('deferred:'):
                     break
 
