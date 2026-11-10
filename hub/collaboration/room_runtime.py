@@ -172,6 +172,8 @@ class RoomRuntime:
                 scopes = {(item['project_id'], item['environment_id']) for item in self.c.room_context.projects(principal, room)}
                 visible = (self.c.chatroom.message_visible(principal, source) and
                            (self.c.room_context.message_scopes(row) | self.c.room_context.message_scopes(source)) <= scopes)
+            if visible:
+                visible = bool(source and self.c.room_consumers.source_is_current(source, json.loads(source['body'])))
         history = {'committed': True, 'message_id': identifier}
         result = {'message': {'id': identifier, 'withheld': True}, 'complete': receipt['complete'],
                   'scheduled': False, 'replayed': replayed, 'historical_result': history,
@@ -220,10 +222,14 @@ class RoomRuntime:
         source = self.source(args, member, principal)
         explicit = 'publish_work' in args
         related = self.reply_goal(source, json.loads(source['body']), explicit)
-        strict = not explicit and (bool(related) or any(args.get(key) for key in
-                     ('expected_intent_revision', 'coordinator_epoch', 'outcome', 'artifact_refs')))
-        self.c.room_consumers.guard_reply_revision(args, principal, member, source, strict=strict)
         wants_publication = args.get('publish_work') if explicit else bool(related and args['complete'])
+        legacy_strict = not explicit and (bool(related) or any(args.get(key) for key in
+                            ('expected_intent_revision', 'coordinator_epoch', 'outcome', 'artifact_refs')))
+        consumers = self.c.room_consumers
+        if legacy_strict and args['expected_inbox_revision'] != member['dirty_revision']:
+            consumers._inbox_changed(member)
+        consumers.guard_reply_revision(args, principal, member, source, strict=legacy_strict or wants_publication,
+                                       action='publish' if wants_publication else 'reply')
         native = self.c.room_work_bridge.native
         if args.get('publish_work') is True and (not related or not native.reference(related)):
             raise DevError('ROOM_REPLY_WORK_REQUIRED', '正式发表必须关联当前房间的原工作', 422)
@@ -258,8 +264,13 @@ class RoomRuntime:
             body['intent_revision'] = self.intent_revision(related['id'])
         if explicit:
             body['publish_work'] = args['publish_work']
-        if 'input_handling' in args:
-            body['input_handling'] = args['input_handling']
+        handling = args.get('input_handling')
+        if handling is None and explicit and args['complete'] and not publication:
+            handling = 'pending'
+        if handling:
+            body['input_handling'] = handling
+        if 'depends_on_delivery_id' in args:
+            body.update(depends_on_delivery_id=args['depends_on_delivery_id'], dependency_mode=args['dependency_mode'])
         if refs:
             body['artifact_refs'] = refs
         if publication:
@@ -283,7 +294,6 @@ class RoomRuntime:
                     publication['result_digest'], canonical(refs), publication['outcome'], body['body_text'],
                     identifier, self.c.clock()))
         self.c.rooms.change(member['conversation_id'], 'message', identifier, message['version'])
-        handling = args.get('input_handling')
         if args['complete'] and (handling == 'answered' or (handling is None and (not explicit or publication))):
             self.c.room_consumers.ack_message(member, source['id'], source_version=source['version'])
         dispositions = self.reply_dispositions(message, source, related, explicit, bool(publication))
@@ -292,7 +302,8 @@ class RoomRuntime:
                             fingerprint, self.c.clock()))
         turn = self.c.room_consumers.yield_after_reply(args, principal, member, session) if args.get('yield_after') else {}
         return {'message_id': identifier, 'source_message_id': source['id'], 'complete': args['complete'],
-                'binding_generation': member['binding_generation'], 'channel_dispositions': dispositions, **turn}, True
+                'binding_generation': member['binding_generation'], 'channel_dispositions': dispositions,
+                'fingerprint_schema_version': 1, **turn}, True
 
     def guard_discussion_work(self, args, goal):
         revision, epoch = args['expected_intent_revision'], args['coordinator_epoch']

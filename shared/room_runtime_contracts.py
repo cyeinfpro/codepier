@@ -119,6 +119,9 @@ class RoomMemberReply(RoomConsumerMutation):
     publish_work: bool | None = Field(default=None, strict=True, exclude_if=lambda value: value is None)
     yield_after: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     input_handling: Literal['answered', 'pending'] | None = Field(default=None, exclude_if=lambda value: value is None)
+    depends_on_delivery_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    dependency_mode: Literal['after_settled', 'requires_success'] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode='after')
     def explicit_effects(self):
@@ -130,6 +133,8 @@ class RoomMemberReply(RoomConsumerMutation):
             raise ValueError('Publication, input handling and yielding require a complete reply')
         if self.publish_work is False and self.outcome is not None:
             raise ValueError('Work outcome requires formal publication')
+        if (self.depends_on_delivery_id is None) != (self.dependency_mode is None):
+            raise ValueError('Delivery dependencies require an original delivery and an explicit mode')
         return self
 
 
