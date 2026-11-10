@@ -16,8 +16,8 @@ from shared.util import DevError
 ROOM_HANDLING = (
     '用本次唤醒的 wake_ticket 领取当前回合，支持 include_inbox 时随领取读取第一页。'
     '沿原消息、房间上下文和工作记录继续对话，已有明确交办时在当前授权内准入一次。'
-    '声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
-    '同一输入可以先说明情况；支持 input_handling 时，执行仍待准入则用 pending 保留待办。'
+    '用 room_reply 回复原消息。声明 explicit_publication 时，普通回复填 publish_work=false，正式发表经核对的完整成果才填 true。'
+    '支持 input_handling 时，已完整回答且没有剩余要求填 answered；仍待准入的执行用 pending 保留。'
     '只追问缺失信息；结果通过协作工具回写，宿主对话文字不会回传。'
     '结果未知时查询原操作，或用同键和原参数恢复原回执。'
     '收到 work_attempt_settled 时，用 archive_arguments 归档原结果及验收证据。'
