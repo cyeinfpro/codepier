@@ -20,6 +20,11 @@ VALUES = {
     'invite_code': 'CPR-fixture-invitation-not-a-secret-' * 2,
     'connection_proof': 'fixture-member-proof-not-a-secret-' * 2,
     'probe_nonce': 'fixture-connection-nonce-not-a-secret-' * 2,
+    'host_connection_id': 'host-connection', 'batch_id': 'rebind-batch',
+    'owner_operation_id': 'owner-operation', 'impact_digest': 'a' * 64,
+    'expected_authority_version': 1, 'expected_route_generation': 1,
+    'callback_url': 'https://callback.example.invalid/room',
+    'members': [{'member_id': 'room-member', 'expected_generation': 1}],
     'work_id': 'room-work',
     'dot_id': 'task-dot', 'message_id': 'message', 'attachment_id': 'attachment', 'confirm_task': True,
     'team_id': 'team', 'binding_generation': 'binding-generation',
@@ -84,6 +89,8 @@ def example(tool, action):
             result[key] = deepcopy(VALUES[key])
     if action == 'room_context_update':
         result['reviewed_sources'] = [{'message_id': 'context-source', 'version': 1, 'digest': 'a' * 64}]
+    if action == 'room_connection_control':
+        result['challenge_proof'] = 'fixture-challenge-proof-not-a-secret'
     return result
 
 

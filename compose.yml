@@ -5,6 +5,8 @@ services:
     image: "${CODEPIER_HUB_IMAGE:-codepier:1.33.8}"
     restart: unless-stopped
     init: true
+    entrypoint: ["python", "-m", "shared.hub_data_contract", "--exec"]
+    command: ["python", "-m", "hub", "run", "--host", "0.0.0.0", "--port", "8765"]
     ports:
       - "${HUB_BIND_ADDRESS:-0.0.0.0}:${HUB_PORT:-8765}:8765"
     environment:
@@ -14,6 +16,7 @@ services:
       CODEPIER_NATIVE_FILE_RELAY: "${CODEPIER_NATIVE_FILE_RELAY:-true}"
       CODEPIER_NATIVE_FILE_PROVIDERS: "${CODEPIER_NATIVE_FILE_PROVIDERS:-[]}"
       CODEPIER_KNOWLEDGE_AUTO_ENROLL: "${CODEPIER_KNOWLEDGE_AUTO_ENROLL:-1}"
+      CODEPIER_ROOM_HOST_CONNECTIONS_MODE: "${CODEPIER_ROOM_HOST_CONNECTIONS_MODE:-off}"
       CODEPIER_COLLABORATION_ENABLED: "${CODEPIER_COLLABORATION_ENABLED:-false}"
       CODEPIER_MCP_EVENTS_ENABLED: "${CODEPIER_MCP_EVENTS_ENABLED:-false}"
       CODEPIER_MONITOR_COLLECTOR_ENABLED: "${CODEPIER_MONITOR_COLLECTOR_ENABLED:-false}"

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Literal
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from shared.collaboration_contracts import Model, Identifier, Key, Scope
 
 
@@ -115,12 +115,19 @@ class RoomProjectImpact(RoomRead):
 class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
+    host_connection_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
     reuse_binding_generation: int | None = Field(default=None, ge=1)
     keep_connected: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     project_scopes: list[MemberProjectScope] = Field(default_factory=list)
     lifetime: Lifetime = Field(default_factory=Lifetime)
     expected_version: int | None = Field(default=None, ge=1)
     idempotency_key: Key
+
+    @model_validator(mode='after')
+    def single_connection_reference(self):
+        if self.host_connection_id and (self.reuse_member_id or self.reuse_binding_generation is not None):
+            raise ValueError('Select one connection reference')
+        return self
 
     @field_validator('name')
     @classmethod
@@ -138,8 +145,15 @@ class ConnectRead(Model):
 class ConnectAction(ConnectRead):
     action: Literal['refresh_invite', 'resume', 'pause', 'remove', 'rebind', 'migrate', 'set_renewal']
     keep_connected: bool | None = Field(default=None, strict=True, exclude_if=lambda value: value is None)
+    host_connection_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
     expected_version: int = Field(ge=1)
     idempotency_key: Key
+
+    @model_validator(mode='after')
+    def host_only_for_rebind(self):
+        if self.host_connection_id and self.action != 'rebind':
+            raise ValueError('A host connection is only used for rebind')
+        return self
 
 
 class ConnectJoin(Model):
@@ -168,10 +182,81 @@ class RoomChanges(RoomRead):
     limit: int = Field(default=40, ge=1, le=100)
 
 
+class HostConnectionRead(Model):
+    host_connection_id: Identifier
+
+
+class HostConnectionList(Model):
+    cursor: str = Field(default='', max_length=2048)
+    limit: int = Field(default=40, ge=1, le=100)
+
+
+class HostConnectionImpact(HostConnectionRead, HostConnectionList):
+    pass
+
+
+class HostConnectionRevoke(HostConnectionRead):
+    impact_digest: str = Field(min_length=64, max_length=64)
+    expected_authority_version: int = Field(ge=1)
+    idempotency_key: Key
+
+
+class HostControl(Model):
+    model_config = ConfigDict(json_schema_extra={'oneOf': [
+        {'required': ['challenge_proof'], 'properties': {'challenge_proof': {'type': 'string'}},
+         'not': {'required': ['control_handle'], 'properties': {'control_handle': {'type': 'string'}}}},
+        {'required': ['control_handle'], 'properties': {'control_handle': {'type': 'string'}},
+         'not': {'required': ['challenge_proof'], 'properties': {'challenge_proof': {'type': 'string'}}}},
+    ]})
+
+    owner_operation_id: Identifier
+    challenge_proof: str | None = Field(default=None, min_length=24, max_length=256)
+    control_handle: str | None = Field(default=None, min_length=24, max_length=256)
+    idempotency_key: Key
+
+    @model_validator(mode='after')
+    def single_proof(self):
+        if bool(self.challenge_proof) == bool(self.control_handle):
+            raise ValueError('Supply exactly one host control proof')
+        return self
+
+
+class HostRoutePrepare(RoomRead):
+    member_id: Identifier
+    expected_route_generation: int = Field(ge=0)
+    callback_url: str = Field(min_length=8, max_length=2048)
+    rotate_control_handle: bool = Field(default=False, strict=True)
+    idempotency_key: Key
+
+
+class HostRebindMember(Model):
+    member_id: Identifier
+    expected_generation: int = Field(ge=1)
+
+
+class HostRebindBatch(Model):
+    members: list[HostRebindMember] = Field(min_length=1, max_length=100)
+    host_connection_id: Identifier | None = None
+    idempotency_key: Key
+
+    @field_validator('members')
+    @classmethod
+    def distinct_members(cls, members):
+        if len({member.member_id for member in members}) != len(members):
+            raise ValueError('Select each member once')
+        return members
+
+
+class HostRebindStatus(HostConnectionList):
+    batch_id: Identifier
+
+
 ROOM_QUERY_ACTIONS = {
     'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
     'room_changes': RoomChanges, 'room_diagnostics': RoomRead,
     'room_project_impact': RoomProjectImpact,
+    'room_connection_list': HostConnectionList, 'room_connection_view': HostConnectionRead,
+    'room_connection_impact': HostConnectionImpact, 'room_connection_rebind_status': HostRebindStatus,
 }
 ROOM_MUTATION_ACTIONS = {
     'room_create': RoomCreate, 'room_update': RoomPatch,
@@ -179,6 +264,9 @@ ROOM_MUTATION_ACTIONS = {
     'room_projects': RoomProjects, 'room_member_create': MemberCreate,
     'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,
     'room_probe_read': ConnectProbeRead, 'room_probe_reply': ConnectProbeReply,
+    'room_connection_control': HostControl, 'room_connection_revoke': HostConnectionRevoke,
+    'room_connection_rebind_batch': HostRebindBatch,
+    'room_connection_route_prepare': HostRoutePrepare,
 }
 
 

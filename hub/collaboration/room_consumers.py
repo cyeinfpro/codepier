@@ -88,35 +88,58 @@ class RoomConsumers(FencedConsumerEngine):
                 (self.c.clock(),member['id']))
         self.enqueue_ref(member,'control_notice',member['id'],member['scope_revision'],{'reason_code':'member_scope_changed'})
 
-    def binding(self, room, member, principal=None, generation=None):
+    def binding(self, room, member, principal=None, generation=None, *, require_subscription=True, ticket_context=False):
         pending = bool(member.get('_pending_binding'))
         current = (self.c.rooms.event_member(member['id'], room['id'], member['binding_generation'])
                    if pending else self.c.rooms.member(member['id'], room['id']))
         actor = principal or self.c.rooms.principal(current)
         self.c.rooms.member_scope(actor, room['id'], current['id'], current['binding_generation'],
-                                  pending=True)
+                                  pending=True, bootstrap=not current['probe_replied_at'])
         internal = self.generation(current)
         if generation is not None and generation != internal:
             raise DevError('ROOM_BINDING_CHANGED', '消费者绑定已改变，请恢复当前成员连接', 409)
         sub = self.store.one('SELECT * FROM mcp_event_subscriptions WHERE id=?', (current['subscription_id'],))
-        if (not sub or sub['state'] != 'active' or sub['expires_at'] <= self.c.clock()
-                or sub['grant_id'] != actor.grant_id or sub['conversation_id'] != room['id']):
+        if (not sub or sub['grant_id'] != actor.grant_id or sub['conversation_id'] != room['id']
+                or (require_subscription and (sub['state'] != 'active' or sub['expires_at'] <= self.c.clock()))):
             raise DevError('ROOM_SUBSCRIPTION_INACTIVE', '原成员通知订阅尚未就绪或已经失效', 409)
         self.c.rooms.event_authorize(sub, json.loads(sub['arguments']))
-        return {**current, 'generation': internal, 'grant_id': actor.grant_id}, sub
+        host = self.c.room_connections.require_member(room, current) if current.get('host_connection_id') else None
+        stored = json.loads(self.store.decrypt(sub['secret'])) if require_subscription or ticket_context else {}
+        return {**current, 'generation': internal, 'grant_id': actor.grant_id,
+            'host_revocation_epoch': host['host_revocation_epoch'] if host else 0,
+            'previous_route_generation': stored.get('previous_route_generation'),
+            'previous_route_until': stored.get('retire_at', 0)}, sub
+
+    def ticket_current(self, ticket, binding):
+        return (super().ticket_current(ticket, binding)
+            or (ticket['route_generation'] == binding['previous_route_generation']
+                and binding['previous_route_until'] > self.c.clock()))
+
+    def session_current(self, row, binding):
+        if binding.get('host_connection_id'):
+            return (row['host_connection_id'] == binding['host_connection_id']
+                and row['host_revocation_epoch'] == binding['host_revocation_epoch'])
+        return not row['host_connection_id'] and super().session_current(row, binding)
+
+    def lease_deadline(self, now, seconds, sub):
+        return now + seconds
 
     def scope(self, raw, principal, model):
         args = validate(model, raw)
         can_verify = model in (contracts.RoomInboxRead, contracts.RoomConsumerBegin)
         actor, room, member = self.c.rooms.member_scope(principal, args['conversation_id'], args['member_id'],
-            args['binding_generation'], args['connection_proof'], require_proof=True, pending=can_verify)
-        if member.get('_pending_binding'):
-            if model is contracts.RoomConsumerBegin:
-                raise DevError('ROOM_PROBE_REQUIRED', '候选连接需要先使用真实通知票据读取并回复探针', 409)
+            args['binding_generation'], args['connection_proof'], require_proof=True, pending=can_verify,
+            bootstrap=can_verify)
+        bootstrap = (member.get('_pending_binding')
+                     or (member.get('connection_identity_version', 1) >= 2 and not member['probe_replied_at']))
+        if model is contracts.RoomConsumerBegin and bootstrap:
+            raise DevError('ROOM_PROBE_REQUIRED', '连接需要先使用真实通知票据读取并回复探针', 409)
+        if model is contracts.RoomInboxRead and bootstrap:
             return args, actor, room, member, member, None, None
         if can_verify:
             self.c.rooms.require_native(room)
-        binding, sub = self.binding(room, member, actor, self.generation(member))
+        binding, sub = self.binding(room, member, actor, self.generation(member),
+                                    require_subscription=False, ticket_context=model is contracts.RoomConsumerBegin)
         return args, actor, room, member, member, binding, sub
 
     def _reply(self, row, *, include_proof=False):
@@ -167,7 +190,7 @@ class RoomConsumers(FencedConsumerEngine):
         self.c.rooms.require_native(room)
         if not member['probe_replied_at']:
             raise DevError('ROOM_PROBE_REQUIRED', '先完成当前成员的真实通知读取和回复验证', 409)
-        binding, _ = self.binding(room, member, principal)
+        binding, _ = self.binding(room, member, principal, require_subscription=False)
         row = self._credential(raw, principal, room, member, binding)
         expected = raw.get('expected_inbox_revision')
         if require_revision and (type(expected) is not int or expected != member['dirty_revision']):
@@ -214,7 +237,9 @@ class RoomConsumers(FencedConsumerEngine):
         ticket = self.store.one('SELECT * FROM dot_wake_tickets WHERE ticket_hash=?', (digest(raw['wake_ticket']),))
         if (not ticket or ticket['member_id'] != member['id'] or ticket['generation'] != binding['generation']
                 or ticket['subscription_id'] != sub['id'] or ticket['grant_id'] != principal.grant_id
-                or ticket['expires_at'] <= self.c.clock()):
+                or ticket['expires_at'] <= self.c.clock() or not self.ticket_current(ticket, binding)
+                or (member.get('connection_identity_version', 1) >= 2 and not member['probe_replied_at']
+                    and ticket['purpose'] != 'connection_probe')):
             raise DevError('ROOM_PROBE_TICKET_INVALID', '连接检查需要当前成员实际收到的原通知票据', 403)
         return ticket
 
@@ -222,7 +247,7 @@ class RoomConsumers(FencedConsumerEngine):
         """An actual host callback, with no business message or work creation."""
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         binding, sub = self.binding(room, member)
-        if member.get('_pending_binding') or not room['room_protocol']:
+        if member.get('_pending_binding') or not room['room_protocol'] or not member['probe_replied_at']:
             reason = 'connection:' + sub['id']
             reason += ':retry:' + retry_key if retry_key is not None else ':' + str(sub['version'])
             return self._wake(member, reason, probe=True)
@@ -285,12 +310,18 @@ class RoomConsumers(FencedConsumerEngine):
             after = rows[-1]['sequence']
 
     def delivery_payload(self, subscription, payload, event_id):
+        if payload.get('host_control_challenge_id'):
+            return self.c.rooms.host_proofs.delivery_payload(subscription, payload)
         if payload.get('test'):
             return {**payload, 'wake_ticket': None}
         member = self.c.rooms.event_member(payload['member_id'], payload['conversation_id'], payload['binding_generation'])
         self.c.rooms.event_authorize(subscription, json.loads(subscription['arguments']), payload)
+        if payload.get('route_probe_id'):
+            return self.c.rooms.routes.payload(subscription, payload, member)
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
-        ticket = self.issue_ticket(room, member, subscription, self.generation(member), event_id)
+        purpose = ('connection_probe' if payload.get('connection_probe')
+                   and member.get('connection_identity_version', 1) >= 2 else 'business')
+        ticket = self.issue_ticket(room, member, subscription, self.generation(member), event_id, purpose=purpose)
         result = {**payload, 'wake_ticket': ticket}
         if not member['probe_replied_at']:
             result['connection_check_required'] = True
@@ -306,6 +337,8 @@ class RoomConsumers(FencedConsumerEngine):
             'conversation_id': member['conversation_id'], 'member_id': member['id'],
             'binding_generation': member['binding_generation'], 'dirty_revision': member['dirty_revision'],
             'test': False, 'test_subscription_id': ''}
+        if probe:
+            payload['connection_probe'] = True
         wake_identity = ([member['probe_created_at'], 'connection-check'] if probe
                          else [member['dirty_revision'], member['wake_generation']])
         identifier = 'room_' + digest([member['id'], member['binding_generation'], *wake_identity, reason])
@@ -552,7 +585,7 @@ class RoomConsumers(FencedConsumerEngine):
     def inbox(self, raw, principal):
         with self.store.transaction(immediate=False):
             args, actor, room, _, member, binding, _ = self.scope(raw, principal, contracts.RoomInboxRead)
-            if member.get('_pending_binding'):
+            if binding is None:
                 if args['cursor']:
                     raise DevError('INVALID_CURSOR', '候选连接没有可分页的收件箱', 400)
                 ready = bool(member['subscription_verified_at'] and member['probe_nonce_hash'])

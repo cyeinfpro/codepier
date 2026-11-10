@@ -72,6 +72,13 @@ def main():
     backup.add_argument("--output", required=True)
     rekey = sub.add_parser("rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换")
     rekey.add_argument("--resume", action="store_true", help="继续已记录的密钥轮换，不创建新的轮换")
+    activate_hosts = sub.add_parser('room-host-activate', help='离线启用独立连接数据契约')
+    activate_hosts.add_argument('--confirm-compatible-deployment', action='store_true')
+    backfill_hosts = sub.add_parser('room-host-backfill', help='报告或分批认领历史房间连接')
+    backfill_hosts.add_argument('--apply', action='store_true')
+    backfill_hosts.add_argument('--after', default='')
+    backfill_hosts.add_argument('--limit', type=int, default=64)
+    backfill_hosts.add_argument('--restart-scan', action='store_true')
     args = parser.parse_args()
     os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
     if args.command in {"run", "check-compatibility", "rekey"}:
@@ -98,6 +105,17 @@ def main():
                     ws_max_size=16 * 1024 * 1024, proxy_headers=True,
                     forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
                     access_log=False, timeout_graceful_shutdown=10)
+        return
+    if args.command in {'room-host-activate', 'room-host-backfill'}:
+        from hub.collaboration.room_host_rollout import activate, backfill
+        try:
+            result = (activate(args.data_dir, confirmed=args.confirm_compatible_deployment)
+                      if args.command == 'room-host-activate'
+                      else backfill(args.data_dir, apply=args.apply, after=args.after,
+                                    limit=args.limit, restart=args.restart_scan))
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, ensure_ascii=False))
         return
     if args.command == "rekey":
         from hub.keyring import rotate_key

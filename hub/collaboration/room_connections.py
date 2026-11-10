@@ -11,6 +11,8 @@ from pydantic import Field
 
 from hub.principal import refresh_principal
 from hub.collaboration.common import digest, read_cursor, sign_cursor, validate
+from hub.collaboration.room_host_connections import HostConnections, migrate as migrate_host_connections
+from hub.collaboration.room_host_migration import record_shadow
 from shared.collaboration_contracts import Model
 from shared.util import DevError
 
@@ -30,12 +32,14 @@ def migrate(db):
             db.execute(f'ALTER TABLE room_members ADD COLUMN {name} {declaration}')
     db.execute('''CREATE INDEX IF NOT EXISTS room_connection_owner
         ON room_members(owner_user_id,connection_source_member_id,created_at,id)''')
+    migrate_host_connections(db)
+    from hub.collaboration.room_host_migration import migrate as migrate_host_backfill
+    from hub.collaboration.room_host_proofs import migrate as migrate_host_proofs
+    migrate_host_backfill(db)
+    migrate_host_proofs(db)
 
 
-class RoomConnections:
-    def __init__(self, collaboration):
-        self.c, self.store = collaboration, collaboration.store
-
+class RoomConnections(HostConnections):
     def conversation(self, member):
         room = self.store.one('SELECT * FROM conversation_rooms WHERE id=?', (member['conversation_id'],))
         if not room or room['owner_user_id'] != member['owner_user_id']:
@@ -52,12 +56,18 @@ class RoomConnections:
                 raise DevError('ROOM_CONNECTION_INVALID', '原连接关系无法核对', 409)
             seen.add(current['id'])
             room = self.conversation(current)
+            if current.get('host_connection_id'):
+                self.require_member(room, current)
             if (current['owner_user_id'] != member['owner_user_id']
                     or room['space_id'] != first_room['space_id']):
                 raise DevError('ROOM_CONNECTION_DENIED', '不能复用其他账号或工作区的连接', 403)
             if current['id'] != member['id'] or require_leaf_ready:
                 if self.c.rooms.state(current, check_connection=False) not in {'ready_chat', 'ready_work'}:
-                    raise DevError('ROOM_CONNECTION_UNAVAILABLE', '原 dot 需要先恢复已验证连接', 409)
+                    reason = ('source_archived' if room['state'] == 'archived' else
+                              'source_paused' if room['state'] == 'paused' or current['status'] == 'paused' else
+                              'source_removed' if current['status'] == 'removed' else 'source_unavailable')
+                    raise DevError('ROOM_CONNECTION_UNAVAILABLE', '原 dot 需要先恢复已验证连接', 409,
+                                   source_reason=reason)
             if expected_grant and current.get('grant_id') and current['grant_id'] != expected_grant:
                 raise DevError('ROOM_CONNECTION_GRANT_CHANGED', '原连接身份已变化，请重新确认', 409)
             expected_grant = expected_grant or current.get('grant_id', '')
@@ -127,6 +137,36 @@ class RoomConnections:
         return source
 
     def guard_join(self, member, principal):
+        if not member.get('host_connection_id'):
+            return self.guard_legacy_join(member, principal)
+        room = self.conversation(member)
+        saved = member if member['grant_id'] else {**member, 'grant_id': principal.grant_id}
+        shadow = (self.c.config.host_connections_mode == 'shadow' and bool(member.get('connection_source_member_id')))
+        try:
+            host = self.require_host_current(principal, room, saved, expected_epoch=member.get('host_revocation_epoch'))
+        except DevError as error:
+            if shadow:
+                self.observe_shadow(member, principal, host_error=error)
+            raise
+        if shadow:
+            self.observe_shadow(member, principal)
+        return host
+
+    def observe_shadow(self, member, principal, *, host_error=None):
+        # Advisory only. A broken historical projection or log handler cannot
+        # change the decision made by the current authority path above.
+        try:
+            if host_error is not None:
+                record_shadow(None, host_error)
+                return
+            try:
+                self.guard_legacy_join(member, principal)
+            except DevError as error:
+                record_shadow(error, None)
+        except Exception:
+            pass
+
+    def guard_legacy_join(self, member, principal):
         if not member.get('connection_source_member_id'):
             return None
         principal = refresh_principal(self.store, principal)
@@ -137,7 +177,17 @@ class RoomConnections:
         return source
 
     def guard_route(self, member, delivery=None):
-        if not delivery or not member.get('connection_source_member_id'):
+        if not delivery:
+            return
+        if member.get('host_connection_id'):
+            self.require_member(self.conversation(member), member, expected_epoch=member.get('host_revocation_epoch'))
+            if (not member.get('probe_replied_at') and not member.get('host_control_evidence_id')
+                    and not self.store.one('''SELECT 1 FROM room_host_binding_adoptions
+                        WHERE member_id=? AND binding_generation=? AND host_connection_id=?''',
+                        (member['id'], member['binding_generation'], member['host_connection_id']))):
+                raise DevError('ROOM_CONNECTION_CONTROL_REQUIRED', '请先验证原 dot 对连接的控制', 409)
+            return
+        if not member.get('connection_source_member_id'):
             return
         source = self.lineage(member)
         if not source['endpoint_digest'] or digest(delivery['url']) != source['endpoint_digest']:
@@ -149,6 +199,10 @@ class RoomConnections:
                 or member['owner_user_id'] != other_member['owner_user_id']
                 or not member.get('grant_id') or member['grant_id'] != other_member.get('grant_id')):
             return False
+        host_id = member.get('host_connection_id')
+        if host_id and other_member.get('host_connection_id'):
+            return host_id == other_member['host_connection_id'] and bool(
+                member.get('probe_replied_at') or member.get('host_control_evidence_id'))
         if not member.get('connection_source_member_id') and not other_member.get('connection_source_member_id'):
             return False
         try:

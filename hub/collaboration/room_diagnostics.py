@@ -315,6 +315,10 @@ def projection(c, room, principal):
         if latest_wake and latest_wake['state'] in {'accepted_without_observed_claim', 'insufficient_evidence'}:
             anomalies.append({'kind': 'notification', 'member_id': member['id'],
                               **latest_wake})
+        notification_evidence = None
+        if latest_wake and latest_wake.get('accepted_at') is not None:
+            notification_evidence = {**latest_wake,
+                'state': 'claimed' if latest_wake['state'] == 'redeemed' else 'accepted_unclaimed'}
         notifications = store.one('''SELECT COUNT(*) AS pending_count,MIN(created) AS oldest,
             MIN(next_at) AS next_attempt_at FROM mcp_event_deliveries
             WHERE subscription_id=? AND state IN ('pending','retry_wait','leased')''', (member['subscription_id'],))
@@ -328,7 +332,7 @@ def projection(c, room, principal):
                 'pending_count': len(visible_pending), 'complete': len(pending) <= LIMITS['pending_per_member'],
                 'oldest_age_seconds': age(min((item['created'] for item in visible_pending), default=None))},
             'notification': {'last_accepted_at': sub['last_accepted'] if sub else None, 'read_verified': False,
-                'latest_wake': latest_wake, 'pending_count': notifications['pending_count'],
+                'latest_wake': latest_wake, 'correlated_receipt': notification_evidence, 'pending_count': notifications['pending_count'],
                 'oldest_age_seconds': age(notifications['oldest']),
                 'next_attempt_at': notifications['next_attempt_at']}})
         trace({'kind': 'member', 'id': member['id'], 'member_id': member['id'],
