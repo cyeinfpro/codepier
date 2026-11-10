@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from hub.collaboration.common import canonical, digest
+from hub.collaboration import weixin_delivery_order as order
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
@@ -193,21 +194,19 @@ class WeixinDelivery:
             (binding['id'], binding['generation'], message['id'], message['version']))
         if old:
             return EnqueueResult('existing', '', binding_id, old)
-        prior = self.store.one('''SELECT id FROM weixin_deliveries
-            WHERE binding_id=? AND generation=? AND peer_id=? AND message_id=?
-            ORDER BY message_version DESC LIMIT 1''',
-            (binding['id'], binding['generation'], binding['peer_id'], message.get('reply_to_id')))
-        ordering = models.delivery_order_key(self.related_goal(message, source), source.get('thread_root_id'), source['id'])
+        ordering, evidence, predecessor = order.reply_ordering(self.store, message, source, binding)
         now, identifier = self.c.clock(), uuid.uuid4().hex
         pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.account_id=? AND d.created>? AND d.state NOT IN ('accepted','owner_confirmed','cancelled')''',
             (account['id'], now - 86400))['n']
         self.store.execute('''INSERT INTO weixin_deliveries
             (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
-             state,created,updated,ordering_key,depends_on_delivery_id)
-            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?)''',
+             state,created,updated,ordering_key,depends_on_delivery_id,ordering_evidence,
+             ordering_schema_version,ordering_checked_version)
+            VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?)''',
             (identifier, binding['id'], binding['generation'], message['id'], message['version'], digest(body),
-             source['id'], binding['peer_id'], now, now, ordering, prior['id'] if prior else None))
+             source['id'], binding['peer_id'], now, now, ordering, predecessor, evidence,
+             order.ORDERING_VERSION, order.ORDERING_VERSION))
         if pending >= 1000:
             self.add_part(identifier, 0, 'text', {'text': ''})
             self.store.execute("UPDATE weixin_parts SET state='rejected',reason_code='daily_reply_quota' WHERE delivery_id=?", (identifier,))
@@ -272,13 +271,18 @@ class WeixinDelivery:
             if old:
                 return old
             now = self.c.clock()
+            work_id = self.related_goal({}, source)
+            revision = self.store.one('SELECT intent_revision FROM room_work_intents WHERE goal_id=?',
+                                      (work_id,)) if work_id else None
+            evidence = order.status_evidence(source, work_id, revision['intent_revision'] if revision else None, now)
             self.store.execute('''INSERT INTO weixin_deliveries
                 (id,binding_id,generation,message_id,message_version,message_digest,source_message_id,peer_id,
-                 state,created,updated,ordering_key,kind,status_code,projection_message_id)
-                VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,'status',?,?)''',
+                 state,created,updated,ordering_key,kind,status_code,projection_message_id,ordering_evidence,
+                 ordering_schema_version,ordering_checked_version)
+                VALUES (?,?,?,?,?,?,?,?,'queued',?,?,?,'status',?,?,?,?,?)''',
                 (identifier, binding['id'], binding['generation'], 'status:' + identifier, source['version'],
                  source_digest, source['id'], binding['peer_id'], now, now, 'status:' + source['id'],
-                 code, projection_message_id or source['id']))
+                 code, projection_message_id or source['id'], evidence, order.ORDERING_VERSION, order.ORDERING_VERSION))
             self.add_part(identifier, 0, 'text', {'text': notice})
             self.c.rooms.change(source['conversation_id'], 'message', projection_message_id or source['id'])
             return self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (identifier,))
@@ -363,10 +367,9 @@ class WeixinDelivery:
             self.c.rooms.change(native['conversation_id'], 'message', native['message_id'], native['message_version'])
 
     def candidates(self, now, *, binding_id=None, peer_id=None):
-        # The wildcard lane is only for historical replies whose relationship
-        # could not be reconstructed. A sender fences the peer until either
-        # its receipt or its expired lease is recorded by reconciliation.
-        return self.store.all('''WITH sendable AS (
+        # Unknown external results block only established reply dependencies.
+        # The separate in-flight check fences every request to the same peer.
+        return self.store.all(f'''WITH sendable AS (
             SELECT p.id,d.created,d.rowid AS delivery_order,p.ordinal,
                 ROW_NUMBER() OVER (PARTITION BY b.account_id,d.peer_id
                     ORDER BY d.created,d.rowid,p.ordinal) AS peer_rank
@@ -377,16 +380,7 @@ class WeixinDelivery:
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_parts first WHERE first.delivery_id=d.id AND first.ordinal<p.ordinal
                         AND first.state NOT IN ('accepted','owner_confirmed','cancelled','rejected'))
-                AND NOT EXISTS (
-                    SELECT 1 FROM weixin_deliveries prior
-                    WHERE prior.binding_id=d.binding_id AND prior.generation=d.generation AND prior.peer_id=d.peer_id
-                        AND (prior.created,prior.rowid)<(d.created,d.rowid)
-                        AND (prior.id=d.depends_on_delivery_id OR prior.ordering_key=d.ordering_key
-                            OR (d.kind='reply' AND prior.kind='reply' AND
-                                (prior.ordering_key='' OR d.ordering_key='' OR prior.source_message_id=d.source_message_id)))
-                        AND (prior.state='waiting_media' OR EXISTS (
-                            SELECT 1 FROM weixin_parts earlier WHERE earlier.delivery_id=prior.id
-                                AND earlier.state NOT IN ('accepted','owner_confirmed','cancelled','rejected'))))
+                AND (NOT ({order.WAITING_PREDECESSOR}) OR ({order.FAILED_PREDECESSOR}))
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_deliveries held JOIN weixin_bindings hb ON hb.id=held.binding_id
                     JOIN weixin_parts sender ON sender.delivery_id=held.id
@@ -410,6 +404,12 @@ class WeixinDelivery:
                 (delivery['id'], part['ordinal']))
             if failed:
                 self.refresh(delivery['id'])
+                return None
+            dependency = order.dependency_state(self.store, delivery['id'])
+            if dependency == 'failed':
+                self.reject_failed_dependency(delivery['id'], now)
+                return None
+            if dependency == 'waiting':
                 return None
             binding, account, owner, message = self.validate(delivery)
             context = self.store.one('SELECT * FROM weixin_contexts WHERE account_id=? AND generation=? AND peer_id=?',
@@ -441,6 +441,13 @@ class WeixinDelivery:
                                (claim_owner, fence, now + (960 if part['kind'] == 'attachment' else 180), now, identifier))
             return {**part, 'lease_owner': claim_owner, 'lease_fence': fence, 'delivery': delivery,
                     'binding': binding, 'account': account, 'context': context}
+
+    def reject_failed_dependency(self, delivery_id, now):
+        self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='dependency_failed',
+            lease_fence=lease_fence+1,lease_until=0,updated=? WHERE delivery_id=?
+            AND state IN ('queued','waiting_context','waiting_media','attention','preparing')
+            AND (attempts=0 OR reason_code='WEIXIN_RATE_LIMITED')""", (now, delivery_id))
+        self.refresh(delivery_id)
 
     def current(self, claim):
         part = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (claim['id'],))
@@ -517,6 +524,17 @@ class WeixinDelivery:
     def mark_sending(self, claim, items):
         with self.store.transaction():
             part = self.current(claim)
+            delivery = claim['delivery']
+            dependency = order.dependency_state(self.store, delivery['id'])
+            version = self.store.one('SELECT ordering_revision FROM weixin_deliveries WHERE id=?', (delivery['id'],))
+            if dependency == 'failed':
+                self.reject_failed_dependency(delivery['id'], self.c.clock())
+                return None
+            if dependency == 'waiting' or version['ordering_revision'] != delivery['ordering_revision']:
+                self.store.execute("""UPDATE weixin_parts SET state='queued',lease_fence=lease_fence+1,
+                    lease_until=0,updated=? WHERE id=?""", (self.c.clock(), part['id']))
+                self.refresh(delivery['id'])
+                return None
             if part['attempts'] and part['reason_code'] == RATE_LIMITED:
                 wire = json.loads(self.store.decrypt(part['wire_body']))
                 context_version = part['context_version']
@@ -656,6 +674,7 @@ class WeixinDelivery:
         if not self.c.config.enabled:
             return
         await self.store.run(self.reconcile)
+        await self.store.run(order.backfill, self.store, self.c.clock())
         rows = await self.store.run(self.candidates, self.c.clock())
         # At most four concurrent peers, with the same fenced check in claim.
         semaphore = asyncio.Semaphore(4)
@@ -744,7 +763,7 @@ class WeixinDelivery:
             return {}
         keys = ','.join('?' for _ in identifiers)
         rows = self.store.all(f'''SELECT id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
-            message_version,updated,kind,status_code,ordering_key FROM weixin_deliveries
+            message_version,updated,kind,status_code,ordering_key,ordering_revision,ordering_evidence FROM weixin_deliveries
             WHERE message_id IN ({keys}) OR projection_message_id IN ({keys})
             ORDER BY message_id,created,id''', (*identifiers, *identifiers))
         grouped = {}
@@ -755,7 +774,7 @@ class WeixinDelivery:
         for part in parts:
             by_delivery.setdefault(part['delivery_id'], []).append(part)
         for row in rows:
-            ordering_reason = '' if row.pop('ordering_key') else 'historical_ordering_unverified'
+            ordering_reason = order.ordering_reason(row.pop('ordering_key'), row.pop('ordering_evidence'))
             grouped.setdefault(row['message_id'], []).append({**row, 'parts': by_delivery.get(row['id'], []),
                 'ordering_reason': ordering_reason, 'provider_delivery_verified': False, 'read_verified': False})
         return grouped
@@ -764,9 +783,9 @@ class WeixinDelivery:
         rows = self.store.all('''SELECT d.* FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id
             WHERE b.room_id=? AND b.conversation_id=? ORDER BY d.created DESC,d.id DESC LIMIT 50''', (room_id, conversation_id))
         return [{k: row[k] for k in ('id', 'binding_id', 'message_version', 'state', 'version',
-                                      'created', 'updated', 'kind', 'status_code')}
+                                      'created', 'updated', 'kind', 'status_code', 'ordering_revision')}
                 | {'message_id': row['projection_message_id'] or row['message_id'],
-                   'ordering_reason': '' if row['ordering_key'] else 'historical_ordering_unverified',
+                   'ordering_reason': order.ordering_reason(row['ordering_key'], row['ordering_evidence']),
                    'parts': self.store.all('''SELECT id,ordinal,client_id,kind,state,attempts,reason_code,updated
                     FROM weixin_parts WHERE delivery_id=? ORDER BY ordinal''', (row['id'],)),
                    'provider_delivery_verified': False, 'read_verified': False} for row in rows]
