@@ -198,6 +198,11 @@ def action_help(address, views, *, project='', workspace_id='', detail='brief', 
         if 'project' in example and workspace_id and 'workspace_id' in props:
             example['workspace_id'] = workspace_id
         info['example'] = example
+    if legacy in u.COLLAB_TOOLS:
+        from shared.room_contracts import TURN_ACTION_CAPABILITIES
+        capabilities = TURN_ACTION_CAPABILITIES.get(operation)
+        if capabilities:
+            info['turn_capabilities'] = dict.fromkeys(capabilities, True)
     if detail == 'schema':
         info['inputSchema'] = schema
         if output is not None:

@@ -18,7 +18,7 @@ from shared.util import DevError
 from shared.dot_consumer_contracts import ConsumerBegin, ConsumerLease, ConsumerRead, ConsumerYield
 from shared.dot_mailbox_contracts import MODEL_MAP as MAILBOX_MODELS
 from shared.team_collaboration_contracts import TOOL_MODELS as TEAM_MODELS
-from shared.room_contracts import ROOM_QUERY_ACTIONS, ROOM_MUTATION_ACTIONS
+from shared.room_contracts import ROOM_QUERY_ACTIONS, ROOM_MUTATION_ACTIONS, TURN_ACTION_CAPABILITIES
 from shared.room_consumer_contracts import ROOM_CONSUMER_QUERIES, ROOM_CONSUMER_ACTIONS
 from shared.room_runtime_contracts import RoomMessagesRead, RoomMessage, WorkControl, ChannelConnect, ChannelRead, ChannelAction, ROOM_RUNTIME_MUTATION_ACTIONS, ROOM_RUNTIME_QUERIES
 
@@ -444,5 +444,7 @@ def action_help(tool, action='', *, scopes=None):
     if needed:
         schema['$defs'] = needed
     return {'tool': tool, 'action': action, 'operation': action, 'scope': 'read', 'arguments_location': 'top-level',
+            **({'turn_capabilities': dict.fromkeys(TURN_ACTION_CAPABILITIES[action], True)}
+               if action in TURN_ACTION_CAPABILITIES else {}),
             'inputSchema': _compact_input_schema(schema),
             'note': 'Exact action validation still runs before dispatch. Discovery grants no authority; original scopes, grants, approvals and leases remain required.'}

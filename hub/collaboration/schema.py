@@ -252,9 +252,13 @@ def migrate(db):
     from hub.collaboration.room_work_bridge import migrate as migrate_room_work_bridge
     from hub.collaboration.room_consumer_migration import migrate as migrate_room_consumers
     migrate_rooms(db)
+    from hub.collaboration.room_turn_policy import migrate as migrate_room_turn_policy
+    migrate_room_turn_policy(db)
     from hub.collaboration.room_permissions import migrate as migrate_room_permissions
     migrate_room_permissions(db)
     migrate_room_consumers(db)
+    db.execute("""CREATE INDEX IF NOT EXISTS room_turn_redeemed_ticket ON dot_wake_tickets(redeemed_session_id)
+        WHERE redeemed_session_id!=''""")
     migrate_room_runtime(db)
     migrate_room_channels(db)
     migrate_room_work_bridge(db)

@@ -45,6 +45,7 @@ class RoomMessage(Model):
     member_id: str = Field(default='', max_length=128)
     reply_to_id: str = Field(default='', max_length=128)
     work_id: str = Field(default='', max_length=128)
+    revise_work_intent: bool | None = Field(default=None, strict=True)
     supersedes_context_ids: list[Identifier] = Field(default_factory=list, max_length=20)
     expected_context_version: int | None = Field(default=None, strict=True, ge=0)
 
@@ -118,6 +119,7 @@ class RoomMemberReply(RoomConsumerMutation):
 
 
 class RoomWorkStart(RoomConsumerMutation):
+    expected_intent_revision: int | None = Field(default=None, strict=True, ge=1)
     source_message_id: Identifier
     source_version: int = Field(ge=1)
     source_digest: str = Field(pattern=r'^[a-f0-9]{64}$')
