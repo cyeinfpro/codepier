@@ -728,28 +728,32 @@ window.CodePierCollaboration = (() => {
     return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}<div data-cr-completed-work hidden></div><footer>${messageProgress(message)}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
   }
   function deliveryReason(code) {
-    return {
-      WEIXIN_RATE_LIMITED: '微信暂时限制发送',
-      WEIXIN_REQUEST_LIMIT: '消息或附件超出微信发送上限',
-      attachment_unavailable: '原附件暂不可用',
-      daily_reply_quota: '已达到今日回传额度',
-      context_missing: '等待原微信私聊的会话上下文',
-      dependency_failed: '同一回复的前一段发送失败',
-      source_unavailable: '原消息或微信连接已失效',
-      provider_response_unknown: '微信未返回可核对的发送结果',
-      authorization_revoked: '工作许可已撤销',
-      authorization_expired: '工作许可已到期',
-      scope_changed: '原工作范围已变化',
-      historical_ordering_unverified: '无法确认旧回复的顺序关系，暂时保留顺序等待',
-    }[code] || reasonText(code);
+    return (
+      {
+        WEIXIN_RATE_LIMITED: '微信暂时限制发送',
+        WEIXIN_REQUEST_LIMIT: '消息或附件超出微信发送上限',
+        attachment_unavailable: '原附件暂不可用',
+        daily_reply_quota: '已达到今日回传额度',
+        context_missing: '等待原微信私聊的会话上下文',
+        dependency_failed: '同一回复的前一段发送失败',
+        source_unavailable: '原消息或微信连接已失效',
+        provider_response_unknown: '微信未返回可核对的发送结果',
+        authorization_revoked: '工作许可已撤销',
+        authorization_expired: '工作许可已到期',
+        scope_changed: '原工作范围已变化',
+        historical_ordering_unverified: '无法确认旧回复的顺序关系，暂时保留顺序等待',
+      }[code] || reasonText(code)
+    );
   }
   function deliveryMarkup(deliveries = [], display, truncated = false) {
     if (!deliveries?.length) return '';
     return `<section class="cr-deliveries" aria-label="发送状态" data-cr-deliveries>${deliveries
       .map((delivery) => {
         const parts = delivery.parts || [];
-        const verified = delivery.read_verified === true || delivery.provider_delivery_verified === true;
-        const uncertain = delivery.state === 'unknown' || parts.some((part) => part.state === 'unknown');
+        const verified =
+          delivery.read_verified === true || delivery.provider_delivery_verified === true;
+        const uncertain =
+          delivery.state === 'unknown' || parts.some((part) => part.state === 'unknown');
         const manuallyConfirmed =
           parts.some((part) => part.state === 'owner_confirmed') &&
           parts.every((part) => ['accepted', 'owner_confirmed'].includes(part.state));
@@ -761,8 +765,12 @@ window.CodePierCollaboration = (() => {
               ? '房主已确认收到'
               : deliveryLabels[delivery.state] || '状态待核对';
         const name = delivery.channel === 'weixin' ? '微信' : delivery.channel || '渠道';
-        const label = state === '已受理' || state === '已送达' ? name + state : name + ' · ' + state;
-        const detail = uncertain || manuallyConfirmed || !!delivery.ordering_reason ||
+        const label =
+          state === '已受理' || state === '已送达' ? name + state : name + ' · ' + state;
+        const detail =
+          uncertain ||
+          manuallyConfirmed ||
+          !!delivery.ordering_reason ||
           ['发送失败', '已取消'].includes(state);
         const retry =
           activeRoom() &&
@@ -1335,9 +1343,7 @@ window.CodePierCollaboration = (() => {
           const name = channel === 'weixin' ? '微信' : 'Telegram';
           return `<section class="cr-inspection-section"><label class="cr-choice"><input type="checkbox" data-permission-mode="${channel}" ${entry.mode === 'follow_room' ? 'checked' : ''}><span>${name}使用和房间相同的权限</span></label><div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div></section>`;
         })
-        .join(
-          '',
-        )}
+        .join('')}
       <section class="cr-continuation" aria-label="未完成的任务">
         <label class="cr-choice"><input type="checkbox" data-cr-continue-selected><span>同时继续未完成的任务<small>只继续本次清单中你选中的任务。已完成的步骤沿用原回执。</small></span></label>
         <div data-cr-continuation-preview hidden></div>
@@ -1602,19 +1608,21 @@ window.CodePierCollaboration = (() => {
     };
   }
   function continuationReason(code) {
-    return {
-      CHANNEL_OWNER_NOT_APPROVED: '需要先在微信连接里重新允许本人交办',
-      ROOM_SOURCE_CHANGED: '原任务消息已修改或撤回',
-      ROOM_OWNER_SOURCE_REQUIRED: '无法核实原任务的房主身份',
-      ROOM_CONTINUATION_SCOPE_DENIED: '当前权限未覆盖原任务的剩余操作',
-      ROOM_CONTINUATION_MANUALLY_PAUSED: '房主已暂停这项工作',
-      ROOM_CONTINUATION_ALREADY_STARTED: '这条消息已经开工',
-      ROOM_CONTINUATION_POLICY_CHANGED: '批准后房间权限已变化',
-      ROOM_CONTINUATION_UNAVAILABLE: '原工作已结束或无法续办',
-      ROOM_CONTINUATION_EVIDENCE_CHANGED: '原续办凭证已变化',
-      ROOM_RECOVERY_MEMBER_UNAVAILABLE: '当前没有可接手原任务的 dot',
-      ROOM_INTENT_CHANGED: '原工作的要求已变化',
-    }[code] || reasonText(code);
+    return (
+      {
+        CHANNEL_OWNER_NOT_APPROVED: '需要先在微信连接里重新允许本人交办',
+        ROOM_SOURCE_CHANGED: '原任务消息已修改或撤回',
+        ROOM_OWNER_SOURCE_REQUIRED: '无法核实原任务的房主身份',
+        ROOM_CONTINUATION_SCOPE_DENIED: '当前权限未覆盖原任务的剩余操作',
+        ROOM_CONTINUATION_MANUALLY_PAUSED: '房主已暂停这项工作',
+        ROOM_CONTINUATION_ALREADY_STARTED: '这条消息已经开工',
+        ROOM_CONTINUATION_POLICY_CHANGED: '批准后房间权限已变化',
+        ROOM_CONTINUATION_UNAVAILABLE: '原工作已结束或无法续办',
+        ROOM_CONTINUATION_EVIDENCE_CHANGED: '原续办凭证已变化',
+        ROOM_RECOVERY_MEMBER_UNAVAILABLE: '当前没有可接手原任务的 dot',
+        ROOM_INTENT_CHANGED: '原工作的要求已变化',
+      }[code] || reasonText(code)
+    );
   }
   function continuationSummary(result) {
     const counts = result.counts || {};
@@ -1640,24 +1648,43 @@ window.CodePierCollaboration = (() => {
     }
   }
   async function refreshContinuationResult(current) {
-    if (panel !== current || current.name !== 'permissions' || current.busy || current.readingContinuation)
+    if (
+      panel !== current ||
+      current.name !== 'permissions' ||
+      current.busy ||
+      current.readingContinuation
+    )
       return;
     const batchId = store.draft(current.roomId).permissionContinuation;
-    if (!batchId || (current.continuationResult?.batch_id === batchId &&
-      current.continuationResult.counts?.pending === 0 &&
-      current.continuationResult.counts?.waiting_operations === 0)) return;
+    if (
+      !batchId ||
+      (current.continuationResult?.batch_id === batchId &&
+        current.continuationResult.counts?.pending === 0 &&
+        current.continuationResult.counts?.waiting_operations === 0)
+    )
+      return;
     const epoch = state.epoch;
     const owner = state.owner;
     current.readingContinuation = true;
     try {
       const result = await store.permissionContinuation(current.roomId, batchId);
-      if (panel !== current || state.epoch !== epoch || owner !== state.owner ||
-        store.draft(current.roomId).permissionContinuation !== batchId) return;
+      if (
+        panel !== current ||
+        state.epoch !== epoch ||
+        owner !== state.owner ||
+        store.draft(current.roomId).permissionContinuation !== batchId
+      )
+        return;
       current.continuationResult = result;
       renderContinuationResult(current);
     } catch (error) {
-      if (panel === current && state.epoch === epoch && owner === state.owner &&
-        !current.continuationResult && [403, 404].includes(error.status))
+      if (
+        panel === current &&
+        state.epoch === epoch &&
+        owner === state.owner &&
+        !current.continuationResult &&
+        [403, 404].includes(error.status)
+      )
         delete store.draft(current.roomId).permissionContinuation;
     } finally {
       current.readingContinuation = false;
@@ -1679,14 +1706,16 @@ window.CodePierCollaboration = (() => {
   function continuationPreviewMarkup(preview) {
     const candidates = preview.candidates || [];
     if (!candidates.length) return '<p class="cr-muted">当前权限下没有可继续的任务。</p>';
-    return `<div class="cr-continuation-select"><label class="cr-choice"><input type="checkbox" data-cr-continuation-all><span>全选</span></label><span class="cr-muted" data-cr-continuation-count aria-live="polite"></span></div><div class="cr-continuation-tasks">${candidates.map((item) => {
-      const eligible = item.eligible !== false;
-      const remaining = (item.remaining_operations || []).map((op) => op.label).filter(Boolean);
-      const detail = eligible
-        ? remaining.join('、') || '继续处理原请求'
-        : continuationReason(item.reason_code) || '当前无法续办';
-      return `<label class="cr-choice"><input type="checkbox" data-cr-continuation-task value="${E(item.task_id)}" ${!eligible ? 'disabled' : item.selected_by_default !== false ? 'checked' : ''}><span><strong>${E(item.label || '未完成的任务')}</strong><small>${E(detail)}</small></span></label>`;
-    }).join('')}</div>`;
+    return `<div class="cr-continuation-select"><label class="cr-choice"><input type="checkbox" data-cr-continuation-all><span>全选</span></label><span class="cr-muted" data-cr-continuation-count aria-live="polite"></span></div><div class="cr-continuation-tasks">${candidates
+      .map((item) => {
+        const eligible = item.eligible !== false;
+        const remaining = (item.remaining_operations || []).map((op) => op.label).filter(Boolean);
+        const detail = eligible
+          ? remaining.join('、') || '继续处理原请求'
+          : continuationReason(item.reason_code) || '当前无法续办';
+        return `<label class="cr-choice"><input type="checkbox" data-cr-continuation-task value="${E(item.task_id)}" ${!eligible ? 'disabled' : item.selected_by_default !== false ? 'checked' : ''}><span><strong>${E(item.label || '未完成的任务')}</strong><small>${E(detail)}</small></span></label>`;
+      })
+      .join('')}</div>`;
   }
   async function previewContinuation(form, current) {
     current.continuationRequest?.abort();
@@ -1697,9 +1726,10 @@ window.CodePierCollaboration = (() => {
     const owner = state.owner;
     const epoch = state.epoch;
     const selection = new Map(
-      [...box.querySelectorAll('[data-cr-continuation-task]:not(:disabled)')].map(
-        (task) => [task.value, task.checked],
-      ),
+      [...box.querySelectorAll('[data-cr-continuation-task]:not(:disabled)')].map((task) => [
+        task.value,
+        task.checked,
+      ]),
     );
     if (!enabled) current.continuationSelection = null;
     else if (selection.size) current.continuationSelection = selection;
@@ -1710,12 +1740,20 @@ window.CodePierCollaboration = (() => {
     if (!enabled) return;
     const request = new AbortController();
     current.continuationRequest = request;
-    const visible = () => panel === current && form.isConnected && owner === state.owner &&
-      epoch === state.epoch && !request.signal.aborted;
+    const visible = () =>
+      panel === current &&
+      form.isConnected &&
+      owner === state.owner &&
+      epoch === state.epoch &&
+      !request.signal.aborted;
     box.innerHTML = '<p class="cr-muted" role="status">正在核对可继续的任务…</p>';
     try {
       const draft = permissionDraft(form, current);
-      const preview = await store.previewPermissionContinuation(current.roomId, draft, request.signal);
+      const preview = await store.previewPermissionContinuation(
+        current.roomId,
+        draft,
+        request.signal,
+      );
       if (!visible()) return;
       current.continuationPreview = { ...preview, draft: JSON.stringify(draft) };
       box.innerHTML = continuationPreviewMarkup(preview);
@@ -1769,21 +1807,25 @@ window.CodePierCollaboration = (() => {
     const enabled = form.querySelector('[data-cr-continue-selected]').checked;
     const selectedTaskIds = [
       ...form.querySelectorAll('[data-cr-continuation-task]:checked:not(:disabled)'),
-    ]
-      .map((task) => task.value);
-    if (enabled && (!preview || preview.draft !== JSON.stringify(draft) ||
-      (preview.expires_at && preview.expires_at <= Date.now() / 1000))) {
+    ].map((task) => task.value);
+    if (
+      enabled &&
+      (!preview ||
+        preview.draft !== JSON.stringify(draft) ||
+        (preview.expires_at && preview.expires_at <= Date.now() / 1000))
+    ) {
       void previewContinuation(form, current);
       throw new Error('权限或续办清单已变化，请核对后保存。');
     }
-    const continuation = enabled && selectedTaskIds.length
-      ? {
-          policy_preview_digest: preview.policy_preview_digest,
-          continuation_preview_id: preview.continuation_preview_id,
-          continue_selected: true,
-          selected_task_ids: selectedTaskIds,
-        }
-      : {};
+    const continuation =
+      enabled && selectedTaskIds.length
+        ? {
+            policy_preview_digest: preview.policy_preview_digest,
+            continuation_preview_id: preview.continuation_preview_id,
+            continue_selected: true,
+            selected_task_ids: selectedTaskIds,
+          }
+        : {};
     const controls = [...form.querySelectorAll('input,select,button')].map((control) => [
       control,
       control.disabled,
@@ -1871,9 +1913,8 @@ window.CodePierCollaboration = (() => {
     current.savedPermissionFeedback = feedback;
     root._crProjectSaveFeedback = feedback;
     announce(feedback.message);
-    const savedPanel = current.returnChannel && !confirmedContinuation
-      ? await returnToChannel(current)
-      : current;
+    const savedPanel =
+      current.returnChannel && !confirmedContinuation ? await returnToChannel(current) : current;
     try {
       await store.refresh();
       if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
@@ -2058,7 +2099,12 @@ window.CodePierCollaboration = (() => {
     }[renewal.state];
     const control =
       activeRoom() && member && !member.legacy && member.state !== 'removed' && !pendingBinding
-        ? btn('connection-renewal', managed ? '关闭托管续期' : '开启托管续期', `data-renewal-enable="${!managed}"`, 'cr-text-button')
+        ? btn(
+            'connection-renewal',
+            managed ? '关闭托管续期' : '开启托管续期',
+            `data-renewal-enable="${!managed}"`,
+            'cr-text-button',
+          )
         : '';
     return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>${E(mode)}</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${end ? `<p class="cr-muted">${managed ? '批准至' : '当前租期至'} ${E(dateTime(end))}</p>` : ''}${control}</section>`;
   }
@@ -3106,7 +3152,9 @@ window.CodePierCollaboration = (() => {
   }
   function channelScopeMarkup(preview, flow) {
     const projects =
-      preview.projects || preview.project_scopes || preview.scope?.project_scopes ||
+      preview.projects ||
+      preview.project_scopes ||
+      preview.scope?.project_scopes ||
       (preview.project_id ? [preview] : []);
     const following = (preview.scope?.routing_mode || preview.routing_mode) === 'follow_room';
     const member = (state.room?.members || []).find(
@@ -3118,18 +3166,51 @@ window.CodePierCollaboration = (() => {
       <h3>微信交办授权</h3>
       ${facts([
         ['房间', roomName(state.room)],
-        ['本人微信', paired ? channelIdentity(flow.binding?.peer_nickname, flow.binding?.peer_id) || '当前已配对联系人' : '发送配对码并由房主确认的联系人'],
+        [
+          '本人微信',
+          paired
+            ? channelIdentity(flow.binding?.peer_nickname, flow.binding?.peer_id) ||
+              '当前已配对联系人'
+            : '发送配对码并由房主确认的联系人',
+        ],
         ['新消息交给', following ? '房间当前主责 dot' : flow.member?.name || '已指定的 dot'],
         ['回传', '当前房间和发起任务的原私聊'],
-        ['连接保持', renewal?.mode === 'managed' ? 'CodePier 定期保持连接' : renewal?.mode === 'host' ? '由 dot 宿主负责续期' : null],
-        ['连接期限', renewal?.approved_until ? dateTime(renewal.approved_until) : renewal?.expires_at ? dateTime(renewal.expires_at) : null],
+        [
+          '连接保持',
+          renewal?.mode === 'managed'
+            ? 'CodePier 定期保持连接'
+            : renewal?.mode === 'host'
+              ? '由 dot 宿主负责续期'
+              : null,
+        ],
+        [
+          '连接期限',
+          renewal?.approved_until
+            ? dateTime(renewal.approved_until)
+            : renewal?.expires_at
+              ? dateTime(renewal.expires_at)
+              : null,
+        ],
       ])}
-      ${projects.length ? `<ul>${projects.map((project) => {
-        const name = project.project_label || project.alias || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id || project;
-        const caps = (project.capabilities || []).map((cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap);
-        const expires = project.lifetime?.expires_at || project.expires_at;
-        return `<li>${E(name)}${caps.length ? ' · ' + E(caps.join('、')) : ''}${expires ? ' · 至 ' + E(dateTime(expires)) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => target === 'project_agent' ? '项目 Agent' : target).join('、')) : ''}</li>`;
-      }).join('')}</ul>` : '<p class="cr-muted">当前没有可交办的项目，私聊可以正常收发消息。</p>'}
+      ${
+        projects.length
+          ? `<ul>${projects
+              .map((project) => {
+                const name =
+                  project.project_label ||
+                  project.alias ||
+                  S.projects.find((item) => item.id === project.project_id)?.alias ||
+                  project.project_id ||
+                  project;
+                const caps = (project.capabilities || []).map(
+                  (cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap,
+                );
+                const expires = project.lifetime?.expires_at || project.expires_at;
+                return `<li>${E(name)}${caps.length ? ' · ' + E(caps.join('、')) : ''}${expires ? ' · 至 ' + E(dateTime(expires)) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`;
+              })
+              .join('')}</ul>`
+          : '<p class="cr-muted">当前没有可交办的项目，私聊可以正常收发消息。</p>'
+      }
       <p class="cr-muted">配对后可在此关闭交办工作，或在权限设置中调整项目与能力。</p>
     </section>`;
   }
@@ -3145,7 +3226,9 @@ window.CodePierCollaboration = (() => {
     const isFollowConfirmation = (item) => (item.name || item.key) === 'confirm_follow_room';
     const fields = serverFields.filter((item) => !isFollowConfirmation(item));
     const action = next.body?.action || flow.primary_action;
-    const followPreview = ['bind', 'approve_tasks'].includes(action) ? flow.follow_task_scope : null;
+    const followPreview = ['bind', 'approve_tasks'].includes(action)
+      ? flow.follow_task_scope
+      : null;
     const allowedActions = flow.allowed_actions || (flow.actions || []).map((item) => item.action);
     const writable = activeRoom();
     const stage = flow.stage;
@@ -3255,7 +3338,12 @@ window.CodePierCollaboration = (() => {
           ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
           ['房间', roomName(state.room)],
           ['本人配对', '已验证'],
-          ['新消息交给', flow.routing_mode === 'follow_room' ? '房间当前主责 dot' : flow.member?.name || '已指定的 dot'],
+          [
+            '新消息交给',
+            flow.routing_mode === 'follow_room'
+              ? '房间当前主责 dot'
+              : flow.member?.name || '已指定的 dot',
+          ],
         ]) +
           `<p class="cr-wx-toggle">在微信里交办工作：${flow.work_authorized ? '已允许' : '未开启'} ${flow.work_authorized ? btn('channel-action', '关闭', 'data-channel-action="revoke_tasks" title="保留聊天连接" aria-label="关闭微信交办工作"', 'cr-text-button') : ''}</p>` +
           btn('channel-project-permissions', '修改权限', '', 'cr-text-button'),
@@ -3285,8 +3373,11 @@ window.CodePierCollaboration = (() => {
 
       const quiet =
         ['pairing', 'waiting_member', 'waiting_project'].includes(stage) && action === 'refresh';
-      const followRequired = serverFields.find(isFollowConfirmation)?.required === true ||
-        (action === 'approve_tasks' && !flow.task_scope && followPreview?.project_ids?.length === 0);
+      const followRequired =
+        serverFields.find(isFollowConfirmation)?.required === true ||
+        (action === 'approve_tasks' &&
+          !flow.task_scope &&
+          followPreview?.project_ids?.length === 0);
       const follow = followPreview
         ? `<label class="cr-choice"><input type="checkbox" name="confirm_follow_room" ${followRequired ? 'required' : ''}><span>跟随房间主责<small>房主更换主责后，新消息交给新主责处理。</small></span></label>`
         : '';
@@ -3565,8 +3656,7 @@ window.CodePierCollaboration = (() => {
     else if (action === 'refresh-continuation-preview') {
       const form = button.closest('[data-cr-form="permissions"]');
       if (form && activeRoom()) await previewContinuation(form, panel);
-    }
-    else if (action === 'work-list') {
+    } else if (action === 'work-list') {
       openPanel('work-list', '房间工作', '<div data-cr-work-list-view></div>');
       renderWorkList();
     } else if (action === 'members') membersPanel();
@@ -3693,14 +3783,21 @@ window.CodePierCollaboration = (() => {
       const current = panel;
       const keepConnected = button.dataset.renewalEnable === 'true';
       const flow = current.flow;
-      if (keepConnected && !(await uiConfirmAction(
-        {
-          title: '在房间授权有效期间保持连接？',
-          body: 'CodePier 会为此房间的当前 dot 连接定期续期。可以在连接详情关闭。',
-          confirmLabel: '开启托管续期',
-        },
-        { owner: button, current: () => panel === current && current.flow.version === flow.version },
-      ))) return;
+      if (
+        keepConnected &&
+        !(await uiConfirmAction(
+          {
+            title: '在房间授权有效期间保持连接？',
+            body: 'CodePier 会为此房间的当前 dot 连接定期续期。可以在连接详情关闭。',
+            confirmLabel: '开启托管续期',
+          },
+          {
+            owner: button,
+            current: () => panel === current && current.flow.version === flow.version,
+          },
+        ))
+      )
+        return;
       const result = await mutation(
         'POST',
         base + '/connect-flows/' + encodeURIComponent(current.flowId) + '/actions',
@@ -4311,9 +4408,11 @@ window.CodePierCollaboration = (() => {
           updateContinuationSelection(form);
         } else if (event.target.matches('[data-cr-continuation-task]')) {
           updateContinuationSelection(form);
-        } else if (event.target.matches('[data-cr-continue-selected]') ||
+        } else if (
+          event.target.matches('[data-cr-continue-selected]') ||
           (form.querySelector('[data-cr-continue-selected]').checked &&
-            event.target.closest('[data-permission-section], [data-permission-mode]'))) {
+            event.target.closest('[data-permission-section], [data-permission-mode]'))
+        ) {
           void previewContinuation(form, panel);
         }
       },
