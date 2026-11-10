@@ -15,7 +15,7 @@ MAX_TURN_LEASE_SECONDS = 300
 _MODES = frozenset({'strict', 'shadow', 'decoupled'})
 _ACTIONS = frozenset({'reply', 'notice_ack', 'work_start', 'work_continue', 'context_update',
                       'handoff', 'create', 'assign', 'claim', 'heartbeat', 'progress',
-                      'execute', 'result', 'archive_result', 'publish', 'read', 'begin', 'other'})
+                      'execute', 'result', 'archive_result', 'publish', 'read', 'begin', 'scope_update', 'other'})
 _REASONS = frozenset({'inbox_revision', 'scope_changed', 'route_expired', 'source_changed'})
 _LOG = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def update(collaboration, raw, principal):
                 mode=excluded.mode, version=excluded.version, updated=excluded.updated''',
                           (room['id'], args['mode'], version, collaboration.clock()))
             result = view(store, room['id'])
-            store.audit(actor, 'room.turn_policy', room['id'], 'ok',
+            store.audit(actor.actor, 'room.turn_policy', room['id'], 'ok',
                         {'previous_mode': current['mode'], 'mode': result['mode'],
                          'previous_override': current['override'], 'override': result['override'],
                          'version': version, 'reason': args['reason']})
