@@ -7,7 +7,7 @@ import pytest
 
 from hub.collaboration import weixin_protocol, weixin_schema
 from hub.collaboration.common import canonical
-from hub.collaboration.weixin_delivery import text_items
+from hub.collaboration.weixin_delivery import EnqueueResult, text_items
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_dot_weixin_channel import fixture_channel, ingest, packet, reply
@@ -263,7 +263,7 @@ async def test_current_work_followup_has_own_reply_lane_and_honors_explicit_succ
         entry = next(item for item in s.room_consumers.inbox(identity, worker)['items']
                      if item['object_id'] == source_id)
         with monkeypatch.context() as patch:
-            patch.setattr(transport, 'queue_reply', lambda *_: None)
+            patch.setattr(transport, 'queue_reply_result', lambda *_, **__: EnqueueResult('not_requested'))
             # Exercise the transport boundary with a persisted reply effect.
             posted = s.room_runtime.reply({**identity, **credentials, **entry['reply_arguments'],
                 'body_text': text, 'idempotency_key': key()}, worker)['message']
