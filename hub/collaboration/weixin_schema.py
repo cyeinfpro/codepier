@@ -128,6 +128,8 @@ def migrate_delivery_order(db):
         ('projection_message_id', 'TEXT'),
         ('ordering_revision', 'INTEGER NOT NULL DEFAULT 1'),
         ('ordering_evidence', "TEXT NOT NULL DEFAULT ''"),
+        ('canonical_source_id', "TEXT NOT NULL DEFAULT ''"),
+        ('dependency_mode', "TEXT NOT NULL DEFAULT 'after_settled'"),
         ('ordering_schema_version', 'INTEGER NOT NULL DEFAULT 1'),
         ('ordering_checked_version', 'INTEGER NOT NULL DEFAULT 0'),
     ):

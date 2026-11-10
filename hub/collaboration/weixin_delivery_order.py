@@ -24,9 +24,9 @@ SAME_RECIPIENT = f'''(({SAME_GENERATION}) OR (
         ON old.account_id=current.account_id AND old.conversation_id=current.conversation_id
         WHERE old.id=prior.binding_id AND current.id=d.binding_id)))'''
 SAME_SOURCE = '''COALESCE(json_extract(NULLIF(prior.ordering_evidence,''),'$.canonical_input_root_id'),
-        NULLIF(prior.source_message_id,'')) =
+        NULLIF(prior.canonical_source_id,''),NULLIF(prior.source_message_id,'')) =
     COALESCE(json_extract(NULLIF(d.ordering_evidence,''),'$.canonical_input_root_id'),
-        NULLIF(d.source_message_id,''))'''
+        NULLIF(d.canonical_source_id,''),NULLIF(d.source_message_id,''))'''
 UNRESOLVED = '''prior.ordering_key='' OR d.ordering_key=''
     OR json_extract(NULLIF(prior.ordering_evidence,''),'$.unresolved')=1
     OR json_extract(NULLIF(d.ordering_evidence,''),'$.unresolved')=1'''
@@ -38,7 +38,8 @@ RELATION = f'''CASE
     WHEN prior.kind='reply' AND d.kind='reply' AND ({UNRESOLVED}) THEN 'legacy_relationship_unknown'
     END'''
 REQUIRES_SUCCESS = f'''{EXPLICIT}
-    AND json_extract(NULLIF(d.ordering_evidence,''),'$.dependency_mode')='requires_success' '''
+    AND COALESCE(json_extract(NULLIF(d.ordering_evidence,''),'$.dependency_mode'),
+        d.dependency_mode)='requires_success' '''
 UNSETTLED = '''prior.state='waiting_media' OR EXISTS (
     SELECT 1 FROM weixin_parts earlier WHERE earlier.delivery_id=prior.id
     AND earlier.state NOT IN ('accepted','owner_confirmed','cancelled','rejected'))'''
@@ -218,7 +219,17 @@ def _historical_order(store, row):
     binding = store.one('SELECT * FROM weixin_bindings WHERE id=?', (row['binding_id'],))
     if message and source and binding:
         original_route = {**binding, 'generation': row['generation'], 'peer_id': row['peer_id']}
-        key, encoded, predecessor = reply_ordering(store, message, source, original_route)
+        old_predecessor = row['depends_on_delivery_id']
+        mode = row['dependency_mode']
+        if old_predecessor and mode == 'requires_success':
+            try:
+                key, encoded, predecessor = reply_ordering(store, message, source, original_route,
+                    predecessor_id=old_predecessor, dependency_mode=mode)
+            except DevError:
+                return row['ordering_key'], canonical({'unresolved': True,
+                    'reason_code': 'legacy_dependency_unverified'}), row['ordering_schema_version']
+        else:
+            key, encoded, predecessor = reply_ordering(store, message, source, original_route)
         evidence = json.loads(encoded)
         if (key and not evidence.get('unresolved') and not evidence.get('recovery_predecessor_id')
                 and predecessor == row['depends_on_delivery_id']):

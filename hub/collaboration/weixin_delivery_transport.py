@@ -55,6 +55,10 @@ def migrate(db):
             ON weixin_late_observations(observed_at,part_id,lease_fence)""",
     ):
         db.execute(statement)
+    if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='weixin_delivery_peer_rotation'").fetchone()
+            and not db.execute('SELECT 1 FROM weixin_peer_admission LIMIT 1').fetchone()):
+        db.execute("""INSERT INTO weixin_peer_admission(account_id,peer_id,last_admitted_sequence)
+            SELECT account_id,peer_id,admitted_sequence FROM weixin_delivery_peer_rotation""")
     columns = {row[1] for row in db.execute('PRAGMA table_info(weixin_parts)')}
     if 'preparation_failures' not in columns:
         db.execute('ALTER TABLE weixin_parts ADD COLUMN preparation_failures INTEGER NOT NULL DEFAULT 0')
@@ -119,6 +123,26 @@ def record_late(store, claim, row, result, now):
         (receipt, now, row['id'], claim['lease_fence'], claim['lease_owner'], identity))
 
 
+def legacy_observations(store, limit):
+    if not limit or not store.one("""SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='weixin_delivery_late_observations'"""):
+        return []
+    rows = store.all("""SELECT p.id,p.delivery_id,late.provider_receipt AS receipt
+        FROM weixin_parts p JOIN weixin_delivery_late_observations late
+            ON late.part_id=p.id AND late.send_fence=p.lease_fence-1
+        JOIN weixin_deliveries d ON d.id=p.delivery_id AND d.id=late.delivery_id
+        JOIN weixin_bindings b ON b.id=d.binding_id AND b.id=late.binding_id
+        WHERE p.state='unknown' AND p.client_id=late.client_id AND p.body_digest=late.body_digest
+          AND d.generation=late.channel_generation AND d.peer_id=late.peer_id AND b.account_id=late.account_id
+          AND NOT EXISTS (SELECT 1 FROM weixin_dispatch_attempts a WHERE a.part_id=p.id)
+          AND json_valid(late.provider_receipt)
+          AND json_extract(late.provider_receipt,'$.provider_state')='accepted'
+        ORDER BY late.created,p.id LIMIT ?""", (limit,))
+    for row in rows:
+        row['receipt'] = accepted_receipt(json.loads(row['receipt']))
+    return [row for row in rows if row['receipt']]
+
+
 def adopt_late(store, now):
     # Only observations authenticated against the original dispatch are used.
     # No observation changes channel authority, the delivery destination or wire.
@@ -129,6 +153,7 @@ def adopt_late(store, now):
         WHERE p.state='unknown' AND a.lease_fence=(
             SELECT MAX(lease_fence) FROM weixin_dispatch_attempts WHERE part_id=p.id)
         ORDER BY o.observed_at,p.id LIMIT 100""")
+    rows.extend(legacy_observations(store, 100 - len(rows)))
     for row in rows:
         updated = store.execute("""UPDATE weixin_parts SET state='accepted',provider_receipt=?,
             reason_code='provider_accepted_late',updated=? WHERE id=? AND state='unknown'""",
