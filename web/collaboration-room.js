@@ -1795,11 +1795,27 @@ window.CodePierCollaboration = (() => {
     }
     return { expected_version: original.version, scope, channels };
   }
+  function pausedProjectNotice(result) {
+    const blocked = result?.blocked_projects || [];
+    if (!blocked.length) return '';
+    const labels = blocked.map((item) => {
+      const project = (result.available_projects || []).find(
+        (entry) =>
+          entry.project_id === item.project_id && entry.environment_id === item.environment_id,
+      );
+      const name =
+        project?.name ||
+        (S.projects || []).find((entry) => entry.id === item.project_id)?.alias ||
+        '项目';
+      return item.environment_id === 'production' ? name : name + '（' + item.environment_id + '）';
+    });
+    return '已跳过暂停项目 ' + labels.join('、') + ' 的新增授权。';
+  }
   async function savePermissions(form, current) {
     if (current.stale) throw new Error('权限已在其他位置更新，请重新载入后核对。');
     updatePermissionControls();
     const owner = state.owner;
-    let confirmed = false;
+    let confirmed = null;
     let confirmedContinuation = null;
     let refreshPreview = false;
     const draft = permissionDraft(form, current);
@@ -1840,7 +1856,7 @@ window.CodePierCollaboration = (() => {
         current,
         {
           onConfirmed: (response) => {
-            confirmed = true;
+            confirmed = response;
             if (response.continuation?.batch_id) {
               confirmedContinuation = response.continuation;
               current.continuationResult = confirmedContinuation;
@@ -1861,9 +1877,10 @@ window.CodePierCollaboration = (() => {
       if (refreshPreview) void previewContinuation(form, current);
       patchRoomPermissions();
     }
-    const savedMessage = confirmedContinuation
-      ? '权限设置已保存。' + continuationSummary(confirmedContinuation)
-      : '权限设置已保存。';
+    const pausedNotice = pausedProjectNotice(result || confirmed);
+    const savedMessage =
+      (pausedNotice ? '已保存可应用的权限。' + pausedNotice : '权限设置已保存。') +
+      (confirmedContinuation ? continuationSummary(confirmedContinuation) : '');
     const invalidation = current.accessInvalidation;
     const receiptOnly =
       confirmed &&
@@ -1890,6 +1907,7 @@ window.CodePierCollaboration = (() => {
         if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
       } catch (error) {
         if (
+          error.name !== 'AbortError' &&
           owner === state.owner &&
           current.roomId === state.roomId &&
           feedback.epoch === state.epoch &&
@@ -1914,12 +1932,16 @@ window.CodePierCollaboration = (() => {
     root._crProjectSaveFeedback = feedback;
     announce(feedback.message);
     const savedPanel =
-      current.returnChannel && !confirmedContinuation ? await returnToChannel(current) : current;
+      current.returnChannel && !confirmedContinuation && !pausedNotice
+        ? await returnToChannel(current)
+        : current;
     try {
       await store.refresh();
       if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
     } catch (error) {
-      if (panel === savedPanel) panelError('权限设置已保存，但房间视图刷新失败：' + error.message);
+      if (error.name === 'AbortError') return;
+      const warning = feedback.message + ' 房间视图刷新失败：' + error.message;
+      if (panel === savedPanel) panelError(warning);
       else if (
         feedback.accessInvalidated &&
         !panel &&
@@ -1928,7 +1950,7 @@ window.CodePierCollaboration = (() => {
         feedback.epoch === state.epoch &&
         feedback.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch
       )
-        announce('权限设置已保存，但房间视图刷新失败：' + error.message, true);
+        announce(warning, true);
     }
   }
   function membersPanel() {
@@ -2423,6 +2445,8 @@ window.CodePierCollaboration = (() => {
       closePanel();
       requestedProject = '';
       await selectRoom(room.id);
+      const pausedNotice = pausedProjectNotice(result);
+      if (pausedNotice) announce('房间已创建。' + pausedNotice);
     } else if (type === 'migration') {
       if (current.migrationRevision !== migrationRevision()) {
         renderMigration();

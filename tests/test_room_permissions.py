@@ -382,3 +382,99 @@ async def test_registered_adapter_recovery_preserves_identity_and_owner_proof(co
         save(service, owner, cid, [rule()])
     assert error.value.code == expected
     assert service.room_permissions.read(cid, owner)['version'] == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('history', ['archive', 'repeat_archive', 'owner_pause', 'new_room'])
+async def test_permissions_reuse_only_archive_pauses_without_reviving_old_room(collab, history):
+    from dataclasses import replace
+
+    from tests.test_room_managed_work import connected
+
+    service, owner, worker, *_ = collab
+    old = service.rooms.create({'title': 'old room',
+        'projects': [{'project': 'otherproj', 'environment_id': 'production'}],
+        'idempotency_key': key()}, owner)['room']
+    old_member = member(service, owner, old['id'])
+    old_slot = service.rooms.member(old_member['id'])['legacy_dot_id']
+    service.rooms.update({'conversation_id': old['id'], 'state': 'archived',
+        'expected_version': old['version'] + 1, 'idempotency_key': key()}, owner)
+    if history == 'repeat_archive':
+        for state in ('active', 'archived'):
+            previous = service.store.one('SELECT version FROM conversation_rooms WHERE id=?', (old['id'],))
+            service.rooms.update({'conversation_id': old['id'], 'state': state,
+                'expected_version': previous['version'], 'idempotency_key': key()}, owner)
+    partition = service.store.one("SELECT * FROM collaboration_rooms WHERE project_id='otherproj'")
+    assert partition['state'] == 'paused'
+    if history == 'owner_pause':
+        service.control({'project': 'otherproj', 'environment_id': 'production', 'action': 'pause',
+            'target_id': partition['id'], 'expected_version': partition['version'],
+            'reason': 'Owner deliberately kept this partition paused', 'idempotency_key': key()}, owner)
+    assert service.store.one('SELECT state FROM collaboration_join_slots WHERE id=?',
+                             (old_slot,))['state'] == 'revoked'
+
+    projects = [{'project': 'otherproj', 'environment_id': 'production'}] if history == 'new_room' else []
+    current = service.rooms.create({'title': 'current room', 'projects': projects,
+        'idempotency_key': key()}, owner)['room']
+    if history != 'new_room':
+        save(service, owner, current['id'], [rule()])
+    service.store.execute('UPDATE grants SET projects=? WHERE id=?',
+                          ('["proj","otherproj"]', worker.grant_id))
+    worker = replace(worker, projects=['proj', 'otherproj'])
+    _, _, _, _, identity, _ = await connected(collab, conversation_id=current['id'], worker_override=worker)
+    previous_version = service.room_permissions.read(current['id'], owner)['version']
+    draft = {
+        'conversation_id': current['id'], 'expected_version': previous_version,
+        'scope': {'project_scopes': [rule(caps=['read', 'write']), rule('otherproj', ['read', 'write', 'execute'])]},
+        'channels': {'weixin': {'mode': 'follow_room'}, 'telegram': {'mode': 'follow_room'}},
+        'idempotency_key': key(),
+    }
+    result = service.room_goal_recovery.continuations.save(draft, owner)
+    assert result['version'] == previous_version + 1
+    if history == 'owner_pause':
+        assert result['blocked_projects'] == [{
+            'project_id': 'otherproj', 'environment_id': 'production', 'reason_code': 'ROOM_PAUSED'}]
+        assert result['scope']['project_scopes'] == [rule(caps=['read', 'write'])]
+        assert service.room_goal_recovery.continuations.save(draft, owner)['blocked_projects'] == result['blocked_projects']
+        assert service.store.one('SELECT state FROM collaboration_rooms WHERE id=?',
+                                 (partition['id'],))['state'] == 'paused'
+        created = service.rooms.create({'title': 'another room', 'projects': [
+            {'project': 'proj', 'environment_id': 'production'},
+            {'project': 'otherproj', 'environment_id': 'production'}], 'idempotency_key': key()}, owner)
+        assert created['blocked_projects'] == result['blocked_projects']
+        assert service.room_permissions.read(created['room']['id'], owner)['scope']['project_scopes'] == [rule()]
+        return
+    assert not result['blocked_projects']
+    assert {r['project_id'] for r in result['scope']['project_scopes']} == {'proj', 'otherproj'}
+    assert service.store.one('SELECT state FROM collaboration_rooms WHERE id=?',
+                             (partition['id'],))['state'] == 'active'
+    assert service.store.one('SELECT state FROM conversation_rooms WHERE id=?',
+                             (old['id'],))['state'] == 'archived'
+    assert service.store.one('SELECT state FROM collaboration_join_slots WHERE id=?',
+                             (old_slot,))['state'] == 'revoked'
+    assert service.store.one("""SELECT id FROM collaboration_join_slots WHERE id IN (
+        SELECT legacy_dot_id FROM room_member_work_bridges WHERE member_id=? AND project_id='otherproj' AND state='active')
+        AND id<>?""", (identity['member_id'], old_slot))
+    assert not service.store.one('SELECT 1 FROM room_continuation_batches')
+
+
+def test_paused_existing_project_keeps_weixin_ceiling_and_allows_revocation(collab):
+    service, owner, cid = room(collab)
+    save(service, owner, cid, [rule(), rule('otherproj')], {
+        'weixin': {'mode': 'custom', 'scope': {'project_scopes': [rule()]}},
+        'telegram': {'mode': 'follow_room'},
+    })
+    member(service, owner, cid)
+    partition = service.store.one("SELECT * FROM collaboration_rooms WHERE project_id='otherproj'")
+    service.control({'project': 'otherproj', 'environment_id': 'production', 'action': 'pause',
+        'target_id': partition['id'], 'expected_version': partition['version'],
+        'reason': 'Keep this execution partition paused', 'idempotency_key': key()}, owner)
+    applied = save(service, owner, cid, [rule(caps=['read', 'write']), rule('otherproj', ['read', 'write'])])
+    assert applied['blocked_projects'] == [{
+        'project_id': 'otherproj', 'environment_id': 'production', 'reason_code': 'ROOM_PAUSED'}]
+    assert applied['scope']['project_scopes'] == [rule('otherproj'), rule(caps=['read', 'write'])]
+    assert applied['channels']['weixin']['mode'] == 'custom'
+    assert applied['channels']['weixin']['scope']['project_scopes'] == [rule(caps=['read', 'write'])]
+    removed = save(service, owner, cid, [rule()])
+    assert removed['scope']['project_scopes'] == [rule()]
+    assert not removed['blocked_projects']

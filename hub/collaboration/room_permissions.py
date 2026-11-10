@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from hub.collaboration.common import canonical, digest, validate
+from hub.collaboration.room_input_authority import as_rule, intersect_grants, rule_key
 from shared import room_contracts as contracts
 from shared.util import DevError
 
@@ -220,6 +221,67 @@ class RoomPermissions:
                          rule['lifetime']['expires_at'] > ceiling['lifetime']['expires_at']))):
                 raise DevError('CHANNEL_SCOPE_EXCEEDS_ROOM', '渠道权限与期限必须是房间权限的子集', 422)
 
+    @staticmethod
+    def paused_project(project, environment):
+        return {'project_id': project, 'environment_id': environment, 'reason_code': 'ROOM_PAUSED'}
+
+    def paused_partitions(self, principal, room, requested):
+        keys = {rule_key(rule) for rule in requested}
+        return {key for row in self.store.all("""SELECT * FROM collaboration_rooms
+                WHERE space_id=? AND owner_user_id=? AND state='paused'""",
+                (principal.space_id, principal.user_id))
+                if (key := rule_key(row)) in keys
+                and (room['state'] != 'active'
+                     or not self.c.conversations.archive.archive_paused_partition(row, principal))}
+
+    def limit_paused(self, proposed, previous, paused, blocked, *, room_rules=None):
+        old = {rule_key(rule): as_rule(rule) for rule in previous if rule_key(rule) in paused}
+        result = []
+        for rule in proposed:
+            key = rule_key(rule)
+            if key not in paused:
+                result.append(rule)
+                continue
+            grants = [old.get(key)]
+            if room_rules is not None:
+                grants.append(room_rules.get(key))
+            allowed = intersect_grants(self.c.clock(), as_rule(rule), *grants)
+            if allowed is None:
+                blocked.add(key)
+                continue
+            expiry = allowed['expires_at']
+            limited = {**rule, 'capabilities': allowed['capabilities'],
+                       'execution_targets': allowed['execution_targets'],
+                       'lifetime': {'mode': 'timed' if expiry is not None else 'until_revoked',
+                                    'expires_at': expiry}}
+            if limited != rule:
+                blocked.add(key)
+            result.append(limited)
+        return result
+
+    def plan(self, args, principal, room):
+        previous = self.policy(room['id'])
+        requested = self.normalize(args['scope']['project_scopes'], principal)
+        paused = self.paused_partitions(principal, room, requested)
+        blocked = set()
+        rules = self.limit_paused(requested, previous['scope']['project_scopes'], paused, blocked)
+        applied = {rule_key(rule): as_rule(rule) for rule in rules}
+        channels = {}
+        for name, entry in args['channels'].items():
+            custom = self.normalize(entry['scope']['project_scopes'], principal) if entry['mode'] == 'custom' else []
+            self.subset(custom, requested)
+            previous_channel = previous['channels'][name]
+            previous_rules = previous['scope']['project_scopes'] if previous_channel['mode'] == 'follow_room' else (
+                previous_channel['scope']['project_scopes'])
+            desired = rules if entry['mode'] == 'follow_room' else custom
+            limited = self.limit_paused(desired, previous_rules, paused, blocked, room_rules=applied)
+            # Following the room must not widen an explicitly paused project's
+            # channel authority. Keep the effective subset when it differs.
+            follows = entry['mode'] == 'follow_room' and limited == rules
+            channels[name] = {'mode': 'follow_room' if follows else 'custom',
+                              'scope': self.scope([] if follows else limited)}
+        return {'scope': self.scope(rules), 'channels': channels}, blocked, paused
+
     def sync_member(self, principal, member, scopes):
         detached = self.c.rooms.member(member['id'])['scope_revision'] != member['scope_revision']
         previous_digest = None
@@ -264,13 +326,8 @@ class RoomPermissions:
                 previous_channels = self.policy(room['id'])['channels']
                 if args['expected_version'] != version:
                     raise DevError('STALE_VERSION', '权限已更新，请重新核对后保存', 409, current_version=version)
-                rules = self.normalize(args['scope']['project_scopes'], principal)
-                channels = {}
-                for name, entry in args['channels'].items():
-                    custom = self.normalize(entry['scope']['project_scopes'], principal) if entry['mode'] == 'custom' else []
-                    self.subset(custom, rules)
-                    channels[name] = {'mode': entry['mode'], 'scope': self.scope(custom)}
-                policy = {'scope': self.scope(rules), 'channels': channels}
+                policy, blocked, _ = self.plan(args, principal, room)
+                rules, channels = policy['scope']['project_scopes'], policy['channels']
                 # Retain pre-detach revisions so revocations still expire the
                 # consumer even when partition removal already changed rows.
                 members = self.store.all("""SELECT * FROM room_members WHERE conversation_id=?
@@ -294,6 +351,7 @@ class RoomPermissions:
                                 'control_notice', room['id'], version + 1, {'reason_code': 'channel_scope_changed'})
                 self.c.room_work_bridge.native.stop_revoked_inputs(room['id'])
                 self.c.rooms.change(room['id'], 'permissions', room['id'], version + 1)
-                return {'conversation_id': room['id'], 'permission_version': version + 1}
-            self.c.rooms.mutation(principal, 'room_permissions', args, perform)
-            return self.read(room['id'], principal)
+                return {'conversation_id': room['id'], 'permission_version': version + 1,
+                        'blocked_projects': [self.paused_project(*key) for key in sorted(blocked)]}
+            receipt = self.c.rooms.mutation(principal, 'room_permissions', args, perform)
+            return {**self.read(room['id'], principal), 'blocked_projects': receipt.get('blocked_projects', [])}

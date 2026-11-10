@@ -418,7 +418,7 @@ class Rooms:
         if expected is not None and row['version'] != expected:
             raise DevError('STALE_VERSION', '内容已更新，请保留当前选择并重新核对', 409, current_version=row['version'])
 
-    def partitions(self, principal, projects):
+    def partitions(self, principal, projects, *, reuse_archived=False):
         partitions, seen = [], set()
         for item in projects:
             project = self.c.runtime.project(item['project'], principal)
@@ -427,6 +427,8 @@ class Rooms:
                 raise DevError('DUPLICATE_PROJECT', '同一项目与环境不能重复关联', 422)
             seen.add(key)
             _, partition = self.c.scope(principal, item, create=True, default_conversation=False)
+            if reuse_archived:
+                partition = self.c.conversations.archive.reuse_partition(partition, principal)
             partitions.append(partition)
         return partitions
 
@@ -439,7 +441,10 @@ class Rooms:
             for item in args['projects']:
                 self.c.runtime.project(item['project'], principal)
             def perform():
-                parts = self.partitions(principal, args['projects'])
+                selected = self.partitions(principal, args['projects'], reuse_archived=True)
+                blocked = [self.c.room_permissions.paused_project(part['project_id'], part['environment_id'])
+                           for part in selected if part['state'] == 'paused']
+                parts = [part for part in selected if part['state'] != 'paused']
                 identifier = uuid.uuid4().hex
                 self.store.execute('''INSERT INTO conversation_rooms
                     (id,space_id,owner_user_id,title,created,room_protocol) VALUES (?,?,?,?,?,1)''',
@@ -448,9 +453,10 @@ class Rooms:
                     self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (identifier, part['id'], self.c.clock()))
                 self.c.room_permissions.initialize(identifier, parts, principal)
                 self.change(identifier, 'room', identifier)
-                return {'conversation_id': identifier}
+                return {'conversation_id': identifier, 'blocked_projects': blocked}
             receipt = self.mutation(principal, 'room_create', args, perform)
-            return self.read(receipt, principal)
+            return {**self.read({'conversation_id': receipt['conversation_id']}, principal),
+                    'blocked_projects': receipt.get('blocked_projects', [])}
 
     def update(self, raw, principal):
         args = validate(contracts.RoomPatch, raw)
@@ -880,7 +886,8 @@ class Rooms:
                         for p in args['projects']}
                     if not requested <= current or any(a['project_scopes'] or a['lifetime'] for a in args['member_approvals']):
                         self.require_native(room)
-                parts = self.partitions(principal, args['projects'])
+                parts = self.partitions(principal, args['projects'],
+                    reuse_archived=bool(_canonical and room['room_protocol'] and room['state'] == 'active'))
                 before = {p['room_id'] for p in self.store.all('SELECT room_id FROM conversation_projects WHERE conversation_id=?', (room['id'],))}
                 after = {p['id'] for p in parts}
                 removed = sorted(before - after)

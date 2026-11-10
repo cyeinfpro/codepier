@@ -153,3 +153,29 @@ async def test_native_project_request_starts_one_original_work_and_claims_it(col
     replay=s.room_runtime.start_work({**raw,'expected_inbox_revision':refreshed['inbox_revision'],
         'coordinator_epoch':current_epoch(s,result['goal_id'])},worker)
     assert replay['goal_id']==result['goal_id'] and len(s.store.all('SELECT * FROM coordination_work'))==1
+
+
+@pytest.mark.asyncio
+async def test_default_work_uses_available_project_when_another_partition_is_paused(collab):
+    service, _, worker, *_ = collab
+    service.store.execute('UPDATE grants SET projects=? WHERE id=?',
+                          ('["proj","otherproj"]', worker.grant_id))
+    worker = replace(worker, projects=['proj', 'otherproj'])
+    s, owner, worker, _, identity, credentials = await connected(collab, scopes=[
+        {'project_id': 'proj'}, {'project_id': 'otherproj'}], worker_override=worker)
+    partition = s.store.one("SELECT * FROM collaboration_rooms WHERE project_id='otherproj'")
+    s.control({'project': 'otherproj', 'environment_id': 'production', 'action': 'pause',
+        'target_id': partition['id'], 'expected_version': partition['version'],
+        'reason': 'Pause only the second project', 'idempotency_key': key()}, owner)
+    sent = s.room_runtime.send({'conversation_id': identity['conversation_id'], 'body_text': '检查可用项目',
+        'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
+    inbox = s.room_consumers.inbox(identity, worker)
+    source = next(row for row in inbox['items'] if row['kind'] == 'message')
+    result = s.room_runtime.start_work({**identity, **credentials, 'source_message_id': sent['id'],
+        'source_version': source['source_version'], 'source_digest': source['source_digest'],
+        'expected_inbox_revision': inbox['inbox_revision'], 'acceptance': '检查可用项目并返回结果',
+        'confirm_task': True, 'idempotency_key': key()}, worker)
+    assert result['scheduled']
+    assert result['next_request']['arguments']['project'] == 'proj'
+    scope = s.store.one('SELECT * FROM room_native_work_scopes WHERE source_message_id=?', (sent['id'],))
+    assert json.loads(scope['spec'])['project_ids'] == ['proj']

@@ -201,7 +201,13 @@ def recover_waiting(c, *, conversation_id=None):
             next_cursor = rows[-1]['sequence'] if len(rows) == BATCH_SIZE else 0
             c.store.execute("INSERT OR REPLACE INTO meta VALUES ('room_waiting_inputs_cursor',?)", (str(next_cursor),))
         for row in rows:
-            _dispatch(c, row)
+            try:
+                with c.store.savepoint():
+                    _dispatch(c, row)
+            except DevError:
+                # Preserve the original input for a later scan and keep
+                # independent waiting inputs recoverable in this pass.
+                continue
 
 
 def fence_follow_poll(c, conversation_id):

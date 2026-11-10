@@ -108,7 +108,9 @@ class RoomGoalScopes:
         coordinator_rules = self.input_authority.rules(source, member, proof=proof)
         external = json.loads(source['body']).get('external_origin', {}).get('native_room')
         denied_code = 'CHANNEL_OWNER_SCOPE_DENIED' if external else 'ROOM_WORK_SCOPE_DENIED'
-        defaults = [r['project_id'] for r in coordinator_rules.values()]
+        available_defaults = {(scope['project_id'], scope['environment_id'])
+                              for scope in self.bridge.setup_scopes(member)}
+        defaults = [rule['project_id'] for key, rule in coordinator_rules.items() if key in available_defaults]
         project_ids = sorted(set(args.get('project_ids') or ([args['target_project_id']] if args.get('target_project_id') else defaults)))
         if external:
             source_rules = self.input_authority.rules(source, proof=proof)
@@ -133,8 +135,9 @@ class RoomGoalScopes:
             approved = (coordinator_rules if current['id'] == member['id'] else
                         self.input_authority.rules(source, current, proof=proof))
             rules=[]
+            scopes = self.bridge.setup_scopes(current)
             for project_id in project_ids:
-                available=[s for s in self.bridge.scopes(current) if s['project_id']==project_id and
+                available=[s for s in scopes if s['project_id']==project_id and
                     (not args.get('environment_id') or s['environment_id']==args['environment_id']) and
                     (s['project_id'],s['environment_id']) in approved]
                 if not available:

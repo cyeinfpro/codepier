@@ -165,3 +165,27 @@ async def test_weixin_revision_retires_original_waiting_input_at_capacity(collab
     stored = s.room_runtime.read(identity['conversation_id'], owner)['messages']
     assert [row['id'] for row in stored] == [original, changed['message_ids'][0]]
     assert all(row['routing']['state'] == 'terminal' for row in stored)
+
+
+def test_waiting_input_domain_error_rolls_back_only_that_input(collab, monkeypatch):
+    service, owner, *_ = collab
+    inputs = []
+    for title in ('first', 'second'):
+        room = service.rooms.create({'title': title, 'idempotency_key': key()}, owner)['room']
+        inputs.append(service.room_runtime.send({'conversation_id': room['id'], 'body_text': title,
+            'client_message_id': key(), 'idempotency_key': key()}, owner)['message']['id'])
+    dispatch = room_waiting_inputs._dispatch
+    seen = []
+
+    def dispatch_with_failure(c, row):
+        seen.append(row['message_id'])
+        if row['message_id'] == inputs[0]:
+            c.store.execute("INSERT INTO meta VALUES ('test_waiting_rollback','uncommitted')")
+            raise DevError('ROOM_MEMBER_UNBOUND', 'Synthetic recovery failure', 409)
+        dispatch(c, row)
+
+    monkeypatch.setattr(room_waiting_inputs, '_dispatch', dispatch_with_failure)
+    room_waiting_inputs.recover_waiting(service)
+    assert seen == inputs
+    assert not service.store.one("SELECT 1 FROM meta WHERE key='test_waiting_rollback'")
+    assert service.store.one('SELECT 1 FROM room_waiting_inputs WHERE message_id=?', (inputs[0],))

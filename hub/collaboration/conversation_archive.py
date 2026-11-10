@@ -347,6 +347,38 @@ class ConversationArchive:
                 version=version+1 WHERE id=?""", (now, conversation['id']))
             self.c.rooms.change(conversation['id'], 'room', conversation['id'], conversation['version'] + 1)
 
+    def archive_paused_partition(self, partition, principal):
+        """Prove that the current pause is entirely attributable to archival."""
+        if partition['state'] != 'paused':
+            return False
+        snapshots = self.store.all("""SELECT
+            json_extract(project.value,'$.version') AS version,
+            json_extract(project.value,'$.state') AS state
+            FROM conversation_archives a
+            JOIN conversation_rooms c ON c.id=a.conversation_id
+            JOIN json_each(a.snapshot,'$.projects') project
+            WHERE c.space_id=? AND c.owner_user_id=?
+              AND json_extract(project.value,'$.id')=?
+              AND json_extract(project.value,'$.exclusive')=1
+              AND json_type(project.value,'$.version')='integer'""",
+            (principal.space_id, principal.user_id, partition['id']))
+        history = {row['version']: row['state'] for row in snapshots}
+        prior_version = partition['version'] - 1
+        # Archiving can pause an already paused partition. A gap in archive
+        # revisions means another lifecycle operation intervened.
+        while history.get(prior_version) == 'paused':
+            prior_version -= 1
+        return history.get(prior_version) == 'active'
+
+    def reuse_partition(self, partition, principal):
+        if not self.archive_paused_partition(partition, principal):
+            return partition
+        self.store.execute("""UPDATE collaboration_rooms SET state='active',version=version+1
+            WHERE id=? AND state='paused' AND version=?""", (partition['id'], partition['version']))
+        self.c.audit(partition, principal.actor, 'conversation.partition_reused', partition['id'],
+                     {'authority_restored': False})
+        return {**partition, 'state': 'active', 'version': partition['version'] + 1}
+
     def restore(self, raw, principal):
         args = validate(Restore, raw)
         with self.store.transaction():

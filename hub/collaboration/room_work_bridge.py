@@ -36,6 +36,14 @@ class RoomWorkBridge:
         rows = self.store.all("SELECT * FROM room_member_scopes WHERE member_id=? AND state='active' ORDER BY project_id,environment_id", (member['id'],))
         return [row for row in rows if row['lifetime_mode']=='until_revoked' or row['expires_at'] > self.c.clock()]
 
+    def setup_scopes(self, member):
+        paused = {(row['project_id'], row['environment_id']) for row in self.store.all('''
+            SELECT r.project_id,r.environment_id FROM conversation_projects p
+            JOIN collaboration_rooms r ON r.id=p.room_id
+            WHERE p.conversation_id=? AND r.state='paused' ''', (member['conversation_id'],))}
+        return [scope for scope in self.scopes(member)
+                if (scope['project_id'], scope['environment_id']) not in paused]
+
     @staticmethod
     def fingerprint(scopes):
         return digest([{k:row[k] for k in ('project_id','environment_id','capabilities','execution_targets',
@@ -54,7 +62,7 @@ class RoomWorkBridge:
     def ensure(self, member, owner):
         if member['status']=='legacy':
             return self.c.dots.find(member['legacy_dot_id']) if member.get('legacy_dot_id') else None
-        scopes = self.scopes(member)
+        scopes = self.setup_scopes(member)
         if not scopes:
             return None
         owner, conversation = self.c.rooms.owner(owner,member['conversation_id'])
@@ -139,7 +147,7 @@ class RoomWorkBridge:
     def bind(self,member,principal):
         if member['status'] in {'legacy','paused','removed'}:
             return None
-        scopes=self.scopes(member)
+        scopes=self.setup_scopes(member)
         if not scopes:
             return None
         owner=self.owner(member,scopes[0])

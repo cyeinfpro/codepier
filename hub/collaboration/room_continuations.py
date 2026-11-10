@@ -51,15 +51,13 @@ class RoomContinuations:
     def native(self):
         return self.c.room_work_bridge.native
 
-    def _policy(self, args, owner):
+    def _policy(self, args, owner, room):
         permissions = self.c.room_permissions
-        rules = permissions.normalize(args['scope']['project_scopes'], owner)
-        channels = {}
-        for name, channel in args['channels'].items():
-            custom = permissions.normalize(channel['scope']['project_scopes'], owner) if channel['mode'] == 'custom' else []
-            permissions.subset(custom, rules)
-            channels[name] = {'mode': channel['mode'], 'scope': permissions.scope(custom)}
-        return {'scope': permissions.scope(rules), 'channels': channels}
+        policy, _, paused = permissions.plan(args, owner, room)
+        for entry in [policy, *policy['channels'].values()]:
+            entry['scope'] = permissions.scope([rule for rule in entry['scope']['project_scopes']
+                if (rule['project_id'], rule['environment_id']) not in paused])
+        return policy
 
     @staticmethod
     def _scope(policy, source):
@@ -180,7 +178,7 @@ class RoomContinuations:
             version = current['version'] if current else 0
             if version != args['expected_version']:
                 raise DevError('STALE_VERSION', '权限已更新，请重新核对续办清单', 409, current_version=version)
-            policy = self._policy(args, owner)
+            policy = self._policy(args, owner, room)
             fingerprint = digest([room['id'], owner.user_id, version, policy])
             candidates = []
             goals = self.store.all('''SELECT * FROM coordination_goals WHERE conversation_id=?
@@ -261,13 +259,18 @@ class RoomContinuations:
             if existing:
                 if existing['fingerprint'] != fingerprint:
                     raise DevError('IDEMPOTENCY_CONFLICT', '续办请求键已经用于不同选择', 409)
+                from hub.collaboration.history_retention import RETIRED_RESPONSE
+                receipt_id = digest([owner.space_id, owner.user_id, owner.grant_id,
+                                     'room_permissions', permissions['idempotency_key']])
+                receipt = self.store.one('SELECT result FROM room_mutations WHERE id=?', (receipt_id,))
+                result = json.loads(receipt['result']) if receipt and receipt['result'] != RETIRED_RESPONSE else {}
             else:
                 preview = self.store.one('''SELECT * FROM room_continuation_previews WHERE id=?
                     AND conversation_id=? AND owner_id=?''', (args['continuation_preview_id'], room['id'], owner.user_id))
                 if (not preview or preview['expires_at'] <= self.c.clock()
                         or self.store.one('SELECT 1 FROM room_continuation_batches WHERE preview_id=?', (preview['id'],))):
                     raise DevError('ROOM_CONTINUATION_PREVIEW_EXPIRED', '续办清单已过期，请重新核对', 409)
-                proposed = self._policy(permissions, owner)
+                proposed = self._policy(permissions, owner, room)
                 policy_digest = digest([room['id'], owner.user_id, args['expected_version'], proposed])
                 if preview['policy_digest'] != policy_digest or args['policy_preview_digest'] != policy_digest:
                     raise DevError('ROOM_CONTINUATION_PREVIEW_CHANGED', '权限或续办预览已变化，请重新核对', 409)
@@ -306,7 +309,9 @@ class RoomContinuations:
                     self.store.execute('INSERT INTO room_continuation_items VALUES (?,?,?,?,?,?)',
                         (identifier, candidate['task_id'], canonical(candidate), state, reason, 0))
         self.recover(limit=8, batch_id=identifier)
-        return {**self.c.room_permissions.read(room['id'], owner), 'continuation': self.status(room['id'], identifier, owner)}
+        return {**self.c.room_permissions.read(room['id'], owner),
+                'blocked_projects': result.get('blocked_projects', []),
+                'continuation': self.status(room['id'], identifier, owner)}
 
     def status(self, conversation_id, identifier, owner):
         owner, room = self.c.rooms.owner(owner, conversation_id)

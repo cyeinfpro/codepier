@@ -1,7 +1,10 @@
 """Room permission bulk selection against a real isolated Hub and browsers."""
+import sqlite3
+
 import pytest
 from playwright.sync_api import expect
 
+from hub.state_layout import state_directory
 from tests.collaboration_support import collaboration_stack, key  # noqa: F401
 
 pytestmark = [pytest.mark.browser, pytest.mark.integration, pytest.mark.slow]
@@ -108,6 +111,45 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
         assert errors == []
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_mobile_bulk_save_reports_paused_project_and_applies_other_projects(
+        collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    paused = stack.projects[1]
+    previous = stack.must(stack.client.post('/api/collaboration/rooms', json={
+        'title': 'Paused partition fixture', 'projects': [{'project': paused['id'], 'environment_id': 'production'}],
+        'idempotency_key': key(),
+    }))['room']
+    stack.must(stack.client.patch(f'/api/collaboration/rooms/{previous["id"]}', json={
+        'state': 'archived', 'expected_version': previous['version'], 'idempotency_key': key()}))
+    database = state_directory(stack.hubdir) / 'hub.sqlite3'
+    with sqlite3.connect(database, timeout=10) as connection:
+        changed = connection.execute("""UPDATE collaboration_rooms SET state='paused',version=version+1
+            WHERE project_id=? AND environment_id='production'""", (paused['id'],))
+        assert changed.rowcount == 1
+    context = chat_browser_pool(engine).new_context(viewport={'width': 390, 'height': 844})
+    page = context.new_page()
+    try:
+        path = open_permissions(page, stack, 'Partial room permissions')
+        section = page.locator('[data-permission-section="room"]')
+        section.locator('[data-permission-select-all]').check()
+        with page.expect_response(lambda response: response.request.method == 'PUT'
+                                  and response.url.endswith('/permissions')) as submitted:
+            page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
+        response = submitted.value
+        assert response.ok, response.text()
+        assert response.json()['blocked_projects'] == [{
+            'project_id': paused['id'], 'environment_id': 'production', 'reason_code': 'ROOM_PAUSED'}]
+        expect(page.locator('[data-cr-feedback]')).to_contain_text(paused['alias'])
+        assert set(stack.must(stack.client.get(path))['scope']['project_ids']) == {
+            project['id'] for project in stack.projects if project['id'] != paused['id']}
+    finally:
+        context.close()
+        with sqlite3.connect(database, timeout=10) as connection:
+            connection.execute("""UPDATE collaboration_rooms SET state='active',version=version+1
+                WHERE project_id=? AND environment_id='production'""", (paused['id'],))
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])
