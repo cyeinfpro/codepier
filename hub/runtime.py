@@ -647,7 +647,25 @@ class Runtime:
         if name == 'collaboration_room_channel_action':
             return await self.collaboration.room_channels.action(raw, principal)
         if name in COLLABORATION_TOOLS:
-            return await self.store.run(self.collaboration.invoke, name, raw, principal)
+            from hub.collaboration.telemetry import Action, Channel, Stage, TOOL_ACTIONS, collaboration_telemetry
+            action = TOOL_ACTIONS.get(name)
+            if action is None:
+                return await self.store.run(self.collaboration.invoke, name, raw, principal)
+            collaboration_telemetry.record(action, Stage.ATTEMPTED, channel=Channel.ROOM)
+            try:
+                value = await self.store.run(self.collaboration.invoke, name, raw, principal)
+            except Exception:
+                collaboration_telemetry.record(action, Stage.ERROR, channel=Channel.ROOM)
+                raise
+            stage = Stage.ERROR if value.get('error') else Stage.SUCCEEDED
+            if stage is Stage.SUCCEEDED and value.get('replayed') is True:
+                stage = Stage.REPLAYED
+            elif stage is Stage.SUCCEEDED and (
+                    (action is Action.BEGIN and value.get('replayed') is False)
+                    or (action is Action.REPLY and value.get('effects_created') is True)):
+                stage = Stage.COMMITTED
+            collaboration_telemetry.record(action, stage, channel=Channel.ROOM)
+            return value
         from shared.query_contracts import QUERY_TOOLS
         if name in QUERY_TOOLS:
             from hub.core_tools import invoke_query

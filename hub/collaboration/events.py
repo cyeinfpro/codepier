@@ -920,6 +920,7 @@ class EventService:
             return stored['url'], signed_headers(item['event_id'], sub['id'], item['body'], keys, self.c.clock())
 
     def finish(self, item, status=None, reason='', retry_after=None):
+        from hub.collaboration.telemetry import Action, Channel, Reason, Stage, collaboration_telemetry
         with self.store.transaction():
             row = self.store.one('SELECT * FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))
             if not row or row['state'] != 'leased' or row['fence'] != item['fence']:
@@ -959,11 +960,23 @@ class EventService:
             if accepted:
                 self.store.execute('UPDATE mcp_event_subscriptions SET last_accepted=? WHERE id=?', (now, sub['id']))
             self.advance(sub['id'])
+            stage = {'accepted': Stage.ACCEPTED, 'retry_wait': Stage.RETRY,
+                     'abandoned': Stage.CANCELLED, 'dead_letter': Stage.REJECTED}[state]
+            metric_reason = {'authorization_stopped': Reason.AUTHORIZATION, 'authorization_revoked': Reason.AUTHORIZATION,
+                             'network_error': Reason.NETWORK, 'wake_ticket_expired': Reason.EXPIRED,
+                             'callback_policy_rejected': Reason.POLICY}.get(reason, Reason.OTHER if reason or status else Reason.NONE)
+            if accepted:
+                metric_reason = Reason.NONE
+            elif status == 429:
+                metric_reason = Reason.RATE_LIMIT
+            self.store.after_commit(lambda: collaboration_telemetry.record(
+                Action.WAKE, stage, channel=Channel.HOST, reason=metric_reason))
             hints = getattr(self.c, 'relay_hints', None)
             if hints is not None:
                 self.store.after_commit(hints.wake)
 
     async def deliver(self, item):
+        from hub.collaboration.telemetry import Action, Channel, Stage, collaboration_telemetry
         try:
             async with self._network_limit:
                 outbound = await self.store.run(self.ready, item)
@@ -974,6 +987,7 @@ class EventService:
                 # Also bound injected/adapted transports; the native transport has
                 # its own stricter 10-second DNS/connect/body deadline.
                 async with asyncio.timeout(12):
+                    collaboration_telemetry.record(Action.WAKE, Stage.ATTEMPTED, channel=Channel.HOST)
                     reply = await self.sender(url, item['body'], headers)
             await self.store.run(self.finish, item, reply.status, '', getattr(reply, 'retry_after_seconds', None))
         except DevError as exc:

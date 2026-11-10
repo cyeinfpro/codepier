@@ -65,6 +65,8 @@ class Store:
         self.directory = Path(directory).resolve()
         from hub.state_layout import state_directory
         self.state_directory = state_directory(self.directory)
+        from hub.collaboration.delivery_compatibility import check_database
+        check_database(self.state_directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
         connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
@@ -226,7 +228,9 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}:
+        from hub.collaboration.delivery_compatibility import PROTECTED_SCHEMA_VERSION, assert_compatible
+        assert_compatible(self.db)
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", PROTECTED_SCHEMA_VERSION}:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}

@@ -40,7 +40,10 @@ def deployment(root):
 
 
 class DockerBoundary:
-    def __init__(self,root,spec):self.root,self.spec,self.commands,self.phase=root,spec,[], 'old'
+    def __init__(self,root,spec):
+        self.root,self.spec,self.commands,self.phase=root,spec,[], 'old'
+        self.floor = {'schema': '10'}
+        self.contract = None
     def __call__(self,command,**kwargs):
         self.commands.append(command)
         if command[:2]==['docker','inspect']:
@@ -54,9 +57,14 @@ class DockerBoundary:
         if command[:3]==['docker','volume','ls']:return '"original-data"'
         if command[:3]==['docker','volume','create']:return command[-1]
         if command[:2]==['docker','run']:
+            if 'dst=/state,readonly' in ' '.join(command):
+                return json.dumps(self.floor)
             if '/backup' in command[-1]:return '{"files":4,"bytes":512,"integrity":"ok"}'
             return json.dumps({'version':TARGET,'agent_sha256':'a'*64,'agent_bytes':123})
-        if command[:3]==['docker','image','inspect']:return 'sha256:'+'c'*64
+        if command[:3]==['docker','image','inspect']:
+            if '{{json .Config.Labels}}' in command:
+                return json.dumps(self.contract)
+            return 'sha256:'+'c'*64
         if command[:2]==['docker','build']:return 'built'
         if 'ps' in command:return 'container-id'
         if 'up' in command:
@@ -261,3 +269,18 @@ def test_broken_startup_preflight_fails_before_maintenance_or_service_stop(tmp_p
     assert not runtime.gate.exists()
     assert not any('stop' in command or command[:3] == ['docker', 'volume', 'create']
                    for command in docker.commands)
+
+
+def test_controller_denies_old_image_before_compose_start(tmp_path):
+    home, config, job, spec = deployment(tmp_path)
+    docker = DockerBoundary(tmp_path, spec)
+    docker.floor = {'schema': '11', 'collaboration_min_reader': '1', 'collaboration_min_writer': '1'}
+    runtime = DockerRuntime(tmp_path, home, config, execute=docker)
+    job.update(old_image='sha256:' + 'b' * 64, old_volume='old-state')
+    with pytest.raises(UpdateError) as error:
+        runtime.start(job, 'old')
+    assert error.value.code == 'DATABASE_COMPATIBILITY_FLOOR'
+    assert not any('up' in command for command in docker.commands)
+    docker.contract = {'org.codepier.collaboration-contract': '1'}
+    runtime.start(job, 'old')
+    assert any('up' in command for command in docker.commands)

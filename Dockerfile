@@ -9,6 +9,7 @@ FROM python:3.13.15-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HUB_DATA_DIR=/app/data HUB_PORT=8765 TZ=Asia/Taipei
 WORKDIR /app
+LABEL org.codepier.collaboration-contract="1"
 COPY --from=dependencies /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN groupadd --gid 10001 codepier \

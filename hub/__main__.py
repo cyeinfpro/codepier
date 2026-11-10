@@ -64,6 +64,7 @@ def main():
     init.add_argument("--username", default="admin")
     reset = sub.add_parser("reset-password", help="通过服务器本机权限重置账号并撤销全部登录授权")
     reset.add_argument("--username", default="admin")
+    sub.add_parser("check-compatibility", help="只读校验当前数据库的最低 reader/writer 能力")
     run = sub.add_parser("run")
     run.add_argument("--host", default=os.getenv("HUB_HOST", "0.0.0.0"))
     run.add_argument("--port", default=os.getenv("HUB_PORT", str(DEFAULT_HUB_PORT)), type=int)
@@ -73,6 +74,15 @@ def main():
     rekey.add_argument("--resume", action="store_true", help="继续已记录的密钥轮换，不创建新的轮换")
     args = parser.parse_args()
     os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
+    if args.command in {"run", "check-compatibility", "rekey"}:
+        from hub.collaboration.delivery_compatibility import check_database
+        from hub.state_layout import state_directory
+        try:
+            check_database(state_directory(args.data_dir))
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            parser.error(str(exc))
+        if args.command == "check-compatibility":
+            return
     if args.command == "run":
         if not 1 <= args.port <= 65535:
             parser.error("端口范围应为 1–65535")

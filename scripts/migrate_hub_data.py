@@ -48,6 +48,8 @@ def probe_admin(root, scratch_root=None):
             connection = sqlite3.connect(probe, timeout=10)
             try:
                 connection.execute("PRAGMA query_only=ON")
+                from hub.collaboration.delivery_compatibility import assert_compatible
+                assert_compatible(connection)
                 found = connection.execute("SELECT id FROM users LIMIT 1").fetchone()
             finally:
                 connection.close()

@@ -385,6 +385,36 @@ HEALTH = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:
 MANIFEST = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json',timeout=5).read().decode())"
 
 
+# Executed by a pinned image using only the standard library. The deployment
+# controller owns this check even when the candidate does not know the schema.
+DATABASE_FLOOR_PROBE = r"""
+from contextlib import closing
+import json
+from pathlib import Path
+import sqlite3
+
+db = Path('/state/hub.sqlite3')
+if db.is_symlink() or (db.exists() and not db.is_file()):
+    raise RuntimeError('Hub database is not a regular file')
+if not db.exists():
+    raise RuntimeError('Hub state volume has no database')
+for name in ('-wal', '-shm', '-journal'):
+    path = db.with_name(db.name + name)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError('Hub database sidecar is not a regular file')
+wal = db.with_name(db.name + '-wal')
+journal = db.with_name(db.name + '-journal')
+if journal.exists() and journal.stat().st_size:
+    raise RuntimeError('Hub database requires recovery before compatibility can be checked')
+mode = '?mode=ro' if wal.exists() and wal.stat().st_size else '?mode=ro&immutable=1'
+with closing(sqlite3.connect(db.as_uri() + mode, uri=True, timeout=3)) as con:
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
+        raise RuntimeError('Hub database schema is missing')
+    values = dict(con.execute("SELECT key,value FROM meta WHERE key IN ('schema','collaboration_min_reader','collaboration_min_writer')"))
+print(json.dumps(values))
+"""
+
+
 class DockerRuntime:
     def __init__(self, root, home, config, execute=run):
         self.root, self.home, self.config, self.execute = Path(root), Path(home), config, execute
@@ -535,7 +565,40 @@ class DockerRuntime:
                             '--entrypoint', 'python', job['old_image'], '-c', COPY_MIGRATION if job.get('layout_migration') else COPY_STATE if job.get('state_layout') == 'split-state-v1' else COPY_DATA], timeout=1800, job=job)
         return json.loads(raw)
 
+    def check_database_floor(self, job, which):
+        image = job['package']['image_id'] if which == 'target' else job['old_image']
+        volume = job['new_volume'] if which == 'target' else job['old_volume']
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}', image) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}', volume):
+            raise UpdateError('DATABASE_COMPATIBILITY_UNVERIFIED', '数据库兼容校验缺少固定镜像或数据卷', 500)
+        try:
+            labels = json.loads(self.command(['docker', 'image', 'inspect', '--format', '{{json .Config.Labels}}',
+                                              image], job=job))
+            capability = (labels or {}).get('org.codepier.collaboration-contract', '0')
+            floor = json.loads(self.command(['docker', 'run', '--rm', '--network', 'none', '--read-only',
+                '--user', '10001:10001', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                '--mount', 'type=volume,src=' + volume + ',dst=/state,readonly,volume-nocopy',
+                '--entrypoint', 'python', image, '-c', DATABASE_FLOOR_PROBE], timeout=30, job=job))
+            if not isinstance(capability, str) or not re.fullmatch(r'0|[1-9][0-9]{0,5}', capability):
+                raise ValueError('Invalid image collaboration contract')
+            schema = floor['schema']
+            limits = (floor.get('collaboration_min_reader'), floor.get('collaboration_min_writer'))
+            if schema == '11':
+                if any(not isinstance(limit, str) or not re.fullmatch(r'[1-9][0-9]{0,5}', limit) for limit in limits):
+                    raise ValueError('Invalid collaboration database floor')
+            elif schema not in {str(version) for version in range(1, 11)} or limits != (None, None):
+                raise ValueError('Invalid Hub schema or unexpected floor')
+        except (UpdateError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            raise UpdateError('DATABASE_COMPATIBILITY_UNVERIFIED', '未能核实数据库和镜像的协作兼容性；未启动目标 Hub', 500) from exc
+        if schema == '11' and max(map(int, limits)) > int(capability):
+            raise UpdateError('DATABASE_COMPATIBILITY_FLOOR', '目标镜像不满足当前数据库的协作读取或写入能力；未启动目标 Hub', 409)
+
     def start(self, job, which):
+        self.check_database_floor(job, which)
+        if which == 'target':
+            path = self.home / 'jobs' / job['id'] / 'target.json'
+            spec = read_json(path.with_suffix('.spec.json'))
+            spec['services']['hub']['image'] = job['package']['image_id']
+            save_compose(path, spec)
         self.compose(job, which, 'up', '-d', '--no-deps', '--no-build', '--force-recreate',
                      '--pull', 'never', '--wait', '--wait-timeout', '90', 'hub', timeout=120)
 
