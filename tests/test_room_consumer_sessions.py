@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hub.collaboration.common import canonical
+from hub.collaboration.common import canonical, digest
 from hub.collaboration.events import EventService, SEALED_BODY_PREFIX
 from hub.collaboration.network import Reply
 from shared.util import DevError
@@ -92,6 +92,10 @@ async def test_shared_grant_members_have_independent_callback_tickets_and_fences
     await subscribe(c, second)
     await dispatch(c)
     second_ticket = c.received[-1][1]['data']['wake_ticket']
+    verify(c)
+    nonce = c.s.rooms.probe_read({**identity(second), 'wake_ticket': second_ticket,
+                                  'idempotency_key': key()}, c.actor)['probe_nonce']
+    c.s.rooms.probe_reply({**identity(second), 'probe_nonce': nonce, 'idempotency_key': key()}, c.actor)
     with pytest.raises(DevError):
         c.s.room_consumers.begin({**identity(c.joined), 'wake_ticket': second_ticket,
             'consumer_run_id': key(), 'idempotency_key': key()}, c.actor)
@@ -294,3 +298,166 @@ async def test_expired_room_wake_is_dead_lettered_before_callback(rooms):
     assert len(c.received) == before + 1
     assert c.received[-1][1]['data']['wake_ticket']
     assert c.received[-1][1]['data']['wake_ticket'] != c.ticket
+
+
+@pytest.mark.asyncio
+async def test_decoupled_begin_replays_after_route_expiry_and_reads_require_live_proof(rooms, monkeypatch):
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'decoupled')
+    c = await connect(rooms)
+    verify(c)
+    sent = send(c)['message']
+    await dispatch(c)
+    other_ticket = c.received[-1][1]['data']['wake_ticket']
+    expires_at = c.clock[0] + 35
+    c.s.store.execute('UPDATE mcp_event_subscriptions SET expires_at=? WHERE id=?', (expires_at, c.sub['id']))
+    raw = {**identity(c.joined), 'wake_ticket': c.ticket, 'consumer_run_id': key(),
+           'idempotency_key': key(), 'include_inbox': True}
+    session = c.s.room_consumers.begin(raw, c.actor)
+    assert session['turn_policy'] == 'decoupled'
+    assert session['lease_until'] > expires_at
+    c.clock[0] = expires_at + 1
+
+    restored = c.s.room_consumers.begin(raw, c.actor)
+    for field in ('consumer_session_id', 'consumer_fence', 'consumer_proof', 'lease_until', 'hard_deadline'):
+        assert restored[field] == session[field]
+    assert restored['replayed'] and restored['inbox']['items'][0]['object_id'] == sent['id']
+    assert c.s.store.one('SELECT COUNT(*) AS n FROM dot_consumer_sessions')['n'] == 1
+
+    for request in (
+        lambda: begin(c, other_ticket),
+        lambda: c.s.room_consumers.inbox(identity(c.joined), c.actor),
+    ):
+        with pytest.raises(DevError) as inactive:
+            request()
+        assert inactive.value.code == 'ROOM_SUBSCRIPTION_INACTIVE'
+    with pytest.raises(DevError) as partial:
+        c.s.room_consumers.inbox({**identity(c.joined), 'consumer_fence': session['consumer_fence']}, c.actor)
+    assert partial.value.code == 'INVALID_ARGUMENTS'
+    with pytest.raises(DevError) as conflict:
+        c.s.room_consumers.begin({**raw, 'wake_ticket': 'z' * 40}, c.actor)
+    assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'
+
+    message = c.s.room_consumers.message({**credentials(c, session), 'message_id': sent['id']}, c.actor)
+    assert message['message']['id'] == sent['id']
+    c.clock[0] = session['lease_until'] + 1
+    with pytest.raises(DevError) as expired:
+        c.s.room_consumers.inbox(credentials(c, session), c.actor)
+    assert expired.value.code == 'DOT_CONSUMER_LEASE_EXPIRED'
+    original = c.s.room_consumers.begin(raw, c.actor)
+    assert original['state'] == 'expired' and original['consumer_fence'] == session['consumer_fence']
+
+
+@pytest.mark.asyncio
+async def test_pause_only_transport_keeps_original_lease_until_fixed_route_grace(rooms, monkeypatch):
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'decoupled')
+    c = await connect(rooms)
+    verify(c)
+    expires_at = c.clock[0] + 120
+    c.s.store.execute('UPDATE mcp_event_subscriptions SET expires_at=? WHERE id=?', (expires_at, c.sub['id']))
+    _, session = begin(c)
+    c.s.store.execute("UPDATE mcp_event_subscriptions SET state='paused' WHERE id=?", (c.sub['id'],))
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'strict')
+    heartbeat = {**credentials(c, session), 'lease_seconds': 300}
+    for elapsed in (80, 350, 620, 890):
+        c.clock[0] = expires_at - 120 + elapsed
+        active = c.s.room_consumers.heartbeat({**heartbeat, 'idempotency_key': key()}, c.actor)
+        assert active['hard_deadline'] == session['hard_deadline'] and active['turn_policy'] == 'decoupled'
+    assert active['lease_until'] == expires_at + 900
+    assert c.s.room_consumers.inbox(credentials(c, session), c.actor)['pagination_complete']
+    c.clock[0] = active['lease_until']
+    with pytest.raises(DevError) as expired:
+        c.s.room_consumers.heartbeat({**heartbeat, 'idempotency_key': key()}, c.actor)
+    assert expired.value.code == 'DOT_CONSUMER_LEASE_EXPIRED'
+
+
+@pytest.mark.asyncio
+async def test_inbox_pagination_keeps_a_fixed_window_and_restarts_on_visibility_change(rooms, monkeypatch):
+    c = await connect(rooms)
+    verify(c)
+    messages = [send(c, f'input {n}')['message']['id'] for n in range(3)]
+    consumers = c.s.room_consumers
+    original_visible = consumers._visible_message
+    visibility = ['old-visibility']
+    monkeypatch.setattr(consumers, '_visibility_digest', lambda *_: digest(visibility[0]))
+    monkeypatch.setattr(consumers, '_visible_message',
+                        lambda member, actor, message: original_visible(member, actor, message)
+                        and (message['id'] != messages[0] or visibility[0] != 'old-visibility'))
+    request = {**identity(c.joined), 'limit': 1}
+    first = consumers.inbox(request, c.actor)
+    assert not first['items'] and first['next_cursor'] and not first['pagination_complete']
+    late = send(c, 'arrives after the first page')['message']['id']
+    visibility[0] = 'new-visibility'
+    page = consumers.inbox({**request, 'cursor': first['next_cursor']}, c.actor)
+    assert page['visibility_changed'] and page['restart_cursor']
+    assert [row['object_id'] for row in page['items']] == messages[1:2]
+    restarted = consumers.inbox({**request, 'cursor': page['restart_cursor']}, c.actor)
+    assert restarted['items'][0]['object_id'] == messages[0]
+    last = consumers.inbox({**request, 'cursor': page['next_cursor']}, c.actor)
+    assert last['pagination_complete'] and not last['next_cursor']
+    assert [row['object_id'] for row in last['items']] == messages[2:]
+    assert late in {row['object_id'] for row in consumers.inbox(identity(c.joined), c.actor)['items']}
+
+
+@pytest.mark.asyncio
+async def test_drain_check_reaches_pending_items_after_a_bounded_invisible_prefix(rooms, monkeypatch):
+    from hub.collaboration.room_consumers import DRAIN_SCAN_LIMIT
+
+    c = await connect(rooms)
+    verify(c)
+    consumers = c.s.room_consumers
+    member = c.s.rooms.member(c.joined['member_id'])
+    with monkeypatch.context() as patch:
+        patch.setattr(consumers, '_wake', lambda *_: None)
+        for n in range(DRAIN_SCAN_LIMIT + 1):
+            consumers.enqueue_ref(member, 'control_notice', f'notice-{n}', 1, {'reason_code': 'test'})
+    original_entry = consumers._entry
+    monkeypatch.setattr(consumers, '_entry', lambda row, *args, **kwargs:
+                        None if row['object_id'].startswith('notice-') else original_entry(row, *args, **kwargs))
+    pending = send(c, 'legitimate input')['message']['id']
+    _, session = begin(c)
+    current = c.s.rooms.member(c.joined['member_id'])
+    request = {**credentials(c, session), 'expected_inbox_revision': current['dirty_revision']}
+    first = consumers.yield_session({**request, 'idempotency_key': key()}, c.actor)
+    assert first['reason_code'] == 'drain_check_pending' and first['state'] == 'active'
+    second = consumers.yield_session({**request, 'idempotency_key': key()}, c.actor)
+    assert second['reason_code'] == 'pending_input' and second['state'] == 'active'
+    row = c.s.store.one('SELECT acknowledged_at FROM dot_mailbox_entries WHERE object_id=?', (pending,))
+    assert row['acknowledged_at'] is None
+
+
+@pytest.mark.asyncio
+async def test_continue_later_persists_one_wake_and_preserves_pending_inputs(rooms, monkeypatch):
+    from hub.collaboration.room_consumers import CONTINUATION_DELAY, RoomConsumers
+
+    monkeypatch.setenv('CODEPIER_ROOM_CHAT_SCOPE_MODE', 'decoupled')
+    c = await connect(rooms)
+    verify(c)
+    initial = send(c, 'unfinished input')['message']['id']
+    await dispatch(c)
+    _, session = begin(c)
+    request = {**credentials(c, session), 'expected_inbox_revision': session['inbox_revision'],
+               'yield_mode': 'continue_later', 'idempotency_key': key()}
+    outcome = c.s.room_consumers.yield_session(request, c.actor)
+    assert outcome['state'] == 'yielded' and outcome['pending_preserved'] and outcome['continuation_queued']
+    assert c.s.room_consumers.yield_session(request, c.actor) == outcome
+    with pytest.raises(DevError) as conflict:
+        c.s.room_consumers.yield_session({**request, 'yield_mode': 'if_drained'}, c.actor)
+    assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'
+    member = c.s.rooms.member(c.joined['member_id'])
+    assert member['drained_revision'] < member['dirty_revision']
+    assert member['consumer_continuation_at'] == c.clock[0] + CONTINUATION_DELAY
+    before = len(c.received)
+    latest = send(c, 'new input while continuing later')['message']['id']
+    await dispatch(c)
+    assert len(c.received) == before
+
+    c.s.room_consumers = RoomConsumers(c.s)
+    c.clock[0] += CONTINUATION_DELAY
+    assert c.s.room_consumers.recover() == 1
+    assert c.s.room_consumers.recover() == 0
+    await dispatch(c)
+    assert len(c.received) == before + 1
+    _, next_session = begin(c, c.received[-1][1]['data']['wake_ticket'])
+    assert next_session['consumer_fence'] == session['consumer_fence'] + 1
+    items = c.s.room_consumers.inbox(identity(c.joined), c.actor)['items']
+    assert {item['object_id'] for item in items} == {initial, latest}
