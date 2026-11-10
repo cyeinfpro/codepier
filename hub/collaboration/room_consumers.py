@@ -138,9 +138,8 @@ class RoomConsumers(FencedConsumerEngine):
             raise DevError('ROOM_BINDING_CHANGED', '消费回合的宿主身份已变更', 409)
 
     def _initial_lease(self, now, args, room, dot, sub):
-        if mode(self.store, room['id']) == 'decoupled':
-            return min(now + args['lease_seconds'], now + MAX_TURN_AGE_SECONDS, sub['expires_at'] + ROUTE_GRACE_SECONDS)
-        return min(now + args['lease_seconds'], sub['expires_at'])
+        return min(now + args['lease_seconds'], now + MAX_TURN_AGE_SECONDS,
+                   sub['expires_at'] + ROUTE_GRACE_SECONDS)
 
     def _record_turn_policy(self, identifier, room, dot, binding, sub, now):
         self.store.execute('''UPDATE dot_consumer_sessions SET turn_policy=?,policy_revision=?,
@@ -154,7 +153,7 @@ class RoomConsumers(FencedConsumerEngine):
     def _expire_activated_turns(self, dot, generation, subscription_id):
         self.store.execute("""UPDATE dot_consumer_sessions SET state='expired',updated=?
             WHERE member_id=? AND state='active' AND (generation!=? OR
-                (subscription_id!=? AND turn_policy!='decoupled'))""",
+                (subscription_id!=? AND turn_policy!='decoupled' AND COALESCE(host_connection_id,'')=''))""",
             (self.c.clock(), dot['id'], generation, subscription_id))
 
     def _lease_scope(self, raw, principal, model):
@@ -168,10 +167,21 @@ class RoomConsumers(FencedConsumerEngine):
             args = {key: value for key, value in args.items() if key != 'yield_mode'}
         return FencedConsumerEngine._lease_fingerprint(args)
 
+    @staticmethod
+    def _independent_turn_route(row, binding):
+        return bool(binding.get('host_connection_id') or (
+            row['subscription_id'] == binding['subscription_id']
+            and row['route_generation'] is not None
+            and binding.get('route_generation', 0) > row['route_generation']))
+
     def _strict_live_scope(self, room, member, binding, row, scope_digest):
-        self.binding(room, member)
-        if row['subscription_id'] != binding['subscription_id']:
-            raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
+        # A verified host keeps its turn through route cutover. Legacy members
+        # retain strict binding, except for a verified signing rotation on the
+        # same subscription.
+        if not binding.get('host_connection_id'):
+            self.binding(room, member, require_subscription=not self._independent_turn_route(row, binding))
+            if row['subscription_id'] != binding['subscription_id']:
+                raise DevError('ROOM_BINDING_CHANGED', '消费回合的原通知路线已变更', 409)
         if self.scope_digest(room, member) != scope_digest:
             if row['turn_policy'] == 'shadow':
                 record_shadow('scope_update', 'would_allow', 'scope_changed')
@@ -182,7 +192,7 @@ class RoomConsumers(FencedConsumerEngine):
             return
         if row['turn_policy'] != 'decoupled':
             self._strict_live_scope(room, dot, binding, row, row['observed_scope_digest'] or row['scope_digest'])
-        else:
+        if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
             route = self._original_route(row)
             if route['state'] == 'revoked':
                 raise DevError('ROOM_SUBSCRIPTION_REVOKED', '原通知连接已撤销', 403)
@@ -196,10 +206,10 @@ class RoomConsumers(FencedConsumerEngine):
                                (row['subscription_id'],))
         return route or {'state': 'unavailable', 'expires_at': row['route_expires_at']}
 
-    def _renew_until(self, now, args, row, sub):
+    def _renew_until(self, now, args, row, binding, sub):
         route = self._original_route(row)
         limit = route['expires_at']
-        if row['turn_policy'] == 'decoupled':
+        if row['turn_policy'] == 'decoupled' or self._independent_turn_route(row, binding):
             limit = min(limit, row['route_expires_at']) + ROUTE_GRACE_SECONDS
         if limit <= now:
             raise DevError('DOT_CONSUMER_LEASE_EXPIRED', '原通知路线的收尾期限已结束', 409)

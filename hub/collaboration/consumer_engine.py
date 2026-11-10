@@ -215,7 +215,7 @@ class FencedConsumerEngine:
     def _lease_fingerprint(args):
         return digest({key: value for key, value in args.items() if key != 'consumer_proof'})
 
-    def _renew_until(self, now, args, row, sub):
+    def _renew_until(self, now, args, row, binding, sub):
         return self.lease_deadline(now, args['lease_seconds'], sub)
 
     def _yield(self, args, principal, dot, binding, row):
@@ -252,7 +252,7 @@ class FencedConsumerEngine:
                 outcome = self._yield(args, principal, dot, binding, row)
             else:
                 self._execute('UPDATE dot_consumer_sessions SET lease_until=?,updated=? WHERE id=?',
-                                   (self._renew_until(now, args, row, sub), now, row['id']))
+                                   (self._renew_until(now, args, row, binding, sub), now, row['id']))
                 outcome = {'more': False}
             current = self._one('SELECT * FROM dot_consumer_sessions WHERE id=?', (row['id'],))
             result = {**self._reply(current), 'inbox_revision': revision, **outcome,
