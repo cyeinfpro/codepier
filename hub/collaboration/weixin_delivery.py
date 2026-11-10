@@ -8,8 +8,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
+from httpx import NetworkError, TimeoutException
+
 from hub.collaboration.common import canonical, digest
 from hub.collaboration import weixin_delivery_order as order
+from hub.collaboration import weixin_delivery_transport as transport
 from hub.collaboration import weixin_schema as models
 from hub.collaboration.weixin_protocol import encode_request, send_payload
 from shared.util import DevError
@@ -34,6 +37,8 @@ TERMINAL_SOURCE = frozenset(TASK_STATUSES) | {
 RATE_LIMITED = 'WEIXIN_RATE_LIMITED'
 REQUEST_LIMIT = 'WEIXIN_REQUEST_LIMIT'
 MAX_SEND_ATTEMPTS = 6
+MAX_ACTIVE_SENDERS = 4
+MAX_ACTIVE_MEDIA = 2
 
 
 @dataclass(frozen=True)
@@ -357,7 +362,7 @@ class WeixinDelivery:
     def refresh(self, delivery_id):
         self.store.execute("""UPDATE weixin_parts SET state='rejected',reason_code='reply_part_failed',updated=?
             WHERE delivery_id=? AND state IN ('queued','waiting_context','waiting_media','attention')
-            AND (attempts=0 OR reason_code='WEIXIN_RATE_LIMITED')
+            AND (attempts=0 OR retry_rejected=1)
             AND ordinal>(SELECT MIN(ordinal) FROM weixin_parts
                 WHERE delivery_id=? AND state IN ('rejected','cancelled'))""",
             (self.c.clock(), delivery_id, delivery_id))
@@ -379,12 +384,17 @@ class WeixinDelivery:
         # Unknown external results block only established reply dependencies.
         # The separate in-flight check fences every request to the same peer.
         return self.store.all(f'''WITH sendable AS (
-            SELECT p.id,d.created,d.rowid AS delivery_order,p.ordinal,
+            SELECT p.id,p.kind,d.created,d.rowid AS delivery_order,p.ordinal,
+                COALESCE(turn.last_admitted_sequence,0) AS last_admitted_sequence,
                 ROW_NUMBER() OVER (PARTITION BY b.account_id,d.peer_id
                     ORDER BY d.created,d.rowid,p.ordinal) AS peer_rank
             FROM weixin_parts p JOIN weixin_deliveries d ON d.id=p.delivery_id
             JOIN weixin_bindings b ON b.id=d.binding_id
-            WHERE p.state IN ('queued','waiting_context','waiting_media') AND p.next_attempt<=?
+            JOIN weixin_accounts account ON account.id=b.account_id
+            LEFT JOIN weixin_peer_admission turn ON turn.account_id=b.account_id AND turn.peer_id=d.peer_id
+            LEFT JOIN weixin_account_cooldown cooldown ON cooldown.account_id=b.account_id
+            WHERE b.state='active' AND account.state='active' AND COALESCE(cooldown.retry_at,0)<=?
+                AND p.state IN ('queued','waiting_context','waiting_media') AND p.next_attempt<=?
                 AND (? IS NULL OR (d.binding_id=? AND d.peer_id=?))
                 AND NOT EXISTS (
                     SELECT 1 FROM weixin_parts first WHERE first.delivery_id=d.id AND first.ordinal<p.ordinal
@@ -395,8 +405,14 @@ class WeixinDelivery:
                     JOIN weixin_parts sender ON sender.delivery_id=held.id
                     WHERE hb.account_id=b.account_id AND held.peer_id=d.peer_id
                         AND sender.state IN ('preparing','sending'))
-            ) SELECT id FROM sendable WHERE peer_rank=1
-                ORDER BY created,delivery_order,ordinal LIMIT 16''', (now, binding_id, binding_id, peer_id))
+            ), fair AS (
+                SELECT id,kind,ROW_NUMBER() OVER (ORDER BY last_admitted_sequence,created,delivery_order,ordinal) AS batch_rank,
+                    ROW_NUMBER() OVER (PARTITION BY kind
+                        ORDER BY last_admitted_sequence,created,delivery_order,ordinal) AS kind_rank
+                FROM sendable WHERE peer_rank=1
+            ) SELECT id,kind FROM fair
+                ORDER BY CASE WHEN kind='text' AND kind_rank=1 THEN 0 ELSE batch_rank END
+                LIMIT 16''', (now, now, binding_id, binding_id, peer_id))
 
     def claim(self, identifier):
         with self.store.transaction():
@@ -407,6 +423,11 @@ class WeixinDelivery:
             delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (part['delivery_id'],))
             candidate = self.candidates(now, binding_id=delivery['binding_id'], peer_id=delivery['peer_id'])
             if not candidate or candidate[0]['id'] != identifier:
+                return None
+            active = self.store.one("""SELECT COUNT(*) AS total,
+                COUNT(CASE WHEN kind='attachment' THEN 1 END) AS media
+                FROM weixin_parts WHERE state IN ('preparing','sending')""")
+            if active['total'] >= MAX_ACTIVE_SENDERS or (part['kind'] == 'attachment' and active['media'] >= MAX_ACTIVE_MEDIA):
                 return None
             failed = self.store.one("""SELECT 1 FROM weixin_parts
                 WHERE delivery_id=? AND ordinal<? AND state IN ('rejected','cancelled') LIMIT 1""",
@@ -448,6 +469,7 @@ class WeixinDelivery:
             claim_owner, fence = uuid.uuid4().hex, part['lease_fence'] + 1
             self.store.execute("UPDATE weixin_parts SET state='preparing',lease_owner=?,lease_fence=?,lease_until=?,updated=? WHERE id=?",
                                (claim_owner, fence, now + (960 if part['kind'] == 'attachment' else 180), now, identifier))
+            transport.admit(self.store, account['id'], delivery['peer_id'])
             return {**part, 'lease_owner': claim_owner, 'lease_fence': fence, 'delivery': delivery,
                     'binding': binding, 'account': account, 'context': context}
 
@@ -544,7 +566,11 @@ class WeixinDelivery:
                     lease_until=0,updated=? WHERE id=?""", (self.c.clock(), part['id']))
                 self.refresh(delivery['id'])
                 return None
-            if part['attempts'] and part['reason_code'] == RATE_LIMITED:
+            cooldown = self.store.one('SELECT retry_at FROM weixin_account_cooldown WHERE account_id=?',
+                                      (claim['account']['id'],))
+            if cooldown and cooldown['retry_at'] > self.c.clock():
+                raise DevError('WEIXIN_ACCOUNT_COOLDOWN', '微信账号暂缓发送', 429, retry_at=cooldown['retry_at'])
+            if part['retry_rejected']:
                 wire = json.loads(self.store.decrypt(part['wire_body']))
                 context_version = part['context_version']
             else:
@@ -567,51 +593,75 @@ class WeixinDelivery:
                         and self.split_unsent_text(part, wire)):
                     return None
                 raise
-            self.store.execute("UPDATE weixin_parts SET state='sending',wire_body=?,context_version=?,attempts=attempts+1,updated=? WHERE id=?",
-                (self.store.encrypt(canonical(wire)), context_version, self.c.clock(), part['id']))
+            now = self.c.clock()
+            transport.record_attempt(self.store, claim, part, wire, now)
+            self.store.execute("UPDATE weixin_parts SET state='sending',wire_body=?,context_version=?,attempts=attempts+1,retry_rejected=0,updated=? WHERE id=?",
+                (self.store.encrypt(canonical(wire)), context_version, now, part['id']))
             self.refresh(part['delivery_id'])
             return wire
 
     def finish(self, claim, result=None, error=None):
         with self.store.transaction():
             row = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (claim['id'],))
-            if (not row or row['lease_owner'] != claim['lease_owner'] or row['lease_fence'] != claim['lease_fence']
-                    or row['state'] not in {'preparing','sending'}):
-                return
             now = self.c.clock()
+            if (not row or row['lease_owner'] != claim['lease_owner'] or row['lease_fence'] != claim['lease_fence']
+                    or row['state'] not in {'preparing','sending'} or (row['lease_until'] or 0) <= now):
+                transport.record_late(self.store, claim, row, result, now)
+                return
             code = error.code if isinstance(error, DevError) else type(error).__name__ if error else ''
+            receipt = transport.accepted_receipt(result) if row['state'] == 'sending' else None
             next_attempt = 0
-            if result is not None and row['state'] == 'sending':
+            preparation_failures = row['preparation_failures']
+            retry_rejected = row['retry_rejected']
+            if receipt:
                 state = 'accepted'
             elif code == REQUEST_LIMIT:
                 state = 'rejected'
             elif row['state'] == 'sending' and code == RATE_LIMITED and error.status == 429:
                 state = 'rejected'
+                delay = error.details.get('retry_after_seconds')
+                if type(delay) is not int or not 0 <= delay <= 999999999:
+                    delay = 60
+                if delay:
+                    transport.cooldown(self.store, claim['account']['id'], now + delay)
                 if row['attempts'] < MAX_SEND_ATTEMPTS:
-                    delay = error.details.get('retry_after_seconds')
-                    if type(delay) is not int or not 0 <= delay <= 999999999:
-                        delay = 60
-                    next_attempt = now + max(min(900, 15 * 2 ** row['attempts']), delay)
-                    state = 'queued'
+                    next_attempt = now + transport.delay(row['attempts'], provider_delay=delay)
+                    state, retry_rejected = 'queued', 1
+            elif row['state'] == 'sending' and code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                state = 'rejected'
             elif row['state'] == 'sending':
-                # A send may have committed despite a lost, malformed or late
-                # response. Preserve its identity for owner review.
-                state = 'unknown'
+                state, code = 'unknown', code or 'WEIXIN_SEND_UNCONFIRMED'
+            elif code == 'WEIXIN_ACCOUNT_COOLDOWN':
+                state, next_attempt, code = 'queued', error.details['retry_at'], row['reason_code']
+            elif code == 'WEIXIN_SEND_INTERRUPTED':
+                state, code = 'queued', row['reason_code'] if retry_rejected else 'host_interrupted_before_send'
             elif code in TERMINAL_SOURCE or (row['kind'] == 'attachment' and code in {
                     'WEIXIN_MEDIA_LIMIT', 'WEIXIN_VOICE_SEND_UNVERIFIED', 'WEIXIN_UPLOAD_REJECTED',
                     'ATTACHMENT_EXPIRED', 'ATTACHMENT_HASH_MISMATCH', 'WEIXIN_MEDIA_INVALID'}):
                 state = 'rejected'
+            elif code in {'WEIXIN_CONTEXT_CHANGED', 'WEIXIN_WAITING_RECONNECT', 'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
+                state, next_attempt = 'waiting_context', now + 5
+            elif error and (isinstance(error, (TimeoutError, ConnectionError, TimeoutException, NetworkError))
+                            or isinstance(error, DevError) and error.status in {429, 502, 503, 504}):
+                preparation_failures += 1
+                if preparation_failures < transport.MAX_PREPARATION_FAILURES:
+                    state = 'queued'
+                    next_attempt = now + transport.delay(preparation_failures)
+                else:
+                    state, code = 'attention', 'WEIXIN_PREPARATION_BUDGET_EXHAUSTED'
             else:
                 state = 'attention'
             self.store.execute('''UPDATE weixin_parts SET state=?,reason_code=?,provider_receipt=?,
-                next_attempt=?,lease_until=0,updated=? WHERE id=?''',
-                (state, code, canonical(result) if state == 'accepted' else None, next_attempt, now, row['id']))
+                next_attempt=?,lease_until=0,preparation_failures=?,retry_rejected=?,updated=? WHERE id=?''',
+                (state, code, receipt, next_attempt, preparation_failures, retry_rejected, now, row['id']))
             self.refresh(row['delivery_id'])
             if code in TASK_STATUSES and claim['delivery']['kind'] == 'reply':
                 self.blocked_status(claim['delivery'], code)
             if code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}:
-                self.store.execute("UPDATE weixin_accounts SET state='attention',reason_code=?,poll_fence=poll_fence+1,poll_until=0 WHERE id=?",
-                                   (code, claim['account']['id']))
+                account = claim['account']
+                self.store.execute("""UPDATE weixin_accounts SET state='attention',reason_code=?,poll_fence=poll_fence+1,
+                    poll_until=0 WHERE id=? AND credential_version=? AND generation=?""",
+                    (code, account['id'], account['credential_version'], account['generation']))
 
     def blocked_status(self, delivery, code):
         source = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (delivery['source_message_id'],))
@@ -628,8 +678,10 @@ class WeixinDelivery:
                     row = self.store.one('SELECT * FROM weixin_parts WHERE id=?', (identifier,))
                     if row and row['state'] in READY:
                         terminal_source = code in TERMINAL_SOURCE
+                        state = ('rejected' if terminal_source else 'waiting_context'
+                                 if code == 'WEIXIN_WAITING_RECONNECT' else row['state'])
                         self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,next_attempt=?,updated=? WHERE id=?",
-                                           ('rejected' if terminal_source else row['state'], code, self.c.clock() + 30, self.c.clock(), identifier))
+                                           (state, code, self.c.clock() + 30, self.c.clock(), identifier))
                         self.refresh(row['delivery_id'])
                         if code in TASK_STATUSES:
                             delivery = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (row['delivery_id'],))
@@ -644,7 +696,7 @@ class WeixinDelivery:
             if digest(body) != claim['body_digest']:
                 raise DevError('WEIXIN_PART_CORRUPT', '微信分项正文摘要不匹配', 409)
             client = self.w.client_factory(claim['account']['api_base'], self.store.decrypt(claim['account']['secret']))
-            if claim['attempts'] and claim['reason_code'] == RATE_LIMITED:
+            if claim['retry_rejected']:
                 items = None  # Retry the frozen encoded message, including any uploaded item.
             elif claim['kind'] == 'text':
                 items = text_items(body['text'])
@@ -673,10 +725,12 @@ class WeixinDelivery:
             rows = self.store.all("SELECT * FROM weixin_parts WHERE state IN ('preparing','sending') AND lease_until<=? ORDER BY lease_until LIMIT 100", (self.c.clock(),))
             for row in rows:
                 state = 'unknown' if row['state'] == 'sending' else 'queued'
-                reason = RATE_LIMITED if state == 'queued' and row['reason_code'] == RATE_LIMITED else 'host_restarted_before_receipt'
+                reason = RATE_LIMITED if state == 'queued' and row['retry_rejected'] else 'host_restarted_before_receipt'
                 self.store.execute('UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?',
                                    (state, reason, self.c.clock(), row['id']))
                 self.refresh(row['delivery_id'])
+            for delivery_id in transport.adopt_late(self.store, self.c.clock()):
+                self.refresh(delivery_id)
             return [r['id'] for r in rows]
 
     async def tick(self):
@@ -686,10 +740,19 @@ class WeixinDelivery:
         await self.store.run(order.backfill, self.store, self.c.clock())
         rows = await self.store.run(self.candidates, self.c.clock())
         # At most four concurrent peers, with the same fenced check in claim.
-        semaphore = asyncio.Semaphore(4)
-        async def run(row):
+        semaphore = asyncio.Semaphore(MAX_ACTIVE_SENDERS)
+        media = asyncio.Semaphore(MAX_ACTIVE_MEDIA)
+
+        async def send(row):
             async with semaphore:
                 await self.send_once(row['id'])
+
+        async def run(row):
+            if row['kind'] == 'attachment':
+                async with media:
+                    await send(row)
+            else:
+                await send(row)
         await asyncio.gather(*(run(row) for row in rows))
 
     def quarantine_binding(self, identifier, reason):
@@ -697,7 +760,7 @@ class WeixinDelivery:
         for row in rows:
             # Fence stale workers and release only parts proven never sent.
             # Unknown sends keep their ordering barrier across re-login.
-            never_sent = row['attempts'] == 0 or row['reason_code'] == RATE_LIMITED
+            never_sent = row['attempts'] == 0 or row['retry_rejected']
             state = ('unknown' if row['state'] in {'sending', 'unknown'} else 'cancelled'
                      if row['state'] in READY | {'preparing', 'attention'} and never_sent else 'attention')
             self.store.execute("UPDATE weixin_parts SET state=?,reason_code=?,lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?",
@@ -708,30 +771,131 @@ class WeixinDelivery:
         for row in self.store.all('SELECT id FROM weixin_bindings WHERE account_id=?', (identifier,)):
             self.quarantine_binding(row['id'], reason)
 
+    def control_row(self, principal, conversation_id, delivery_id, *, native=False):
+        row = self.store.one("""SELECT d.* FROM weixin_deliveries d
+            JOIN weixin_bindings b ON b.id=d.binding_id
+            WHERE d.id=? AND b.conversation_id=? AND b.owner_user_id=? AND b.space_id=?
+              AND (?=0 OR b.native_member_id!='')""",
+            (delivery_id, conversation_id, principal.user_id, principal.space_id, native))
+        if not row:
+            raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '当前房间没有这条投递', 404)
+        message = self.store.one('SELECT * FROM collaboration_messages WHERE id=? AND conversation_id=?',
+                                 (row['projection_message_id'] or row['message_id'], conversation_id))
+        if not message:
+            raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '原投递消息不可用', 404)
+        self.c.chatroom.require_message_visible(principal, message)
+        return row
+
+    def control_plan(self, row, args, principal, conversation_id, *, cascade=True):
+        states = ("state='unknown'" if args['action'] == 'confirm_received' else
+                  "state IN ('queued','preparing','waiting_context','waiting_media','attention') "
+                  "AND (attempts=0 OR retry_rejected=1)")
+
+        def eligible(delivery_id):
+            return self.store.all(f"""SELECT id,delivery_id,ordinal,state,lease_fence FROM weixin_parts
+                WHERE delivery_id=? AND {states} ORDER BY ordinal LIMIT 101""", (delivery_id,))
+
+        parts = eligible(row['id'])
+        selected = set(args.get('part_ids') or ())
+        if selected and not selected <= {p['id'] for p in parts}:
+            raise DevError('STALE_VERSION', '选中的分项状态已变化，请刷新。', 409)
+        if selected and args['action'] == 'cancel_unsent':
+            first = min(p['ordinal'] for p in parts if p['id'] in selected)
+            parts = [p for p in parts if p['ordinal'] >= first]
+        elif selected:
+            parts = [p for p in parts if p['id'] in selected]
+
+        version = row.get('ordering_revision', 1)
+        snapshot = [(row['id'], row['version'], version)]
+        if cascade and parts and args['action'] == 'cancel_unsent' and 'ordering_evidence' in row:
+            from hub.collaboration.weixin_delivery_order import successors
+
+            visited, queue = {row['id']}, [row['id']]
+            for predecessor in queue:
+                for successor in successors(self.store, predecessor, limit=101):
+                    delivery_id = successor['id']
+                    if delivery_id in visited:
+                        continue
+                    visited.add(delivery_id)
+                    try:
+                        current = self.control_row(principal, conversation_id, delivery_id)
+                    except DevError as exc:
+                        if exc.status not in {403, 404}:
+                            raise
+                        continue
+                    dependent_parts = eligible(delivery_id)
+                    if not dependent_parts:
+                        continue
+                    queue.append(delivery_id)
+                    parts.extend(dependent_parts)
+                    snapshot.append((delivery_id, current['version'], current.get('ordering_revision', 1)))
+                    if len(parts) > 100:
+                        raise DevError('WEIXIN_CONTROL_SCOPE_LIMIT', '影响范围过大，请缩小本次操作。', 409)
+        if len(parts) > 100:
+            raise DevError('WEIXIN_CONTROL_SCOPE_LIMIT', '影响范围过大，请缩小本次操作。', 409)
+        preview = digest([args['action'], sorted(selected), sorted(snapshot), parts])
+        return {'delivery_id': row['id'], 'delivery_version': row['version'], 'ordering_revision': version,
+                'affected_parts': [{'part_id': part['id'], 'delivery_id': part['delivery_id'],
+                                    'ordinal': part['ordinal'], 'state': part['state']} for part in parts],
+                'affected_count': len(parts), 'preview_digest': preview}
+
+    def apply_control(self, row, args, principal, room, conversation_id, *, require_preview=False):
+        if row['version'] != args['expected_version']:
+            raise DevError('STALE_VERSION', '原投递分项状态已变化，请刷新。', 409)
+        scoped = require_preview or args.get('part_ids') is not None or args.get('preview_digest')
+        plan = self.control_plan(row, args, principal, conversation_id, cascade=bool(scoped))
+        if scoped and (args.get('expected_ordering_revision') != plan['ordering_revision']
+                       or args.get('preview_digest') != plan['preview_digest']):
+            raise DevError('WEIXIN_CONTROL_PREVIEW_CHANGED', '投递分项或依赖范围已变化，请刷新预览。', 409)
+        confirming = args['action'] == 'confirm_received'
+        if confirming and not args['confirmation_note'].strip():
+            raise DevError('WEIXIN_OWNER_CONFIRMATION_REQUIRED', '请记录人工核对依据。', 422)
+        now = self.c.clock()
+        for part in plan['affected_parts']:
+            if confirming:
+                self.store.execute("""UPDATE weixin_parts SET state='owner_confirmed',
+                    reason_code='owner_attested_not_provider_verified',updated=? WHERE id=? AND state='unknown'""",
+                    (now, part['part_id']))
+            else:
+                self.store.execute("""UPDATE weixin_parts SET state='cancelled',reason_code='owner_stopped_unsent',
+                    lease_fence=lease_fence+1,lease_until=0,updated=? WHERE id=?""", (now, part['part_id']))
+        for delivery_id in sorted({p['delivery_id'] for p in plan['affected_parts']}):
+            self.refresh(delivery_id)
+        action = 'weixin.delivery_' + args['action']
+        detail = {'note': args['confirmation_note'], 'affected_parts': plan['affected_parts'],
+                  'provider_delivery_verified': False}
+        if require_preview:
+            self.store.audit(principal.actor, action, row['id'], 'ok', detail)
+        else:
+            self.c.audit(room, principal.actor, action, row['id'], detail)
+        return {'delivery_id': row['id'], 'affected_count': plan['affected_count'],
+                'provider_delivery_verified': False, 'automatic_resend': False}
+
+    def control_preview(self, raw, principal):
+        with self.store.transaction(immediate=False):
+            args, principal, _ = self.w.owner(raw, principal, models.DeliveryPreview, enabled=False)
+            row = self.control_row(principal, args['conversation_id'], args['delivery_id'])
+            return self.control_plan(row, args, principal, args['conversation_id'])
+
     def control(self, raw, principal):
         with self.store.transaction():
             args, principal, room = self.w.owner(raw, principal, models.DeliveryControl, enabled=False)
-            row = self.store.one('SELECT d.* FROM weixin_deliveries d JOIN weixin_bindings b ON b.id=d.binding_id WHERE d.id=? AND b.room_id=? AND b.conversation_id=?',
-                                (args['delivery_id'], room['id'], args['conversation_id']))
-            if not row:
-                raise DevError('WEIXIN_DELIVERY_NOT_FOUND', '当前话题没有这条投递', 404)
-            def save():
-                current = self.store.one('SELECT * FROM weixin_deliveries WHERE id=?', (row['id'],))
-                if current['version'] != args['expected_version']:
-                    raise DevError('STALE_VERSION', '原投递分项状态已变化', 409)
-                if args['action'] == 'confirm_received':
-                    if not args['confirmation_note'].strip():
-                        raise DevError('WEIXIN_OWNER_CONFIRMATION_REQUIRED', '请明确记录人工核对依据；这不等同平台送达回执', 422)
-                    self.store.execute("UPDATE weixin_parts SET state='owner_confirmed',reason_code='owner_attested_not_provider_verified',updated=? WHERE delivery_id=? AND state='unknown'",
-                                       (self.c.clock(), row['id']))
-                else:
-                    self.store.execute("UPDATE weixin_parts SET state='cancelled',lease_fence=lease_fence+1,lease_until=0,updated=? WHERE delivery_id=? AND state IN ('queued','preparing','waiting_context','waiting_media','attention')",
-                                       (self.c.clock(), row['id']))
-                self.refresh(row['id'])
-                self.c.audit(room, principal.actor, 'weixin.delivery_' + args['action'], row['id'],
-                             {'note': args['confirmation_note'], 'provider_delivery_verified': False})
-                return {'delivery_id': row['id'], 'provider_delivery_verified': False, 'automatic_resend': False}
-            return self.c.mutation(principal, room, 'weixin_delivery_control', args, save)
+            conversation_id = args['conversation_id']
+            row = self.control_row(principal, conversation_id, args['delivery_id'])
+            return self.c.mutation(principal, room, 'weixin_delivery_control', args,
+                lambda: self.apply_control(row, args, principal, room, conversation_id))
+
+    def control_room(self, conversation_id, delivery_id, args, principal, *, preview=False):
+        with self.store.transaction(immediate=not preview):
+            principal, room = self.c.rooms.owner(principal, conversation_id)
+            self.c.rooms.require_native(room)
+            row = self.control_row(principal, conversation_id, delivery_id, native=True)
+            if preview:
+                return self.control_plan(row, args, principal, conversation_id)
+
+            return self.c.room_channels.receipt(principal, room, 'weixin_delivery_control',
+                {**args, 'delivery_id': delivery_id}, lambda: self.apply_control(
+                    row, args, principal, room, conversation_id, require_preview=True))
 
     def retry_room(self, conversation_id, delivery_id, args, principal):
         """Requeue only parts whose send was never attempted."""
@@ -756,7 +920,7 @@ class WeixinDelivery:
                 if not parts:
                     raise DevError('WEIXIN_RETRY_UNAVAILABLE', '没有可以安全重试的分项。', 409)
                 now = self.c.clock()
-                self.store.execute("""UPDATE weixin_parts SET state='queued',next_attempt=?,reason_code='',
+                self.store.execute("""UPDATE weixin_parts SET state='queued',next_attempt=?,reason_code='',preparation_failures=0,
                     lease_fence=lease_fence+1,lease_until=0,updated=?
                     WHERE delivery_id=? AND state='attention' AND attempts=0""", (now, now, delivery_id))
                 self.refresh(delivery_id)

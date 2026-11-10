@@ -38,10 +38,16 @@ def test_rate_limit_respects_retry_after_and_freezes_wire(collab):
     asyncio.run(channel.delivery.tick())
     queued = part_for(c.s.store, delivery)
     assert (queued['state'], queued['next_attempt'], queued['attempts']) == ('queued', c.clock[0] + 120, 1)
-    ingest(c, channel, account, packet(3, 'fresh context', context_token='new-private-context'))
+    with c.s.store.transaction():
+        c.s.store.execute('DELETE FROM weixin_contexts')
     asyncio.run(channel.delivery.tick())
     assert len(calls) == 1
     c.clock[0] = queued['next_attempt']
+    asyncio.run(channel.delivery.tick())
+    waiting = part_for(c.s.store, delivery)
+    assert waiting['state'] == 'waiting_context' and waiting['retry_rejected'] == 1
+    ingest(c, channel, account, packet(3, 'fresh context', context_token='new-private-context'))
+    c.clock[0] = waiting['next_attempt']
     asyncio.run(channel.delivery.tick())
     assert calls[0] == calls[1] and calls[0][2] == part['client_id']
     assert part_for(c.s.store, delivery)['state'] == 'accepted'
@@ -90,21 +96,29 @@ def test_unknown_blocks_related_replies_only_and_late_receipt_is_fenced(collab):
     assert not channel.delivery.candidates(c.clock[0])
     c.clock[0] += 181
     channel.delivery.reconcile()
-    channel.delivery.finish(old, {'provider_state': 'accepted'})
+    channel.delivery.finish({**old, 'lease_owner': 'unrelated-worker'}, {'provider_state': 'accepted'})
+    assert not c.s.store.all('SELECT * FROM weixin_late_observations')
     calls = []
 
     class Provider:
         async def send(self, peer, context, client_id, items):
-            calls.append(items[0]['text_item']['text'])
+            calls.append((client_id, items[0]['text_item']['text']))
             return {'provider_state': 'accepted'}
 
     channel.client_factory = lambda *_: Provider()
     asyncio.run(channel.delivery.tick())
-    asyncio.run(channel.delivery.tick())
-    assert calls == ['独立回复']
+    assert [value for _, value in calls] == ['独立回复']
     assert part_for(c.s.store, delivery)['state'] == 'unknown'
-    related = c.s.store.all('SELECT state FROM weixin_deliveries WHERE source_message_id=? ORDER BY rowid', (source,))
-    assert [item['state'] for item in related] == ['needs_attention', 'queued']
+
+    channel.delivery.finish(old, {'provider_state': 'accepted', 'provider_message_id': 'late-receipt'})
+    assert part_for(c.s.store, delivery)['state'] == 'unknown'
+    assert len(c.s.store.all('SELECT * FROM weixin_late_observations')) == 1
+    asyncio.run(channel.delivery.tick())
+    asyncio.run(channel.delivery.tick())
+    saved = part_for(c.s.store, delivery)
+    assert (saved['state'], saved['attempts'], saved['reason_code']) == ('accepted', 1, 'provider_accepted_late')
+    assert all(client_id != part['client_id'] for client_id, _ in calls)
+    assert calls[-1][1] == '同一来源的下一条回复'
 
 
 def test_encoded_budget_splits_unattempted_unicode_and_preserves_order(collab, monkeypatch):

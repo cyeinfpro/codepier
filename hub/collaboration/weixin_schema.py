@@ -105,6 +105,8 @@ def migrate(db):
 
 
     migrate_delivery_order(db)
+    from hub.collaboration.weixin_delivery_transport import migrate as migrate_transport
+    migrate_transport(db)
 
 
 def delivery_order_key(goal_id, thread_root_id, source_id):
@@ -260,11 +262,38 @@ class AttachmentAdd(Mutation):
     confirm_file_egress: Literal[True]
 
 
-class DeliveryControl(Mutation):
-    delivery_id: str = Field(min_length=1, max_length=100)
-    expected_version: int = Field(ge=1)
+class DeliverySelection(AccessModel):
     action: Literal['cancel_unsent', 'confirm_received']
+    part_ids: list[str] | None = Field(default=None, min_length=1, max_length=50,
+                                       exclude_if=lambda value: value is None)
+
+    @model_validator(mode='after')
+    def unique_parts(self):
+        if self.part_ids is not None and (len(set(self.part_ids)) != len(self.part_ids)
+                or any(not part_id or len(part_id) > 100 for part_id in self.part_ids)):
+            raise ValueError('Invalid or duplicate delivery part IDs')
+        return self
+
+
+class DeliveryPreview(Scope, DeliverySelection):
+    delivery_id: str = Field(min_length=1, max_length=100)
+
+
+class DeliveryRevision(DeliverySelection):
+    expected_version: int = Field(ge=1)
+    expected_ordering_revision: int | None = Field(default=None, ge=1,
+                                                  exclude_if=lambda value: value is None)
+    preview_digest: str = Field(default='', pattern=r'^(?:[0-9a-f]{64})?$',
+                                exclude_if=lambda value: not value)
     confirmation_note: str = Field(default='', max_length=1000)
+
+
+class DeliveryControl(Mutation, DeliveryRevision):
+    delivery_id: str = Field(min_length=1, max_length=100)
+
+
+class NativeDeliveryControl(DeliveryRevision):
+    idempotency_key: str = Field(min_length=8, max_length=128)
 
 
 class OwnerRequest(Mutation):

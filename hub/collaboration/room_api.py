@@ -2,6 +2,7 @@
 from typing import Annotated
 from fastapi import Query, Request, Response
 from pydantic import Field
+from hub.collaboration.weixin_schema import DeliverySelection, NativeDeliveryControl
 from shared.collaboration_contracts import Key, Model
 from shared.util import DevError
 
@@ -36,6 +37,19 @@ def install_routes(router, auth, runtime):
     @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/retry')
     async def retry_weixin_delivery(request: Request, identifier: str, delivery_id: str, body: RoomDeliveryRetry):
         return await store.run(lambda: service.weixin.delivery.retry_room(
+            identifier, delivery_id, body.model_dump(), auth.admin(request, True)))
+
+    @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/control-preview')
+    async def preview_weixin_delivery(request: Request, response: Response, identifier: str,
+                                       delivery_id: str, body: DeliverySelection):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await store.run(lambda: service.weixin.delivery.control_room(
+            identifier, delivery_id, body.model_dump(), auth.admin(request, True), preview=True))
+
+    @router.post('/rooms/{identifier}/weixin-deliveries/{delivery_id}/control')
+    async def control_weixin_delivery(request: Request, identifier: str,
+                                       delivery_id: str, body: NativeDeliveryControl):
+        return await store.run(lambda: service.weixin.delivery.control_room(
             identifier, delivery_id, body.model_dump(), auth.admin(request, True)))
 
     @router.get('/rooms/{identifier}/context')
