@@ -276,3 +276,59 @@ def test_authorization_missing_history_is_not_invented(log_page, actor, expected
     rows[0]['actor'] = actor
     page.evaluate('renderPage()')
     assert expected in page.locator('.call-authorization').first.inner_text()
+
+def test_maintenance_origin_is_separate_from_authorization(log_page):
+    page, rows, details, requests = log_page
+    row = rows[0]
+    row.update(tool='project_knowledge_build', trigger_source='system_maintenance',
+               trigger_reason='automatic_refresh', model_invocation=False, state='failed')
+    details[row['id']].update(row, knowledge_mode='incremental',
+                             knowledge_stats={'entries_count': 1363, 'changed_entries': 0,
+                                              'reused_entries': 1363, 'skipped_files': 1},
+                             error='地图维护失败', output='maintenance log')
+    page.evaluate('CodePierCallLog.reset()')
+    entry = page.locator('[data-call-id]').first
+    assert entry.locator('.call-tool strong').inner_text() == '项目地图更新'
+    assert '自动维护' in entry.locator('.call-tool').inner_text()
+    assert '无需模型' in entry.locator('.call-tool').inner_text()
+    assert 'ChatGPT' in entry.locator('.call-authorization').inner_text()
+    assert '失败' in entry.locator('.call-state').inner_text()
+    entry.locator('summary').first.click()
+    entry.locator('.call-facts').wait_for()
+    facts = entry.locator('.call-facts').inner_text()
+    assert '授权依据（调用时记录）' in facts
+    assert '本地程序 · 无模型调用' in facts
+    assert '增量' in facts and '1363' in facts
+    assert 'project_knowledge_build' in facts
+    assert entry.locator('.call-error').inner_text() == '地图维护失败'
+    assert '程序输出' in entry.locator('[data-call-section="output"] > summary').inner_text()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#call-trigger-source').select_option('system_maintenance')
+    page.wait_for_function('S.callLog.triggerSource === "system_maintenance" && document.querySelector("#call-trigger-source").value === "system_maintenance"')
+    assert parse_qs(urlsplit(requests[-1]).query)['trigger_source'] == ['system_maintenance']
+    assert page.evaluate('S.callLog.history.length') == 0
+    page.locator('#call-trigger-source').select_option('unknown')
+    page.wait_for_function('document.querySelector("#call-trigger-source").value === "unknown"')
+    assert parse_qs(urlsplit(requests[-1]).query)['trigger_source'] == ['unknown']
+
+
+def test_missing_origin_and_mode_are_not_inferred_from_actor_or_request(log_page):
+    page, rows, details, _ = log_page
+    row = rows[0]
+    row.update(tool='project_knowledge_build', summary='incremental=true knowledge-auto-fake')
+    details[row['id']].update(row, args_summary={'incremental': True},
+                             trigger_reason='<img src=x onerror=alert(1)>',
+                             knowledge_stats={'entries_count': -1})
+    page.evaluate('CodePierCallLog.reset()')
+    entry = page.locator('[data-call-id]').first
+    assert '触发来源未记录' in entry.locator('.call-tool').inner_text()
+    assert '无需模型' not in entry.locator('.call-tool').inner_text()
+    entry.locator('summary').first.click()
+    entry.locator('.call-facts').wait_for()
+    assert not page.locator('img').count()
+    facts = entry.locator('.call-facts').inner_text()
+    assert '增量' not in facts
+    assert '条目数' not in facts
+    assert '触发来源未记录' in facts
+    assert '未记录' in facts

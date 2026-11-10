@@ -59,11 +59,14 @@ def argument_summary(args: dict) -> str:
     return "  ".join(parts)[:1200]
 
 
-def operation_summary(args: dict) -> dict:
+def operation_summary(args: dict, *, maintenance=False) -> dict:
     """Persist counts alongside the existing privacy-preserving summary."""
     from shared.util import safe_summary
     result = safe_summary(args)
-    meta = {"version": 1}
+    # Only trusted admission context supplies origin; never copy request _log.
+    meta = {"version": 2, "trigger_source": "system_maintenance" if maintenance else "request"}
+    if maintenance:
+        meta["trigger_reason"] = "automatic_refresh"
     if isinstance(args.get("command"), str):
         meta["command_chars"] = len(args["command"])
     if isinstance(args.get("edits"), list):
@@ -78,6 +81,13 @@ def public_row(row: dict, now: float | None = None) -> dict:
     args, clipped, scrubbed = display_value(_object(result.get("args_summary")), text_limit=1200, budget=12000)
     result["args_summary"] = args
     result["summary"] = argument_summary(args)
+    meta = args.get("_log") if isinstance(args.get("_log"), dict) else {}
+    source = meta.get("trigger_source") if meta.get("version") == 2 else None
+    result["trigger_source"] = source if source in {"system_maintenance", "request"} else "unknown"
+    result["trigger_reason"] = ("automatic_refresh" if source == "system_maintenance"
+                                and meta.get("trigger_reason") == "automatic_refresh" else None)
+    result["model_invocation"] = False if row.get("tool") == "project_knowledge_build" else None
+    result["knowledge_mode"] = None
     result["arguments_truncated"] = clipped or "…" in json.dumps(args, ensure_ascii=False)
     created = result.get("created")
     end = result.get("updated") if result.get("state") in TERMINAL else (time.time() if now is None else now)
@@ -147,11 +157,11 @@ def register_call_log(app, runtime, auth):
 
     @app.get("/api/call-log")
     @database_endpoint(store, read_only=True)
-    def call_log(request: Request, limit: int = Query(40, ge=1, le=100), cursor: str = Query("", max_length=1024), q: str = Query("", max_length=200), source: str = Query("", max_length=20), status: str = Query("", max_length=30), project: str = Query("", max_length=100), tool: str = Query("", max_length=100), watch: str = Query("", max_length=4096), include_filters: bool = True):
+    def call_log(request: Request, limit: int = Query(40, ge=1, le=100), cursor: str = Query("", max_length=1024), q: str = Query("", max_length=200), source: str = Query("", max_length=20), trigger_source: str = Query("", max_length=30), status: str = Query("", max_length=30), project: str = Query("", max_length=100), tool: str = Query("", max_length=100), watch: str = Query("", max_length=4096), include_filters: bool = True):
         principal = auth.panel(request)
-        if source not in {"", "mcp", "panel"} or status not in STATES | {""}:
+        if trigger_source not in {"", "system_maintenance", "request", "unknown"} or source not in {"", "mcp", "panel"} or status not in STATES | {""}:
             raise DevError("INVALID_FILTER", "无效的调用来源或状态")
-        filters = {"q": q.strip(), "source": source, "status": status, "project": project, "tool": tool, "space": principal.space_id, "user": principal.user_id, "epoch": principal.user_epoch}
+        filters = {"q": q.strip(), "source": source, "trigger_source": trigger_source, "status": status, "project": project, "tool": tool, "space": principal.space_id, "user": principal.user_id, "epoch": principal.user_epoch}
         clause, scope_args = iam.private_sql(principal, 'o.')
         if not principal.admin:
             clause += ' AND (o.project_id IS NULL OR o.project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
@@ -164,6 +174,16 @@ def register_call_log(app, runtime, auth):
         if source:
             where.append("o.actor LIKE ?")
             values.append(source + ":%")
+        if trigger_source:
+            # JSON guard keeps malformed historical summaries readable. No payload
+            # decryption and no idempotency-prefix inference of origin.
+            origin = """CASE WHEN json_valid(o.args_summary)
+                THEN CASE WHEN json_extract(o.args_summary,'$._log.version')=2
+                     AND json_extract(o.args_summary,'$._log.trigger_source') IN ('system_maintenance','request')
+                     THEN json_extract(o.args_summary,'$._log.trigger_source')
+                     ELSE 'unknown' END ELSE 'unknown' END"""
+            where.append("(" + origin + ")=?")
+            values.append(trigger_source)
         if filters["q"]:
             literal = filters["q"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             columns = ("o.id", "o.actor", "o.tool", "o.args_summary", "o.error", "p.alias", "d.name")
@@ -218,6 +238,16 @@ def register_call_log(app, runtime, auth):
         data = result.get("data") if isinstance(result, dict) else None
         if isinstance(data, dict) and type(data.get("exit_code")) is int:
             row["exit_code"] = data["exit_code"]
+        if row.get("tool") == "project_knowledge_build" and isinstance(data, dict):
+            refresh = data.get("refresh") if isinstance(data.get("refresh"), dict) else {}
+            mode = refresh.get("mode")
+            row["knowledge_mode"] = mode if mode in {"full", "incremental"} else None
+            row["knowledge_stats"] = {
+                key: data[key] for key in ("entries_count", "changed_entries", "reused_entries", "skipped_files")
+                if type(data.get(key)) is int and data[key] >= 0
+            }
+            if type(refresh.get("metadata_reused")) is int and refresh["metadata_reused"] >= 0:
+                row["knowledge_stats"]["metadata_reused"] = refresh["metadata_reused"]
         row.update({key: original[key] for key in ('queue_stage', 'waiting') if key in original})
         if isinstance(data, dict) and isinstance(data.get('concurrency'), dict):
             row['concurrency'] = data['concurrency']

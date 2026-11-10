@@ -97,7 +97,11 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
             entry.locator('.call-facts').wait_for()
             assert 'inputChars=' in entry.locator('.call-args').inner_text()
             assert '<17 chars>' in entry.locator('[data-call-section="arguments"] pre').inner_text()
-            assert '未记录' not in entry.locator('.call-facts').inner_text()
+            # Timing remains populated; an unrecorded trigger reason is honest.
+            for label in ('总历时', '执行前等待（Hub 观测）', '实际执行（本次 Agent 计时）'):
+                fact = entry.locator('.call-facts > div').filter(has=page.locator('dt', has_text=label))
+                assert '未记录' not in fact.locator('dd').inner_text()
+            assert '请求发起' in entry.locator('.call-facts').inner_text()
             # An SSE message must update in place, not replace the expanded row.
             entry.evaluate('(el)=>window.callLogOriginalNode=el')
             page.evaluate("S.events.onmessage({data:JSON.stringify({type:'operation',data:{id:'fixture'}})})")

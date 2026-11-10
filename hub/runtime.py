@@ -1132,8 +1132,8 @@ class Runtime:
                                     min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
                 self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                     (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
-                     json.dumps(operation_summary(args), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds, principal.space_id, principal.user_id))
-                self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args)})
+                     json.dumps(operation_summary(args, maintenance=maintenance is not None), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds, principal.space_id, principal.user_id))
+                self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args, maintenance=maintenance is not None)})
                 self.diagnostics.record(id, "hub_received")
                 self.knowledge_maintenance.admitted(name, args, project, principal, id, maintenance)
                 if maintenance is None:

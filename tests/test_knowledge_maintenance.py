@@ -1,5 +1,6 @@
 """Durable scheduler and live authorization; no credentials or real services."""
 import asyncio
+import json
 import time
 
 import pytest
@@ -603,6 +604,12 @@ def test_auto_enrollment_bootstraps_then_switches_to_incremental(runtime, monkey
     args, project, identity, guard = maintenance.prepare(identifier)
     assert args['incremental'] is False and identity.grant_id == principal.grant_id
     initial, _ = instance._admit_operation(BUILD, args, project, identity, maintenance=guard)
+    automatic_row = instance.store.one('SELECT actor,args_summary FROM operations WHERE id=?', (initial,))
+    request_row = instance.store.one('SELECT actor,args_summary FROM operations WHERE id=?', (write,))
+    assert automatic_row['actor'] == request_row['actor'] == principal.actor
+    assert json.loads(automatic_row['args_summary'])['_log']['trigger_source'] == 'system_maintenance'
+    assert json.loads(automatic_row['args_summary'])['_log']['trigger_reason'] == 'automatic_refresh'
+    assert json.loads(request_row['args_summary'])['_log']['trigger_source'] == 'request'
     succeed(instance, initial)
     due(instance)
     args, _, _, _ = maintenance.prepare(identifier)

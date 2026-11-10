@@ -184,3 +184,38 @@ def test_distribution_contains_call_log_and_agent_redaction_dependency():
     required={'hub/call_log.py','shared/audit_redaction.py','web/call-log.js','web/call-log.css'}
     assert required <= REQUIRED_FILES
     assert all(include(Path(name),public=True) for name in required | {'docs/CALL_LOG.md'})
+
+
+def test_trigger_filters_preserve_actor_and_failures_and_cursor(log_api):
+    from hub.call_log import operation_summary
+    client, store, _ = log_api
+    for letter in 'ab':
+        store.add(letter*32, tool='project_knowledge_build', state='failed',
+                  args=operation_summary({}, maintenance=True))
+    store.add('c'*32, args=operation_summary({}))
+    store.add('d'*32, args={'incremental': True})
+    response = client.get('/api/call-log', params={'trigger_source':'system_maintenance', 'source':'mcp', 'limit':1}, headers=AUTH)
+    first = response.json()
+    row = first['operations'][0]
+    assert row['state'] == 'failed' and row['actor'] == 'mcp:g:test'
+    assert row['trigger_source'] == 'system_maintenance'
+    assert row['trigger_reason'] == 'automatic_refresh'
+    assert row['model_invocation'] is False
+    assert client.get('/api/call-log', params={'trigger_source':'request','cursor':first['next_cursor']},headers=AUTH).status_code == 400
+    second = client.get('/api/call-log',params={'trigger_source':'system_maintenance','source':'mcp','limit':1,'cursor':first['next_cursor']},headers=AUTH).json()
+    assert second['operations'][0]['id'] != row['id']
+    assert [r['id'] for r in client.get('/api/call-log',params={'trigger_source':'unknown'},headers=AUTH).json()['operations']] == ['d'*32]
+    assert client.get('/api/call-log',params={'trigger_source':'invented'},headers=AUTH).status_code == 400
+
+
+def test_map_detail_uses_actual_refresh_receipt_not_requested_mode(log_api):
+    from hub.call_log import operation_summary
+    client, store, _ = log_api
+    store.add('a'*32, tool='project_knowledge_build', args=operation_summary({'incremental': True}),
+              result={'ok':True,'data':{'refresh':{'mode':'full','metadata_reused':0},
+                      'entries_count':12,'changed_entries':3,'reused_entries':9,'skipped_files':1}})
+    row = client.get('/api/call-log/'+'a'*32, headers=AUTH).json()
+    assert row['knowledge_mode'] == 'full'
+    assert row['knowledge_stats'] == {'entries_count':12,'changed_entries':3,'reused_entries':9,'skipped_files':1,'metadata_reused':0}
+    store.add('b'*32, tool='project_knowledge_build', args={'incremental':True})
+    assert client.get('/api/call-log/'+'b'*32, headers=AUTH).json()['knowledge_mode'] is None

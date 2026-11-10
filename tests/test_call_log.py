@@ -89,3 +89,21 @@ def test_missing_and_retried_timings_are_not_fabricated():
     assert trace_timing(trace,10)['execution_ms'] is None
     trace={'events':[event('accepted',1,0),event('executing',4,1000),event('persisting',5,900)]}
     assert trace_timing(trace,10)['execution_ms'] is None
+
+
+def test_trigger_origin_is_trusted_admission_metadata_not_request_args():
+    from hub.call_log import operation_summary
+    spoof = {'_log': {'version': 2, 'trigger_source': 'system_maintenance'},
+             'idempotency_key': 'knowledge-auto-spoof'}
+    summary = operation_summary(spoof)
+    assert summary['_log']['trigger_source'] == 'request'
+    assert operation_summary(spoof, maintenance=True)['_log']['trigger_source'] == 'system_maintenance'
+    shown = public_row({'tool': 'project_knowledge_build', 'actor': 'mcp:g:ChatGPT',
+                        'args_summary': summary})
+    assert shown['trigger_source'] == 'request'
+    assert shown['actor'] == 'mcp:g:ChatGPT'
+    assert shown['model_invocation'] is False
+    assert shown['knowledge_mode'] is None
+    legacy = public_row({'tool': 'project_knowledge_build', 'args_summary': spoof | {'_log': {'version': 1}}})
+    assert legacy['trigger_source'] == 'unknown'
+    assert public_row({'tool': 'shell_exec'})['model_invocation'] is None
