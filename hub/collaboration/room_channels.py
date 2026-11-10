@@ -38,8 +38,6 @@ def migrate(db):
         owner_user_id TEXT NOT NULL,conversation_id TEXT NOT NULL,action TEXT NOT NULL,
         request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,result TEXT NOT NULL,created REAL NOT NULL,
         PRIMARY KEY(owner_user_id,conversation_id,action,request_key))''')
-    if 'fingerprint_schema_version' not in {column[1] for column in db.execute('PRAGMA table_info(room_runtime_receipts)')}:
-        db.execute('ALTER TABLE room_runtime_receipts ADD COLUMN fingerprint_schema_version INTEGER NOT NULL DEFAULT 1')
     db.execute('''CREATE INDEX IF NOT EXISTS room_reply_receipt_message
         ON room_runtime_receipts(owner_user_id,conversation_id,json_extract(result,'$.message_id'))
         WHERE json_valid(result) AND action LIKE 'room_reply:%' ''')

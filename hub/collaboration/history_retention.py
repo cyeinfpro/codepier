@@ -24,7 +24,7 @@ def retired_room_reply(result):
     # The original request key and fingerprint remain in the receipt row.
     original = json.loads(result)
     minimum = ('message_id', 'source_message_id', 'binding_generation', 'complete',
-               'yielded_at_commit', 'channel_dispositions')
+               'yielded_at_commit', 'channel_dispositions', 'fingerprint_schema_version')
     return json.dumps({**json.loads(RETIRED_RESPONSE), **{key: original[key] for key in minimum if key in original}},
                       ensure_ascii=False, sort_keys=True, separators=(',', ':'))
 
