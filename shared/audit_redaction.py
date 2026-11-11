@@ -3,6 +3,7 @@
 This is a display boundary, not a credential detector: never log raw request
 bodies or decrypt operation payloads to make a richer audit record.
 """
+
 from __future__ import annotations
 
 import re
@@ -11,15 +12,23 @@ from itertools import islice
 REDACTED = "<redacted>"
 _SECRET = r"(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|credential|sshp[a-z]*|verifier)"
 _SECRET_KEY = re.compile(_SECRET, re.I)
-_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)")
+_PEM = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
+)
 _AUTH = re.compile(r"\b(Bearer|Basic)\s+[^\s\"'<>;,]+", re.I)
 _URL_AUTH = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]*@", re.I)
-_VALUE = r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&\r\n]+)'''
-_ASSIGN = re.compile(rf'''(?<![\w.-])((?:[\w.-]{{0,96}}{_SECRET}[\w.-]{{0,96}})["']?\s*[:=]\s*){_VALUE}''', re.I)
-_FLAG = re.compile(rf'''((?:--?[\w-]{{0,96}}{_SECRET}[\w-]{{0,96}})\s+){_VALUE}''', re.I)
-_HEADER = re.compile(r"(?im)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+")
-_ENV_ASSIGN = re.compile(rf'''(?<![\w/])([A-Z][A-Z0-9_]*=){_VALUE}''')
-_CONTROL = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\Z))|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&\r\n]+)"""
+_ASSIGN = re.compile(
+    rf"""(?<![\w.-])((?:[\w.-]{{0,96}}{_SECRET}[\w.-]{{0,96}})["']?\s*[:=]\s*){_VALUE}""", re.I
+)
+_FLAG = re.compile(rf"""((?:--?[\w-]{{0,96}}{_SECRET}[\w-]{{0,96}})\s+){_VALUE}""", re.I)
+_HEADER = re.compile(
+    r"(?im)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+"
+)
+_ENV_ASSIGN = re.compile(rf"""(?<![\w/])([A-Z][A-Z0-9_]*=){_VALUE}""")
+_CONTROL = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\Z))|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
+)
 
 
 def redact_text(text: str) -> str:

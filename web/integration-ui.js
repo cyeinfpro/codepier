@@ -139,8 +139,7 @@ window.CodePierIntegrationUI = (() => {
       WORKSPACE_DIRTY: '先保存或处理隔离目录中的改动；不会强制删除。',
       WORKSPACE_BUSY: '先结束该目录的活动任务，再核实是否可以移除。',
       VALIDATION_NOT_CURRENT: '当前源码未通过有效验收；请核对详情或重新运行。',
-      NETWORK_UNCERTAIN:
-        '修改结果可能已保存在服务端。请使用下面的原请求入口核查，不要重新创建操作。',
+      NETWORK_UNCERTAIN: '修改可能已经保存。请从下方打开原请求，确认执行结果。',
     };
     return (
       String(error?.message || error || '暂时无法取得结果。') +

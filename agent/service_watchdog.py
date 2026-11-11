@@ -1,4 +1,5 @@
 """Detect a stalled service event loop independently of the Hub connection."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,14 +14,16 @@ from shared.brand_migration import is_legacy_launchd_name
 
 def is_supervised():
     """Recognize old launchd installations without rewriting their identity."""
-    service = os.environ.get('XPC_SERVICE_NAME')
-    return (os.environ.get('CODEPIER_SUPERVISED') == '1'
-            or service == 'com.codepier.agent' or is_legacy_launchd_name(service))
+    service = os.environ.get("XPC_SERVICE_NAME")
+    return (
+        os.environ.get("CODEPIER_SUPERVISED") == "1"
+        or service == "com.codepier.agent"
+        or is_legacy_launchd_name(service)
+    )
 
 
 class Watchdog:
-    def __init__(self, *, timeout=120.0, interval=5.0, clock=time.monotonic,
-                 terminate=os._exit):
+    def __init__(self, *, timeout=120.0, interval=5.0, clock=time.monotonic, terminate=os._exit):
         self.timeout = timeout
         self.interval = interval
         self.clock = clock
@@ -48,7 +51,9 @@ class Watchdog:
                 # Exiting is deliberate: the service manager owns restart/backoff.
                 # Do not wait for the event loop or stdout locks on this path.
                 try:
-                    os.write(sys.stderr.fileno(), b"CodePier: event loop stalled; restarting service.\n")
+                    os.write(
+                        sys.stderr.fileno(), b"CodePier: event loop stalled; restarting service.\n"
+                    )
                 except (AttributeError, OSError, ValueError):
                     pass
                 self.terminate(1)
@@ -84,6 +89,7 @@ def watch_event_loop():
 def run_service(base):
     """Windowless Task Scheduler entry point; the scheduler owns this process."""
     from pathlib import Path
+
     base = Path(base)
     logs = base / "logs"
     logs.mkdir(exist_ok=True)
@@ -92,4 +98,5 @@ def run_service(base):
     os.chdir(base / "runtime")
     sys.argv = ["agent", "--config", str(base / "config.json"), "run", "--supervised"]
     from agent.__main__ import main
+
     main()

@@ -3,6 +3,7 @@
 Project/grant IDs remain tombstones after unmapping/revocation. Historical IDs
 are never authority: every access resolves the current project and grant.
 """
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS collaboration_rooms (
  id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id),
@@ -87,11 +88,6 @@ CREATE TABLE IF NOT EXISTS collaboration_late_results (
  id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES collaboration_jobs(id),
  attempt INTEGER NOT NULL, fencing_token INTEGER NOT NULL, digest TEXT NOT NULL,
  body TEXT NOT NULL, created REAL NOT NULL, UNIQUE(job_id,attempt,fencing_token,digest)
-);
-CREATE TABLE IF NOT EXISTS collaboration_consumptions (
- room_id TEXT NOT NULL REFERENCES collaboration_rooms(id), grant_id TEXT NOT NULL,
- result_id TEXT NOT NULL REFERENCES collaboration_results(id), created REAL NOT NULL,
- PRIMARY KEY(room_id,grant_id,result_id)
 );
 CREATE TABLE IF NOT EXISTS collaboration_idempotency (
  id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
@@ -188,15 +184,15 @@ CREATE INDEX IF NOT EXISTS mcp_event_deliveries_ready ON mcp_event_deliveries(su
 
 
 def migrate(db):
-    columns = {row[1] for row in db.execute('PRAGMA table_info(projects)')}
-    if not {'space_id', 'owner_user_id'} <= columns:
+    columns = {row[1] for row in db.execute("PRAGMA table_info(projects)")}
+    if not {"space_id", "owner_user_id"} <= columns:
         if int(db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]) < 8:
             return
-        raise RuntimeError('Collaboration requires the completed IAM migration')
+        raise RuntimeError("Collaboration requires the completed IAM migration")
     version = db.execute("SELECT value FROM meta WHERE key='collaboration_schema'").fetchone()
-    if version and version[0] not in {'1', '2', '3'}:
-        raise RuntimeError('Unsupported collaboration schema')
-    for statement in SCHEMA.split(';'):
+    if version and version[0] not in {"1", "2", "3"}:
+        raise RuntimeError("Unsupported collaboration schema")
+    for statement in SCHEMA.split(";"):
         if statement.strip():
             db.execute(statement)
     db.execute("""CREATE TRIGGER IF NOT EXISTS monitor_plan_immutable BEFORE UPDATE ON monitor_plans
@@ -205,56 +201,79 @@ def migrate(db):
         BEGIN SELECT RAISE(ABORT,'analysis results are immutable'); END""")
     migrate_chatroom(db)
     from hub.collaboration.conversations import migrate as migrate_conversations
+
     migrate_conversations(db)
     from hub.collaboration.coordination_schema import migrate as migrate_coordination
+
     migrate_coordination(db)
     from hub.collaboration.delegation import migrate as migrate_delegation
+
     migrate_delegation(db)
     from hub.collaboration.dots import migrate as migrate_dots
+
     migrate_dots(db)
     from hub.collaboration.dot_chat import migrate as migrate_dot_chat
+
     migrate_dot_chat(db)
     from hub.collaboration.message_handling import migrate as migrate_message_handling
+
     migrate_message_handling(db)
     from hub.collaboration.owner_task_context import migrate as migrate_owner_task_context
+
     migrate_owner_task_context(db)
     from hub.collaboration.dot_relay import migrate as migrate_dot_relay
+
     migrate_dot_relay(db)
     from hub.collaboration.task_liveness import migrate as migrate_task_liveness
+
     migrate_task_liveness(db)
     from hub.room_scope import migrate as migrate_room_scope
+
     migrate_room_scope(db)
     from hub.collaboration.weixin_schema import migrate as migrate_weixin
     from hub.collaboration.channel_media import migrate as migrate_channel_media
+
     migrate_weixin(db)
     from hub.collaboration.channel_owner_authority import migrate as migrate_channel_owner_authority
+
     migrate_channel_owner_authority(db)
     migrate_channel_media(db)
     from hub.collaboration.telegram_schema import migrate as migrate_telegram
+
     migrate_telegram(db)
     from hub.collaboration.channel_consent import migrate as migrate_channel_consent
+
     migrate_channel_consent(db)
     from hub.collaboration.channel_settings import migrate as migrate_channel_settings
+
     migrate_channel_settings(db)
     from hub.collaboration.events import migrate_dispatch
+
     migrate_dispatch(db)
     from hub.collaboration.dot_consumers import migrate as migrate_dot_consumers
+
     migrate_dot_consumers(db)
     from hub.collaboration.dot_mailbox import migrate as migrate_dot_mailbox
+
     migrate_dot_mailbox(db)
     from hub.collaboration.relay_hints import migrate as migrate_relay_hints
+
     migrate_relay_hints(db)
     from hub.collaboration.room_event_migration import migrate as migrate_room_events
+
     migrate_room_events(db)
     from hub.collaboration.rooms import migrate as migrate_rooms
     from hub.collaboration.room_runtime import migrate as migrate_room_runtime
     from hub.collaboration.room_channels import migrate as migrate_room_channels
     from hub.collaboration.room_work_bridge import migrate as migrate_room_work_bridge
     from hub.collaboration.room_consumer_migration import migrate as migrate_room_consumers
+
     migrate_rooms(db)
     from hub.collaboration.room_turn_policy import migrate as migrate_room_turn_policy
+
     migrate_room_turn_policy(db)
     from hub.collaboration.room_permissions import migrate as migrate_room_permissions
+
     migrate_room_permissions(db)
     migrate_room_consumers(db)
     db.execute("""CREATE INDEX IF NOT EXISTS room_turn_redeemed_ticket ON dot_wake_tickets(redeemed_session_id)
@@ -264,15 +283,20 @@ def migrate(db):
     migrate_room_work_bridge(db)
     from hub.collaboration.room_goal_recovery import migrate as migrate_room_goal_recovery
     from hub.collaboration.room_goal_handoffs import migrate as migrate_room_goal_handoffs
+
     migrate_room_goal_recovery(db)
     migrate_room_goal_handoffs(db)
     from hub.collaboration.room_context import migrate as migrate_room_context
+
     migrate_room_context(db)
     from hub.collaboration.room_message_migration import migrate as migrate_room_messages
+
     migrate_room_messages(db)
     from hub.collaboration.query_indexes import migrate as migrate_query_indexes
+
     migrate_query_indexes(db)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('collaboration_schema','3')")
+
 
 def migrate_chatroom(db):
     """Forward-only additive upgrade; no existing job, join or approval is rebuilt.
@@ -281,45 +305,62 @@ def migrate_chatroom(db):
     complete log; future retention must introduce an explicit reset boundary.
     """
     import json
-    columns = {row[1] for row in db.execute('PRAGMA table_info(collaboration_messages)')}
-    for name, declaration in [('server_sequence', 'INTEGER NOT NULL DEFAULT 0'),
-                              ('thread_root_id', "TEXT NOT NULL DEFAULT ''"),
-                              ('reply_to_id', "TEXT NOT NULL DEFAULT ''")]:
+
+    columns = {row[1] for row in db.execute("PRAGMA table_info(collaboration_messages)")}
+    for name, declaration in [
+        ("server_sequence", "INTEGER NOT NULL DEFAULT 0"),
+        ("thread_root_id", "TEXT NOT NULL DEFAULT ''"),
+        ("reply_to_id", "TEXT NOT NULL DEFAULT ''"),
+    ]:
         if name not in columns:
-            db.execute(f'ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}')
-    rooms = {row[1] for row in db.execute('PRAGMA table_info(collaboration_rooms)')}
-    for name, declaration in [('title', "TEXT NOT NULL DEFAULT ''"), ('topic', "TEXT NOT NULL DEFAULT ''"),
-                              ('chat_history_sequence', 'INTEGER NOT NULL DEFAULT 0')]:
+            db.execute(f"ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}")
+    rooms = {row[1] for row in db.execute("PRAGMA table_info(collaboration_rooms)")}
+    for name, declaration in [
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("topic", "TEXT NOT NULL DEFAULT ''"),
+        ("chat_history_sequence", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
         if name not in rooms:
-            db.execute(f'ALTER TABLE collaboration_rooms ADD COLUMN {name} {declaration}')
-    db.execute('''CREATE TABLE IF NOT EXISTS collaboration_room_changes (
+            db.execute(f"ALTER TABLE collaboration_rooms ADD COLUMN {name} {declaration}")
+    db.execute("""CREATE TABLE IF NOT EXISTS collaboration_room_changes (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
-        kind TEXT NOT NULL, object_id TEXT NOT NULL, version INTEGER NOT NULL, created REAL NOT NULL)''')
-    db.execute('CREATE INDEX IF NOT EXISTS collaboration_changes_room ON collaboration_room_changes(room_id,sequence)')
-    db.execute('''CREATE TABLE IF NOT EXISTS collaboration_read_cursors (
+        kind TEXT NOT NULL, object_id TEXT NOT NULL, version INTEGER NOT NULL, created REAL NOT NULL)""")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS collaboration_changes_room ON collaboration_room_changes(room_id,sequence)"
+    )
+    db.execute("""CREATE TABLE IF NOT EXISTS collaboration_read_cursors (
         room_id TEXT NOT NULL REFERENCES collaboration_rooms(id), user_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL, updated REAL NOT NULL, PRIMARY KEY(room_id,user_id))''')
-    db.execute('''CREATE TABLE IF NOT EXISTS collaboration_message_writers (
+        sequence INTEGER NOT NULL, updated REAL NOT NULL, PRIMARY KEY(room_id,user_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS collaboration_message_writers (
         room_id TEXT NOT NULL REFERENCES collaboration_rooms(id), grant_id TEXT NOT NULL,
         enabled INTEGER NOT NULL, expires_at REAL NOT NULL, principal TEXT NOT NULL,
-        updated REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(room_id,grant_id))''')
-    writers = {row[1] for row in db.execute('PRAGMA table_info(collaboration_message_writers)')}
-    if 'version' not in writers:
-        db.execute('ALTER TABLE collaboration_message_writers ADD COLUMN version INTEGER NOT NULL DEFAULT 1')
+        updated REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(room_id,grant_id))""")
+    writers = {row[1] for row in db.execute("PRAGMA table_info(collaboration_message_writers)")}
+    if "version" not in writers:
+        db.execute(
+            "ALTER TABLE collaboration_message_writers ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+        )
     # Keep the normal restart path independent of retained chat history. The
     # partial index is empty after backfill, while interrupted/legacy rows stay
     # discoverable without a permanent marker that could hide unfinished work.
     db.execute("""CREATE INDEX IF NOT EXISTS collaboration_chatroom_backfill_pending
         ON collaboration_messages(room_id) WHERE server_sequence=0 OR thread_root_id=''""")
-    pending_rooms = ('SELECT id FROM collaboration_rooms' if 'chat_history_sequence' not in rooms else
-                     "SELECT DISTINCT room_id FROM collaboration_messages WHERE server_sequence=0 OR thread_root_id=''")
+    pending_rooms = (
+        "SELECT id FROM collaboration_rooms"
+        if "chat_history_sequence" not in rooms
+        else "SELECT DISTINCT room_id FROM collaboration_messages WHERE server_sequence=0 OR thread_root_id=''"
+    )
     mapped, unresolved = 0, 0
     for room in db.execute(pending_rooms).fetchall():
         rid = room[0]
-        rows = db.execute('SELECT id,thread_id,kind,body FROM collaboration_messages WHERE room_id=? ORDER BY created,id', (rid,)).fetchall()
+        rows = db.execute(
+            "SELECT id,thread_id,kind,body FROM collaboration_messages WHERE room_id=? ORDER BY created,id",
+            (rid,),
+        ).fetchall()
         known = {row[0]: row for row in rows}
         roots = {}
-        def resolve(identifier, visited=None):
+
+        def resolve(identifier, visited=None, *, known=known, rid=rid, roots=roots):
             visited = set() if visited is None else visited
             if identifier in roots:
                 return roots[identifier]
@@ -328,32 +369,55 @@ def migrate_chatroom(db):
             visited.add(identifier)
             row = known[identifier]
             parent = row[1] if row[1] != identifier else None
-            if row[2] == 'agent_result':
+            if row[2] == "agent_result":
                 body = json.loads(row[3])
-                job = db.execute('SELECT context,goal_id FROM collaboration_jobs WHERE id=? AND room_id=?', (body.get('job_id', ''), rid)).fetchone()
+                job = db.execute(
+                    "SELECT context,goal_id FROM collaboration_jobs WHERE id=? AND room_id=?",
+                    (body.get("job_id", ""), rid),
+                ).fetchone()
                 if job:
-                    parent = json.loads(job[0]).get('origin_message_id')
+                    parent = json.loads(job[0]).get("origin_message_id")
                     if not parent and job[1]:
-                        goal = db.execute('SELECT source_message_id FROM collaboration_goals WHERE id=? AND room_id=?', (job[1], rid)).fetchone()
+                        goal = db.execute(
+                            "SELECT source_message_id FROM collaboration_goals WHERE id=? AND room_id=?",
+                            (job[1], rid),
+                        ).fetchone()
                         parent = goal[0] if goal else None
             roots[identifier] = resolve(parent, visited) if parent else identifier
             return roots[identifier]
-        maximum = db.execute('SELECT COALESCE(MAX(server_sequence),0) FROM collaboration_messages WHERE room_id=?', (rid,)).fetchone()[0]
+
+        maximum = db.execute(
+            "SELECT COALESCE(MAX(server_sequence),0) FROM collaboration_messages WHERE room_id=?",
+            (rid,),
+        ).fetchone()[0]
         for row in rows:
-            current = db.execute('SELECT server_sequence,thread_root_id FROM collaboration_messages WHERE id=?', (row[0],)).fetchone()
+            current = db.execute(
+                "SELECT server_sequence,thread_root_id FROM collaboration_messages WHERE id=?",
+                (row[0],),
+            ).fetchone()
             if not current[0]:
                 maximum += 1
-                db.execute('UPDATE collaboration_messages SET server_sequence=? WHERE id=?', (maximum, row[0]))
+                db.execute(
+                    "UPDATE collaboration_messages SET server_sequence=? WHERE id=?",
+                    (maximum, row[0]),
+                )
             if not current[1]:
                 root = resolve(row[0])
                 if root:
                     mapped += 1
                 else:
                     unresolved += 1
-                db.execute('UPDATE collaboration_messages SET thread_root_id=? WHERE id=?', (root or row[0], row[0]))
-        if 'chat_history_sequence' not in rooms:
-            db.execute('UPDATE collaboration_rooms SET chat_history_sequence=? WHERE id=?', (maximum, rid))
-    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS collaboration_message_sequence ON collaboration_messages(room_id,server_sequence) WHERE server_sequence>0')
+                db.execute(
+                    "UPDATE collaboration_messages SET thread_root_id=? WHERE id=?",
+                    (root or row[0], row[0]),
+                )
+        if "chat_history_sequence" not in rooms:
+            db.execute(
+                "UPDATE collaboration_rooms SET chat_history_sequence=? WHERE id=?", (maximum, rid)
+            )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS collaboration_message_sequence ON collaboration_messages(room_id,server_sequence) WHERE server_sequence>0"
+    )
     db.execute("""CREATE TRIGGER IF NOT EXISTS collaboration_message_insert AFTER INSERT ON collaboration_messages
         BEGIN
             UPDATE collaboration_messages SET server_sequence=(SELECT COALESCE(MAX(server_sequence),0)+1 FROM collaboration_messages WHERE room_id=NEW.room_id AND id!=NEW.id),
@@ -367,12 +431,12 @@ def migrate_chatroom(db):
         WHEN NEW.version!=OLD.version OR NEW.state!=OLD.state OR NEW.body!=OLD.body
         BEGIN INSERT INTO collaboration_room_changes(room_id,kind,object_id,version,created)
             VALUES (NEW.room_id,'message',NEW.id,NEW.version,NEW.created); END""")
-    for table, kind in [('collaboration_jobs', 'job'), ('collaboration_goals', 'goal')]:
-        for operation in ('INSERT', 'UPDATE'):
+    for table, kind in [("collaboration_jobs", "job"), ("collaboration_goals", "goal")]:
+        for operation in ("INSERT", "UPDATE"):
             db.execute(f"""CREATE TRIGGER IF NOT EXISTS chatroom_{kind}_{operation.lower()} AFTER {operation} ON {table}
                 BEGIN INSERT INTO collaboration_room_changes(room_id,kind,object_id,version,created)
                 VALUES (NEW.room_id,'{kind}',NEW.id,NEW.version,NEW.updated); END""")
-    for operation in ('INSERT', 'UPDATE'):
+    for operation in ("INSERT", "UPDATE"):
         db.execute(f"""CREATE TRIGGER IF NOT EXISTS chatroom_delivery_{operation.lower()} AFTER {operation} ON mcp_event_deliveries
             WHEN EXISTS (SELECT 1 FROM mcp_event_outbox WHERE id=NEW.event_id AND name='codepier.collaboration.message_mentioned.v1'
                 AND json_extract(data,'$.test')=0)
@@ -380,5 +444,7 @@ def migrate_chatroom(db):
                 SELECT room_id,'message_delivery',json_extract(data,'$.message_id'),NEW.fence+1,NEW.created
                 FROM mcp_event_outbox WHERE id=NEW.event_id; END""")
     if mapped or unresolved:
-        db.execute("INSERT OR REPLACE INTO meta VALUES ('chatroom_thread_backfill',?)",
-                   (json.dumps({'mapped': mapped, 'unresolved': unresolved}),))
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES ('chatroom_thread_backfill',?)",
+            (json.dumps({"mapped": mapped, "unresolved": unresolved}),),
+        )

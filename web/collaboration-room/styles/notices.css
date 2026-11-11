@@ -1,0 +1,225 @@
+/* ------------------------------------------------------------------------
+   Notices, Legacy Banner & Un-nested Migration Checklist
+   ------------------------------------------------------------------------ */
+.cr-feedback {
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+  padding: 0 28px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.cr-feedback:not(:empty) {
+  padding-top: 12px;
+  padding-bottom: 4px;
+}
+
+.cr-feedback.is-error,
+.cr-error {
+  color: var(--ui-danger);
+}
+
+.cr-legacy-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 28px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ui-warning) 18%, var(--cr-line));
+  background: var(--ui-warning-bg);
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+/* Hide the top banner when the empty-state checklist is already on screen,
+   preventing duplicate read-only blocks stacked on top of each other. */
+.cr-main:has([data-cr-empty]:not([hidden]) .cr-migrate-card) > .cr-legacy-note {
+  display: none;
+}
+
+.cr-legacy-note > div {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.cr-legacy-note strong {
+  color: var(--ui-text);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-legacy-note p {
+  margin: 2px 0 0;
+  line-height: 1.5;
+  color: var(--cr-muted);
+}
+
+.cr-legacy-note .cr-button {
+  flex: 0 0 auto;
+}
+
+.cr-legacy-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--ui-warning);
+  color: var(--cr-surface);
+  font-weight: var(--ui-weight-bold);
+  font-size: var(--ui-text-xs);
+}
+
+/* Un-nested checklist: sits directly on the canvas with hairline dividers */
+.cr-migrate-card {
+  width: 100%;
+  max-width: 600px;
+  margin: clamp(16px, 5vh, 48px) auto 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.cr-migrate-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding-bottom: 16px;
+}
+
+.cr-migrate-head h3 {
+  margin: 0 0 6px;
+  font-size: var(--ui-text-title);
+  font-weight: var(--ui-weight-semibold);
+  letter-spacing: -0.02em;
+}
+
+.cr-migrate-head p {
+  margin: 0 0 4px;
+  line-height: var(--ui-leading-body);
+  color: var(--cr-muted);
+  font-size: var(--ui-text-sm);
+}
+
+.cr-migrate-steps {
+  list-style: none;
+  margin: 4px 0 20px;
+  padding: 0;
+  border-top: 1px solid var(--cr-line);
+  border-bottom: 1px solid var(--cr-line);
+}
+
+.cr-migrate-steps > li {
+  display: flex;
+  gap: 12px;
+  padding: 14px 2px;
+}
+
+.cr-migrate-steps > li + li {
+  border-top: 1px solid var(--cr-line);
+}
+
+.cr-migrate-steps > li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.cr-migrate-steps strong {
+  font-size: var(--ui-text-sm);
+}
+
+.cr-migrate-steps p {
+  margin: 2px 0 0;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-migrate-steps ul {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.cr-migrate-steps ul li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: var(--ui-text-xs);
+  line-height: 1.5;
+  color: var(--cr-muted);
+}
+
+.cr-migrate-steps ul li > span {
+  flex: 1 1 220px;
+}
+
+.cr-check {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 50%;
+  font-size: var(--ui-text-xs);
+  font-weight: var(--ui-weight-semibold);
+}
+
+.is-open > .cr-check {
+  background: var(--ui-warning-bg);
+  color: var(--ui-warning);
+}
+
+.is-done > .cr-check {
+  background: var(--ui-success-bg);
+  color: var(--ui-success);
+}
+
+.cr-migrate-card .cr-empty-actions {
+  justify-content: flex-start;
+}
+
+[data-cr-empty]:has(.cr-migrate-card) {
+  height: auto;
+}
+
+.cr-migration-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--cr-line);
+  border-bottom: 1px solid var(--cr-line);
+}
+
+.cr-migration-counts > div {
+  text-align: center;
+}
+
+.cr-migration-counts dt {
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-migration-counts dd {
+  margin: 4px 0 0;
+  font-size: var(--ui-text-h2);
+  font-weight: var(--ui-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-cr-migration-blockers] ul {
+  padding-left: 20px;
+}
+
+[data-cr-migration-blockers] li {
+  margin: 10px 0;
+  line-height: 1.6;
+  font-size: var(--ui-text-sm);
+}

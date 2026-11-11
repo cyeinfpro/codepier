@@ -1,6 +1,6 @@
 # 统一文件入站：协议、限制与部署验收
 
-本页描述当前源码（v1.22.0）的统一入站实现。源码和隔离测试通过不代表已部署，也不代表四种宿主都完成真实往返。已发布 v1.21.0 默认关闭；v1.22.0 Hub 和 Agent 在没有显式设置时默认开启认证入站，明确的 false 保持关闭。来源 provider 与本地读根仍需单独审核。新版关闭原生中转时明确拒绝，不静默回退 Agent 直取。
+本页描述当前源码的统一入站实现。源码和隔离测试通过不代表已部署，也不代表四种宿主都完成真实往返。已发布 v1.21.0 默认关闭；v1.22.0 Hub 和 Agent 在没有显式设置时默认开启认证入站，明确的 false 保持关闭。来源 provider 与本地读根仍需单独审核。新版关闭原生中转时明确拒绝，不静默回退 Agent 直取。
 
 ## 目标与路由
 
@@ -30,11 +30,11 @@
 
 | 位置 | 设置 | 默认 |
 | --- | --- | --- |
-| Hub | `CODEPIER_FILE_IMPORT_STREAMING` | v1.22.0未设置时开启；显式 false 关闭 |
-| Hub | `CODEPIER_NATIVE_FILE_RELAY` | v1.22.0未设置时开启；还需上一个开关；显式 false 关闭 |
+| Hub | `CODEPIER_FILE_IMPORT_STREAMING` | 未设置时开启；显式 false 关闭 |
+| Hub | `CODEPIER_NATIVE_FILE_RELAY` | 未设置时开启；还需上一个开关；显式 false 关闭 |
 | Hub | `CODEPIER_NATIVE_FILE_HOSTS` | 不设置则使用内置精确域名；JSON 数组显式替换基础列表 |
 | Hub | `CODEPIER_NATIVE_FILE_PROVIDERS` | 命名来源 JSON 数组，默认空 |
-| Agent | `integrations.file_import_streaming` | v1.22.0未设置时开启；显式 false 关闭 |
+| Agent | `integrations.file_import_streaming` | 未设置时开启；显式 false 关闭 |
 | Agent 直取 | `integrations.file_source_providers` | 命名来源数组，默认空 |
 | 本地桥接 | `CODEPIER_FILE_IMPORT_ROOTS` | 绝对目录 JSON 数组；不设置则不展示本地上传工具 |
 
@@ -120,3 +120,7 @@ Hub 下载缓冲位于 `HUB_DATA_DIR` 所在的可写数据卷，不使用 Compo
 6. 逐节点记录运行版本、开关、实际写入路径、字节数、完整摘要和回执；样本 JPEG/PDF 成功不等于所有客户端和平台通过。
 
 恢复时先关闭入口阻止新请求，保留数据库和暂存以核查未决上传；不要把删库/清暂存当成回滚。已经成功写入的项目文件不会因回滚软件自动撤回。
+
+## 文档分工
+
+本页是文件入站的当前入口，维护统一协议、默认值和通道选择。需要 Agent 来源和目标路径排查时阅读 [Agent 直取](FILE_IMPORT.md)；需要管理 Hub 的保存值、继承关系及确认预览时阅读 [Hub 入站设置](hub-file-import-settings.md)。后两页不另行定义传输默认值。

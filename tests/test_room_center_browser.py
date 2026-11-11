@@ -452,3 +452,29 @@ def test_nested_room_diagnostics_failure_can_retry_without_losing_focus(
         expect(opener).to_be_focused()
     finally:
         context.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_room_assets_load_on_demand_and_navigation_survives_retry(collaboration_stack, chat_browser_pool, engine):
+    stack = collaboration_stack
+    context = chat_browser_pool(engine).new_context()
+    page = context.new_page()
+    requested = []
+    page.on('request', lambda request: requested.append(request.url))
+    try:
+        page.goto(stack.url + '/#overview')
+        page.fill('#username', 'admin')
+        page.fill('#password', stack.password)
+        page.click('#login-form button')
+        expect(page.locator('#page h1')).to_be_visible()
+        assert not any('/static/collaboration-room' in url for url in requested)
+        page.route('**/static/collaboration-room.js?*', lambda route: route.abort('failed'))
+        page.evaluate("navigate('collaboration')")
+        expect(page.locator('#page')).to_contain_text('页面资源未能加载')
+        page.unroute('**/static/collaboration-room.js?*')
+        page.evaluate("navigate('overview')")
+        page.evaluate("navigate('collaboration')")
+        expect(page.locator('.cr-shell')).to_be_visible()
+        assert len([url for url in requested if '/static/collaboration-room-store.js?' in url]) == 1
+    finally:
+        context.close()

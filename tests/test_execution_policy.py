@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from shared.execution_policy import InvocationInspector, agent_blocks_codex, validate_policy, enforce_argv, hub_execution_policy, COMPUTER_DENIAL_CODE
 from shared.contracts import ShellExec
 from shared.util import DevError, atomic_json
-from hub.runtime import Principal, remote_codex_denial
+from hub.runtime import Principal, remote_execution_denial
 from tests.test_shell import shell_agent, shell_request
 from tests.test_audit_runtime import runtime, Socket
 

@@ -1,4 +1,5 @@
 """Loop-side continuations produced by synchronous, worker-owned validation."""
+
 from dataclasses import dataclass
 
 

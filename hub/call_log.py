@@ -3,6 +3,7 @@
 Never decrypt the queued request to display a log, and never run an operation
 when expanding its entry. Historical records retain their original evidence.
 """
+
 from __future__ import annotations
 
 import base64
@@ -34,7 +35,17 @@ def _object(value):
 
 def argument_summary(args: dict) -> str:
     parts = []
-    for key in ("path", "command", "task", "query", "cwd", "start_line", "max_lines", "offset", "timeout_seconds"):
+    for key in (
+        "path",
+        "command",
+        "task",
+        "query",
+        "cwd",
+        "start_line",
+        "max_lines",
+        "offset",
+        "timeout_seconds",
+    ):
         value = args.get(key)
         if isinstance(value, (str, int, float)) and not isinstance(value, bool) and value != "":
             parts.append(f"{key}={str(value).replace(chr(10), ' ↵ ')[:600]}")
@@ -62,6 +73,7 @@ def argument_summary(args: dict) -> str:
 def operation_summary(args: dict, *, maintenance=False) -> dict:
     """Persist counts alongside the existing privacy-preserving summary."""
     from shared.util import safe_summary
+
     result = safe_summary(args)
     # Only trusted admission context supplies origin; never copy request _log.
     meta = {"version": 2, "trigger_source": "system_maintenance" if maintenance else "request"}
@@ -76,26 +88,58 @@ def operation_summary(args: dict, *, maintenance=False) -> dict:
 
 
 def public_row(row: dict, now: float | None = None) -> dict:
-    public = {"id", "project_id", "device_id", "tool", "actor", "state", "created", "updated", "args_summary", "error", "attempts", "alias", "device_name", "accepted_at", "deadline", "cancel_requested", "transport_error"}
+    public = {
+        "id",
+        "project_id",
+        "device_id",
+        "tool",
+        "actor",
+        "state",
+        "created",
+        "updated",
+        "args_summary",
+        "error",
+        "attempts",
+        "alias",
+        "device_name",
+        "accepted_at",
+        "deadline",
+        "cancel_requested",
+        "transport_error",
+    }
     result = {key: value for key, value in row.items() if key in public}
-    args, clipped, scrubbed = display_value(_object(result.get("args_summary")), text_limit=1200, budget=12000)
+    args, clipped, scrubbed = display_value(
+        _object(result.get("args_summary")), text_limit=1200, budget=12000
+    )
     result["args_summary"] = args
     result["summary"] = argument_summary(args)
     meta = args.get("_log") if isinstance(args.get("_log"), dict) else {}
     source = meta.get("trigger_source") if meta.get("version") == 2 else None
     result["trigger_source"] = source if source in {"system_maintenance", "request"} else "unknown"
-    result["trigger_reason"] = ("automatic_refresh" if source == "system_maintenance"
-                                and meta.get("trigger_reason") == "automatic_refresh" else None)
+    result["trigger_reason"] = (
+        "automatic_refresh"
+        if source == "system_maintenance" and meta.get("trigger_reason") == "automatic_refresh"
+        else None
+    )
     result["model_invocation"] = False if row.get("tool") == "project_knowledge_build" else None
     result["knowledge_mode"] = None
     result["arguments_truncated"] = clipped or "…" in json.dumps(args, ensure_ascii=False)
     created = result.get("created")
-    end = result.get("updated") if result.get("state") in TERMINAL else (time.time() if now is None else now)
-    valid_times = all(type(value) in (float, int) and math.isfinite(value) for value in (created, end))
+    end = (
+        result.get("updated")
+        if result.get("state") in TERMINAL
+        else (time.time() if now is None else now)
+    )
+    valid_times = all(
+        type(value) in (float, int) and math.isfinite(value) for value in (created, end)
+    )
     result["elapsed_ms"] = max(0, round((end - created) * 1000)) if valid_times else None
     result["exit_code"] = None
     result, more_clipped, more_scrubbed = display_value(result, text_limit=1600, budget=16000)
-    result["display"] = {"truncated": clipped or more_clipped, "redacted": scrubbed or more_scrubbed}
+    result["display"] = {
+        "truncated": clipped or more_clipped,
+        "redacted": scrubbed or more_scrubbed,
+    }
     result.pop("args_summary", None)
     return result
 
@@ -116,35 +160,70 @@ def trace_timing(trace: dict, created) -> dict:
             execution = None
         elif stage == "executing":
             observed = event.get("at")
-            if wait is None and isinstance(observed, (int, float)) and isinstance(created, (int, float)) and observed >= created:
+            if (
+                wait is None
+                and isinstance(observed, (int, float))
+                and isinstance(created, (int, float))
+                and observed >= created
+            ):
                 wait = round((observed - created) * 1000)
             if accepted is not None:
                 start = event
         elif stage == "persisting" and start is not None:
             begin = start.get("elapsed_ms")
             first_seq = start.get("seq")
-            if type(elapsed) is int and type(begin) is int and elapsed >= begin and type(seq) is int and type(first_seq) is int and seq > first_seq:
+            if (
+                type(elapsed) is int
+                and type(begin) is int
+                and elapsed >= begin
+                and type(seq) is int
+                and type(first_seq) is int
+                and seq > first_seq
+            ):
                 execution = elapsed - begin
             start = None
     return {"wait_ms": wait, "execution_ms": execution}
 
 
 def _filter_id(filters):
-    return hashlib.sha256(json.dumps(filters, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:20]
+    return hashlib.sha256(
+        json.dumps(filters, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()[:20]
 
 
 def _cursor(created, identifier, filters):
-    return base64.urlsafe_b64encode(json.dumps([1, created, identifier, _filter_id(filters)], separators=(",", ":")).encode()).decode().rstrip("=")
+    return (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                [1, created, identifier, _filter_id(filters)], separators=(",", ":")
+            ).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
 
 
 def _decode_cursor(cursor, filters):
     from shared.util import DevError
+
     try:
-        raw = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
+        raw = json.loads(
+            base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        )
         version, created, identifier, fingerprint = raw
-        if version != 1 or isinstance(created, bool) or not isinstance(created, (int, float)) or not math.isfinite(created) or created < 0:
+        if (
+            version != 1
+            or isinstance(created, bool)
+            or not isinstance(created, (int, float))
+            or not math.isfinite(created)
+            or created < 0
+        ):
             raise ValueError()
-        if not isinstance(identifier, str) or not 1 <= len(identifier) <= 100 or fingerprint != _filter_id(filters):
+        if (
+            not isinstance(identifier, str)
+            or not 1 <= len(identifier) <= 100
+            or fingerprint != _filter_id(filters)
+        ):
             raise ValueError()
         return created, identifier
     except (ValueError, TypeError, OverflowError, UnicodeError) as exc:
@@ -153,18 +232,47 @@ def _decode_cursor(cursor, filters):
 
 def register_call_log(app, runtime, auth):
     from shared.util import DevError
+
     store = runtime.store
 
     @app.get("/api/call-log")
     @database_endpoint(store, read_only=True)
-    def call_log(request: Request, limit: int = Query(40, ge=1, le=100), cursor: str = Query("", max_length=1024), q: str = Query("", max_length=200), source: str = Query("", max_length=20), trigger_source: str = Query("", max_length=30), status: str = Query("", max_length=30), project: str = Query("", max_length=100), tool: str = Query("", max_length=100), watch: str = Query("", max_length=4096), include_filters: bool = True):
+    def call_log(
+        request: Request,
+        limit: int = Query(40, ge=1, le=100),
+        cursor: str = Query("", max_length=1024),
+        q: str = Query("", max_length=200),
+        source: str = Query("", max_length=20),
+        trigger_source: str = Query("", max_length=30),
+        status: str = Query("", max_length=30),
+        project: str = Query("", max_length=100),
+        tool: str = Query("", max_length=100),
+        watch: str = Query("", max_length=4096),
+        include_filters: bool = True,
+    ):
         principal = auth.panel(request)
-        if trigger_source not in {"", "system_maintenance", "request", "unknown"} or source not in {"", "mcp", "panel"} or status not in STATES | {""}:
+        if (
+            trigger_source not in {"", "system_maintenance", "request", "unknown"}
+            or source not in {"", "mcp", "panel"}
+            or status not in STATES | {""}
+        ):
             raise DevError("INVALID_FILTER", "无效的调用来源或状态")
-        filters = {"q": q.strip(), "source": source, "trigger_source": trigger_source, "status": status, "project": project, "tool": tool, "space": principal.space_id, "user": principal.user_id, "epoch": principal.user_epoch}
-        clause, scope_args = iam.private_sql(principal, 'o.')
+        filters = {
+            "q": q.strip(),
+            "source": source,
+            "trigger_source": trigger_source,
+            "status": status,
+            "project": project,
+            "tool": tool,
+            "space": principal.space_id,
+            "user": principal.user_id,
+            "epoch": principal.user_epoch,
+        }
+        clause, scope_args = iam.private_sql(principal, "o.")
         if not principal.admin:
-            clause += ' AND (o.project_id IS NULL OR o.project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
+            clause += " AND (o.project_id IS NULL OR o.project_id IN (%s))" % (
+                ",".join("?" for _ in principal.projects) or "NULL"
+            )
             scope_args.extend(principal.projects)
         where, values = [clause], list(scope_args)
         for column, value in (("o.state", status), ("o.project_id", project), ("o.tool", tool)):
@@ -186,8 +294,18 @@ def register_call_log(app, runtime, auth):
             values.append(trigger_source)
         if filters["q"]:
             literal = filters["q"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            columns = ("o.id", "o.actor", "o.tool", "o.args_summary", "o.error", "p.alias", "d.name")
-            where.append("(" + " OR ".join(column + " LIKE ? ESCAPE '\\'" for column in columns) + ")")
+            columns = (
+                "o.id",
+                "o.actor",
+                "o.tool",
+                "o.args_summary",
+                "o.error",
+                "p.alias",
+                "d.name",
+            )
+            where.append(
+                "(" + " OR ".join(column + " LIKE ? ESCAPE '\\'" for column in columns) + ")"
+            )
             values.extend(["%" + literal + "%"] * len(columns))
         if cursor:
             created, identifier = _decode_cursor(cursor, filters)
@@ -207,31 +325,73 @@ def register_call_log(app, runtime, auth):
         updates = []
         if watched:
             base = "SELECT o.id,o.project_id,o.device_id,o.tool,o.actor,o.state,o.created,o.updated,o.args_summary,o.error,o.attempts,p.alias,d.name AS device_name FROM operations o LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id"
-            updates = store.all(base + " WHERE " + clause + " AND o.id IN (" + ",".join("?" for _ in watched) + ")", (*scope_args, *watched))
-        return {"updates": [public_row(row, observed) for row in updates], "operations": [public_row(row, observed) for row in rows], "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None, "observed_at": observed, "projects": [{k: row[k] for k in ('id', 'alias')} for row in runtime.list_projects(principal)] if include_filters else [], "tools": [x["tool"] for x in store.all("SELECT DISTINCT o.tool FROM operations o WHERE " + clause + " ORDER BY o.tool LIMIT 200", scope_args)] if include_filters else []}
+            updates = store.all(
+                base + " WHERE " + clause + " AND o.id IN (" + ",".join("?" for _ in watched) + ")",
+                (*scope_args, *watched),
+            )
+        return {
+            "updates": [public_row(row, observed) for row in updates],
+            "operations": [public_row(row, observed) for row in rows],
+            "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None,
+            "observed_at": observed,
+            "projects": [
+                {k: row[k] for k in ("id", "alias")} for row in runtime.list_projects(principal)
+            ]
+            if include_filters
+            else [],
+            "tools": [
+                x["tool"]
+                for x in store.all(
+                    "SELECT DISTINCT o.tool FROM operations o WHERE "
+                    + clause
+                    + " ORDER BY o.tool LIMIT 200",
+                    scope_args,
+                )
+            ]
+            if include_filters
+            else [],
+        }
 
     @app.get("/api/call-log/{identifier}")
     @database_endpoint(store, read_only=True)
     def call_log_detail(identifier: str, request: Request):
         principal = auth.panel(request)
         original = runtime.operation(identifier, principal)
-        row = public_row({key: value for key, value in original.items() if key not in {"result", "output"}})
+        row = public_row(
+            {key: value for key, value in original.items() if key not in {"result", "output"}}
+        )
         sections = {}
         any_clipped = any_scrubbed = False
-        for field, budget in (("args_summary", 12000), ("output", 32768), ("result", 32768), ("error", 4000), ("transport_error", 2000)):
+        for field, budget in (
+            ("args_summary", 12000),
+            ("output", 32768),
+            ("result", 32768),
+            ("error", 4000),
+            ("transport_error", 2000),
+        ):
             raw = original.get(field)
             if field == "output" and isinstance(raw, str):
                 # Scrub before slicing, then preserve the most recent output.
                 clean = redact_text(raw)
                 clipped, scrubbed = len(clean) > budget, clean != raw
-                row[field] = ("<… truncated; latest output follows>\n" + clean[-budget:]) if clipped else clean
+                row[field] = (
+                    ("<… truncated; latest output follows>\n" + clean[-budget:])
+                    if clipped
+                    else clean
+                )
             else:
-                value, clipped, scrubbed = display_value({field: raw}, text_limit=budget, budget=budget)
+                value, clipped, scrubbed = display_value(
+                    {field: raw}, text_limit=budget, budget=budget
+                )
                 row[field] = value[field]
             sections[field] = clipped
             any_clipped |= clipped
             any_scrubbed |= scrubbed
-        row["display"] = {"truncated": any_clipped or original.get("output_truncated", False), "redacted": any_scrubbed, "sections": sections}
+        row["display"] = {
+            "truncated": any_clipped or original.get("output_truncated", False),
+            "redacted": any_scrubbed,
+            "sections": sections,
+        }
         row["output_truncated"] = original.get("output_truncated", False) or sections["output"]
         row["arguments_truncated"] |= sections["args_summary"]
         result = row.get("result")
@@ -243,24 +403,31 @@ def register_call_log(app, runtime, auth):
             mode = refresh.get("mode")
             row["knowledge_mode"] = mode if mode in {"full", "incremental"} else None
             row["knowledge_stats"] = {
-                key: data[key] for key in ("entries_count", "changed_entries", "reused_entries", "skipped_files")
+                key: data[key]
+                for key in ("entries_count", "changed_entries", "reused_entries", "skipped_files")
                 if type(data.get(key)) is int and data[key] >= 0
             }
             if type(refresh.get("metadata_reused")) is int and refresh["metadata_reused"] >= 0:
                 row["knowledge_stats"]["metadata_reused"] = refresh["metadata_reused"]
-        row.update({key: original[key] for key in ('queue_stage', 'waiting') if key in original})
-        if isinstance(data, dict) and isinstance(data.get('concurrency'), dict):
-            row['concurrency'] = data['concurrency']
+        row.update({key: original[key] for key in ("queue_stage", "waiting") if key in original})
+        if isinstance(data, dict) and isinstance(data.get("concurrency"), dict):
+            row["concurrency"] = data["concurrency"]
         row["timing"] = {"wait_ms": None, "execution_ms": None}
         try:
             # Read evidence directly: polling must not generate more audit calls.
-            trace = runtime.diagnostics.trace({"operation_id": identifier, "after_event_id": 0, "limit": 200}, principal)
+            trace = runtime.diagnostics.trace(
+                {"operation_id": identifier, "after_event_id": 0, "limit": 200}, principal
+            )
             row["timing"] = trace_timing(trace, original.get("created"))
             row["trace"], trace_clipped, _ = display_value(trace, text_limit=1000, budget=32768)
             shown = row["trace"]
             if isinstance(shown, dict):
                 events = shown.get("events")
-                shown["events"] = [e for e in events if isinstance(e, dict) and isinstance(e.get("stage"), str)] if isinstance(events, list) else []
+                shown["events"] = (
+                    [e for e in events if isinstance(e, dict) and isinstance(e.get("stage"), str)]
+                    if isinstance(events, list)
+                    else []
+                )
             row["display"]["truncated"] |= trace_clipped
         except DevError as exc:
             row["trace_error"] = redact_text(str(exc))[:2000]

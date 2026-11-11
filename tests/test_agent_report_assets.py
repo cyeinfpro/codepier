@@ -203,10 +203,11 @@ def test_active_record_visible_behind_historical_receipts(assets):
     records = Records(engine.journal)
     bound = json.dumps(binding(project), sort_keys=True)
     rows = [('browser', f'{i:032x}', bound, '{"state":"closed"}', i + 10) for i in range(2001)]
-    rows.append(('browser', 'f' * 32, bound, '{"state":"ready"}', 1))
+    rows.append(('browser', 'f' * 32, bound, '{"state":"ready","expires":100}', 1))
     with engine.journal.lock, engine.journal.db:
         engine.journal.db.executemany('INSERT INTO integration_records VALUES(?,?,?,?,?)', rows)
-    assert records.list('browser', project, 1) == [{'state': 'ready'}]
+    assert records.list_page('browser', project, 1) == {
+        'records': [{'state': 'ready', 'expires': 100, 'lease_id': 'f' * 32}], 'record_errors': []}
 
 
 def test_blob_read_budget_is_enforced_before_mutation(assets, monkeypatch):

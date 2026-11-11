@@ -5,6 +5,7 @@ read snapshot still issue BEGIN, and read/modify/write callers BEGIN IMMEDIATE.
 Only the outermost context commits. An inner failure makes the outer transaction
 rollback-only even when application code catches that failure.
 """
+
 from __future__ import annotations
 
 import sqlite3
@@ -45,7 +46,10 @@ class OwnedRLock:
         self.require()
         observation = None
         if self._on_release is not None and self._local.depth == 1:
-            observation = (self._local.wait_ms, max(0, (time.monotonic() - self._local.acquired_at) * 1000))
+            observation = (
+                self._local.wait_ms,
+                max(0, (time.monotonic() - self._local.acquired_at) * 1000),
+            )
         self._lock.release()
         self._local.depth -= 1
         if observation is not None:
@@ -67,7 +71,9 @@ class TransactionAborted(RuntimeError):
 
 
 class CheckedConnection:
-    def __init__(self, connection: sqlite3.Connection, lock: OwnedRLock, on_write=None, on_transaction=None):
+    def __init__(
+        self, connection: sqlite3.Connection, lock: OwnedRLock, on_write=None, on_transaction=None
+    ):
         self._connection = connection
         self._lock = lock
         self.depth = 0
@@ -101,7 +107,9 @@ class CheckedConnection:
 
     def execute(self, sql, parameters=()):
         self._require()
-        started = time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        started = (
+            time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        )
         try:
             cursor = self._connection.execute(sql, parameters)
         finally:
@@ -112,7 +120,9 @@ class CheckedConnection:
 
     def executemany(self, sql, parameters):
         self._require()
-        started = time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        started = (
+            time.monotonic() if self._on_transaction and self._transaction_started is None else None
+        )
         try:
             cursor = self._connection.executemany(sql, parameters)
         finally:
@@ -142,18 +152,18 @@ class CheckedConnection:
         self._require()
         if not self.depth or not self._connection.in_transaction:
             raise RuntimeError("Savepoints require an active Store.transaction")
-        name = f'cp_isolated_{next(self._savepoint_ids)}'
+        name = f"cp_isolated_{next(self._savepoint_ids)}"
         rollback_before = self._rollback_only
         callback_count = len(self._callbacks)
-        self._connection.execute(f'SAVEPOINT {name}')
+        self._connection.execute(f"SAVEPOINT {name}")
         try:
             yield self
             if self._rollback_only and not rollback_before:
                 raise TransactionAborted("An isolated nested database operation failed")
         except BaseException:
             try:
-                self._connection.execute(f'ROLLBACK TO {name}')
-                self._connection.execute(f'RELEASE {name}')
+                self._connection.execute(f"ROLLBACK TO {name}")
+                self._connection.execute(f"RELEASE {name}")
             except BaseException:
                 self._rollback_only = True
                 raise
@@ -164,7 +174,7 @@ class CheckedConnection:
             raise
         else:
             try:
-                self._connection.execute(f'RELEASE {name}')
+                self._connection.execute(f"RELEASE {name}")
             except BaseException:
                 self._rollback_only = True
                 del self._callbacks[callback_count:]
@@ -206,16 +216,18 @@ class CheckedConnection:
             try:
                 self._connection.rollback()
             except BaseException:
-                self._transaction_finished('rollback_failed')
+                self._transaction_finished("rollback_failed")
                 raise
-            self._transaction_finished('rolled_back')
-            raise TransactionAborted("An inner database operation failed; the whole transaction was rolled back")
+            self._transaction_finished("rolled_back")
+            raise TransactionAborted(
+                "An inner database operation failed; the whole transaction was rolled back"
+            )
         try:
             outcome = self._connection.__exit__(kind, error, traceback)
         except BaseException:
-            self._transaction_finished('commit_failed' if kind is None else 'rollback_failed')
+            self._transaction_finished("commit_failed" if kind is None else "rollback_failed")
             raise
-        self._transaction_finished('committed' if kind is None else 'rolled_back')
+        self._transaction_finished("committed" if kind is None else "rolled_back")
         if kind is None:
             for callback in callbacks:
                 callback()
@@ -229,6 +241,7 @@ class CheckedConnection:
 
 class CheckedCursor:
     """A cursor cannot smuggle an unlocked connection out of Store.execute."""
+
     def __init__(self, cursor, lock):
         self._cursor, self._lock = cursor, lock
         self.rowcount, self.lastrowid = cursor.rowcount, cursor.lastrowid

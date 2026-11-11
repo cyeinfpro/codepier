@@ -18,6 +18,7 @@ Two bounded, content-free measures (Linux/glibc only; no-ops elsewhere):
 Neither touches operations, journals or user data, and neither changes any
 admission threshold: the node simply stops pausing itself.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -33,7 +34,7 @@ M_ARENA_MAX = -8
 ARENA_MAX = 2
 PRESSURE_INTERVAL = 30.0
 IDLE_INTERVAL = 600.0
-LOG_THRESHOLD = 16 * 1024 ** 2
+LOG_THRESHOLD = 16 * 1024**2
 
 _libc = None
 _libc_loaded = False
@@ -102,7 +103,7 @@ def below_recovery(sample) -> bool:
         return False
     if not isinstance(available, int) or not isinstance(total, int) or total <= 0:
         return False
-    return available < max(min(512 * 1024 ** 2, total * .20), total * .10)
+    return available < max(min(512 * 1024**2, total * 0.20), total * 0.10)
 
 
 class MemoryRelief:
@@ -127,6 +128,9 @@ class MemoryRelief:
         self.last = now
         freed = self.trimmer()
         if freed and freed >= LOG_THRESHOLD:
-            LOGGER.info("已释放 Agent 空闲内存 %s MiB（%s）", freed // 1024 ** 2,
-                        "节点内存紧张" if pressured else "空闲整理")
+            LOGGER.info(
+                "已释放 Agent 空闲内存 %s MiB（%s）",
+                freed // 1024**2,
+                "节点内存紧张" if pressured else "空闲整理",
+            )
         return freed

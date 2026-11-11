@@ -65,10 +65,7 @@ class TelegramFiles:
                 binding["chat_id"],
                 message["id"],
                 message["version"],
-                [
-                    (a["id"], a["name"], a["sha256"], a["bytes"], a["expires"])
-                    for a in artifacts
-                ],
+                [(a["id"], a["name"], a["sha256"], a["bytes"], a["expires"]) for a in artifacts],
             ]
         )
         return args, principal, room, binding, message, artifacts, proof
@@ -130,9 +127,7 @@ class TelegramFiles:
                     (message["id"], binding["id"]),
                 )["n"]
                 if count + len(artifacts) > 16:
-                    raise DevError(
-                        "ATTACHMENT_COUNT_LIMIT", "每个原回复目标最多16件附件", 409
-                    )
+                    raise DevError("ATTACHMENT_COUNT_LIMIT", "每个原回复目标最多16件附件", 409)
                 self.c.channels.queue(message)
                 delivery = self.store.one(
                     """SELECT * FROM channel_mirrors WHERE channel='telegram' AND binding_id=?
@@ -152,9 +147,7 @@ class TelegramFiles:
                     )
                 self.c.channels.validate(delivery)
                 if delivery["state"] in {"cancelled", "superseded"}:
-                    raise DevError(
-                        "TELEGRAM_FILE_DELIVERY_CLOSED", "原回复投递已取消或被替代", 409
-                    )
+                    raise DevError("TELEGRAM_FILE_DELIVERY_CLOSED", "原回复投递已取消或被替代", 409)
                 ordinal = self.store.one(
                     "SELECT COALESCE(MAX(ordinal),-1)+1 AS n FROM channel_attachments WHERE message_id=? AND direction='outbound'",
                     (message["id"],),
@@ -178,7 +171,10 @@ class TelegramFiles:
                         )
                     aid = uuid.uuid4().hex
                     name = safe_filename(artifact["name"])
-                    mime, kind = "application/octet-stream", "file"  # Byte verification determines type.
+                    mime, kind = (
+                        "application/octet-stream",
+                        "file",
+                    )  # Byte verification determines type.
                     self.store.execute(
                         """INSERT INTO channel_attachments
                         (id,space_id,owner_user_id,room_id,conversation_id,project_id,message_id,ordinal,direction,
@@ -212,7 +208,9 @@ class TelegramFiles:
                                     }
                                 )
                             ),
-                            artifact["expires"] if binding.get("lifetime_mode") == "until_revoked" else min(binding["expires_at"], artifact["expires"]),
+                            artifact["expires"]
+                            if binding.get("lifetime_mode") == "until_revoked"
+                            else min(binding["expires_at"], artifact["expires"]),
                             now,
                             now,
                         ),
@@ -233,7 +231,9 @@ class TelegramFiles:
                     )
                     self.store.execute(
                         """INSERT INTO channel_attachment_transfers(attachment_id,channel,part_id,upload_state,binding_version)
-                        VALUES (?,'telegram',?,'combined_with_send',?)""", (aid, part_id, binding["version"]))
+                        VALUES (?,'telegram',?,'combined_with_send',?)""",
+                        (aid, part_id, binding["version"]),
+                    )
                     ids.append(aid)
                 self.c.channels.refresh(delivery["id"])
                 self.c.audit(
@@ -270,10 +270,7 @@ class TelegramFiles:
             if not self.c.chatroom.message_visible(principal, row):
                 continue
             body = json.loads(row["body"])
-            if (
-                body.get("sender_dot_id")
-                and body.get("dot_reply_complete") is not False
-            ):
+            if body.get("sender_dot_id") and body.get("dot_reply_complete") is not False:
                 replies.append(
                     {
                         "id": row["id"],
@@ -282,9 +279,7 @@ class TelegramFiles:
                     }
                 )
         return {
-            "artifact_candidates": [
-                r for r in artifacts["artifacts"] if not r["expired"]
-            ],
+            "artifact_candidates": [r for r in artifacts["artifacts"] if not r["expired"]],
             "artifact_candidates_more": bool(artifacts["next_cursor"]),
             "reply_candidates": replies[:20],
             "upload_limit": UPLOAD_LIMIT,

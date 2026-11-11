@@ -1,4 +1,5 @@
 """Project-independent room and member actions; invitations never grant credentials."""
+
 from __future__ import annotations
 
 from typing import Literal
@@ -11,11 +12,11 @@ class RoomCreate(Model):
     projects: list[Scope] = Field(default_factory=list)
     idempotency_key: Key
 
-    @field_validator('title')
+    @field_validator("title")
     @classmethod
     def nonblank(cls, value):
         if not value.strip():
-            raise ValueError('A room name is required')
+            raise ValueError("A room name is required")
         return value.strip()
 
 
@@ -26,101 +27,121 @@ class RoomRead(Model):
 class RoomDiagnosticsRead(RoomRead):
     member_id: Identifier | None = None
     delivery_id: Identifier | None = None
-    cursor: str = Field(default='', max_length=2048)
+    cursor: str = Field(default="", max_length=2048)
 
 
 class RoomTurnPolicyUpdate(RoomRead):
-    mode: Literal['strict', 'shadow', 'decoupled'] | None
+    mode: Literal["strict", "shadow", "decoupled"] | None
     expected_version: int = Field(ge=0, strict=True)
     reason: str = Field(min_length=1, max_length=160)
     idempotency_key: Key
 
-    @field_validator('reason')
+    @field_validator("reason")
     @classmethod
     def nonblank(cls, value):
         if not value.strip():
-            raise ValueError('A reason is required')
+            raise ValueError("A reason is required")
         return value.strip()
 
 
 TURN_ACTION_CAPABILITIES = {
-    'room_reply': ('explicit_publication', 'reply_yield_after'),
-    'room_consumer_yield': ('consumer_continue_later',),
-    **dict.fromkeys(('room_inbox', 'room_consumer', 'room_message_read', 'room_attachment_read', 'room_context'),
-                    ('expired_route_session_read',)),
+    "room_reply": ("explicit_publication", "reply_yield_after"),
+    "room_consumer_yield": ("consumer_continue_later",),
+    **dict.fromkeys(
+        (
+            "room_inbox",
+            "room_consumer",
+            "room_message_read",
+            "room_attachment_read",
+            "room_context",
+        ),
+        ("expired_route_session_read",),
+    ),
 }
 TURN_CAPABILITY_REQUIREMENTS = dict.fromkeys(
-    ('consumer_continue_later', 'expired_route_session_read'), 'decoupled')
-_TURN_CAPABILITIES = frozenset(capability for names in TURN_ACTION_CAPABILITIES.values() for capability in names)
+    ("consumer_continue_later", "expired_route_session_read"), "decoupled"
+)
+_TURN_CAPABILITIES = frozenset(
+    capability for names in TURN_ACTION_CAPABILITIES.values() for capability in names
+)
 
 
 def turn_capabilities(policy):
-    return {name: True for name in sorted(_TURN_CAPABILITIES)
-            if TURN_CAPABILITY_REQUIREMENTS.get(name, policy) == policy}
+    return {
+        name: True
+        for name in sorted(_TURN_CAPABILITIES)
+        if TURN_CAPABILITY_REQUIREMENTS.get(name, policy) == policy
+    }
 
 
 def turn_action_help(action):
     names = TURN_ACTION_CAPABILITIES.get(action, ())
     declared = {name: True for name in names if name not in TURN_CAPABILITY_REQUIREMENTS}
-    conditional = {name: TURN_CAPABILITY_REQUIREMENTS[name] for name in names if name in TURN_CAPABILITY_REQUIREMENTS}
-    info = {'turn_capabilities': declared} if declared else {}
+    conditional = {
+        name: TURN_CAPABILITY_REQUIREMENTS[name]
+        for name in names
+        if name in TURN_CAPABILITY_REQUIREMENTS
+    }
+    info = {"turn_capabilities": declared} if declared else {}
     if conditional:
-        info['turn_capability_requirements'] = conditional
+        info["turn_capability_requirements"] = conditional
     return info
 
 
 class RoomList(Model):
-    cursor: str = Field(default='', max_length=2048)
+    cursor: str = Field(default="", max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
     include_archived: bool = False
 
 
 class RoomPatch(RoomRead):
     title: str | None = Field(default=None, min_length=1, max_length=120)
-    state: Literal['active', 'paused', 'archived'] | None = None
+    state: Literal["active", "paused", "archived"] | None = None
     lead_member_id: str | None = Field(default=None, max_length=128)
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 
-    @field_validator('title')
+    @field_validator("title")
     @classmethod
     def nonblank(cls, value):
         if value is not None and not value.strip():
-            raise ValueError('A room name is required')
+            raise ValueError("A room name is required")
         return value.strip() if value is not None else None
 
 
 class RoomMigrate(RoomRead):
-    action: Literal['activate']
+    action: Literal["activate"]
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 
 
 class MemberProjectScope(Model):
     project_id: Identifier
-    environment_id: str = Field(default='production', min_length=1, max_length=64)
-    capabilities: list[Literal['read', 'write', 'execute']] = Field(default_factory=lambda: ['read'], min_length=1, max_length=3)
+    environment_id: str = Field(default="production", min_length=1, max_length=64)
+    capabilities: list[Literal["read", "write", "execute"]] = Field(
+        default_factory=lambda: ["read"], min_length=1, max_length=3
+    )
     execution_targets: list[str] = Field(default_factory=list)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def bounded_scope(self):
         if len(set(self.capabilities)) != len(self.capabilities):
-            raise ValueError('Capabilities must be distinct')
-        if 'read' not in self.capabilities:
-            raise ValueError('Member project access requires read')
-        if 'execute' in self.capabilities and not self.execution_targets:
-            raise ValueError('Execution requires an explicit target')
+            raise ValueError("Capabilities must be distinct")
+        if "read" not in self.capabilities:
+            raise ValueError("Member project access requires read")
+        if "execute" in self.capabilities and not self.execution_targets:
+            raise ValueError("Execution requires an explicit target")
         return self
 
 
 class Lifetime(Model):
-    mode: Literal['until_revoked', 'timed'] = 'until_revoked'
+    mode: Literal["until_revoked", "timed"] = "until_revoked"
     expires_at: float | int | None = None
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def lifetime(self):
-        if (self.mode == 'timed') != (self.expires_at is not None):
-            raise ValueError('Only timed authorization has an expiry')
+        if (self.mode == "timed") != (self.expires_at is not None):
+            raise ValueError("Only timed authorization has an expiry")
         return self
 
 
@@ -144,18 +165,20 @@ class RoomProjectImpact(RoomRead):
     removed_partition_ids: list[Identifier] = Field(default_factory=list)
     expected_version: int = Field(ge=1)
 
-    @field_validator('removed_partition_ids')
+    @field_validator("removed_partition_ids")
     @classmethod
     def distinct_partitions(cls, value):
         if len(set(value)) != len(value):
-            raise ValueError('Removed partitions must be distinct')
+            raise ValueError("Removed partitions must be distinct")
         return value
 
 
 class MemberCreate(RoomRead):
     name: str = Field(min_length=1, max_length=80)
     reuse_member_id: Identifier | None = None
-    host_connection_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    host_connection_id: Identifier | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     reuse_binding_generation: int | None = Field(default=None, ge=1)
     keep_connected: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     project_scopes: list[MemberProjectScope] = Field(default_factory=list)
@@ -163,17 +186,19 @@ class MemberCreate(RoomRead):
     expected_version: int | None = Field(default=None, ge=1)
     idempotency_key: Key
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def single_connection_reference(self):
-        if self.host_connection_id and (self.reuse_member_id or self.reuse_binding_generation is not None):
-            raise ValueError('Select one connection reference')
+        if self.host_connection_id and (
+            self.reuse_member_id or self.reuse_binding_generation is not None
+        ):
+            raise ValueError("Select one connection reference")
         return self
 
-    @field_validator('name')
+    @field_validator("name")
     @classmethod
     def nonblank(cls, value):
         if not value.strip():
-            raise ValueError('A member name is required')
+            raise ValueError("A member name is required")
         return value.strip()
 
 
@@ -183,16 +208,22 @@ class ConnectRead(Model):
 
 
 class ConnectAction(ConnectRead):
-    action: Literal['refresh_invite', 'resume', 'pause', 'remove', 'rebind', 'migrate', 'set_renewal']
-    keep_connected: bool | None = Field(default=None, strict=True, exclude_if=lambda value: value is None)
-    host_connection_id: Identifier | None = Field(default=None, exclude_if=lambda value: value is None)
+    action: Literal[
+        "refresh_invite", "resume", "pause", "remove", "rebind", "migrate", "set_renewal"
+    ]
+    keep_connected: bool | None = Field(
+        default=None, strict=True, exclude_if=lambda value: value is None
+    )
+    host_connection_id: Identifier | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     expected_version: int = Field(ge=1)
     idempotency_key: Key
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def host_only_for_rebind(self):
-        if self.host_connection_id and self.action != 'rebind':
-            raise ValueError('A host connection is only used for rebind')
+        if self.host_connection_id and self.action != "rebind":
+            raise ValueError("A host connection is only used for rebind")
         return self
 
 
@@ -212,12 +243,14 @@ class MemberTurnRead(MemberIdentity):
     consumer_fence: int | None = Field(default=None, ge=1, strict=True)
     consumer_proof: str | None = Field(default=None, min_length=32, max_length=256, repr=False)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def complete_turn_proof(self):
-        supplied = sum(getattr(self, name) is not None for name in (
-            'consumer_session_id', 'consumer_fence', 'consumer_proof'))
+        supplied = sum(
+            getattr(self, name) is not None
+            for name in ("consumer_session_id", "consumer_fence", "consumer_proof")
+        )
         if supplied not in (0, 3):
-            raise ValueError('Provide the session, fence and proof together')
+            raise ValueError("Provide the session, fence and proof together")
         return self
 
 
@@ -232,7 +265,7 @@ class ConnectProbeReply(MemberIdentity):
 
 
 class RoomChanges(RoomRead):
-    cursor: str = Field(default='', max_length=2048)
+    cursor: str = Field(default="", max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
 
 
@@ -241,7 +274,7 @@ class HostConnectionRead(Model):
 
 
 class HostConnectionList(Model):
-    cursor: str = Field(default='', max_length=2048)
+    cursor: str = Field(default="", max_length=2048)
     limit: int = Field(default=40, ge=1, le=100)
 
 
@@ -256,22 +289,38 @@ class HostConnectionRevoke(HostConnectionRead):
 
 
 class HostControl(Model):
-    model_config = ConfigDict(json_schema_extra={'oneOf': [
-        {'required': ['challenge_proof'], 'properties': {'challenge_proof': {'type': 'string'}},
-         'not': {'required': ['control_handle'], 'properties': {'control_handle': {'type': 'string'}}}},
-        {'required': ['control_handle'], 'properties': {'control_handle': {'type': 'string'}},
-         'not': {'required': ['challenge_proof'], 'properties': {'challenge_proof': {'type': 'string'}}}},
-    ]})
+    model_config = ConfigDict(
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "required": ["challenge_proof"],
+                    "properties": {"challenge_proof": {"type": "string"}},
+                    "not": {
+                        "required": ["control_handle"],
+                        "properties": {"control_handle": {"type": "string"}},
+                    },
+                },
+                {
+                    "required": ["control_handle"],
+                    "properties": {"control_handle": {"type": "string"}},
+                    "not": {
+                        "required": ["challenge_proof"],
+                        "properties": {"challenge_proof": {"type": "string"}},
+                    },
+                },
+            ]
+        }
+    )
 
     owner_operation_id: Identifier
     challenge_proof: str | None = Field(default=None, min_length=24, max_length=256)
     control_handle: str | None = Field(default=None, min_length=24, max_length=256)
     idempotency_key: Key
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def single_proof(self):
         if bool(self.challenge_proof) == bool(self.control_handle):
-            raise ValueError('Supply exactly one host control proof')
+            raise ValueError("Supply exactly one host control proof")
         return self
 
 
@@ -293,11 +342,11 @@ class HostRebindBatch(Model):
     host_connection_id: Identifier | None = None
     idempotency_key: Key
 
-    @field_validator('members')
+    @field_validator("members")
     @classmethod
     def distinct_members(cls, members):
         if len({member.member_id for member in members}) != len(members):
-            raise ValueError('Select each member once')
+            raise ValueError("Select each member once")
         return members
 
 
@@ -306,31 +355,43 @@ class HostRebindStatus(HostConnectionList):
 
 
 ROOM_QUERY_ACTIONS = {
-    'room_list': RoomList, 'room_view': RoomRead, 'room_connect': ConnectRead,
-    'room_changes': RoomChanges, 'room_diagnostics': RoomDiagnosticsRead,
-    'room_project_impact': RoomProjectImpact, 'room_turn_policy': RoomRead,
-    'room_connection_list': HostConnectionList, 'room_connection_view': HostConnectionRead,
-    'room_connection_impact': HostConnectionImpact, 'room_connection_rebind_status': HostRebindStatus,
+    "room_list": RoomList,
+    "room_view": RoomRead,
+    "room_connect": ConnectRead,
+    "room_changes": RoomChanges,
+    "room_diagnostics": RoomDiagnosticsRead,
+    "room_project_impact": RoomProjectImpact,
+    "room_turn_policy": RoomRead,
+    "room_connection_list": HostConnectionList,
+    "room_connection_view": HostConnectionRead,
+    "room_connection_impact": HostConnectionImpact,
+    "room_connection_rebind_status": HostRebindStatus,
 }
 ROOM_MUTATION_ACTIONS = {
-    'room_create': RoomCreate, 'room_update': RoomPatch, 'room_turn_policy_update': RoomTurnPolicyUpdate,
-    'room_migrate': RoomMigrate,
-    'room_projects': RoomProjects, 'room_member_create': MemberCreate,
-    'room_connect_resume': ConnectAction, 'room_connect_join': ConnectJoin,
-    'room_probe_read': ConnectProbeRead, 'room_probe_reply': ConnectProbeReply,
-    'room_connection_control': HostControl, 'room_connection_revoke': HostConnectionRevoke,
-    'room_connection_rebind_batch': HostRebindBatch,
-    'room_connection_route_prepare': HostRoutePrepare,
+    "room_create": RoomCreate,
+    "room_update": RoomPatch,
+    "room_turn_policy_update": RoomTurnPolicyUpdate,
+    "room_migrate": RoomMigrate,
+    "room_projects": RoomProjects,
+    "room_member_create": MemberCreate,
+    "room_connect_resume": ConnectAction,
+    "room_connect_join": ConnectJoin,
+    "room_probe_read": ConnectProbeRead,
+    "room_probe_reply": ConnectProbeReply,
+    "room_connection_control": HostControl,
+    "room_connection_revoke": HostConnectionRevoke,
+    "room_connection_rebind_batch": HostRebindBatch,
+    "room_connection_route_prepare": HostRoutePrepare,
 }
 
 
 class RoomPermissionProject(MemberProjectScope):
     lifetime: Lifetime = Field(default_factory=Lifetime)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def targets_require_execute(self):
-        if self.execution_targets and 'execute' not in self.capabilities:
-            raise ValueError('Execution targets require execute capability')
+        if self.execution_targets and "execute" not in self.capabilities:
+            raise ValueError("Execution targets require execute capability")
         return self
 
 
@@ -338,27 +399,29 @@ class RoomPermissionScope(Model):
     project_ids: list[Identifier] | None = Field(default=None)
     project_scopes: list[RoomPermissionProject] = Field(default_factory=list)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def matching_projects(self):
-        if self.project_ids is not None and set(self.project_ids) != {s.project_id for s in self.project_scopes}:
-            raise ValueError('Project IDs must match the explicit project scopes')
+        if self.project_ids is not None and set(self.project_ids) != {
+            s.project_id for s in self.project_scopes
+        }:
+            raise ValueError("Project IDs must match the explicit project scopes")
         return self
 
 
 class RoomChannelPermission(Model):
-    mode: Literal['follow_room', 'custom'] = 'follow_room'
+    mode: Literal["follow_room", "custom"] = "follow_room"
     scope: RoomPermissionScope = Field(default_factory=RoomPermissionScope)
 
 
 class RoomPermissionsUpdate(RoomRead):
     expected_version: int = Field(ge=0)
     scope: RoomPermissionScope
-    channels: dict[Literal['weixin', 'telegram'], RoomChannelPermission]
+    channels: dict[Literal["weixin", "telegram"], RoomChannelPermission]
     idempotency_key: Key | None = None
 
-    @field_validator('channels')
+    @field_validator("channels")
     @classmethod
     def both_channels(cls, value):
-        if set(value) != {'weixin', 'telegram'}:
-            raise ValueError('Both channel policies must be explicit')
+        if set(value) != {"weixin", "telegram"}:
+            raise ValueError("Both channel policies must be explicit")
         return value

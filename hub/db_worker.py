@@ -1,4 +1,5 @@
 """Run complete synchronous authorization/transaction phases off the ASGI loop."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +22,7 @@ def database_endpoint(store, *, read_only=False):
     The decorated function must not await or manipulate loop-owned objects.
     Request authentication and dependent writes remain in the SAME job.
     """
+
     def decorate(function):
         if inspect.iscoroutinefunction(function):
             raise TypeError("database_endpoint requires a synchronous function")
@@ -33,4 +35,5 @@ def database_endpoint(store, *, read_only=False):
 
         endpoint.__signature__ = inspect.signature(function, eval_str=True)
         return endpoint
+
     return decorate

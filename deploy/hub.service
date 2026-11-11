@@ -1,6 +1,6 @@
 # Native installation example. Create a dedicated codepier user and edit paths first.
 [Unit]
-Description=CodePier CodePier Hub
+Description=CodePier Hub
 Wants=network-online.target
 After=network-online.target
 [Service]

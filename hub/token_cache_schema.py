@@ -5,6 +5,7 @@ updates do not change visibility: a metric may be stale for the documented
 refresh interval, while reassigning its authorization fields invalidates every
 cached snapshot immediately. No payload or identity is stored in revisions.
 """
+
 from __future__ import annotations
 
 
@@ -15,8 +16,12 @@ def install(store):
             data_revision INTEGER NOT NULL DEFAULT 0,
             visibility_revision INTEGER NOT NULL DEFAULT 0)""")
         store.db.execute("INSERT OR IGNORE INTO token_dashboard_revision(id) VALUES(1)")
-        tables = {row["name"] for row in store.all(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('mcp_activity','mcp_usage')")}
+        tables = {
+            row["name"]
+            for row in store.all(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('mcp_activity','mcp_usage')"
+            )
+        }
         for table in sorted(tables):
             for operation in ("INSERT", "UPDATE", "DELETE"):
                 name = f"token_dashboard_{table}_{operation.lower()}"
@@ -38,7 +43,9 @@ def install(store):
 
 
 def revision(store):
-    row = store.one("SELECT data_revision,visibility_revision FROM token_dashboard_revision WHERE id=1")
+    row = store.one(
+        "SELECT data_revision,visibility_revision FROM token_dashboard_revision WHERE id=1"
+    )
     if row is None:
         raise RuntimeError("Missing token dashboard revision record")
     return row["data_revision"], row["visibility_revision"]

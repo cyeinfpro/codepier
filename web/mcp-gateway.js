@@ -33,7 +33,7 @@ window.CodePierGateway = (() => {
       );
     return `<div id="gateway-page">${heading(
       'MCP 网关',
-      'CONNECT / REVIEW / DELEGATE',
+      '连接与授权',
       '独立帐户 · 明确发布 · 当前权限',
       `${state.instance_admin ? '<button class="btn primary" data-gw="connector">添加 MCP 服务</button>' : ''}<button class="btn" data-gw="account">连接后端帐户</button>`,
     )}
@@ -42,7 +42,7 @@ window.CodePierGateway = (() => {
       ${section('账号与凭据', state.accounts.map((a) => `<div class="grant-row"><div><strong>${esc(a.label)}</strong> · ${a.sharing === 'space' ? '空间共享' : '个人私有'} · ${a.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(a.id)}</p><small>服务：${esc(state.connectors.find((c) => c.id === a.connector_id)?.label || '未提供')} · ${a.catalog_hash ? '已有发现目录，仍需明确发布' : '尚未发现当前帐户的工具'}</small></div>${manageable(a) ? `<div class="actions"><button class="btn small" data-gw-discover="${esc(a.id)}">发现 / 审核工具</button><button class="btn small" data-gw-account="${esc(a.id)}">更新凭据</button><button class="btn small" data-gw-toggle="accounts" data-id="${esc(a.id)}" data-version="${a.version}" data-enabled="${a.enabled ? '1' : '0'}">${a.enabled ? '暂停' : '恢复'}</button></div>` : ''}</div>`).join('') || empty('凭据加密存放在 Hub，不会回传到页面。'))}
       ${section('已发布工具', state.bindings.map((b) => `<div class="grant-row"><div><strong>${esc(b.alias)}__…</strong> · ${esc(accountLabel(b.account_id))} · ${b.enabled ? '启用' : '暂停'}<p class="mono gw-wrap">${esc(b.id)}</p><p class="gw-wrap">${b.tools.map(esc).join(' · ')}</p></div><div class="actions">${state.space_admin ? `<button class="btn small" data-gw-role="${esc(b.id)}">配置角色工具权限</button>` : ''}${manageable(state.accounts.find((a) => a.id === b.account_id)) ? `<button class="btn small" data-gw-toggle="bindings" data-id="${esc(b.id)}" data-version="${b.version}" data-enabled="${b.enabled ? '1' : '0'}">${b.enabled ? '暂停' : '恢复'}</button>` : ''}</div></div>`).join('') || empty('在帐户的工具发现窗口选择工具并发布命名空间。'))}
       ${section('我的连接委派', `<p class="form-note">既有 Role grant 不会自动获得外部 MCP 权限。下列同意仅影响该 grant；撤销不影响本地 CodePier 项目权限。</p>${state.grants.map((g) => `<div class="grant-row"><div><strong>${esc(g.label)}</strong><p class="mono gw-wrap">${esc(g.id)}</p><small>${g.consent_version ? '已明确同意外部 MCP 委派' : '尚未同意'}</small></div><button class="btn small" data-gw-consent="${esc(g.id)}">${g.consent_version ? '撤销外部委派' : '查看政策并同意'}</button></div>`).join('') || empty('先在访问 Profiles 建立 Role 连接。')}`)}
-      ${section('最近调用', `<p class="form-note">最多显示 50 条私有调用摘要，不包含原始参数、凭据或结果。unknown 不等于未执行，必须核对原回执，不能自动重发。</p>${state.calls.map((c) => `<div class="grant-row"><div><strong>${esc(c.tool)}</strong> · ${esc(c.state)}<p class="mono gw-wrap">${esc(c.id)}</p><small>${esc(timeText(c.created))}${c.error_code ? ' · ' + esc(c.error_code) : ''}</small></div></div>`).join('') || empty('尚无外部 MCP 调用。')}`)}</div>`;
+      ${section('最近调用', `<p class="form-note">最多显示 50 条私有调用摘要，不包含原始参数、凭据或结果。unknown 表示执行结果待确认，请先查看原请求的状态。</p>${state.calls.map((c) => `<div class="grant-row"><div><strong>${esc(c.tool)}</strong> · ${esc(c.state)}<p class="mono gw-wrap">${esc(c.id)}</p><small>${esc(timeText(c.created))}${c.error_code ? ' · ' + esc(c.error_code) : ''}</small></div></div>`).join('') || empty('尚无外部 MCP 调用。')}`)}</div>`;
   }
 
   function form(title, body, save) {
@@ -83,7 +83,7 @@ window.CodePierGateway = (() => {
               [408, 500, 502, 503, 504].includes(error.status);
             node.dataset.submission = uncertain ? 'uncertain' : 'rejected';
             $('#gw-status', dialog).textContent = uncertain
-              ? '保存结果尚未确认，已锁定重复提交。请关闭并刷新配置核对原结果；凭据不会保留，不能把空输入自动当作新的无认证配置。'
+              ? '保存结果待确认，重复提交已锁定。请关闭并刷新配置查看结果；如需再次保存，请重新填写凭据或明确选择无认证。'
               : error.message;
             $('#gw-status', dialog).classList.add('error-text');
           }

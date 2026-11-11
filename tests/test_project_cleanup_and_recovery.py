@@ -61,7 +61,7 @@ else:
 def records_fixture():
     from agent.integration_state import Records
 
-    db = sqlite3.connect(':memory:')
+    db = sqlite3.connect(':memory:', check_same_thread=False)
     db.row_factory = sqlite3.Row
     return Records(SimpleNamespace(db=db, lock=threading.RLock())), db
 
@@ -109,7 +109,7 @@ def test_cross_workspace_enumeration_still_requires_internal_owner_cleanup():
     records, db = records_fixture()
     try:
         with pytest.raises(DevError) as error:
-            records.project_entries('browser', {'id': 'p', 'root': '/fixture', '_integration_owner': 'owner'})
+            records.project_record_ids('browser', {'id': 'p', 'root': '/fixture', '_integration_owner': 'owner'})
         assert error.value.status == 403
     finally:
         db.close()
@@ -200,3 +200,130 @@ def test_repair_preserves_local_policy_and_history_paths(tmp_path, monkeypatch):
         assert updated[key] == config[key]
     backup = list(tmp_path.glob('config.json.before-repair-*'))
     assert len(backup) == 1 and json.loads(backup[0].read_text(encoding='utf-8')) == config
+
+
+@pytest.mark.parametrize('damage', ['json', 'shape', 'wrong_id', 'missing_owner', 'extra_binding', 'save_error'])
+def test_project_browser_cleanup_isolates_damaged_receipts(monkeypatch, damage):
+    from agent.background_browser import BrowserBroker
+    from agent.integration_state import binding
+
+    records, db = records_fixture()
+    project = {'id': 'fixture', 'root': '/fixture', '_integration_owner': 'owner'}
+    bad_id, good_id = '1' * 32, '2' * 32
+    bad = {'lease_id': bad_id, 'state': 'ready'}
+    identity = binding(project)
+    if damage == 'wrong_id':
+        bad['lease_id'] = good_id
+    if damage == 'missing_owner':
+        identity.pop('owner')
+    if damage == 'extra_binding':
+        identity['unexpected'] = 'another identity'
+    raw = '{broken body' if damage == 'json' else '[]' if damage == 'shape' else json.dumps(bad)
+    try:
+        with db:
+            db.execute('INSERT INTO integration_records VALUES (?,?,?,?,?)',
+                       ('browser', bad_id, json.dumps(identity), raw, 1))
+        records.save('browser', good_id, project, {'lease_id': good_id, 'state': 'ready'})
+        original = records.save
+        if damage == 'save_error':
+            def save(kind, identifier, bound, body, **keywords):
+                if identifier == bad_id:
+                    raise sqlite3.OperationalError('synthetic bad receipt')
+                return original(kind, identifier, bound, body, **keywords)
+            monkeypatch.setattr(records, 'save', save)
+        broker = BrowserBroker(SimpleNamespace(config={}), records)
+        calls = []
+
+        async def close(action, body, **keywords):
+            calls.append(body['lease_id'])
+            return {'tab_cleanup_confirmed': True}
+
+        broker.rpc = close
+        result = asyncio.run(broker.release_project(project))
+        outcomes = {row['lease_id']: row for row in result}
+        assert set(outcomes) == {bad_id, good_id}
+        assert outcomes[bad_id]['tab_cleanup_confirmed'] is False
+        assert outcomes[bad_id]['error'] in {'RECORD_INVALID', 'RECORD_NOT_FOUND', 'RECORD_STORAGE_ERROR'}
+        assert outcomes[good_id]['tab_cleanup_confirmed'] is True
+        assert calls == [good_id], 'an invalid receipt must not target another lease'
+        assert records.load('browser', good_id, project)['state'] == 'closed'
+        assert db.execute('SELECT body FROM integration_records WHERE id=?', (bad_id,)).fetchone()[0] == raw
+    finally:
+        db.close()
+
+
+def test_project_cleanup_does_not_materialize_finished_browser_history():
+    from agent.background_browser import BrowserBroker
+    from agent.integration_state import binding
+
+    records, db = records_fixture()
+    project = {'id': 'fixture', 'root': '/fixture', '_integration_owner': 'owner'}
+    bound = json.dumps(binding(project))
+    try:
+        with db:
+            db.executemany('INSERT INTO integration_records VALUES (?,?,?,?,?)',
+                [('browser', f'{i:032x}', bound, json.dumps({'lease_id': f'{i:032x}', 'state': 'closed'}), i)
+                 for i in range(300)])
+        pending_id = 'f' * 32
+        records.save('browser', pending_id, project,
+                     {'lease_id': pending_id, 'state': 'closed', 'tab_cleanup_confirmed': False})
+        fetched = []
+
+        def observe(cursor, row):
+            fetched.append(tuple(row))
+            return sqlite3.Row(cursor, row)
+
+        db.row_factory = observe
+        broker = BrowserBroker(SimpleNamespace(config={}), records)
+
+        async def close(action, body, **keywords):
+            assert body['lease_id'] == pending_id
+            return {'tab_cleanup_confirmed': True}
+
+        broker.rpc = close
+        result = asyncio.run(broker.release_project(project))
+        assert result == [{'lease_id': pending_id, 'workspace_id': '', 'tab_cleanup_confirmed': True}]
+        assert len(fetched) <= 4, 'finished history should not become Python objects during cleanup'
+        db.row_factory = sqlite3.Row
+        assert db.execute('SELECT COUNT(*) FROM integration_records').fetchone()[0] == 301
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_project_stop_does_not_block_another_projects_controls():
+    from agent.integration_control import Controls
+
+    records, db = records_fixture()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def close_project(project):
+        entered.set()
+        await release.wait()
+        return [{'lease_id': 'fixture', 'tab_cleanup_confirmed': False}]
+
+    agent = SimpleNamespace(journal=records.journal, integration_projects={}, integration_tool_names={},
+                            jobs={}, processes={},
+                            integrations=SimpleNamespace(browser=SimpleNamespace(release_project=close_project)))
+    control = Controls(agent)
+    first = {'id': 'first', 'alias': 'first', 'root': '/fixture/first', '_integration_admin': True}
+    second = {**first, 'id': 'second', 'alias': 'second', 'root': '/fixture/second'}
+    stop = asyncio.create_task(control.action('stop', first, {'action': 'stop', 'confirm': 'first'}))
+    resume = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        other = await asyncio.wait_for(control.action('other', second,
+            {'action': 'resume', 'confirm': 'second'}), .5)
+        assert other['paused'] is False and control.state(first)['paused'] is True
+        # Same-project controls must still serialize, including while cleanup is pending.
+        resume = asyncio.create_task(control.action('resume', first, {'action': 'resume', 'confirm': 'first'}))
+        await asyncio.sleep(0)
+        assert not resume.done()
+        release.set()
+        assert (await stop)['complete'] is False
+        assert (await resume)['paused'] is False
+        assert not control.locks, 'completed projects must not retain locks forever'
+    finally:
+        release.set()
+        await asyncio.gather(stop, *([resume] if resume else []), return_exceptions=True)
+        db.close()

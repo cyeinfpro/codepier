@@ -5,7 +5,7 @@ import json
 from cryptography.fernet import Fernet
 import pytest
 
-from shared.dot_outbox import DotOutbox
+from docs.examples.dot_outbox import DotOutbox
 from shared.util import DevError
 from tests.collaboration_support import collab as collab, key
 from tests.test_collaboration_dot_chat import duplex, owner_message

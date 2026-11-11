@@ -670,7 +670,7 @@ def test_real_downloader_revalidates_redirects_without_external_network(relay, m
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(incoming_artifacts, "PublicTLSConnection", Connection)
+    monkeypatch.setattr('shared.file_download.PublicTLSConnection', Connection)
     monkeypatch.setattr(native, "download_chunks", incoming_artifacts.download_chunks)
     if allowed:
         assert run_import(relay)["created"]
@@ -830,7 +830,7 @@ def test_actual_stream_limit_without_content_length_never_begins(relay, monkeypa
 
     policy = {**native.native_source_policy(), "max_bytes": 3}
     monkeypatch.setattr(native, "native_source_policy", lambda store=None: policy)
-    monkeypatch.setattr(incoming_artifacts, "PublicTLSConnection", Connection)
+    monkeypatch.setattr('shared.file_download.PublicTLSConnection', Connection)
     monkeypatch.setattr(native, "download_chunks", incoming_artifacts.download_chunks)
     value = request()
     value["file"].pop("size")

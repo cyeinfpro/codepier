@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from shared.audit_redaction import redact_command, redact_text
 
-VERSION = '1.33.12'
+VERSION = "1.33.13"
 
 
 class DevError(Exception):
@@ -22,7 +22,11 @@ def normalize_url(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("地址必须是 HTTP(S) 根地址文字")
     value = value.strip()
-    if not value or not valid_json_value(value) or any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in value):
+    if (
+        not value
+        or not valid_json_value(value)
+        or any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in value)
+    ):
         raise ValueError("地址不可包含空白、控制字符或反斜杠")
     if "://" not in value:
         value = "http://" + value
@@ -102,7 +106,7 @@ def fsync_directory(directory: Path) -> None:
 
 def atomic_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp = tempfile.mkstemp(prefix=".rd-", dir=path.parent)
+    fd, temp = tempfile.mkstemp(prefix=".codepier-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -119,28 +123,67 @@ def atomic_json(path: Path, data: dict) -> None:
 def safe_summary(value, limit: int = 500):
     """Do not copy file contents, credentials or command output into audit inputs."""
     if isinstance(value, dict):
-        # Scrub the complete command before truncating, without changing the
-        # request that will be executed. Inline environment values stay private.
-        if isinstance(value.get("command"), str):
-            value = {**value, "command": redact_command(value["command"])}
-        if 'upload_id' in value and any(key in value for key in ('data', 'data_base64')):
-            return {key: ('<private binary chunk>' if key in {'data', 'data_base64'}
-                          else safe_summary(item, limit)) for key, item in value.items()}
-        if 'download_url' in value and 'file_id' in value:
+        if "download_url" in value and "file_id" in value:
             from shared.file_sources import source_metadata
-            return {'native_file': '<private file reference>', 'size': value.get('size'), **source_metadata(value['download_url'])}
-        if isinstance(value.get('action'), str) and value['action'] in {'fill','key','navigate','select'}:
-            return {k: ('<private input>' if k in {'value','url'} else safe_summary(v,limit)) for k,v in value.items()}
-        if isinstance(value.get("action"), dict) and value["action"].get("type") in {"type_text", "set_value", "select_text", "press_key", "perform_secondary_action", "click", "drag", "scroll"}:
-            action = value["action"]
-            return {k: ({field: (f"<{len(str(v))} chars>" if field in {"text", "value", "prefix", "suffix", "key"} else safe_summary(v, limit)) for field, v in action.items()} if k == "action" else safe_summary(v, limit)) for k, v in value.items()}
-        if "env" in value and isinstance(value["env"], dict):
-            return {k: ({name: "<redacted>" for name in v} if k == "env" else safe_summary({k: v}, limit)[k]) for k, v in value.items()}
-        return {k: (f"<{len(str(v))} chars>" if any(s in k.lower() for s in
-                     ("content", "secret", "token", "password", "old_text", "new_text", "verifier",
-                      "passwd", "passphrase", "api_key", "apikey", "api-key", "authorization",
-                      "cookie", "credential", "private_key", "headers"))
-                    else safe_summary(v, limit)) for k, v in value.items()}
+
+            return {
+                "native_file": "<private file reference>",
+                "size": safe_summary(value.get("size"), limit),
+                **source_metadata(value["download_url"]),
+            }
+        private_chunk = "upload_id" in value
+        action = value.get("action")
+        private_input = isinstance(action, str) and action in {"fill", "key", "navigate", "select"}
+        native_type = value.get("type")
+        native_input = isinstance(native_type, str) and native_type in {
+            "type_text",
+            "set_value",
+            "select_text",
+            "press_key",
+            "perform_secondary_action",
+            "click",
+            "drag",
+            "scroll",
+        }
+        result = {}
+        for key, item in value.items():
+            # Every request shape goes through the same credential filter.
+            if any(
+                part in str(key).lower()
+                for part in (
+                    "content",
+                    "secret",
+                    "token",
+                    "password",
+                    "old_text",
+                    "new_text",
+                    "verifier",
+                    "passwd",
+                    "passphrase",
+                    "api_key",
+                    "apikey",
+                    "api-key",
+                    "authorization",
+                    "cookie",
+                    "credential",
+                    "private_key",
+                    "headers",
+                )
+            ):
+                result[key] = f"<{len(str(item))} chars>"
+            elif key == "env" and isinstance(item, dict):
+                result[key] = {name: "<redacted>" for name in item}
+            elif private_chunk and key in {"data", "data_base64"}:
+                result[key] = "<private binary chunk>"
+            elif private_input and key in {"value", "url"}:
+                result[key] = "<private input>"
+            elif native_input and key in {"text", "value", "prefix", "suffix", "key"}:
+                result[key] = f"<{len(str(item))} chars>"
+            else:
+                if key == "command" and isinstance(item, str):
+                    item = redact_command(item)
+                result[key] = safe_summary(item, limit)
+        return result
     if isinstance(value, list):
         return [safe_summary(v, limit) for v in value[:30]]
     if isinstance(value, str):

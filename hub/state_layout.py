@@ -1,4 +1,5 @@
 """Explicit opt-in separation of versioned state from stable user files."""
+
 from __future__ import annotations
 import json
 import os
@@ -8,6 +9,7 @@ STATE_LAYOUT = "split-state-v1"
 STATE_MARKER = ".codepier-state.json"
 STATE_SNAPSHOT_REQUIRED = frozenset({"hub.sqlite3", "master.key", STATE_MARKER})
 STATE_SNAPSHOT_FILES = STATE_SNAPSHOT_REQUIRED | {"master.keys.json", "native-cli/native.sqlite3"}
+
 
 def state_directory(data_directory: str | Path) -> Path:
     data = Path(data_directory).expanduser().resolve()
@@ -29,5 +31,7 @@ def state_directory(data_directory: str | Path) -> Path:
     for name in ("hub.sqlite3", "master.key"):
         path = state / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
-            raise RuntimeError("Split state identity is incomplete; restore matching database and keys")
+            raise RuntimeError(
+                "Split state identity is incomplete; restore matching database and keys"
+            )
     return state

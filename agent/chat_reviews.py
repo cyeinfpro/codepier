@@ -1,4 +1,5 @@
 """Best-effort per-turn reviews, independent of browser lifetime or model output."""
+
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -14,12 +15,20 @@ class TurnReviews:
 
     def engine(self):
         # Never create a Journal here: its constructor performs Agent recovery.
-        with self.config_path.open(encoding='utf-8') as source:
+        with self.config_path.open(encoding="utf-8") as source:
             config = json.load(source)
-        engine = FileEngine(config, SimpleNamespace(directory=self.directory.parent), self.config_path)
-        project = {'id': self.row['project_id'], 'alias': self.row['project_id'],
-                   'root': self.row['root'], 'device_id': self.row['device_id'],
-                   'mode': 'write', 'allow_tasks': True, '_coding_owner': 'native:'+self.row['id']}
+        engine = FileEngine(
+            config, SimpleNamespace(directory=self.directory.parent), self.config_path
+        )
+        project = {
+            "id": self.row["project_id"],
+            "alias": self.row["project_id"],
+            "root": self.row["root"],
+            "device_id": self.row["device_id"],
+            "mode": "write",
+            "allow_tasks": True,
+            "_coding_owner": "native:" + self.row["id"],
+        }
         engine.root(project)  # Fresh local root authorization at BOTH ends of a turn.
         return engine, project
 
@@ -27,9 +36,9 @@ class TurnReviews:
         try:
             engine, project = self.engine()
             document = ReviewStore(engine).save(capture(engine, project))
-            self.baselines[receipt] = document['id']
+            self.baselines[receipt] = document["id"]
         except Exception as exc:  # Optional review failures must not interrupt native execution.
-            self.baselines[receipt] = {'code': getattr(exc, 'code', 'REVIEW_UNAVAILABLE')}
+            self.baselines[receipt] = {"code": getattr(exc, "code", "REVIEW_UNAVAILABLE")}
 
     def finish(self, receipt):
         baseline = self.baselines.pop(receipt, None)
@@ -38,20 +47,35 @@ class TurnReviews:
         finalized = False
         try:
             if isinstance(baseline, dict):
-                return {'available': False, 'status': 'unavailable', 'text': '未能记录修改前快照，不能核实本轮改动。', 'reason': baseline['code']}
+                return {
+                    "available": False,
+                    "status": "unavailable",
+                    "text": "未能记录修改前快照，不能核实本轮改动。",
+                    "reason": baseline["code"],
+                }
             engine, project = self.engine()
             summary = freeze_review(engine, project, baseline, finalize=True)
             finalized = True
             # The persistent transcript contains a compact summary; large private
             # source/diff data stays in the bounded review store and loads on demand.
-            coverage = summary['coverage']
-            return {**summary, 'available': True,
-                    'coverage': {'complete': coverage['complete'],
-                                 'skipped_files': len(coverage['before']['skipped'])+len(coverage['after']['skipped'])},
-                    'text': '本轮期间改动 · '+str(summary['summary']['files'])+' 个文件'}
+            coverage = summary["coverage"]
+            return {
+                **summary,
+                "available": True,
+                "coverage": {
+                    "complete": coverage["complete"],
+                    "skipped_files": len(coverage["before"]["skipped"])
+                    + len(coverage["after"]["skipped"]),
+                },
+                "text": "本轮期间改动 · " + str(summary["summary"]["files"]) + " 个文件",
+            }
         except Exception as exc:  # Optional review failures must not interrupt native execution.
-            return {'available': False, 'status': 'unavailable', 'text': '改动审阅暂不可用；不会把未知结果显示为没有修改。',
-                    'reason': getattr(exc, 'code', 'REVIEW_UNAVAILABLE')}
+            return {
+                "available": False,
+                "status": "unavailable",
+                "text": "改动审阅暂不可用；不会把未知结果显示为没有修改。",
+                "reason": getattr(exc, "code", "REVIEW_UNAVAILABLE"),
+            }
         finally:
             if isinstance(baseline, str) and not finalized:
                 try:

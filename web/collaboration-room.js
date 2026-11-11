@@ -1,179 +1,6 @@
-'use strict';
-// Room-first panel. Authorization, readiness and recovery actions come from Hub.
-window.CodePierCollaboration = (() => {
-  const store = window.CodePierRoomStore.create((...args) => api(...args));
-  const state = store.state;
-  const E = (value) => CP.ui.esc(String(value ?? ''));
-  const icon = (name) =>
-    name === 'message'
-      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/></svg>'
-      : CP.ui.icon(name);
-  const btn = (action, label, extra = '', cls = '') =>
-    `<button type="button" class="cr-button ${cls}" data-cr-action="${action}" ${extra}>${label}</button>`;
-  const field = (label, control) =>
-    `<label class="cr-field"><span>${label}</span>${control}</label>`;
-  const base = '/api/collaboration';
-  const connectionsPath = base + '/connections';
-  const hostPath = (id) => connectionsPath + '/' + encodeURIComponent(id);
-  const batchPath = connectionsPath + '/rebind-batch';
-  const hostStates = {
-    invited: '等待接入',
-    pending: '等待接入',
-    waiting_host: '等待接入',
-    waiting_for_host: '等待接入',
-    verifying: '正在验证',
-    connected: '已连接',
-    ready: '已连接',
-    ready_chat: '已连接',
-    ready_work: '已连接',
-    active: '已登记',
-    recovering: '正在恢复',
-    awaiting_host_refresh: '等待宿主续订',
-    waiting_host_refresh: '等待宿主续订',
-    waiting_host_renewal: '等待宿主续订',
-    authorization_expired: '授权已到期',
-    grant_expired: '授权已到期',
-    paused: '已暂停',
-    revoked: '已撤销',
-  };
-  const connectionState = (item) => hostStates[item.display_state || item.state] || '路线待核对';
-  const connectionName = (item) => item.label || item.name || 'dot 连接';
-  const connectionRoomSummary = (item) =>
-    item.single_room_title ||
-    (Number.isInteger(item.room_count) ? `${item.room_count} 个房间` : '');
-  const reuseAnchor = (item) =>
-    item.host_connection_id ? item.reuse_member_id : item.member_id || item.id;
-  const supportsHostReuse = (item, capabilities) =>
-    item.connection_capabilities?.verified_reuse ?? capabilities.verified_reuse ?? false;
-  const connectionChoice = (item) => item.host_connection_id || reuseAnchor(item);
-  const connectionChoiceLabel = (item) => {
-    if (!item.host_connection_id)
-      return connectionName(item) + ' · ' + (item.room_title || '原房间');
-    const last = item.last_round_trip_at || item.verified_at;
-    return [
-      connectionName(item),
-      connectionState(item),
-      connectionRoomSummary(item),
-      last ? `最近往返 ${dateTime(last)}` : '',
-    ]
-      .filter(Boolean)
-      .join(' · ');
-  };
-  const connectionListPath = (cursor, host = true) =>
-    connectionsPath +
-    '?limit=40' +
-    (host ? '&host_connections=true' : '') +
-    (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
-  const stages = {
-    invited: '等待 dot 接入',
-    joining: '正在连接',
-    waiting_host: '等待在 dot 中确认',
-    verifying: '正在验证回复',
-    ready_chat: '可以聊天',
-    ready_work: '可以协作',
-    degraded: '需要恢复连接',
-    paused: '已暂停',
-    removed: '已移除',
-    choose_account: '选择微信账号',
-    scan: '扫码登录',
-    confirm_account: '确认微信账号',
-    pairing: '确认本人',
-    confirm_owner: '确认房间与范围',
-    ready: '微信已连接',
-    expired: '连接已过期',
-  };
-  const workLabels = {
-    queued: '排队中',
-    leased: '排队中',
-    running: '进行中',
-    verifying: '正在验收',
-    waiting_input: '等你回复',
-    waiting_user: '等你回复',
-    waiting_member: '等待 dot 处理',
-    waiting_authorization: '等待授权',
-    waiting_target: '等待执行环境',
-    reconciling: '正在核对原操作回执',
-    blocked: '暂时受阻',
-    unknown: '结果待核对',
-    reconnecting: '等待连接恢复',
-    succeeded: '已完成',
-    completed: '已完成',
-    paused: '已暂停',
-    cancelling: '正在停止',
-    stopping: '正在停止',
-    cancelled: '已停止',
-    failed: '失败',
-    expired: '已过期',
-  };
-  const memberBadges = {
-    invited: '连接中',
-    joining: '连接中',
-    waiting_host: '连接中',
-    verifying: '连接中',
-    ready_chat: '在线',
-    ready_work: '在线',
-    degraded: '需要处理',
-    paused: '已暂停',
-    removed: '已移除',
-  };
-  const deliveryLabels = {
-    queued: '待发送',
-    pending: '待发送',
-    preparing: '待发送',
-    leased: '待发送',
-    sending: '发送中',
-    waiting_context: '等待发送条件',
-    waiting_media: '等待附件',
-    blocked: '等待前一条回复',
-    accepted: '已受理',
-    owner_confirmed: '本人已核对收到',
-    needs_attention: '发送失败',
-    attention: '发送失败',
-    rejected: '发送失败',
-    failed: '发送失败',
-    unknown: '发送结果待核对',
-    insufficient_evidence: '无投递证据',
-    cancelled: '已取消',
-    superseded: '已替换',
-  };
-  const finishedWork = (work) =>
-    ['succeeded', 'completed', 'cancelled', 'failed', 'expired'].includes(work.state);
-  const workSourceId = (work) =>
-    work.original_source_message_id || work.source_message_id || work.intent?.source_message_id;
-  const workStatus = (work) => work.display?.title || workLabels[work.state] || '状态待核对';
-  const contextKinds = {
-    objective: '当前目标',
-    decision: '已确认决策',
-    constraint: '当前约束',
-    question: '待回答问题',
-    artifact: '产物引用',
-  };
-  let root = null,
-    timer = null,
-    bound = null,
-    panel = null,
-    panelEpoch = 0,
-    pollPromise = null,
-    pollAgain = false,
-    hints = null,
-    hintsConnected = false,
-    accessBlocked = false;
-  let requestedProject = '',
-    unsubscribe = null,
-    abortEvents = null,
-    suspended = false;
-  const activeRoom = () => store.writable();
-  const readOnlyReason = () =>
-    state.room?.legacy
-      ? '这是旧版房间。处理完迁移清单后即可继续使用。'
-      : '房间已暂停或归档，恢复后才能发消息。';
-  const retryableContinuationPreview = new Set([
-    'ROOM_CONTINUATION_PREVIEW_EXPIRED',
-    'ROOM_CONTINUATION_PREVIEW_CHANGED',
-    'ROOM_CONTINUATION_SELECTION_CHANGED',
-  ]);
-  const safeWorkActions = new Set(['pause', 'cancel', 'stop']);
-  const safeChannelActions = new Set(['pause', 'disconnect', 'revoke_tasks', 'cancel']);
+// Generated by web/mcp-apps/build-room.mjs; edit web/collaboration-room/*.mjs.
+(() => {
+  // ../collaboration-room/presentation.mjs
   function mutationAllowed(method, url, body, roomId = state.roomId) {
     if (url === base + '/rooms' || store.writable(roomId)) return true;
     if (
@@ -203,118 +30,48 @@ window.CodePierCollaboration = (() => {
     panel ? panelError(message) : announce(message, true);
     throw Object.assign(new Error(message), { code: 'ROOM_READ_ONLY' });
   }
-  const currentOwner = () =>
-    [S.session?.user_id || S.session?.username || '', S.space_id || ''].join(':');
-  const memberId = (item) => item.member_id || item.id;
-  const memberShort = (item) => '#' + memberId(item).slice(0, 8);
-  const memberOrigin = (item) =>
-    item.host_label ||
-    (item.host_connection_id
-      ? '独立 dot 连接'
-      : item.connection_source_member_id
-        ? '来自连接 #' + item.connection_source_member_id.slice(0, 8)
-        : item.legacy
-          ? '原连接待迁移'
-          : item.evidence?.host_bound
-            ? '本房间已登记的宿主'
-            : '宿主尚未登记');
-  const members = () => (state.room?.members || []).filter((item) => item.state !== 'removed');
-  const title = (item) => item?.display?.title || stages[item?.stage || item?.state] || '等待连接';
-  // Rooms carried over from project partitions were titled with raw project
-  // IDs ("267454898aed… · production"). Show the project alias instead.
-  const rawPartitionTitle = /^([0-9a-f]{32})(?:\s*·\s*(.+))?$/i;
-  const projectLabel = (id, room) =>
-    S.projects?.find((p) => p.id === id)?.alias ||
-    S.projects?.find((p) => p.id === id)?.name ||
-    room?.projects?.find((p) => p.project_id === id)?.project_label ||
-    room?.projects?.find((p) => p.project_id === id)?.alias ||
-    '';
   function roomName(room) {
     const raw = String(room?.title || '').trim();
     const match = rawPartitionTitle.exec(raw);
-    if (!match) return raw || '未命名房间';
+    if (!match) return raw || '\u672A\u547D\u540D\u623F\u95F4';
     const alias = projectLabel(match[1], room);
-    const env = match[2] && match[2] !== 'production' ? ' · ' + match[2] : '';
-    return (alias || '项目 ' + match[1].slice(0, 6)) + env;
+    const env = match[2] && match[2] !== 'production' ? ' \xB7 ' + match[2] : '';
+    return (alias || '\u9879\u76EE ' + match[1].slice(0, 6)) + env;
   }
-  const roomProjects = (room) =>
-    (room?.projects || [])
-      .filter((p) => p.state !== 'removed')
-      .map((p) => projectLabel(p.project_id, room) || p.project_id?.slice(0, 6))
-      .filter(Boolean);
   function roomSubtitle(room) {
     if (!room) return '';
-    if (room.state === 'archived') return '已归档';
-    if (room.state === 'paused') return '已暂停';
+    if (room.state === 'archived') return '\u5DF2\u5F52\u6863';
+    if (room.state === 'paused') return '\u5DF2\u6682\u505C';
     const names = roomProjects(room);
-    const title = roomName(room);
+    const title2 = roomName(room);
     const count = (room.projects || []).filter((p) => p.state !== 'removed').length;
     const projects =
-      names.length === 1 && names[0] === title
-        ? '1 个项目'
+      names.length === 1 && names[0] === title2
+        ? '1 \u4E2A\u9879\u76EE'
         : names.length
-          ? names.slice(0, 2).join('、') + (names.length > 2 ? ` 等 ${names.length} 个项目` : '')
+          ? names.slice(0, 2).join('\u3001') +
+            (names.length > 2 ? ` \u7B49 ${names.length} \u4E2A\u9879\u76EE` : '')
           : count
-            ? `${count} 个项目`
-            : '无关联项目';
+            ? `${count} \u4E2A\u9879\u76EE`
+            : '\u65E0\u5173\u8054\u9879\u76EE';
     return projects;
   }
   function roomChip(room) {
     if (!room) return null;
-    if (room.legacy) return { tone: 'warning', text: '只读 · 待迁移' };
-    if (room.state === 'archived') return { tone: 'muted', text: '已归档' };
-    if (room.state === 'paused') return { tone: 'muted', text: '已暂停' };
+    if (room.legacy) return { tone: 'warning', text: '\u53EA\u8BFB \xB7 \u5F85\u8FC1\u79FB' };
+    if (room.state === 'archived') return { tone: 'muted', text: '\u5DF2\u5F52\u6863' };
+    if (room.state === 'paused') return { tone: 'muted', text: '\u5DF2\u6682\u505C' };
     const list = members();
-    if (!list.length) return { tone: 'muted', text: '还没有 dot' };
+    if (!list.length) return { tone: 'muted', text: '\u8FD8\u6CA1\u6709 dot' };
     const ready = list.filter((m) => ['ready_chat', 'ready_work'].includes(m.stage || m.state));
     return ready.length
-      ? { tone: 'success', text: `${ready.length}/${list.length} 个 dot 在线` }
-      : { tone: 'warning', text: '等待 dot 接入' };
+      ? { tone: 'success', text: `${ready.length}/${list.length} \u4E2A dot \u5728\u7EBF` }
+      : { tone: 'warning', text: '\u7B49\u5F85 dot \u63A5\u5165' };
   }
-  let roomFilter = '';
-  const hue = (value) =>
-    [...String(value || '')].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 7);
-  const actionLabel = (action) =>
-    ({
-      refresh_invite: '刷新加入说明',
-      resume: '继续连接',
-      retry_probe: '重新发送连接检查',
-      pause: '暂停',
-      remove: '移除成员',
-      continue_connection: '继续连接',
-      recover_connection: '恢复连接',
-      wait_for_host_refresh: '在原 dot 继续连接',
-      awaiting_host_refresh: '在原 dot 继续连接',
-      copy_instructions: '复制加入说明',
-      view_details: '查看详情',
-      start_qr: '生成二维码',
-      poll_qr: '检查扫码状态',
-      accept_account: '确认账号',
-      bind: '生成配对说明',
-      confirm_owner: '完成连接',
-      refresh_pairing: '刷新配对说明',
-      cancel: '取消连接',
-      approve_tasks: '允许微信交办工作',
-      revoke_tasks: '仅撤销工作许可',
-      rebind: '更换连接',
-    })[action] || '继续';
-  const time = (value) =>
-    value
-      ? new Date(typeof value === 'number' ? value * 1000 : value).toLocaleTimeString('zh-CN', {
-          hour: '2-digit',
-          minute: '2-digit',
-        })
-      : '';
-  const dateTime = (value) =>
-    value === null || value === undefined || value === ''
-      ? '未提供'
-      : new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN');
-  const supplied = (value) => (value === null || value === undefined ? '未提供' : String(value));
-  const identifier = (value) => (value ? '#' + String(value).slice(0, 12) : '未提供');
   function selection(value) {
     try {
       const key = 'codepier-room:' + currentOwner();
-      if (value !== undefined) sessionStorage.setItem(key, value);
+      if (value !== void 0) sessionStorage.setItem(key, value);
       return sessionStorage.getItem(key) || '';
     } catch {
       return '';
@@ -332,8 +89,6 @@ window.CodePierCollaboration = (() => {
     if (node) {
       node.textContent = value || '';
       node.hidden = !value;
-      // The alert follows a potentially long project list. Keep a rejected
-      // save visible without moving keyboard focus or scrolling a closed panel.
       if (value && node.closest('dialog')?.open) node.scrollIntoView({ block: 'nearest' });
     }
   }
@@ -417,7 +172,9 @@ window.CodePierCollaboration = (() => {
       else if (anchor) restoreAnchor(reading);
       else {
         delete store.draft().reading;
-        announce('原阅读位置已不可见，已保留当前可读取的历史。');
+        announce(
+          '\u539F\u9605\u8BFB\u4F4D\u7F6E\u5DF2\u4E0D\u53EF\u89C1\uFF0C\u5DF2\u4FDD\u7559\u5F53\u524D\u53EF\u8BFB\u53D6\u7684\u5386\u53F2\u3002',
+        );
       }
     } catch (error) {
       if (!current()) return;
@@ -425,31 +182,15 @@ window.CodePierCollaboration = (() => {
       await store.latestMessages();
       announce(
         [400, 403, 404, 410].includes(error.status)
-          ? '原阅读位置已不在当前可读范围，已核对最新窗口。'
-          : '原阅读位置暂时无法恢复，已保留草稿并核对最新窗口。',
+          ? '\u539F\u9605\u8BFB\u4F4D\u7F6E\u5DF2\u4E0D\u5728\u5F53\u524D\u53EF\u8BFB\u8303\u56F4\uFF0C\u5DF2\u6838\u5BF9\u6700\u65B0\u7A97\u53E3\u3002'
+          : '\u539F\u9605\u8BFB\u4F4D\u7F6E\u6682\u65F6\u65E0\u6CD5\u6062\u590D\uFF0C\u5DF2\u4FDD\u7559\u8349\u7A3F\u5E76\u6838\u5BF9\u6700\u65B0\u7A97\u53E3\u3002',
       );
     } finally {
       if (current()) view._restoringReading = false;
     }
   }
-  function detach() {
-    remember();
-    rememberReading();
-    clearTimeout(timer);
-    timer = null;
-    closeHints();
-    pollAgain = false;
-    store.abort();
-    abortEvents?.abort();
-    abortEvents = null;
-    unsubscribe?.();
-    unsubscribe = null;
-    CP.ui.closeModalLayer(root?.querySelector('dialog'));
-    root = null;
-    bound = null;
-    panelEpoch++;
-    panel = null;
-  }
+
+  // ../collaboration-room/room-shell.mjs
   function clear() {
     detach();
     store.reset();
@@ -460,7 +201,7 @@ window.CodePierCollaboration = (() => {
       await store.list();
     } catch (error) {
       if (error.code === 'COLLABORATION_DISABLED')
-        return '<section class="panel cr-disabled"><h1 tabindex="-1">协作中心</h1><p>协作中心尚未启用。</p></section>';
+        return '<section class="panel cr-disabled"><h1 tabindex="-1">\u534F\u4F5C\u4E2D\u5FC3</h1><p>\u534F\u4F5C\u4E2D\u5FC3\u5C1A\u672A\u542F\u7528\u3002</p></section>';
       throw error;
     }
     const selected =
@@ -477,16 +218,16 @@ window.CodePierCollaboration = (() => {
         if (error.name !== 'AbortError') state.loadError = error.message;
       }
     } else await store.select('');
-    return `<section class="collaboration cr-shell" aria-label="协作中心">
-      <aside class="cr-sidebar" aria-label="房间列表"><header class="cr-side-head"><div><h2>房间</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>新建</span>', 'aria-label="新建房间"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">搜索房间</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter placeholder="搜索房间或项目" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '加载更多房间', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
-      <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('permissions', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', '···', 'aria-label="房间设置"', 'cr-icon')}</nav></header>
-        <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>原房间当前只读</strong><p data-cr-legacy-progress>历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。</p></div>${btn('migration', '查看迁移要求', 'data-cr-migration-open')}</div>
-        <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
-        <section class="cr-feed" aria-label="房间对话" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '回到最新')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
-        ${btn('latest', '查看新消息 ↓', 'data-cr-latest hidden', 'cr-latest')}
-        <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" placeholder="继续对话，或交办工作…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span data-cr-compose-status>Enter 发送 · Shift + Enter 换行</span></footer></form>
-      </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
-    </section>`;
+    return `<section class="collaboration cr-shell" aria-label="\u534F\u4F5C\u4E2D\u5FC3">
+    <aside class="cr-sidebar" aria-label="\u623F\u95F4\u5217\u8868"><header class="cr-side-head"><div><h2>\u623F\u95F4</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>\u65B0\u5EFA</span>', 'aria-label="\u65B0\u5EFA\u623F\u95F4"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">\u641C\u7D22\u623F\u95F4</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter placeholder="\u641C\u7D22\u623F\u95F4\u6216\u9879\u76EE" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '\u52A0\u8F7D\u66F4\u591A\u623F\u95F4', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '\u663E\u793A\u5DF2\u5F52\u6863', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
+    <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="\u663E\u793A\u623F\u95F4\u5217\u8868" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="\u623F\u95F4\u7BA1\u7406">${btn('permissions', icon('folder') + '<span data-cr-project-count>\u9879\u76EE</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>\u6210\u5458</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>\u8FDE\u63A5\u5FAE\u4FE1</span>')}${btn('settings', '\xB7\xB7\xB7', 'aria-label="\u623F\u95F4\u8BBE\u7F6E"', 'cr-icon')}</nav></header>
+      <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>\u539F\u623F\u95F4\u5F53\u524D\u53EA\u8BFB</strong><p data-cr-legacy-progress>\u5386\u53F2\u548C\u539F\u5DE5\u4F5C\u5DF2\u4FDD\u7559\u3002\u5904\u7406\u5B8C\u65E7\u8FDE\u63A5\u540E\uFF0C\u7531\u4F60\u660E\u786E\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762\u3002</p></div>${btn('migration', '\u67E5\u770B\u8FC1\u79FB\u8981\u6C42', 'data-cr-migration-open')}</div>
+      <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
+      <section class="cr-feed" aria-label="\u623F\u95F4\u5BF9\u8BDD" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '\u66F4\u65E9\u7684\u6D88\u606F')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '\u56DE\u5230\u6700\u65B0')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
+      ${btn('latest', '\u67E5\u770B\u65B0\u6D88\u606F \u2193', 'data-cr-latest hidden', 'cr-latest')}
+      <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="\u5F85\u53D1\u9001\u7684\u9644\u4EF6" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="\u6D88\u606F" placeholder="\u7EE7\u7EED\u5BF9\u8BDD\uFF0C\u6216\u4EA4\u529E\u5DE5\u4F5C\u2026" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="\u53D1\u9001\u6D88\u606F">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="\u6DFB\u52A0\u9644\u4EF6" title="\u6BCF\u4E2A\u9644\u4EF6\u6700\u591A 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="\u9009\u62E9\u9644\u4EF6"><label class="cr-recipient"><span>\u53D1\u9001\u7ED9</span><select name="member_id" aria-label="\u9009\u62E9\u5904\u7406\u6210\u5458"><option value="">\u4E3B\u8D23 dot</option></select></label></div><span data-cr-compose-status>Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C</span></footer></form>
+    </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="\u5173\u95ED\u9762\u677F"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
+  </section>`;
   }
   function patchRooms() {
     const list = root?.querySelector('[data-cr-rooms]');
@@ -508,33 +249,38 @@ window.CodePierCollaboration = (() => {
           .map((room) => {
             const name = roomName(room);
             const current = room.id === state.roomId;
-            return `<button type="button" class="cr-room ${current ? 'is-current' : ''} ${room.legacy ? 'is-legacy' : ''}" data-cr-action="select" data-id="${E(room.id)}" aria-current="${current ? 'true' : 'false'}" title="${E(room.title || name)}"><span class="cr-room-avatar" style="--cr-hue:${hue(room.id)}" aria-hidden="true">${E([...name][0] || '房')}</span><span class="cr-room-text"><strong>${E(name)}</strong><small>${E(roomSubtitle(room))}</small></span>${room.legacy ? '<span class="cr-room-flag" aria-label="待迁移">只读</span>' : ''}</button>`;
+            return `<button type="button" class="cr-room ${current ? 'is-current' : ''} ${room.legacy ? 'is-legacy' : ''}" data-cr-action="select" data-id="${E(room.id)}" aria-current="${current ? 'true' : 'false'}" title="${E(room.title || name)}"><span class="cr-room-avatar" style="--cr-hue:${hue(room.id)}" aria-hidden="true">${E([...name][0] || '\u623F')}</span><span class="cr-room-text"><strong>${E(name)}</strong><small>${E(roomSubtitle(room))}</small></span>${room.legacy ? '<span class="cr-room-flag" aria-label="\u5F85\u8FC1\u79FB">\u53EA\u8BFB</span>' : ''}</button>`;
           })
           .join('')
-      : `<p class="cr-list-empty">${needle ? '没有匹配的房间' : '还没有房间'}</p>`;
+      : `<p class="cr-list-empty">${needle ? '\u6CA1\u6709\u5339\u914D\u7684\u623F\u95F4' : '\u8FD8\u6CA1\u6709\u623F\u95F4'}</p>`;
     if (list._markup !== markup) {
       list.innerHTML = markup;
       list._markup = markup;
     }
     root.querySelector('[data-cr-more-rooms]').hidden = !state.roomsCursor;
     const archives = root.querySelector('[data-cr-action="archives"]');
-    archives.textContent = state.includeArchived ? '隐藏已归档' : '显示已归档';
+    archives.textContent = state.includeArchived
+      ? '\u9690\u85CF\u5DF2\u5F52\u6863'
+      : '\u663E\u793A\u5DF2\u5F52\u6863';
     archives.setAttribute('aria-pressed', String(state.includeArchived));
   }
   function patchHeader() {
     if (!root) return;
     const room = state.room;
     const heading = root.querySelector('[data-cr-title]');
-    heading.textContent = room ? roomName(room) : '开始一段协作';
+    heading.textContent = room ? roomName(room) : '\u5F00\u59CB\u4E00\u6BB5\u534F\u4F5C';
     heading.title = room?.title && room.title !== heading.textContent ? room.title : '';
     const projectNames = room ? roomProjects(room) : [];
     const online = members().filter((member) =>
       ['ready_chat', 'ready_work'].includes(member.stage || member.state),
     ).length;
     root.querySelector('[data-cr-status]').textContent = room
-      ? [...projectNames, members().length ? online + '/' + members().length + ' 个 dot 在线' : '']
+      ? [
+          ...projectNames,
+          members().length ? online + '/' + members().length + ' \u4E2A dot \u5728\u7EBF' : '',
+        ]
           .filter(Boolean)
-          .join(' · ')
+          .join(' \xB7 ')
       : '';
     const chip = root.querySelector('[data-cr-chip]'),
       chipValue = roomChip(room);
@@ -544,16 +290,18 @@ window.CodePierCollaboration = (() => {
       chip.dataset.tone = chipValue.tone;
     }
     root.querySelector('[data-cr-project-count]').textContent =
-      '项目 ' + (room?.projects?.filter((p) => p.state !== 'removed').length || 0);
+      '\u9879\u76EE ' + (room?.projects?.filter((p) => p.state !== 'removed').length || 0);
     root.querySelector('[data-cr-legacy]').hidden = !room?.legacy || !state.messages.length;
     const blockers = room?.migration?.blockers?.length || 0;
     root.querySelector('[data-cr-legacy-progress]').textContent = room?.migration?.eligible
-      ? '迁移条件已满足。确认后即可继续协作，历史与原工作保留。'
+      ? '\u8FC1\u79FB\u6761\u4EF6\u5DF2\u6EE1\u8DB3\u3002\u786E\u8BA4\u540E\u5373\u53EF\u7EE7\u7EED\u534F\u4F5C\uFF0C\u5386\u53F2\u4E0E\u539F\u5DE5\u4F5C\u4FDD\u7559\u3002'
       : blockers
-        ? `还有 ${blockers} 项旧连接待处理。历史与原工作已保留，处理完后由你明确启用新房间界面。`
-        : '历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。';
+        ? `\u8FD8\u6709 ${blockers} \u9879\u65E7\u8FDE\u63A5\u5F85\u5904\u7406\u3002\u5386\u53F2\u4E0E\u539F\u5DE5\u4F5C\u5DF2\u4FDD\u7559\uFF0C\u5904\u7406\u5B8C\u540E\u7531\u4F60\u660E\u786E\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762\u3002`
+        : '\u5386\u53F2\u548C\u539F\u5DE5\u4F5C\u5DF2\u4FDD\u7559\u3002\u5904\u7406\u5B8C\u65E7\u8FDE\u63A5\u540E\uFF0C\u7531\u4F60\u660E\u786E\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762\u3002';
     const migrationOpen = root.querySelector('[data-cr-migration-open]');
-    migrationOpen.textContent = room?.migration?.eligible ? '启用新房间界面' : '查看迁移要求';
+    migrationOpen.textContent = room?.migration?.eligible
+      ? '\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762'
+      : '\u67E5\u770B\u8FC1\u79FB\u8981\u6C42';
     migrationOpen.classList.toggle('cr-primary', !!room?.migration?.eligible);
     const avatars = root.querySelector('[data-cr-avatars]');
     const avatarMarkup = members()
@@ -572,14 +320,14 @@ window.CodePierCollaboration = (() => {
       !connected &&
       !['choose_account', 'cancelled', 'closed', 'disconnected'].includes(channelStage);
     root.querySelector('[data-cr-weixin-label]').textContent = connected
-      ? '微信已连接'
+      ? '\u5FAE\u4FE1\u5DF2\u8FDE\u63A5'
       : channelStage === 'paused'
-        ? '微信已暂停'
+        ? '\u5FAE\u4FE1\u5DF2\u6682\u505C'
         : attention
-          ? '微信需处理'
+          ? '\u5FAE\u4FE1\u9700\u5904\u7406'
           : pending
-            ? '继续连接微信'
-            : '连接微信';
+            ? '\u7EE7\u7EED\u8FDE\u63A5\u5FAE\u4FE1'
+            : '\u8FDE\u63A5\u5FAE\u4FE1';
     root.querySelector('[data-cr-weixin-dot]').dataset.state = connected
       ? 'ready'
       : attention
@@ -604,19 +352,17 @@ window.CodePierCollaboration = (() => {
       (p) => p.state !== 'removed',
     ).length;
     const markup = !state.room
-      ? `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('message')}</i><span></span></div><h3>还没有房间</h3><p>新建房间后就可以添加项目和 dot。</p><div class="cr-empty-actions">${btn('create', '新建房间', '', 'cr-primary')}${btn('host-list', '管理 dot 连接', '', 'cr-text-button')}</div></div>`
+      ? `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('message')}</i><span></span></div><h3>\u8FD8\u6CA1\u6709\u623F\u95F4</h3><p>\u65B0\u5EFA\u623F\u95F4\u540E\u5C31\u53EF\u4EE5\u6DFB\u52A0\u9879\u76EE\u548C dot\u3002</p><div class="cr-empty-actions">${btn('create', '\u65B0\u5EFA\u623F\u95F4', '', 'cr-primary')}${btn('host-list', '\u7BA1\u7406 dot \u8FDE\u63A5', '', 'cr-text-button')}</div></div>`
       : !activeRoom()
         ? state.room.legacy
           ? migrationChecklist()
-          : `<div class="cr-empty"><h3>房间当前只读</h3><p>${E(readOnlyReason())}</p>${btn('settings', '查看房间状态')}</div>`
-        : `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('network')}</i><span></span></div><h3>${members().length ? '发条消息开始' : '添加一个 dot'}</h3><p>${members().length ? '' : 'dot 是参与房间的助手。也可以先把目标写下来。'}</p><div class="cr-empty-actions">${!members().length ? btn('add-member', '添加 dot', '', 'cr-primary') : ''}${!activeProjectCount ? btn('projects', '添加项目') : ''}</div></div>`;
+          : `<div class="cr-empty"><h3>\u623F\u95F4\u5F53\u524D\u53EA\u8BFB</h3><p>${E(readOnlyReason())}</p>${btn('settings', '\u67E5\u770B\u623F\u95F4\u72B6\u6001')}</div>`
+        : `<div class="cr-empty"><div class="cr-orbit" aria-hidden="true"><span></span><i>${icon('network')}</i><span></span></div><h3>${members().length ? '\u53D1\u6761\u6D88\u606F\u5F00\u59CB' : '\u6DFB\u52A0\u4E00\u4E2A dot'}</h3><p>${members().length ? '' : 'dot \u662F\u53C2\u4E0E\u623F\u95F4\u7684\u52A9\u624B\u3002\u4E5F\u53EF\u4EE5\u5148\u628A\u76EE\u6807\u5199\u4E0B\u6765\u3002'}</p><div class="cr-empty-actions">${!members().length ? btn('add-member', '\u6DFB\u52A0 dot', '', 'cr-primary') : ''}${!activeProjectCount ? btn('projects', '\u6DFB\u52A0\u9879\u76EE') : ''}</div></div>`;
     if (node._markup !== markup) {
       node.innerHTML = markup;
       node._markup = markup;
     }
   }
-  // Legacy rooms: one actionable checklist instead of three copies of the same
-  // read-only sentence. Each line carries the exact next step for that blocker.
   function migrationChecklist() {
     const room = state.room,
       migration = room.migration || {},
@@ -624,32 +370,35 @@ window.CodePierCollaboration = (() => {
       counts = migration.member_counts;
     const groups = [
       [
-        '成员连接',
+        '\u6210\u5458\u8FDE\u63A5',
         blockers.filter((b) => b.code?.startsWith('MEMBER_') || b.code === 'ROOM_MEMBER_LIMIT'),
       ],
-      ['旧 dot 路线', blockers.filter((b) => b.code === 'LEGACY_ROUTE_ACTIVE')],
-      ['微信 / Telegram', blockers.filter((b) => b.code === 'LEGACY_CHANNEL_ACTIVE')],
-      ['房间状态', blockers.filter((b) => ['ROOM_PAUSED', 'ROOM_ARCHIVED'].includes(b.code))],
+      ['\u65E7 dot \u8DEF\u7EBF', blockers.filter((b) => b.code === 'LEGACY_ROUTE_ACTIVE')],
+      ['\u5FAE\u4FE1 / Telegram', blockers.filter((b) => b.code === 'LEGACY_CHANNEL_ACTIVE')],
+      [
+        '\u623F\u95F4\u72B6\u6001',
+        blockers.filter((b) => ['ROOM_PAUSED', 'ROOM_ARCHIVED'].includes(b.code)),
+      ],
     ];
     const steps = groups
       .map(
         ([label, items]) =>
-          `<li class="${items.length ? 'is-open' : 'is-done'}"><span class="cr-check" aria-hidden="true">${items.length ? items.length : '✓'}</span><div><strong>${E(label)}</strong>${
+          `<li class="${items.length ? 'is-open' : 'is-done'}"><span class="cr-check" aria-hidden="true">${items.length ? items.length : '\u2713'}</span><div><strong>${E(label)}</strong>${
             items.length
               ? `<ul>${items
                   .slice(0, 6)
                   .map((item) => migrationBlockerMarkup(item, true))
                   .join(
                     '',
-                  )}${items.length > 6 ? `<li>另有 ${items.length - 6} 项，打开迁移要求查看全部</li>` : ''}</ul>`
-              : '<p>已处理</p>'
+                  )}${items.length > 6 ? `<li>\u53E6\u6709 ${items.length - 6} \u9879\uFF0C\u6253\u5F00\u8FC1\u79FB\u8981\u6C42\u67E5\u770B\u5168\u90E8</li>` : ''}</ul>`
+              : '<p>\u5DF2\u5904\u7406</p>'
           }</div></li>`,
       )
       .join('');
     const progress = counts
-      ? `<p class="cr-muted">原成员 ${E(supplied(counts.total))} 个 · 已验证 ${E(supplied(counts.verified))} · 已移除 ${E(supplied(counts.removed))}</p>`
+      ? `<p class="cr-muted">\u539F\u6210\u5458 ${E(supplied(counts.total))} \u4E2A \xB7 \u5DF2\u9A8C\u8BC1 ${E(supplied(counts.verified))} \xB7 \u5DF2\u79FB\u9664 ${E(supplied(counts.removed))}</p>`
       : '';
-    return `<div class="cr-migrate-card"><div class="cr-migrate-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>先核对原房间的连接</h3><p>这个房间来自旧版协作中心。处理完下面的条目并启用新界面后，就能继续发消息、加 dot 和连接微信；历史、原工作和回执都会保留。</p>${progress}</div></div>${migration.eligibility_checked === false ? '<p class="cr-info">迁移条件尚未核对。</p>' : `<ol class="cr-migrate-steps">${steps}</ol>`}<div class="cr-empty-actions">${migration.eligible ? btn('migration', '启用新房间界面', '', 'cr-primary') : btn('migration', '查看迁移要求')}${btn('refresh-migration', '重新核对', '', 'cr-text-button')}</div></div>`;
+    return `<div class="cr-migrate-card"><div class="cr-migrate-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>\u5148\u6838\u5BF9\u539F\u623F\u95F4\u7684\u8FDE\u63A5</h3><p>\u8FD9\u4E2A\u623F\u95F4\u6765\u81EA\u65E7\u7248\u534F\u4F5C\u4E2D\u5FC3\u3002\u5904\u7406\u5B8C\u4E0B\u9762\u7684\u6761\u76EE\u5E76\u542F\u7528\u65B0\u754C\u9762\u540E\uFF0C\u5C31\u80FD\u7EE7\u7EED\u53D1\u6D88\u606F\u3001\u52A0 dot \u548C\u8FDE\u63A5\u5FAE\u4FE1\uFF1B\u5386\u53F2\u3001\u539F\u5DE5\u4F5C\u548C\u56DE\u6267\u90FD\u4F1A\u4FDD\u7559\u3002</p>${progress}</div></div>${migration.eligibility_checked === false ? '<p class="cr-info">\u8FC1\u79FB\u6761\u4EF6\u5C1A\u672A\u6838\u5BF9\u3002</p>' : `<ol class="cr-migrate-steps">${steps}</ol>`}<div class="cr-empty-actions">${migration.eligible ? btn('migration', '\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762', '', 'cr-primary') : btn('migration', '\u67E5\u770B\u8FC1\u79FB\u8981\u6C42')}${btn('refresh-migration', '\u91CD\u65B0\u6838\u5BF9', '', 'cr-text-button')}</div></div>`;
   }
   function patchComposer() {
     const editor = root?.querySelector('#cr-message'),
@@ -677,22 +426,22 @@ window.CodePierCollaboration = (() => {
     status.textContent =
       disabled && state.room
         ? state.room.legacy
-          ? '迁移前只读 · 草稿已保留'
-          : '房间只读 · 草稿已保留'
+          ? '\u8FC1\u79FB\u524D\u53EA\u8BFB \xB7 \u8349\u7A3F\u5DF2\u4FDD\u7559'
+          : '\u623F\u95F4\u53EA\u8BFB \xB7 \u8349\u7A3F\u5DF2\u4FDD\u7559'
         : unfinished
-          ? '请完成附件上传后发送'
+          ? '\u8BF7\u5B8C\u6210\u9644\u4EF6\u4E0A\u4F20\u540E\u53D1\u9001'
           : draft.contextCorrection
             ? staleCorrection
-              ? '请重新核对当前事实'
-              : '发送后纠正所选事实'
+              ? '\u8BF7\u91CD\u65B0\u6838\u5BF9\u5F53\u524D\u4E8B\u5B9E'
+              : '\u53D1\u9001\u540E\u7EA0\u6B63\u6240\u9009\u4E8B\u5B9E'
             : draft.work
-              ? '发送后更新原交办'
-              : 'Enter 发送 · Shift + Enter 换行';
+              ? '\u53D1\u9001\u540E\u66F4\u65B0\u539F\u4EA4\u529E'
+              : 'Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C';
     patchFiles();
     const correction = root.querySelector('[data-cr-correction]');
     correction.hidden = !draft.contextCorrection;
     if (draft.contextCorrection) {
-      const markup = `<span>${staleCorrection ? '上下文已变化，请重新选择要纠正的事实。' : '正在纠正事实 ' + E(draft.contextCorrection.ids.map(identifier).join('、')) + ' · 版本 ' + E(draft.contextCorrection.version)}</span>${btn('context', staleCorrection ? '重新核对' : '查看事实', '', 'cr-text-button')}${btn('cancel-context-correction', '×', 'aria-label="取消纠正上下文"', 'cr-icon')}`;
+      const markup = `<span>${staleCorrection ? '\u4E0A\u4E0B\u6587\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u8981\u7EA0\u6B63\u7684\u4E8B\u5B9E\u3002' : '\u6B63\u5728\u7EA0\u6B63\u4E8B\u5B9E ' + E(draft.contextCorrection.ids.map(identifier).join('\u3001')) + ' \xB7 \u7248\u672C ' + E(draft.contextCorrection.version)}</span>${btn('context', staleCorrection ? '\u91CD\u65B0\u6838\u5BF9' : '\u67E5\u770B\u4E8B\u5B9E', '', 'cr-text-button')}${btn('cancel-context-correction', '\xD7', 'aria-label="\u53D6\u6D88\u7EA0\u6B63\u4E0A\u4E0B\u6587"', 'cr-icon')}`;
       if (correction._markup !== markup) {
         correction.innerHTML = markup;
         correction._markup = markup;
@@ -702,15 +451,20 @@ window.CodePierCollaboration = (() => {
       const rows = members();
       const names = rows.map((member) => member.name || member.label || 'dot');
       const markup =
-        '<option value="">主责 dot</option>' +
+        '<option value="">\u4E3B\u8D23 dot</option>' +
         rows
           .map((member, index) => {
             const name = names[index],
               stage = member.stage || member.state;
-            const status = memberBadges[stage] || '连接中';
-            const dot = status === '在线' ? '●' : status === '需要处理' ? '◐' : '○';
-            const duplicate = names.filter((item) => item === name).length > 1;
-            return `<option value="${E(memberId(member))}">${dot} ${E(name)}${duplicate ? ' · ' + E(memberShort(member)) : ''}</option>`;
+            const status2 = memberBadges[stage] || '\u8FDE\u63A5\u4E2D';
+            const dot =
+              status2 === '\u5728\u7EBF'
+                ? '\u25CF'
+                : status2 === '\u9700\u8981\u5904\u7406'
+                  ? '\u25D0'
+                  : '\u25CB';
+            const duplicate2 = names.filter((item) => item === name).length > 1;
+            return `<option value="${E(memberId(member))}">${dot} ${E(name)}${duplicate2 ? ' \xB7 ' + E(memberShort(member)) : ''}</option>`;
           })
           .join('');
       if (select._markup !== markup) {
@@ -724,13 +478,15 @@ window.CodePierCollaboration = (() => {
     if (draft.reply || draft.work) {
       const original = state.messages.find((m) => m.id === draft.reply);
       const work = state.works.find((item) => item.id === draft.work);
-      const markup = `<span>${draft.work ? '修改交办 · ' + E(work?.title || '当前工作') : '回复：' + E((original?.body_text || '原消息').slice(0, 100))}</span>${btn(draft.work ? 'cancel-supplement' : 'cancel-reply', '×', `aria-label="${draft.work ? '取消修改交办' : '取消引用'}"`, 'cr-icon')}`;
+      const markup = `<span>${draft.work ? '\u4FEE\u6539\u4EA4\u529E \xB7 ' + E(work?.title || '\u5F53\u524D\u5DE5\u4F5C') : '\u56DE\u590D\uFF1A' + E((original?.body_text || '\u539F\u6D88\u606F').slice(0, 100))}</span>${btn(draft.work ? 'cancel-supplement' : 'cancel-reply', '\xD7', `aria-label="${draft.work ? '\u53D6\u6D88\u4FEE\u6539\u4EA4\u529E' : '\u53D6\u6D88\u5F15\u7528'}"`, 'cr-icon')}`;
       if (reply._markup !== markup) {
         reply.innerHTML = markup;
         reply._markup = markup;
       }
     }
   }
+
+  // ../collaboration-room/timeline.mjs
   function fileSize(value) {
     return value >= 1024 * 1024
       ? (value / (1024 * 1024)).toFixed(1) + ' MiB'
@@ -746,7 +502,7 @@ window.CodePierCollaboration = (() => {
     const markup = files
       .map(
         (entry) =>
-          `<article class="cr-file" data-file-id="${E(entry.id)}" data-state="${E(entry.state)}"><div><strong>${E(entry.attachment?.name || entry.name)}</strong><small>${fileSize(entry.size)} · ${entry.state === 'ready' ? '已上传，待发送' : entry.state === 'unknown' ? '上传结果待核对' : entry.state === 'failed' ? E(entry.error || '上传失败') : '正在上传…'}</small></div>${['failed', 'unknown'].includes(entry.state) ? btn('retry-file', entry.state === 'unknown' ? '确认是否已上传' : '重试', `data-id="${E(entry.id)}" ${activeRoom() ? '' : 'disabled'}`, 'cr-text-button') : ''}${btn('remove-file', '×', `data-id="${E(entry.id)}" aria-label="移除附件 ${E(entry.name)}"`, 'cr-icon')}</article>`,
+          `<article class="cr-file" data-file-id="${E(entry.id)}" data-state="${E(entry.state)}"><div><strong>${E(entry.attachment?.name || entry.name)}</strong><small>${fileSize(entry.size)} \xB7 ${entry.state === 'ready' ? '\u5DF2\u4E0A\u4F20\uFF0C\u5F85\u53D1\u9001' : entry.state === 'unknown' ? '\u4E0A\u4F20\u7ED3\u679C\u5F85\u6838\u5BF9' : entry.state === 'failed' ? E(entry.error || '\u4E0A\u4F20\u5931\u8D25') : '\u6B63\u5728\u4E0A\u4F20\u2026'}</small></div>${['failed', 'unknown'].includes(entry.state) ? btn('retry-file', entry.state === 'unknown' ? '\u786E\u8BA4\u662F\u5426\u5DF2\u4E0A\u4F20' : '\u91CD\u8BD5', `data-id="${E(entry.id)}" ${activeRoom() ? '' : 'disabled'}`, 'cr-text-button') : ''}${btn('remove-file', '\xD7', `data-id="${E(entry.id)}" aria-label="\u79FB\u9664\u9644\u4EF6 ${E(entry.name)}"`, 'cr-icon')}</article>`,
       )
       .join('');
     if (box._markup !== markup) {
@@ -757,14 +513,14 @@ window.CodePierCollaboration = (() => {
   function attachmentMarkup(item) {
     const expired =
       item.state === 'expired' ||
-      (item.retention?.expires_at && item.retention.expires_at * 1000 <= Date.now());
+      (item.retention?.expires_at && item.retention.expires_at * 1e3 <= Date.now());
     const downloadable =
       !expired &&
       item.state === 'ready' &&
       /^\/api\/collaboration\/attachments\/[a-zA-Z0-9_-]+\/content(?:\?space_id=[a-zA-Z0-9_%.-]+)?$/.test(
         item.download_path || '',
       );
-    const body = `<span>${E(item.name || '附件')}</span><small>${fileSize(item.size || 0)} · ${expired ? '已过保留期限' : downloadable ? '下载原文件' : '文件暂不可用'}</small>`;
+    const body = `<span>${E(item.name || '\u9644\u4EF6')}</span><small>${fileSize(item.size || 0)} \xB7 ${expired ? '\u5DF2\u8FC7\u4FDD\u7559\u671F\u9650' : downloadable ? '\u4E0B\u8F7D\u539F\u6587\u4EF6' : '\u6587\u4EF6\u6682\u4E0D\u53EF\u7528'}</small>`;
     return downloadable
       ? `<a class="cr-message-file" href="${E(item.download_path)}" download="${E(item.name || 'attachment')}">${body}</a>`
       : `<span class="cr-message-file is-unavailable">${body}</span>`;
@@ -773,65 +529,71 @@ window.CodePierCollaboration = (() => {
     const route = message.routing || {};
     const progress = message.display || {};
     const reason = {
-      member_paused: '已保存，等待 dot 恢复',
-      member_not_connected: '已保存，等待 dot 恢复',
-      member_removed: '已保存，等待原 dot 恢复',
-      lead_member_required: '已保存，等待主责',
-      source_unavailable: '原消息或微信连接已失效',
-      work_unavailable: '原工作已结束或不可继续',
+      member_paused: '\u5DF2\u4FDD\u5B58\uFF0C\u7B49\u5F85 dot \u6062\u590D',
+      member_not_connected: '\u5DF2\u4FDD\u5B58\uFF0C\u7B49\u5F85 dot \u6062\u590D',
+      member_removed: '\u5DF2\u4FDD\u5B58\uFF0C\u7B49\u5F85\u539F dot \u6062\u590D',
+      lead_member_required: '\u5DF2\u4FDD\u5B58\uFF0C\u7B49\u5F85\u4E3B\u8D23',
+      source_unavailable: '\u539F\u6D88\u606F\u6216\u5FAE\u4FE1\u8FDE\u63A5\u5DF2\u5931\u6548',
+      work_unavailable: '\u539F\u5DE5\u4F5C\u5DF2\u7ED3\u675F\u6216\u4E0D\u53EF\u7EE7\u7EED',
     }[route.reason_code];
     const label =
       (progress.state && progress.title) ||
       (route.state !== 'queued' && reason) ||
-      (route.state === 'queued' && '待 dot 处理') ||
+      (route.state === 'queued' && '\u5F85 dot \u5904\u7406') ||
       progress.title;
     if (!label) return '';
     return `<span data-cr-message-progress data-state="${E(progress.state || route.state || 'saved')}"${progress.reason ? ` title="${E(progress.reason)}"` : ''}>${E(label)}</span>`;
   }
   function messageMarkup(message) {
     const owner = ['owner', 'user', 'human'].includes(message.author_kind);
-    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '你' : message.author_kind === 'system' ? '房间动态' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">回复原消息</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}<div class="cr-source-works" data-cr-source-works hidden></div><footer>${messageProgress(message)}${btn('reply', '回复', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
+    return `<header><strong>${E(message.author_name || message.display_name || message.member_name || (owner ? '\u4F60' : message.author_kind === 'system' ? '\u623F\u95F4\u52A8\u6001' : 'dot'))}</strong><time>${E(time(message.created_at || message.created))}</time></header>${message.reply_to_id ? '<span class="cr-message-reference">\u56DE\u590D\u539F\u6D88\u606F</span>' : ''}<div class="cr-message-body" ${message.body_text ? '' : 'hidden'}></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${deliveryMarkup(message.channel_deliveries)}<div class="cr-source-works" data-cr-source-works hidden></div><footer>${messageProgress(message)}${btn('reply', '\u56DE\u590D', `data-id="${E(message.id)}"`, 'cr-text-button')}</footer>`;
   }
   function deliveryReason(code) {
     return (
       {
-        WEIXIN_RATE_LIMITED: '微信暂时限制发送',
-        WEIXIN_REQUEST_LIMIT: '消息或附件超出微信发送上限',
-        attachment_unavailable: '原附件暂不可用',
-        daily_reply_quota: '已达到今日回传额度',
-        context_missing: '等待原微信私聊的会话上下文',
-        WEIXIN_RECOVERY_SCOPE_CHANGED: '原内容、收件人或发送权限发生变化',
-        dependency_waiting: '等待前置回复发送完成',
-        dependency_failed: '前置回复未能发送',
-        source_unavailable: '原消息或微信连接已失效',
-        provider_response_unknown: '微信未返回可核对的发送结果',
-        authorization_revoked: '工作许可已撤销',
-        authorization_expired: '工作许可已到期',
-        scope_changed: '原工作范围已变化',
-        historical_ordering_unverified: '无法确认旧回复的顺序关系，暂时保留顺序等待',
+        WEIXIN_RATE_LIMITED: '\u5FAE\u4FE1\u6682\u65F6\u9650\u5236\u53D1\u9001',
+        WEIXIN_REQUEST_LIMIT:
+          '\u6D88\u606F\u6216\u9644\u4EF6\u8D85\u51FA\u5FAE\u4FE1\u53D1\u9001\u4E0A\u9650',
+        attachment_unavailable: '\u539F\u9644\u4EF6\u6682\u4E0D\u53EF\u7528',
+        daily_reply_quota: '\u5DF2\u8FBE\u5230\u4ECA\u65E5\u56DE\u4F20\u989D\u5EA6',
+        context_missing:
+          '\u7B49\u5F85\u539F\u5FAE\u4FE1\u79C1\u804A\u7684\u4F1A\u8BDD\u4E0A\u4E0B\u6587',
+        WEIXIN_RECOVERY_SCOPE_CHANGED:
+          '\u539F\u5185\u5BB9\u3001\u6536\u4EF6\u4EBA\u6216\u53D1\u9001\u6743\u9650\u53D1\u751F\u53D8\u5316',
+        dependency_waiting: '\u7B49\u5F85\u524D\u7F6E\u56DE\u590D\u53D1\u9001\u5B8C\u6210',
+        dependency_failed: '\u524D\u7F6E\u56DE\u590D\u672A\u80FD\u53D1\u9001',
+        source_unavailable: '\u539F\u6D88\u606F\u6216\u5FAE\u4FE1\u8FDE\u63A5\u5DF2\u5931\u6548',
+        provider_response_unknown:
+          '\u5FAE\u4FE1\u672A\u8FD4\u56DE\u53EF\u6838\u5BF9\u7684\u53D1\u9001\u7ED3\u679C',
+        authorization_revoked: '\u5DE5\u4F5C\u8BB8\u53EF\u5DF2\u64A4\u9500',
+        authorization_expired: '\u5DE5\u4F5C\u8BB8\u53EF\u5DF2\u5230\u671F',
+        scope_changed: '\u539F\u5DE5\u4F5C\u8303\u56F4\u5DF2\u53D8\u5316',
+        historical_ordering_unverified:
+          '\u65E0\u6CD5\u786E\u8BA4\u65E7\u56DE\u590D\u7684\u987A\u5E8F\u5173\u7CFB\uFF0C\u6682\u65F6\u4FDD\u7559\u987A\u5E8F\u7B49\u5F85',
       }[code] || reasonText(code)
     );
   }
-  const deliveryControlPreviews = new Map();
   function deliveryControlKey(id) {
     return [state.owner, state.roomId, id].join(':');
   }
   function deliveryControlPreviewMarkup(item) {
     if (!item) return '';
-    const { preview, selection } = item;
-    const confirming = selection.action === 'confirm_received';
-    const label = confirming ? '确认已收到所选分项' : '停止这些分项';
+    const { preview, selection: selection2 } = item;
+    const confirming = selection2.action === 'confirm_received';
+    const label = confirming
+      ? '\u786E\u8BA4\u5DF2\u6536\u5230\u6240\u9009\u5206\u9879'
+      : '\u505C\u6B62\u8FD9\u4E9B\u5206\u9879';
     const attr = `data-id="${E(preview.delivery_id)}"`;
-    return `<p>${confirming ? '核对所选分项' : '将停止尚未发送的内容'} · ${E(preview.affected_count)} 段</p>${
+    return `<p>${confirming ? '\u6838\u5BF9\u6240\u9009\u5206\u9879' : '\u5C06\u505C\u6B62\u5C1A\u672A\u53D1\u9001\u7684\u5185\u5BB9'} \xB7 ${E(preview.affected_count)} \u6BB5</p>${
       preview.affected_count
         ? `<ul class="cr-delivery-parts">${preview.affected_parts
             .map(
               (part) =>
-                `<li>${part.delivery_id === preview.delivery_id ? '原回复' : '关联回复'} · 第 ${E(Number(part.ordinal) + 1)} 段 · ${E(deliveryLabels[part.state] || part.state)}</li>`,
+                `<li>${part.delivery_id === preview.delivery_id ? '\u539F\u56DE\u590D' : '\u5173\u8054\u56DE\u590D'} \xB7 \u7B2C ${E(Number(part.ordinal) + 1)} \u6BB5 \xB7 ${E(deliveryLabels[part.state] || part.state)}</li>`,
             )
             .join('')}</ul>${btn('apply-delivery-control', label, attr, 'cr-text-button')}`
-        : '<p class="cr-muted">当前没有符合条件的分项。</p>'
-    }${btn('dismiss-delivery-control', '关闭核对', attr, 'cr-text-button')}`;
+        : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u5206\u9879\u3002</p>'
+    }${btn('dismiss-delivery-control', '\u5173\u95ED\u6838\u5BF9', attr, 'cr-text-button')}`;
   }
   function deliveryPath(id) {
     return store.path() + '/weixin-deliveries/' + encodeURIComponent(id);
@@ -845,17 +607,17 @@ window.CodePierCollaboration = (() => {
     box.innerHTML = deliveryControlPreviewMarkup(item);
     box.querySelector('button')?.focus({ preventScroll: true });
   }
-  async function previewDeliveryControl(button, selection) {
+  async function previewDeliveryControl(button, selection2) {
     const id = button.dataset.id;
     const key = deliveryControlKey(id);
     button.disabled = true;
     try {
       const preview = await api(deliveryPath(id) + '/control-preview', {
         method: 'POST',
-        body: JSON.stringify(selection),
+        body: JSON.stringify(selection2),
       });
       if (key !== deliveryControlKey(id)) return;
-      deliveryControlPreviews.set(key, { preview, selection, requestKey: store.key() });
+      deliveryControlPreviews.set(key, { preview, selection: selection2, requestKey: store.key() });
       paintDeliveryControl(button, id);
     } finally {
       button.disabled = false;
@@ -866,16 +628,18 @@ window.CodePierCollaboration = (() => {
     const key = deliveryControlKey(id);
     const item = deliveryControlPreviews.get(key);
     if (!item) return;
-    const { selection, preview, requestKey } = item;
+    const { selection: selection2, preview, requestKey } = item;
     button.disabled = true;
     try {
       const result = await mutation('POST', deliveryPath(id) + '/control', {
-        ...selection,
+        ...selection2,
         expected_version: preview.delivery_version,
         expected_ordering_revision: preview.ordering_revision,
         preview_digest: preview.preview_digest,
         confirmation_note:
-          selection.action === 'confirm_received' ? '本人核对手机微信收到所选分项' : '',
+          selection2.action === 'confirm_received'
+            ? '\u672C\u4EBA\u6838\u5BF9\u624B\u673A\u5FAE\u4FE1\u6536\u5230\u6240\u9009\u5206\u9879'
+            : '',
         idempotency_key: requestKey,
       });
       if (!result || key !== deliveryControlKey(id)) return;
@@ -883,14 +647,16 @@ window.CodePierCollaboration = (() => {
       paintDeliveryControl(button, id);
       await store.messages();
       announce(
-        selection.action === 'confirm_received'
-          ? '已保存所选分项的核对结果'
-          : '已停止所选范围内未发送的内容',
+        selection2.action === 'confirm_received'
+          ? '\u5DF2\u4FDD\u5B58\u6240\u9009\u5206\u9879\u7684\u6838\u5BF9\u7ED3\u679C'
+          : '\u5DF2\u505C\u6B62\u6240\u9009\u8303\u56F4\u5185\u672A\u53D1\u9001\u7684\u5185\u5BB9',
       );
     } catch (error) {
       if (error.status !== 409 || key !== deliveryControlKey(id)) throw error;
-      await previewDeliveryControl(button, selection);
-      announce('发送状态刚有变化，请核对更新后的范围。');
+      await previewDeliveryControl(button, selection2);
+      announce(
+        '\u53D1\u9001\u72B6\u6001\u521A\u6709\u53D8\u5316\uFF0C\u8BF7\u6838\u5BF9\u66F4\u65B0\u540E\u7684\u8303\u56F4\u3002',
+      );
     } finally {
       button.disabled = false;
     }
@@ -904,25 +670,25 @@ window.CodePierCollaboration = (() => {
     );
     if (state.roomId !== roomId || !target?.isConnected) return;
     const prior = data.direct_blocker;
-    const count = (value) => (data.truncated ? '至少 ' : '') + supplied(value);
+    const count = (value) => (data.truncated ? '\u81F3\u5C11 ' : '') + supplied(value);
     target.innerHTML = diagnosticFields([
       [
-        '最近前置投递',
+        '\u6700\u8FD1\u524D\u7F6E\u6295\u9012',
         prior?.restricted
-          ? '当前授权下不可查看'
+          ? '\u5F53\u524D\u6388\u6743\u4E0B\u4E0D\u53EF\u67E5\u770B'
           : prior?.delivery_id
             ? identifier(prior.delivery_id)
-            : '无',
+            : '\u65E0',
       ],
-      ['关系', prior?.reason_code ? deliveryReason(prior.reason_code) : '—'],
-      ['直接等待', count(data.direct_waiting_count)],
-      ['受影响的后续回复', count(data.affected_waiting_count)],
+      ['\u5173\u7CFB', prior?.reason_code ? deliveryReason(prior.reason_code) : '\u2014'],
+      ['\u76F4\u63A5\u7B49\u5F85', count(data.direct_waiting_count)],
+      ['\u53D7\u5F71\u54CD\u7684\u540E\u7EED\u56DE\u590D', count(data.affected_waiting_count)],
     ]);
   }
   function deliveryMarkup(deliveries = [], display, truncated = false) {
     const visible = (deliveries || []).filter((item) => item.state !== 'not_requested');
     if (!visible.length) return '';
-    return `<section class="cr-deliveries" aria-label="发送状态" data-cr-deliveries>${visible
+    return `<section class="cr-deliveries" aria-label="\u53D1\u9001\u72B6\u6001" data-cr-deliveries>${visible
       .map((delivery) => {
         const parts = delivery.parts || [];
         const accepted = parts.filter((part) => part.state === 'accepted').length;
@@ -931,21 +697,25 @@ window.CodePierCollaboration = (() => {
         const stopped = parts.filter((part) =>
           ['cancelled', 'rejected', 'superseded'].includes(part.state),
         ).length;
-        const name = delivery.channel === 'weixin' ? '微信' : delivery.channel || '渠道';
-        let label = name + ' · ' + (deliveryLabels[delivery.state] || '状态待核对');
-        if (delivery.state === 'blocked' && !delivery.id) label = name + '回复待处理';
-        if (delivery.state === 'rejected' && !delivery.id) label = name + '回复未发送';
+        const name =
+          delivery.channel === 'weixin' ? '\u5FAE\u4FE1' : delivery.channel || '\u6E20\u9053';
+        let label =
+          name + ' \xB7 ' + (deliveryLabels[delivery.state] || '\u72B6\u6001\u5F85\u6838\u5BF9');
+        if (delivery.state === 'blocked' && !delivery.id)
+          label = name + '\u56DE\u590D\u5F85\u5904\u7406';
+        if (delivery.state === 'rejected' && !delivery.id)
+          label = name + '\u56DE\u590D\u672A\u53D1\u9001';
         if (unknown || delivery.state === 'unknown')
           label = accepted
-            ? `${name}接口已受理 ${accepted} 段，${unknown} 段待核对`
-            : name + '发送结果待核对';
+            ? `${name}\u63A5\u53E3\u5DF2\u53D7\u7406 ${accepted} \u6BB5\uFF0C${unknown} \u6BB5\u5F85\u6838\u5BF9`
+            : name + '\u53D1\u9001\u7ED3\u679C\u5F85\u6838\u5BF9';
         else if (stopped && (accepted || confirmed))
-          label = `${name} · ${accepted ? '已受理 ' + accepted + ' 段，' : ''}${confirmed ? '本人核对 ' + confirmed + ' 段，' : ''}${stopped} 段已停止`;
+          label = `${name} \xB7 ${accepted ? '\u5DF2\u53D7\u7406 ' + accepted + ' \u6BB5\uFF0C' : ''}${confirmed ? '\u672C\u4EBA\u6838\u5BF9 ' + confirmed + ' \u6BB5\uFF0C' : ''}${stopped} \u6BB5\u5DF2\u505C\u6B62`;
         else if (confirmed)
-          label = `${name} · ${accepted ? '已受理 ' + accepted + ' 段，' : ''}本人已核对收到 ${confirmed} 段`;
-        else if (delivery.state === 'accepted') label = name + '接口已受理';
+          label = `${name} \xB7 ${accepted ? '\u5DF2\u53D7\u7406 ' + accepted + ' \u6BB5\uFF0C' : ''}\u672C\u4EBA\u5DF2\u6838\u5BF9\u6536\u5230 ${confirmed} \u6BB5`;
+        else if (delivery.state === 'accepted') label = name + '\u63A5\u53E3\u5DF2\u53D7\u7406';
         if (delivery.read_verified === true || delivery.provider_delivery_verified === true)
-          label = name + '已送达';
+          label = name + '\u5DF2\u9001\u8FBE';
         const controllable =
           activeRoom() &&
           delivery.channel === 'weixin' &&
@@ -966,7 +736,7 @@ window.CodePierCollaboration = (() => {
             (part) => part.state === 'queued' && part.reason_code === 'WEIXIN_RATE_LIMITED',
           )
         )
-          label = `平台限流，${delivery.next_attempt_at ? dateTime(delivery.next_attempt_at) + ' 后继续发送' : '稍后自动继续'}`;
+          label = `\u5E73\u53F0\u9650\u6D41\uFF0C${delivery.next_attempt_at ? dateTime(delivery.next_attempt_at) + ' \u540E\u7EE7\u7EED\u53D1\u9001' : '\u7A0D\u540E\u81EA\u52A8\u7EE7\u7EED'}`;
         const retry =
           activeRoom() &&
           delivery.channel === 'weixin' &&
@@ -983,17 +753,17 @@ window.CodePierCollaboration = (() => {
           !!delivery.reason_code ||
           ['unknown', 'needs_attention', 'blocked'].includes(delivery.state);
         const attr = `data-id="${E(delivery.id)}"`;
-        return `<div class="cr-delivery" data-delivery-id="${E(delivery.id)}" data-state="${E(unknown ? 'unknown' : delivery.state)}"><span class="cr-delivery-title">${E(label)}${delivery.kind === 'status' ? ' · 状态通知' : ''}</span>${
+        return `<div class="cr-delivery" data-delivery-id="${E(delivery.id)}" data-state="${E(unknown ? 'unknown' : delivery.state)}"><span class="cr-delivery-title">${E(label)}${delivery.kind === 'status' ? ' \xB7 \u72B6\u6001\u901A\u77E5' : ''}</span>${
           detail
-            ? `<details><summary>查看原回复和分项</summary>
-        ${delivery.display?.reason ? `<p>${E(delivery.display.reason)}</p>` : ''}
-        ${delivery.ordering_reason || delivery.reason_code ? `<p>${E(deliveryReason(delivery.ordering_reason || delivery.reason_code))}</p>` : ''}
-        ${parts.length ? `<ul class="cr-delivery-parts">${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">第 ${E(Number(part.ordinal) + 1)} 段 · ${E({ text: '文字', image: '图片', file: '文件', voice: '语音', video: '视频' }[part.kind] || '消息')} · ${E(deliveryLabels[part.state] || '状态待核对')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}${controllable && part.id && part.state === 'unknown' ? btn('preview-delivery-control', '核对这一段', `${attr} data-control="confirm_received" data-part="${E(part.id)}"`, 'cr-text-button') : ''}${controllable && part.route_recovery_blocked ? `<p>${E(deliveryReason(part.route_recovery_blocked))}</p>` : ''}${controllable && part.id && part.route_recovery_available === true ? btn('retry-delivery', '恢复发送此段', `${attr} data-version="${E(delivery.version)}" data-ordering="${E(delivery.ordering_revision)}" data-part="${E(part.id)}"`, 'cr-text-button') : ''}</li>`).join('')}</ul>` : ''}
-        ${retry ? btn('retry-delivery', '重试可发送分项', `${attr} data-version="${E(delivery.version)}"`, 'cr-text-button') : ''}
-        ${stop ? btn('preview-delivery-control', '停止尚未发送的后续内容', `${attr} data-control="cancel_unsent"`, 'cr-text-button') : ''}
-        <div data-cr-delivery-control-preview aria-live="polite">${deliveryControlPreviewMarkup(deliveryControlPreviews.get(deliveryControlKey(delivery.id)))}</div>
-        ${delivery.channel === 'weixin' && delivery.id ? `<div data-cr-delivery-relationships>${btn('delivery-relationships', '查看关联等待', attr, 'cr-text-button')}</div>` : ''}
-        </details>`
+            ? `<details><summary>\u67E5\u770B\u539F\u56DE\u590D\u548C\u5206\u9879</summary>
+      ${delivery.display?.reason ? `<p>${E(delivery.display.reason)}</p>` : ''}
+      ${delivery.ordering_reason || delivery.reason_code ? `<p>${E(deliveryReason(delivery.ordering_reason || delivery.reason_code))}</p>` : ''}
+      ${parts.length ? `<ul class="cr-delivery-parts">${parts.map((part) => `<li data-delivery-part="${E(part.id || part.ordinal)}" data-state="${E(part.state)}">\u7B2C ${E(Number(part.ordinal) + 1)} \u6BB5 \xB7 ${E({ text: '\u6587\u5B57', image: '\u56FE\u7247', file: '\u6587\u4EF6', voice: '\u8BED\u97F3', video: '\u89C6\u9891' }[part.kind] || '\u6D88\u606F')} \xB7 ${E(deliveryLabels[part.state] || '\u72B6\u6001\u5F85\u6838\u5BF9')}${part.reason_code && part.state !== 'owner_confirmed' ? `<p>${E(deliveryReason(part.reason_code))}</p>` : ''}${controllable && part.id && part.state === 'unknown' ? btn('preview-delivery-control', '\u6838\u5BF9\u8FD9\u4E00\u6BB5', `${attr} data-control="confirm_received" data-part="${E(part.id)}"`, 'cr-text-button') : ''}${controllable && part.route_recovery_blocked ? `<p>${E(deliveryReason(part.route_recovery_blocked))}</p>` : ''}${controllable && part.id && part.route_recovery_available === true ? btn('retry-delivery', '\u6062\u590D\u53D1\u9001\u6B64\u6BB5', `${attr} data-version="${E(delivery.version)}" data-ordering="${E(delivery.ordering_revision)}" data-part="${E(part.id)}"`, 'cr-text-button') : ''}</li>`).join('')}</ul>` : ''}
+      ${retry ? btn('retry-delivery', '\u91CD\u8BD5\u53EF\u53D1\u9001\u5206\u9879', `${attr} data-version="${E(delivery.version)}"`, 'cr-text-button') : ''}
+      ${stop ? btn('preview-delivery-control', '\u505C\u6B62\u5C1A\u672A\u53D1\u9001\u7684\u540E\u7EED\u5185\u5BB9', `${attr} data-control="cancel_unsent"`, 'cr-text-button') : ''}
+      <div data-cr-delivery-control-preview aria-live="polite">${deliveryControlPreviewMarkup(deliveryControlPreviews.get(deliveryControlKey(delivery.id)))}</div>
+      ${delivery.channel === 'weixin' && delivery.id ? `<div data-cr-delivery-relationships>${btn('delivery-relationships', '\u67E5\u770B\u5173\u8054\u7B49\u5F85', attr, 'cr-text-button')}</div>` : ''}
+      </details>`
             : ''
         }</div>`;
       })
@@ -1069,8 +839,7 @@ window.CodePierCollaboration = (() => {
       const signature = JSON.stringify([
         message,
         (message.attachments || []).map(
-          (file) =>
-            !!(file.retention?.expires_at && file.retention.expires_at * 1000 <= Date.now()),
+          (file) => !!(file.retention?.expires_at && file.retention.expires_at * 1e3 <= Date.now()),
         ),
       ]);
       if (node._signature === signature) continue;
@@ -1081,7 +850,6 @@ window.CodePierCollaboration = (() => {
       patchMessageContent(node, message);
       changed = true;
     }
-    // Stable nodes keep browser selection and scroll intact across projections.
     state.messages.forEach((message, index) => {
       const node = [...list.children].find((child) => child.dataset.messageId === message.id);
       if (node && list.children[index] !== node)
@@ -1117,7 +885,7 @@ window.CodePierCollaboration = (() => {
       receipts
         .map(
           (item) =>
-            `<article class="cr-pending-item"><p>${E(item.body.text)}${item.body.attachments?.length ? `<small>${E(item.body.attachments.map((file) => file.name).join('、'))}</small>` : ''}</p><div>${item.state === 'sending' ? '正在发送…' : item.state === 'unknown' ? '正在核对是否已保存' : E(item.error || '发送失败')}${item.state !== 'sending' ? btn('recover-send', item.state === 'unknown' ? '确认是否已发送' : '继续发送', `data-id="${E(item.id)}" ${item.state === 'unknown' || activeRoom() ? '' : 'disabled'}`) : ''}</div></article>`,
+            `<article class="cr-pending-item"><p>${E(item.body.text)}${item.body.attachments?.length ? `<small>${E(item.body.attachments.map((file) => file.name).join('\u3001'))}</small>` : ''}</p><div>${item.state === 'sending' ? '\u6B63\u5728\u53D1\u9001\u2026' : item.state === 'unknown' ? '\u6B63\u5728\u6838\u5BF9\u662F\u5426\u5DF2\u4FDD\u5B58' : E(item.error || '\u53D1\u9001\u5931\u8D25')}${item.state !== 'sending' ? btn('recover-send', item.state === 'unknown' ? '\u786E\u8BA4\u662F\u5426\u5DF2\u53D1\u9001' : '\u7EE7\u7EED\u53D1\u9001', `data-id="${E(item.id)}" ${item.state === 'unknown' || activeRoom() ? '' : 'disabled'}`) : ''}</div></article>`,
         )
         .join('') + mutationMarkup();
     if (node._markup !== markup) {
@@ -1142,7 +910,7 @@ window.CodePierCollaboration = (() => {
       )
       .map(
         (item) =>
-          `<article class="cr-pending-item" data-mutation-state="${E(item.state)}"><p>${E(item.label)} · ${item.state === 'not_saved' ? '原请求未保存' : '结果尚未确认'}${item.state !== 'not_saved' && !mutationAllowed(item.method, item.url, JSON.parse(item.body), item.roomId) ? '<small>仅按原请求键核对。若原操作未保存，当前只读状态会阻止执行；不会改用新的请求。</small>' : ''}${item.error ? `<small>${E(item.error)}</small>` : ''}</p><div>${item.state === 'not_saved' ? btn('migration', '重新核对并确认') : item.state === 'recovering' ? '正在核对原请求…' : btn('recover-action', '查看结果', `data-id="${E(item.id)}"`)}</div></article>`,
+          `<article class="cr-pending-item" data-mutation-state="${E(item.state)}"><p>${E(item.label)} \xB7 ${item.state === 'not_saved' ? '\u539F\u8BF7\u6C42\u672A\u4FDD\u5B58' : '\u7ED3\u679C\u5C1A\u672A\u786E\u8BA4'}${item.state !== 'not_saved' && !mutationAllowed(item.method, item.url, JSON.parse(item.body), item.roomId) ? '<small>\u4EC5\u6309\u539F\u8BF7\u6C42\u952E\u6838\u5BF9\u3002\u82E5\u539F\u64CD\u4F5C\u672A\u4FDD\u5B58\uFF0C\u5F53\u524D\u53EA\u8BFB\u72B6\u6001\u4F1A\u963B\u6B62\u6267\u884C\uFF1B\u4E0D\u4F1A\u6539\u7528\u65B0\u7684\u8BF7\u6C42\u3002</small>' : ''}${item.error ? `<small>${E(item.error)}</small>` : ''}</p><div>${item.state === 'not_saved' ? btn('migration', '\u91CD\u65B0\u6838\u5BF9\u5E76\u786E\u8BA4') : item.state === 'recovering' ? '\u6B63\u5728\u6838\u5BF9\u539F\u8BF7\u6C42\u2026' : btn('recover-action', '\u67E5\u770B\u7ED3\u679C', `data-id="${E(item.id)}"`)}</div></article>`,
       )
       .join('');
   }
@@ -1159,14 +927,14 @@ window.CodePierCollaboration = (() => {
   function patchWorks() {
     const node = root?.querySelector('[data-cr-work]');
     if (!node) return;
-    const markup = btn('work-list', '工作记录', '', 'cr-text-button');
+    const markup = btn('work-list', '\u5DE5\u4F5C\u8BB0\u5F55', '', 'cr-text-button');
     node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
     if (node._markup !== markup) {
       node.innerHTML = markup;
       node._markup = markup;
     }
     if (panel?.name === 'work-list') renderWorkList();
-    const bySource = new Map();
+    const bySource = /* @__PURE__ */ new Map();
     for (const work of state.works) {
       const sourceId = workSourceId(work);
       if (!sourceId) continue;
@@ -1178,7 +946,7 @@ window.CodePierCollaboration = (() => {
       const items = works
         .map(
           (work) =>
-            `<button type="button" class="cr-timeline-work" data-cr-action="work-detail" data-id="${E(work.id)}" data-work-state="${E(work.state)}"><span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><span class="cr-timeline-work-title">${E(work.title || '工作')}</span><small>${E(workStatus(work))}</small></button>`,
+            `<button type="button" class="cr-timeline-work" data-cr-action="work-detail" data-id="${E(work.id)}" data-work-state="${E(work.state)}"><span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><span class="cr-timeline-work-title">${E(work.title || '\u5DE5\u4F5C')}</span><small>${E(workStatus(work))}</small></button>`,
         )
         .join('');
       if (message._markup !== items) {
@@ -1206,15 +974,15 @@ window.CodePierCollaboration = (() => {
       ordered
         .map(
           (work) => `<article class="cr-work" data-work-id="${E(work.id)}">
-      <span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><div><strong>${E(work.title || '工作')}</strong>
-      <p>${E(workStatus(work))}${work.display?.reason ? ' · ' + E(work.display.reason) : ''}</p></div>
-      ${btn('work-detail', '查看', 'data-id="' + E(work.id) + '"', 'cr-text-button')}</article>`,
+    <span class="cr-work-indicator ${E(work.state)}" aria-hidden="true"></span><div><strong>${E(work.title || '\u5DE5\u4F5C')}</strong>
+    <p>${E(workStatus(work))}${work.display?.reason ? ' \xB7 ' + E(work.display.reason) : ''}</p></div>
+    ${btn('work-detail', '\u67E5\u770B', 'data-id="' + E(work.id) + '"', 'cr-text-button')}</article>`,
         )
         .join('') +
-      (state.worksCursor ? btn('more-work', '更早的工作', '', 'cr-full') : '') +
-      (state.workHistory ? btn('latest-work', '回到最新', '', 'cr-full') : '');
+      (state.worksCursor ? btn('more-work', '\u66F4\u65E9\u7684\u5DE5\u4F5C', '', 'cr-full') : '') +
+      (state.workHistory ? btn('latest-work', '\u56DE\u5230\u6700\u65B0', '', 'cr-full') : '');
     if (list._markup !== markup) {
-      list.innerHTML = markup || '<p>暂无工作。</p>';
+      list.innerHTML = markup || '<p>\u6682\u65E0\u5DE5\u4F5C\u3002</p>';
       list._markup = markup;
     }
   }
@@ -1235,7 +1003,9 @@ window.CodePierCollaboration = (() => {
       ) {
         panel.context = latest;
         renderContext();
-        panelError('当前上下文已更新，旧页已清除，请按最新事实核对。');
+        panelError(
+          '\u5F53\u524D\u4E0A\u4E0B\u6587\u5DF2\u66F4\u65B0\uFF0C\u65E7\u9875\u5DF2\u6E05\u9664\uFF0C\u8BF7\u6309\u6700\u65B0\u4E8B\u5B9E\u6838\u5BF9\u3002',
+        );
       }
     }
     if (domain === 'messages') {
@@ -1265,56 +1035,21 @@ window.CodePierCollaboration = (() => {
     }
     if (domain === 'page') patchWindowHints();
   }
+
+  // ../collaboration-room/panels.mjs
   function sizeEditor(editor) {
     editor.style.height = 'auto';
     editor.style.height = Math.min(editor.scrollHeight, 180) + 'px';
-  }
-  function closePanel({ restoreFocus = true } = {}) {
-    const dialog = root?.querySelector('dialog');
-    if (!dialog) return;
-    if (!restoreFocus) dialog._crOpener = null;
-    panel?.impactController?.abort();
-    if (panel?.name === 'work') state.workDetail = null;
-    panelEpoch++;
-    panel = null;
-    CP.ui.closeModalLayer(dialog);
-  }
-  function openPanel(name, heading, content, data = {}) {
-    panel?.impactController?.abort();
-    if (panel?.name === 'work') state.workDetail = null;
-    panelEpoch++;
-    panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
-    const dialog = root.querySelector('dialog');
-    dialog._crOpeningEpoch = panel.epoch;
-    if (!dialog.open)
-      dialog._crOpener = root._panelOpener?.isConnected
-        ? root._panelOpener
-        : document.activeElement;
-    dialog.querySelector('h2').textContent = heading;
-    dialog.querySelector('.cr-panel-content').innerHTML = content;
-    dialog.scrollTop = 0;
-    panelError('');
-    patchMutationRecovery();
-    patchRoomPermissions();
-    if (!dialog.open) CP.ui.showModalLayer(dialog);
-    const openingEpoch = panel.epoch;
-    requestAnimationFrame(() => {
-      if (!dialog.open || panel?.epoch !== openingEpoch) return;
-      const focused = document.activeElement;
-      if (focused && focused !== dialog && dialog.contains(focused)) return;
-      const controls = CP.ui.focusable(dialog);
-      (controls.find((control) => control.matches('[autofocus]')) || controls[0])?.focus();
-    });
   }
   function patchRoomPermissions() {
     if (!root) return;
     const restricted = !activeRoom();
     const disable = (control, blocked) => {
       if (blocked) {
-        if (control._crPermissionDisabled === undefined)
+        if (control._crPermissionDisabled === void 0)
           control._crPermissionDisabled = control.disabled;
         control.disabled = true;
-      } else if (control._crPermissionDisabled !== undefined) {
+      } else if (control._crPermissionDisabled !== void 0) {
         control.disabled = control._crPermissionDisabled;
         delete control._crPermissionDisabled;
       }
@@ -1355,7 +1090,11 @@ window.CodePierCollaboration = (() => {
   }
   function migrationPanel() {
     if (!state.room) return;
-    openPanel('migration', '启用新房间界面', '<div data-cr-migration-view></div>');
+    openPanel(
+      'migration',
+      '\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762',
+      '<div data-cr-migration-view></div>',
+    );
     renderMigration();
   }
   function legacyChannelRemediation(blocker) {
@@ -1381,24 +1120,24 @@ window.CodePierCollaboration = (() => {
       blocker.member_id && members().some((member) => memberId(member) === blocker.member_id)
         ? btn(
             inline ? 'open-member' : 'member-detail',
-            '管理此成员',
+            '\u7BA1\u7406\u6B64\u6210\u5458',
             `data-id="${E(blocker.member_id)}"`,
             'cr-text-button',
           )
         : '';
     const roomAction = ['ROOM_PAUSED', 'ROOM_ARCHIVED'].includes(blocker.code)
-      ? btn('settings', '查看房间状态', '', 'cr-text-button')
+      ? btn('settings', '\u67E5\u770B\u623F\u95F4\u72B6\u6001', '', 'cr-text-button')
       : '';
     const channelAction = legacyChannelRemediation(blocker)
       ? btn(
           inline ? 'inline-channel-pause' : 'legacy-channel-pause',
-          blocker.channel === 'weixin' ? '暂停原微信连接' : '暂停原 Telegram 连接',
+          blocker.channel === 'weixin'
+            ? '\u6682\u505C\u539F\u5FAE\u4FE1\u8FDE\u63A5'
+            : '\u6682\u505C\u539F Telegram \u8FDE\u63A5',
           `data-id="${E(blocker.binding_id)}"`,
           'cr-text-button',
         )
       : '';
-    // The migration dialog owns data-migration-blocker; summaries elsewhere
-    // (room checklist, WeChat wizard) use a separate hook.
     return `<li ${inline ? 'data-migration-item' : 'data-migration-blocker'}="${E(blocker.code)}"><span>${E(blocker.title || blocker.code)}</span>${memberAction}${roomAction}${channelAction}</li>`;
   }
   function renderMigration() {
@@ -1415,13 +1154,16 @@ window.CodePierCollaboration = (() => {
     const eligible = room.legacy && migration.eligible === true;
     const counts = migration.member_counts;
     const markup = room.legacy
-      ? `<p class="cr-info">${E(readOnlyReason())}</p><p>逐一迁移或移除原成员，并安全暂停旧的消息路线。成员验证完成后，仍需在这里明确启用。</p>${counts ? `<dl class="cr-migration-counts"><div><dt>原成员</dt><dd>${E(supplied(counts.total))}</dd></div><div><dt>已验证</dt><dd>${E(supplied(counts.verified))}</dd></div><div><dt>已移除</dt><dd>${E(supplied(counts.removed))}</dd></div><div><dt>待处理</dt><dd>${E(supplied(counts.pending))}</dd></div></dl>` : ''}${migration.blockers_truncated ? '<p class="cr-info">当前只列出有界迁移条件，处理后请重新核对剩余连接。</p>' : ''}<div data-cr-migration-blockers>${migration.blockers?.length ? `<ul>${migration.blockers.map(migrationBlockerMarkup).join('')}</ul>` : `<p>${eligible ? '可以启用新版房间。' : '迁移条件尚未确认，请重新读取。'}</p>`}</div><div class="cr-setting-actions">${btn('members', '查看原成员')}${btn('diagnostics', '查看运行诊断')}${btn('refresh-migration', '重新核对')}</div><form data-cr-form="migration"><button type="submit" class="cr-button cr-primary cr-full" ${eligible ? '' : 'disabled'}>启用新房间界面</button></form>`
-      : '<p class="cr-info">新房间界面已启用。原历史和工作已保留，后续动作仍按当前批准范围核验。</p>';
+      ? `<p class="cr-info">${E(readOnlyReason())}</p><p>\u9010\u4E00\u8FC1\u79FB\u6216\u79FB\u9664\u539F\u6210\u5458\uFF0C\u5E76\u5B89\u5168\u6682\u505C\u65E7\u7684\u6D88\u606F\u8DEF\u7EBF\u3002\u6210\u5458\u9A8C\u8BC1\u5B8C\u6210\u540E\uFF0C\u4ECD\u9700\u5728\u8FD9\u91CC\u660E\u786E\u542F\u7528\u3002</p>${counts ? `<dl class="cr-migration-counts"><div><dt>\u539F\u6210\u5458</dt><dd>${E(supplied(counts.total))}</dd></div><div><dt>\u5DF2\u9A8C\u8BC1</dt><dd>${E(supplied(counts.verified))}</dd></div><div><dt>\u5DF2\u79FB\u9664</dt><dd>${E(supplied(counts.removed))}</dd></div><div><dt>\u5F85\u5904\u7406</dt><dd>${E(supplied(counts.pending))}</dd></div></dl>` : ''}${migration.blockers_truncated ? '<p class="cr-info">\u5F53\u524D\u53EA\u5217\u51FA\u6709\u754C\u8FC1\u79FB\u6761\u4EF6\uFF0C\u5904\u7406\u540E\u8BF7\u91CD\u65B0\u6838\u5BF9\u5269\u4F59\u8FDE\u63A5\u3002</p>' : ''}<div data-cr-migration-blockers>${migration.blockers?.length ? `<ul>${migration.blockers.map(migrationBlockerMarkup).join('')}</ul>` : `<p>${eligible ? '\u53EF\u4EE5\u542F\u7528\u65B0\u7248\u623F\u95F4\u3002' : '\u8FC1\u79FB\u6761\u4EF6\u5C1A\u672A\u786E\u8BA4\uFF0C\u8BF7\u91CD\u65B0\u8BFB\u53D6\u3002'}</p>`}</div><div class="cr-setting-actions">${btn('members', '\u67E5\u770B\u539F\u6210\u5458')}${btn('diagnostics', '\u67E5\u770B\u8FD0\u884C\u8BCA\u65AD')}${btn('refresh-migration', '\u91CD\u65B0\u6838\u5BF9')}</div><form data-cr-form="migration"><button type="submit" class="cr-button cr-primary cr-full" ${eligible ? '' : 'disabled'}>\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762</button></form>`
+      : '<p class="cr-info">\u65B0\u623F\u95F4\u754C\u9762\u5DF2\u542F\u7528\u3002\u539F\u5386\u53F2\u548C\u5DE5\u4F5C\u5DF2\u4FDD\u7559\uFF0C\u540E\u7EED\u52A8\u4F5C\u4ECD\u6309\u5F53\u524D\u6279\u51C6\u8303\u56F4\u6838\u9A8C\u3002</p>';
     if (box._markup !== markup || changed) {
       box.innerHTML = markup;
       box._markup = markup;
     }
-    if (changed && room.legacy) panelError('房间或迁移条件已变化，请重新核对并确认。');
+    if (changed && room.legacy)
+      panelError(
+        '\u623F\u95F4\u6216\u8FC1\u79FB\u6761\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9\u5E76\u786E\u8BA4\u3002',
+      );
   }
   function createPanel() {
     const projects = (S.projects || [])
@@ -1432,48 +1174,22 @@ window.CodePierCollaboration = (() => {
       .join('');
     openPanel(
       'create',
-      '新建房间',
-      `<form data-cr-form="create">${field('房间名称', '<input name="title" required maxlength="120" placeholder="例如：产品工作室" autofocus>')}
-        ${projects ? `<fieldset class="cr-create-projects"><legend>项目（可选，初始只读）</legend>${projects}</fieldset>` : ''}
-        <button class="cr-button cr-primary" type="submit">创建房间</button></form>`,
+      '\u65B0\u5EFA\u623F\u95F4',
+      `<form data-cr-form="create">${field('\u623F\u95F4\u540D\u79F0', '<input name="title" required maxlength="120" placeholder="\u4F8B\u5982\uFF1A\u4EA7\u54C1\u5DE5\u4F5C\u5BA4" autofocus>')}
+      ${projects ? `<fieldset class="cr-create-projects"><legend>\u9879\u76EE\uFF08\u53EF\u9009\uFF0C\u521D\u59CB\u53EA\u8BFB\uFF09</legend>${projects}</fieldset>` : ''}
+      <button class="cr-button cr-primary" type="submit">\u521B\u5EFA\u623F\u95F4</button></form>`,
     );
   }
-  const permissionCaps = ['read', 'write', 'execute'];
-  const permissionLevels = {
-    '': ['不加入', []],
-    read: ['只读', ['read']],
-    write: ['读写', ['read', 'write']],
-    run: ['读取和运行', ['read', 'execute']],
-    execute: ['读写和运行', ['read', 'write', 'execute']],
-  };
-  const permissionLevel = (caps) =>
-    caps.includes('execute')
-      ? caps.includes('write')
-        ? 'execute'
-        : 'run'
-      : caps.includes('write')
-        ? 'write'
-        : caps.includes('read')
-          ? 'read'
-          : '';
-  const permissionOptions = (value = '', bulk = false) =>
-    Object.entries(permissionLevels)
-      .filter(([key]) => !bulk || key !== 'run')
-      .map(
-        ([key, [label]]) =>
-          `<option value="${key}" ${key === value ? 'selected' : ''}>${label}</option>`,
-      )
-      .join('');
-  const permissionKey = (value) =>
-    JSON.stringify([value.project_id, value.environment_id || 'production']);
+
+  // ../collaboration-room/permissions.mjs
   function permissionDateValue(timestamp) {
     if (!Number.isFinite(Number(timestamp)) || timestamp == null) return '';
-    const value = new Date(Number(timestamp) * 1000);
-    return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+    const value = new Date(Number(timestamp) * 1e3);
+    return new Date(value.getTime() - value.getTimezoneOffset() * 6e4).toISOString().slice(0, 19);
   }
   function permissionLifetimeControls(lifetime, inherit) {
     const value = lifetime || { mode: 'until_revoked', expires_at: null };
-    return `<div data-permission-lifetime data-original-lifetime="${E(JSON.stringify(value))}" data-inherit-lifetime="${inherit}">${field('有效期', `<select data-permission-lifetime-mode><option value="until_revoked" ${value.mode === 'until_revoked' ? 'selected' : ''}>直到我撤销</option><option value="timed" ${value.mode === 'timed' ? 'selected' : ''}>指定截止时间</option></select>`)}${field('截止时间（本地时间）', `<input type="datetime-local" step="1" data-permission-lifetime-until value="${E(permissionDateValue(value.expires_at))}">`)}<small class="cr-warning" data-permission-expired hidden>已过期：请在这里选择新的截止时间或改为直到我撤销，再保存续期。</small>${inherit ? '<small class="cr-muted">新自定义范围默认继承当前房间项目有效期；不能晚于房间截止时间。</small>' : ''}</div>`;
+    return `<div data-permission-lifetime data-original-lifetime="${E(JSON.stringify(value))}" data-inherit-lifetime="${inherit}">${field('\u6709\u6548\u671F', `<select data-permission-lifetime-mode><option value="until_revoked" ${value.mode === 'until_revoked' ? 'selected' : ''}>\u76F4\u5230\u6211\u64A4\u9500</option><option value="timed" ${value.mode === 'timed' ? 'selected' : ''}>\u6307\u5B9A\u622A\u6B62\u65F6\u95F4</option></select>`)}${field('\u622A\u6B62\u65F6\u95F4\uFF08\u672C\u5730\u65F6\u95F4\uFF09', `<input type="datetime-local" step="1" data-permission-lifetime-until value="${E(permissionDateValue(value.expires_at))}">`)}<small class="cr-warning" data-permission-expired hidden>\u5DF2\u8FC7\u671F\uFF1A\u8BF7\u5728\u8FD9\u91CC\u9009\u62E9\u65B0\u7684\u622A\u6B62\u65F6\u95F4\u6216\u6539\u4E3A\u76F4\u5230\u6211\u64A4\u9500\uFF0C\u518D\u4FDD\u5B58\u7EED\u671F\u3002</small>${inherit ? '<small class="cr-muted">\u65B0\u81EA\u5B9A\u4E49\u8303\u56F4\u9ED8\u8BA4\u7EE7\u627F\u5F53\u524D\u623F\u95F4\u9879\u76EE\u6709\u6548\u671F\uFF1B\u4E0D\u80FD\u665A\u4E8E\u623F\u95F4\u622A\u6B62\u65F6\u95F4\u3002</small>' : ''}</div>`;
   }
   function permissionLifetimeValue(group) {
     const controls = group.querySelector('[data-permission-lifetime]');
@@ -1490,7 +1206,7 @@ window.CodePierCollaboration = (() => {
     const value = controls.querySelector('[data-permission-lifetime-until]').value;
     return {
       mode,
-      expires_at: mode === 'timed' && value ? new Date(value).getTime() / 1000 : null,
+      expires_at: mode === 'timed' && value ? new Date(value).getTime() / 1e3 : null,
     };
   }
   function permissionRows(policy, scope, section) {
@@ -1510,27 +1226,27 @@ window.CodePierCollaboration = (() => {
           const selectedTargets = selected.includes('execute')
             ? rule.execution_targets || []
             : targets;
-          const label = project.name || project.project_label || '项目';
+          const label = project.name || project.project_label || '\u9879\u76EE';
           const env = project.environment_id || 'production';
           return `<div class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(env)}" data-project-label="${E(label)}">
-            <div class="cr-permission-row-main">
-              <label class="cr-choice cr-permission-project"><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}><span>${E(label)}${env === 'production' ? '' : ' · ' + E(env)}</span></label>
-              <select data-permission-level aria-label="${E(label)}的权限" title="可选权限受项目和电脑的设置限制">${permissionOptions(permissionLevel(selected))}</select>
-            </div>
-            <div hidden>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
-            ${targets.length ? `<details data-permission-targets><summary>运行位置</summary>${targets.map((target) => `<label class="cr-choice"><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}><span>${E(project.execution_target_labels?.[target] || (target === 'project_agent' ? '项目电脑' : target))}</span></label>`).join('')}</details>` : ''}
-            <details class="cr-permission-expiry"><summary>有效期</summary>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</details>
-          </div>`;
+          <div class="cr-permission-row-main">
+            <label class="cr-choice cr-permission-project"><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}><span>${E(label)}${env === 'production' ? '' : ' \xB7 ' + E(env)}</span></label>
+            <select data-permission-level aria-label="${E(label)}\u7684\u6743\u9650" title="\u53EF\u9009\u6743\u9650\u53D7\u9879\u76EE\u548C\u7535\u8111\u7684\u8BBE\u7F6E\u9650\u5236">${permissionOptions(permissionLevel(selected))}</select>
+          </div>
+          <div hidden>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
+          ${targets.length ? `<details data-permission-targets><summary>\u8FD0\u884C\u4F4D\u7F6E</summary>${targets.map((target) => `<label class="cr-choice"><input type="checkbox" data-permission-target-option value="${E(target)}" ${selectedTargets.includes(target) ? 'checked' : ''}><span>${E(project.execution_target_labels?.[target] || (target === 'project_agent' ? '\u9879\u76EE\u7535\u8111' : target))}</span></label>`).join('')}</details>` : ''}
+          <details class="cr-permission-expiry"><summary>\u6709\u6548\u671F</summary>${permissionLifetimeControls(lifetime, section !== 'room' && !rule)}</details>
+        </div>`;
         })
-        .join('') || '<p class="cr-muted">没有可授权项目。</p>'
+        .join('') || '<p class="cr-muted">\u6CA1\u6709\u53EF\u6388\u6743\u9879\u76EE\u3002</p>'
     );
   }
   function permissionSection(policy, scope, section) {
     return `<section data-permission-section="${section}"><div class="cr-permission-bulk">
-      <label class="cr-choice cr-permission-select-all"><input type="checkbox" data-permission-select-all><span>全选</span><span class="cr-muted" data-permission-count aria-live="polite"></span></label>
-      <label>所选权限 <select data-permission-bulk-level><option value="-" selected>选择权限</option>${permissionOptions('-', true)}</select></label>
-      ${section === 'room' ? '<label>所选项目有效期 <select data-permission-global-expiry><option value="">各项目设置</option><option value="until_revoked">直到撤销</option><option value="timed">指定时间</option></select></label><label data-permission-global-date hidden>截止时间 <input type="datetime-local"></label>' : ''}
-      </div>${permissionRows(policy, scope, section)}</section>`;
+    <label class="cr-choice cr-permission-select-all"><input type="checkbox" data-permission-select-all><span>\u5168\u9009</span><span class="cr-muted" data-permission-count aria-live="polite"></span></label>
+    <label>\u6240\u9009\u6743\u9650 <select data-permission-bulk-level><option value="-" selected>\u9009\u62E9\u6743\u9650</option>${permissionOptions('-', true)}</select></label>
+    ${section === 'room' ? '<label>\u6240\u9009\u9879\u76EE\u6709\u6548\u671F <select data-permission-global-expiry><option value="">\u5404\u9879\u76EE\u8BBE\u7F6E</option><option value="until_revoked">\u76F4\u5230\u64A4\u9500</option><option value="timed">\u6307\u5B9A\u65F6\u95F4</option></select></label><label data-permission-global-date hidden>\u622A\u6B62\u65F6\u95F4 <input type="datetime-local"></label>' : ''}
+    </div>${permissionRows(policy, scope, section)}</section>`;
   }
   function renderPermissions(policy) {
     if (panel?.name !== 'permissions') return;
@@ -1543,20 +1259,20 @@ window.CodePierCollaboration = (() => {
       (name) => policy.channels?.[name]?.transport_supported !== false,
     );
     root.querySelector('[data-cr-permissions-view]').innerHTML =
-      `${panel.returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-muted">保存后生效。</p>${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())}</p>`}
-      <form data-cr-form="permissions"><h3>项目权限</h3>${permissionSection(policy, policy.scope, 'room')}
-      ${channels
-        .map((channel) => {
-          const entry = policy.channels?.[channel] || { mode: 'follow_room', scope: {} };
-          const name = channel === 'weixin' ? '微信' : 'Telegram';
-          return `<section class="cr-inspection-section"><label class="cr-choice"><input type="checkbox" data-permission-mode="${channel}" ${entry.mode === 'follow_room' ? 'checked' : ''}><span>${name}使用和房间相同的权限</span></label><div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div></section>`;
-        })
-        .join('')}
-      <section class="cr-continuation" aria-label="未完成的任务">
-        <label class="cr-choice"><input type="checkbox" data-cr-continue-selected><span>同时继续未完成的任务<small>只继续本次清单中你选中的任务。已完成的步骤沿用原回执。</small></span></label>
-        <div data-cr-continuation-preview hidden></div>
-      </section>
-      <button class="cr-button cr-primary" type="submit">保存权限</button></form><div data-cr-continuation-result></div>${btn('reload-permissions', '放弃修改', '', 'cr-text-button')}`;
+      `${panel.returnChannel ? btn('channel-scope-back', '\u8FD4\u56DE\u5FAE\u4FE1', '', 'cr-text-button') : ''}<p class="cr-muted">\u4FDD\u5B58\u540E\u751F\u6548\u3002</p>${activeRoom() ? '' : `<p class="cr-info">${E(readOnlyReason())}</p>`}
+    <form data-cr-form="permissions"><h3>\u9879\u76EE\u6743\u9650</h3>${permissionSection(policy, policy.scope, 'room')}
+    ${channels
+      .map((channel) => {
+        const entry = policy.channels?.[channel] || { mode: 'follow_room', scope: {} };
+        const name = channel === 'weixin' ? '\u5FAE\u4FE1' : 'Telegram';
+        return `<section class="cr-inspection-section"><label class="cr-choice"><input type="checkbox" data-permission-mode="${channel}" ${entry.mode === 'follow_room' ? 'checked' : ''}><span>${name}\u4F7F\u7528\u548C\u623F\u95F4\u76F8\u540C\u7684\u6743\u9650</span></label><div data-permission-custom="${channel}" ${entry.mode === 'custom' ? '' : 'hidden'}>${permissionSection(policy, entry.scope, channel)}</div></section>`;
+      })
+      .join('')}
+    <section class="cr-continuation" aria-label="\u672A\u5B8C\u6210\u7684\u4EFB\u52A1">
+      <label class="cr-choice"><input type="checkbox" data-cr-continue-selected><span>\u540C\u65F6\u7EE7\u7EED\u672A\u5B8C\u6210\u7684\u4EFB\u52A1<small>\u53EA\u7EE7\u7EED\u672C\u6B21\u6E05\u5355\u4E2D\u4F60\u9009\u4E2D\u7684\u4EFB\u52A1\u3002\u5DF2\u5B8C\u6210\u7684\u6B65\u9AA4\u6CBF\u7528\u539F\u56DE\u6267\u3002</small></span></label>
+      <div data-cr-continuation-preview hidden></div>
+    </section>
+    <button class="cr-button cr-primary" type="submit">\u4FDD\u5B58\u6743\u9650</button></form><div data-cr-continuation-result></div>${btn('reload-permissions', '\u653E\u5F03\u4FEE\u6539', '', 'cr-text-button')}`;
     updatePermissionControls();
     renderContinuationResult(panel);
   }
@@ -1564,8 +1280,8 @@ window.CodePierCollaboration = (() => {
     if (!state.room) return;
     openPanel(
       'permissions',
-      '权限设置',
-      `<div data-cr-permissions-view>${returnChannel ? btn('channel-scope-back', '返回微信', '', 'cr-text-button') : ''}<p class="cr-muted">正在读取房间权限…</p>${btn('reload-permissions', '重新读取', '', 'cr-text-button')}</div>`,
+      '\u6743\u9650\u8BBE\u7F6E',
+      `<div data-cr-permissions-view>${returnChannel ? btn('channel-scope-back', '\u8FD4\u56DE\u5FAE\u4FE1', '', 'cr-text-button') : ''}<p class="cr-muted">\u6B63\u5728\u8BFB\u53D6\u623F\u95F4\u6743\u9650\u2026</p>${btn('reload-permissions', '\u91CD\u65B0\u8BFB\u53D6', '', 'cr-text-button')}</div>`,
       { returnChannel },
     );
     const current = panel;
@@ -1604,8 +1320,6 @@ window.CodePierCollaboration = (() => {
         lifetime.expires_at,
       );
     }
-    // Room rows are evaluated first. Custom channels are bounded by this
-    // unsaved room selection, not just the host's maximum grant.
     for (const group of form.querySelectorAll('[data-permission-row]')) {
       const channel = group.closest('[data-permission-section]').dataset.permissionSection;
       const parent =
@@ -1631,7 +1345,7 @@ window.CodePierCollaboration = (() => {
       lifetimeUntil.closest('label').hidden = lifetimeMode.value !== 'timed';
       const lifetime = permissionLifetimeValue(group);
       group.querySelector('[data-permission-expired]').hidden =
-        lifetime.mode !== 'timed' || !(Number(lifetime.expires_at) <= Date.now() / 1000);
+        lifetime.mode !== 'timed' || !(Number(lifetime.expires_at) <= Date.now() / 1e3);
       for (const input of group.querySelectorAll('[data-permission-cap]')) {
         const parentCap = parent?.querySelector(
           '[data-permission-cap][value="' + input.value + '"]:checked:not(:disabled)',
@@ -1675,15 +1389,19 @@ window.CodePierCollaboration = (() => {
         const allowed = [...targets.querySelectorAll('input:not(:disabled)')];
         const selected = allowed.filter((input) => input.checked).length;
         targets.querySelector('summary').textContent =
-          '运行位置：' + (selected === allowed.length ? '全部' : '已选') + '（' + selected + '）';
+          '\u8FD0\u884C\u4F4D\u7F6E\uFF1A' +
+          (selected === allowed.length ? '\u5168\u90E8' : '\u5DF2\u9009') +
+          '\uFF08' +
+          selected +
+          '\uFF09';
       }
       const expiry = group.querySelector('.cr-permission-expiry');
       expiry.hidden = !enabled;
       expiry.querySelector('summary').textContent = !group.querySelector(
         '[data-permission-expired]',
       ).hidden
-        ? '有效期 · 已过期'
-        : '有效期';
+        ? '\u6709\u6548\u671F \xB7 \u5DF2\u8FC7\u671F'
+        : '\u6709\u6548\u671F';
     }
     for (const section of form.querySelectorAll('[data-permission-section]')) {
       const projects = [...section.querySelectorAll('[data-permission-project]:not(:disabled)')];
@@ -1693,7 +1411,7 @@ window.CodePierCollaboration = (() => {
       all.checked = selected > 0 && selected === projects.length;
       all.indeterminate = selected > 0 && selected < projects.length;
       section.querySelector('[data-permission-count]').textContent =
-        '已选 ' + selected + ' / ' + projects.length;
+        '\u5DF2\u9009 ' + selected + ' / ' + projects.length;
       for (const control of section.querySelectorAll(
         '[data-permission-bulk-level], [data-permission-global-expiry], [data-permission-global-date] input',
       ))
@@ -1747,7 +1465,10 @@ window.CodePierCollaboration = (() => {
       const capabilities = [
         ...group.querySelectorAll('[data-permission-cap]:checked:not(:disabled)'),
       ].map((item) => item.value);
-      if (!capabilities.length) throw new Error('所选项目至少需要一项可授予权限。');
+      if (!capabilities.length)
+        throw new Error(
+          '\u6240\u9009\u9879\u76EE\u81F3\u5C11\u9700\u8981\u4E00\u9879\u53EF\u6388\u4E88\u6743\u9650\u3002',
+        );
       const project = {
         project_id: group.dataset.projectId,
         environment_id: group.dataset.environmentId,
@@ -1755,9 +1476,13 @@ window.CodePierCollaboration = (() => {
       const lifetime = permissionLifetimeValue(group);
       if (
         lifetime.mode === 'timed' &&
-        (!Number.isFinite(lifetime.expires_at) || lifetime.expires_at <= Date.now() / 1000)
+        (!Number.isFinite(lifetime.expires_at) || lifetime.expires_at <= Date.now() / 1e3)
       )
-        throw new Error('请更新“' + group.dataset.projectLabel + '”的有效期。');
+        throw new Error(
+          '\u8BF7\u66F4\u65B0\u201C' +
+            group.dataset.projectLabel +
+            '\u201D\u7684\u6709\u6548\u671F\u3002',
+        );
       const parent = parentScope?.project_scopes?.find(
         (item) => permissionKey(item) === permissionKey(project),
       );
@@ -1765,14 +1490,18 @@ window.CodePierCollaboration = (() => {
         parent?.lifetime?.mode === 'timed' &&
         (lifetime.mode !== 'timed' || lifetime.expires_at > parent.lifetime.expires_at)
       )
-        throw new Error('渠道自定义有效期不能晚于对应房间项目的截止时间，请调整该行有效期。');
+        throw new Error(
+          '\u6E20\u9053\u81EA\u5B9A\u4E49\u6709\u6548\u671F\u4E0D\u80FD\u665A\u4E8E\u5BF9\u5E94\u623F\u95F4\u9879\u76EE\u7684\u622A\u6B62\u65F6\u95F4\uFF0C\u8BF7\u8C03\u6574\u8BE5\u884C\u6709\u6548\u671F\u3002',
+        );
       const executionTargets = capabilities.includes('execute')
         ? [...group.querySelectorAll('[data-permission-target-option]:checked:not(:disabled)')].map(
             (input) => input.value,
           )
         : [];
       if (capabilities.includes('execute') && !executionTargets.length)
-        throw new Error('允许执行的项目需要选择至少一个执行位置。');
+        throw new Error(
+          '\u5141\u8BB8\u6267\u884C\u7684\u9879\u76EE\u9700\u8981\u9009\u62E9\u81F3\u5C11\u4E00\u4E2A\u6267\u884C\u4F4D\u7F6E\u3002',
+        );
       rules.push({
         ...project,
         capabilities,
@@ -1800,7 +1529,7 @@ window.CodePierCollaboration = (() => {
         Number.isFinite,
       );
       const expires_at = deadlines.length ? Math.min(...deadlines) : null;
-      if (expires_at !== null && expires_at <= Date.now() / 1000) return [];
+      if (expires_at !== null && expires_at <= Date.now() / 1e3) return [];
       return [
         {
           ...rule,
@@ -1818,23 +1547,29 @@ window.CodePierCollaboration = (() => {
   function continuationReason(code) {
     return (
       {
-        CHANNEL_OWNER_NOT_APPROVED: '需要先在微信连接里重新允许本人交办',
-        ROOM_SOURCE_CHANGED: '原任务消息已修改或撤回',
-        ROOM_OWNER_SOURCE_REQUIRED: '无法核实原任务的房主身份',
-        ROOM_CONTINUATION_SCOPE_DENIED: '当前权限未覆盖原任务的剩余操作',
-        ROOM_CONTINUATION_MANUALLY_PAUSED: '房主已暂停这项工作',
-        ROOM_CONTINUATION_ALREADY_STARTED: '这条消息已经开工',
-        ROOM_CONTINUATION_POLICY_CHANGED: '批准后房间权限已变化',
-        ROOM_CONTINUATION_UNAVAILABLE: '原工作已结束或无法续办',
-        ROOM_CONTINUATION_EVIDENCE_CHANGED: '原续办凭证已变化',
-        ROOM_RECOVERY_MEMBER_UNAVAILABLE: '当前没有可接手原任务的 dot',
-        ROOM_INTENT_CHANGED: '原工作的要求已变化',
+        CHANNEL_OWNER_NOT_APPROVED:
+          '\u9700\u8981\u5148\u5728\u5FAE\u4FE1\u8FDE\u63A5\u91CC\u91CD\u65B0\u5141\u8BB8\u672C\u4EBA\u4EA4\u529E',
+        ROOM_SOURCE_CHANGED: '\u539F\u4EFB\u52A1\u6D88\u606F\u5DF2\u4FEE\u6539\u6216\u64A4\u56DE',
+        ROOM_OWNER_SOURCE_REQUIRED:
+          '\u65E0\u6CD5\u6838\u5B9E\u539F\u4EFB\u52A1\u7684\u623F\u4E3B\u8EAB\u4EFD',
+        ROOM_CONTINUATION_SCOPE_DENIED:
+          '\u5F53\u524D\u6743\u9650\u672A\u8986\u76D6\u539F\u4EFB\u52A1\u7684\u5269\u4F59\u64CD\u4F5C',
+        ROOM_CONTINUATION_MANUALLY_PAUSED: '\u623F\u4E3B\u5DF2\u6682\u505C\u8FD9\u9879\u5DE5\u4F5C',
+        ROOM_CONTINUATION_ALREADY_STARTED: '\u8FD9\u6761\u6D88\u606F\u5DF2\u7ECF\u5F00\u5DE5',
+        ROOM_CONTINUATION_POLICY_CHANGED:
+          '\u6279\u51C6\u540E\u623F\u95F4\u6743\u9650\u5DF2\u53D8\u5316',
+        ROOM_CONTINUATION_UNAVAILABLE:
+          '\u539F\u5DE5\u4F5C\u5DF2\u7ED3\u675F\u6216\u65E0\u6CD5\u7EED\u529E',
+        ROOM_CONTINUATION_EVIDENCE_CHANGED: '\u539F\u7EED\u529E\u51ED\u8BC1\u5DF2\u53D8\u5316',
+        ROOM_RECOVERY_MEMBER_UNAVAILABLE:
+          '\u5F53\u524D\u6CA1\u6709\u53EF\u63A5\u624B\u539F\u4EFB\u52A1\u7684 dot',
+        ROOM_INTENT_CHANGED: '\u539F\u5DE5\u4F5C\u7684\u8981\u6C42\u5DF2\u53D8\u5316',
       }[code] || reasonText(code)
     );
   }
   function continuationSummary(result) {
     const counts = result.counts || {};
-    return `续办：${counts.continued || 0} 项已继续，${counts.waiting_operations || 0} 项待核对，${counts.skipped || 0} 项跳过${counts.pending ? '，' + counts.pending + ' 项待处理' : ''}。`;
+    return `\u7EED\u529E\uFF1A${counts.continued || 0} \u9879\u5DF2\u7EE7\u7EED\uFF0C${counts.waiting_operations || 0} \u9879\u5F85\u6838\u5BF9\uFF0C${counts.skipped || 0} \u9879\u8DF3\u8FC7${counts.pending ? '\uFF0C' + counts.pending + ' \u9879\u5F85\u5904\u7406' : ''}\u3002`;
   }
   function renderContinuationResult(current) {
     if (panel !== current || current?.name !== 'permissions') return;
@@ -1842,13 +1577,13 @@ window.CodePierCollaboration = (() => {
     if (!box) return;
     const result = current.continuationResult;
     const states = {
-      continued: '已继续',
-      waiting_operations: '等待原操作回执',
-      skipped: '已跳过',
-      pending: '待处理',
+      continued: '\u5DF2\u7EE7\u7EED',
+      waiting_operations: '\u7B49\u5F85\u539F\u64CD\u4F5C\u56DE\u6267',
+      skipped: '\u5DF2\u8DF3\u8FC7',
+      pending: '\u5F85\u5904\u7406',
     };
     const markup = result
-      ? `<section class="cr-continuation" aria-label="续办结果"><h3>续办结果</h3><p role="status">${E(continuationSummary(result))}</p><ul>${(result.results || []).map((item) => `<li><strong>${E(item.label || current.continuationLabels?.get(item.task_id) || '原任务 #' + String(item.task_id).slice(0, 8))}</strong> · ${E(states[item.state] || '待核对')}${item.reason_code ? `<small>${E(continuationReason(item.reason_code))}</small>` : ''}</li>`).join('')}</ul></section>`
+      ? `<section class="cr-continuation" aria-label="\u7EED\u529E\u7ED3\u679C"><h3>\u7EED\u529E\u7ED3\u679C</h3><p role="status">${E(continuationSummary(result))}</p><ul>${(result.results || []).map((item) => `<li><strong>${E(item.label || current.continuationLabels?.get(item.task_id) || '\u539F\u4EFB\u52A1 #' + String(item.task_id).slice(0, 8))}</strong> \xB7 ${E(states[item.state] || '\u5F85\u6838\u5BF9')}${item.reason_code ? `<small>${E(continuationReason(item.reason_code))}</small>` : ''}</li>`).join('')}</ul></section>`
       : '';
     if (box._markup !== markup) {
       box.innerHTML = markup;
@@ -1908,20 +1643,23 @@ window.CodePierCollaboration = (() => {
       all.indeterminate = selected > 0 && selected < tasks.length;
     }
     const count = form.querySelector('[data-cr-continuation-count]');
-    if (count) count.textContent = '已选 ' + selected + ' / ' + tasks.length;
-    form.querySelector('button[type="submit"]').textContent = selected ? '保存并继续' : '保存权限';
+    if (count) count.textContent = '\u5DF2\u9009 ' + selected + ' / ' + tasks.length;
+    form.querySelector('button[type="submit"]').textContent = selected
+      ? '\u4FDD\u5B58\u5E76\u7EE7\u7EED'
+      : '\u4FDD\u5B58\u6743\u9650';
   }
   function continuationPreviewMarkup(preview) {
     const candidates = preview.candidates || [];
-    if (!candidates.length) return '<p class="cr-muted">当前权限下没有可继续的任务。</p>';
-    return `<div class="cr-continuation-select"><label class="cr-choice"><input type="checkbox" data-cr-continuation-all><span>全选</span></label><span class="cr-muted" data-cr-continuation-count aria-live="polite"></span></div><div class="cr-continuation-tasks">${candidates
+    if (!candidates.length)
+      return '<p class="cr-muted">\u5F53\u524D\u6743\u9650\u4E0B\u6CA1\u6709\u53EF\u7EE7\u7EED\u7684\u4EFB\u52A1\u3002</p>';
+    return `<div class="cr-continuation-select"><label class="cr-choice"><input type="checkbox" data-cr-continuation-all><span>\u5168\u9009</span></label><span class="cr-muted" data-cr-continuation-count aria-live="polite"></span></div><div class="cr-continuation-tasks">${candidates
       .map((item) => {
         const eligible = item.eligible !== false;
         const remaining = (item.remaining_operations || []).map((op) => op.label).filter(Boolean);
         const detail = eligible
-          ? remaining.join('、') || '继续处理原请求'
-          : continuationReason(item.reason_code) || '当前无法续办';
-        return `<label class="cr-choice"><input type="checkbox" data-cr-continuation-task value="${E(item.task_id)}" ${!eligible ? 'disabled' : item.selected_by_default !== false ? 'checked' : ''}><span><strong>${E(item.label || '未完成的任务')}</strong><small>${E(detail)}</small></span></label>`;
+          ? remaining.join('\u3001') || '\u7EE7\u7EED\u5904\u7406\u539F\u8BF7\u6C42'
+          : continuationReason(item.reason_code) || '\u5F53\u524D\u65E0\u6CD5\u7EED\u529E';
+        return `<label class="cr-choice"><input type="checkbox" data-cr-continuation-task value="${E(item.task_id)}" ${!eligible ? 'disabled' : item.selected_by_default !== false ? 'checked' : ''}><span><strong>${E(item.label || '\u672A\u5B8C\u6210\u7684\u4EFB\u52A1')}</strong><small>${E(detail)}</small></span></label>`;
       })
       .join('')}</div>`;
   }
@@ -1933,14 +1671,14 @@ window.CodePierCollaboration = (() => {
     const submit = form.querySelector('button[type="submit"]');
     const owner = state.owner;
     const epoch = state.epoch;
-    const selection = new Map(
+    const selection2 = new Map(
       [...box.querySelectorAll('[data-cr-continuation-task]:not(:disabled)')].map((task) => [
         task.value,
         task.checked,
       ]),
     );
     if (!enabled) current.continuationSelection = null;
-    else if (selection.size) current.continuationSelection = selection;
+    else if (selection2.size) current.continuationSelection = selection2;
     box.hidden = !enabled;
     box.replaceChildren();
     updateContinuationSelection(form);
@@ -1954,7 +1692,8 @@ window.CodePierCollaboration = (() => {
       owner === state.owner &&
       epoch === state.epoch &&
       !request.signal.aborted;
-    box.innerHTML = '<p class="cr-muted" role="status">正在核对可继续的任务…</p>';
+    box.innerHTML =
+      '<p class="cr-muted" role="status">\u6B63\u5728\u6838\u5BF9\u53EF\u7EE7\u7EED\u7684\u4EFB\u52A1\u2026</p>';
     try {
       const draft = permissionDraft(form, current);
       const preview = await store.previewPermissionContinuation(
@@ -1972,7 +1711,7 @@ window.CodePierCollaboration = (() => {
       submit.disabled = !activeRoom() || current.busy;
     } catch (error) {
       if (!visible()) return;
-      box.innerHTML = `<p role="status">${E(error.message || '暂时无法核对续办清单。')}</p>${btn('refresh-continuation-preview', '重新核对', '', 'cr-text-button')}`;
+      box.innerHTML = `<p role="status">${E(error.message || '\u6682\u65F6\u65E0\u6CD5\u6838\u5BF9\u7EED\u529E\u6E05\u5355\u3002')}</p>${btn('refresh-continuation-preview', '\u91CD\u65B0\u6838\u5BF9', '', 'cr-text-button')}`;
     }
     patchRoomPermissions();
   }
@@ -2014,13 +1753,22 @@ window.CodePierCollaboration = (() => {
       const name =
         project?.name ||
         (S.projects || []).find((entry) => entry.id === item.project_id)?.alias ||
-        '项目';
-      return item.environment_id === 'production' ? name : name + '（' + item.environment_id + '）';
+        '\u9879\u76EE';
+      return item.environment_id === 'production'
+        ? name
+        : name + '\uFF08' + item.environment_id + '\uFF09';
     });
-    return '已跳过暂停项目 ' + labels.join('、') + ' 的新增授权。';
+    return (
+      '\u5DF2\u8DF3\u8FC7\u6682\u505C\u9879\u76EE ' +
+      labels.join('\u3001') +
+      ' \u7684\u65B0\u589E\u6388\u6743\u3002'
+    );
   }
   async function savePermissions(form, current) {
-    if (current.stale) throw new Error('权限已在其他位置更新，请重新载入后核对。');
+    if (current.stale)
+      throw new Error(
+        '\u6743\u9650\u5DF2\u5728\u5176\u4ED6\u4F4D\u7F6E\u66F4\u65B0\uFF0C\u8BF7\u91CD\u65B0\u8F7D\u5165\u540E\u6838\u5BF9\u3002',
+      );
     updatePermissionControls();
     const owner = state.owner;
     let confirmed = null;
@@ -2036,10 +1784,12 @@ window.CodePierCollaboration = (() => {
       enabled &&
       (!preview ||
         preview.draft !== JSON.stringify(draft) ||
-        (preview.expires_at && preview.expires_at <= Date.now() / 1000))
+        (preview.expires_at && preview.expires_at <= Date.now() / 1e3))
     ) {
       void previewContinuation(form, current);
-      throw new Error('权限或续办清单已变化，请核对后保存。');
+      throw new Error(
+        '\u6743\u9650\u6216\u7EED\u529E\u6E05\u5355\u5DF2\u53D8\u5316\uFF0C\u8BF7\u6838\u5BF9\u540E\u4FDD\u5B58\u3002',
+      );
     }
     const continuation =
       enabled && selectedTaskIds.length
@@ -2087,7 +1837,9 @@ window.CodePierCollaboration = (() => {
     }
     const pausedNotice = pausedProjectNotice(result || confirmed);
     const savedMessage =
-      (pausedNotice ? '已保存可应用的权限。' + pausedNotice : '权限设置已保存。') +
+      (pausedNotice
+        ? '\u5DF2\u4FDD\u5B58\u53EF\u5E94\u7528\u7684\u6743\u9650\u3002' + pausedNotice
+        : '\u6743\u9650\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\u3002') +
       (confirmedContinuation ? continuationSummary(confirmedContinuation) : '');
     const invalidation = current.accessInvalidation;
     const receiptOnly =
@@ -2101,28 +1853,33 @@ window.CodePierCollaboration = (() => {
       invalidation.epoch === state.epoch &&
       invalidation.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch;
     if (receiptOnly) {
-      const feedback = {
+      const feedback2 = {
         owner,
         roomId: current.roomId,
         epoch: state.epoch,
         openingEpoch: current.epoch,
         message: savedMessage,
       };
-      root._crProjectSaveFeedback = feedback;
-      announce(feedback.message);
+      root._crProjectSaveFeedback = feedback2;
+      announce(feedback2.message);
       try {
         await store.refresh();
-        if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
+        if (root?._crProjectSaveFeedback === feedback2) delete root._crProjectSaveFeedback;
       } catch (error) {
         if (
           error.name !== 'AbortError' &&
           owner === state.owner &&
           current.roomId === state.roomId &&
-          feedback.epoch === state.epoch &&
+          feedback2.epoch === state.epoch &&
           !panel &&
-          feedback.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch
+          feedback2.openingEpoch === root?.querySelector('dialog')?._crOpeningEpoch
         )
-          announce(feedback.message + ' 房间视图刷新失败：' + error.message, true);
+          announce(
+            feedback2.message +
+              ' \u623F\u95F4\u89C6\u56FE\u5237\u65B0\u5931\u8D25\uFF1A' +
+              error.message,
+            true,
+          );
       }
       return;
     }
@@ -2148,7 +1905,10 @@ window.CodePierCollaboration = (() => {
       if (root?._crProjectSaveFeedback === feedback) delete root._crProjectSaveFeedback;
     } catch (error) {
       if (error.name === 'AbortError') return;
-      const warning = feedback.message + ' 房间视图刷新失败：' + error.message;
+      const warning =
+        feedback.message +
+        ' \u623F\u95F4\u89C6\u56FE\u5237\u65B0\u5931\u8D25\uFF1A' +
+        error.message;
       if (panel === savedPanel) panelError(warning);
       else if (
         feedback.accessInvalidated &&
@@ -2161,21 +1921,23 @@ window.CodePierCollaboration = (() => {
         announce(warning, true);
     }
   }
+
+  // ../collaboration-room/connections.mjs
   function membersPanel() {
     if (!state.room) return;
     openPanel(
       'members',
-      '房间成员',
+      '\u623F\u95F4\u6210\u5458',
       `<div class="cr-member-list">${
         members().length
           ? members()
               .map(
                 (member) =>
-                  `<article class="cr-member"><span class="cr-member-avatar" aria-hidden="true">${E((member.name || member.label || 'D').slice(0, 1))}</span><div><h3>${E(member.name || member.label)}${state.room.lead_member_id === memberId(member) ? '<span class="cr-tag">主责</span>' : ''}</h3><p>${E(hostStates[member.host_connection_state] || memberBadges[member.stage || member.state] || '连接中')}</p><small>${E(memberOrigin(member))}</small></div>${btn('member-detail', '管理', `data-id="${E(memberId(member))}" aria-label="管理 ${E(member.name || member.label)} ${E(memberShort(member))}"`)}</article>`,
+                  `<article class="cr-member"><span class="cr-member-avatar" aria-hidden="true">${E((member.name || member.label || 'D').slice(0, 1))}</span><div><h3>${E(member.name || member.label)}${state.room.lead_member_id === memberId(member) ? '<span class="cr-tag">\u4E3B\u8D23</span>' : ''}</h3><p>${E(hostStates[member.host_connection_state] || memberBadges[member.stage || member.state] || '\u8FDE\u63A5\u4E2D')}</p><small>${E(memberOrigin(member))}</small></div>${btn('member-detail', '\u7BA1\u7406', `data-id="${E(memberId(member))}" aria-label="\u7BA1\u7406 ${E(member.name || member.label)} ${E(memberShort(member))}"`)}</article>`,
               )
               .join('')
-          : '<p class="cr-muted">连接一个 dot，让工作持续推进。</p>'
-      }</div>${btn('add-member', '添加 dot', '', 'cr-primary cr-full')}${btn('host-list', '管理 dot 连接', '', 'cr-text-button cr-full')}`,
+          : '<p class="cr-muted">\u8FDE\u63A5\u4E00\u4E2A dot\uFF0C\u8BA9\u5DE5\u4F5C\u6301\u7EED\u63A8\u8FDB\u3002</p>'
+      }</div>${btn('add-member', '\u6DFB\u52A0 dot', '', 'cr-primary cr-full')}${btn('host-list', '\u7BA1\u7406 dot \u8FDE\u63A5', '', 'cr-text-button cr-full')}`,
     );
   }
   async function addMemberPanel() {
@@ -2211,8 +1973,8 @@ window.CodePierCollaboration = (() => {
     }
     openPanel(
       'add-member',
-      '添加 dot',
-      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">加入后使用房间的项目权限。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-connect-summary" aria-label="接入范围"><p class="cr-muted">dot 加入「${E(roomName(state.room))}」并使用房间已批准的项目权限。读取和回复探测通过后就可在房间收发消息。</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>在房间授权有效期间保持连接<small>自动处理可恢复的连接故障。订阅由 dot 宿主续订。</small></span></label></section><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
+      '\u6DFB\u52A0 dot',
+      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">\u9009\u62E9\u8FDE\u63A5\u65B9\u5F0F</legend><label><input type="radio" name="connection_mode" value="new" checked><span>\u65B0 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>\u5DF2\u6709 dot</span></label></fieldset><section data-cr-connections hidden>${field('\u5DF2\u9A8C\u8BC1\u7684\u8FDE\u63A5', '<select name="reuse_member_id" disabled><option value="">\u9009\u62E9\u5DF2\u9A8C\u8BC1\u7684 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '\u8BFB\u53D6\u5DF2\u6709\u8FDE\u63A5', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">\u52A0\u5165\u540E\u4F7F\u7528\u623F\u95F4\u7684\u9879\u76EE\u6743\u9650\u3002</p></section>${field('\u6210\u5458\u540D\u79F0', '<input name="name" required maxlength="80" placeholder="\u7ED9\u8FD9\u4E2A dot \u8D77\u4E2A\u540D\u5B57" autofocus>')}<section class="cr-connect-summary" aria-label="\u63A5\u5165\u8303\u56F4"><p class="cr-muted">dot \u52A0\u5165\u300C${E(roomName(state.room))}\u300D\u5E76\u4F7F\u7528\u623F\u95F4\u5DF2\u6279\u51C6\u7684\u9879\u76EE\u6743\u9650\u3002\u8BFB\u53D6\u548C\u56DE\u590D\u63A2\u6D4B\u901A\u8FC7\u540E\u5C31\u53EF\u5728\u623F\u95F4\u6536\u53D1\u6D88\u606F\u3002</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>\u5728\u623F\u95F4\u6388\u6743\u6709\u6548\u671F\u95F4\u4FDD\u6301\u8FDE\u63A5<small>\u81EA\u52A8\u5904\u7406\u53EF\u6062\u590D\u7684\u8FDE\u63A5\u6545\u969C\u3002\u8BA2\u9605\u7531 dot \u5BBF\u4E3B\u7EED\u8BA2\u3002</small></span></label></section><button class="cr-button cr-primary" type="submit">\u6DFB\u52A0\u5E76\u8FDE\u63A5</button></form>`,
       {
         version: state.room.version,
         connections: [],
@@ -2227,7 +1989,7 @@ window.CodePierCollaboration = (() => {
     const current = panel;
     current.connectionsLoading = true;
     const status = root.querySelector('[data-cr-connection-status]');
-    status.textContent = '正在加载已连接的 dot…';
+    status.textContent = '\u6B63\u5728\u52A0\u8F7D\u5DF2\u8FDE\u63A5\u7684 dot\u2026';
     const moreButton = root.querySelector('[data-cr-more-connections]');
     moreButton.disabled = true;
     try {
@@ -2236,8 +1998,6 @@ window.CodePierCollaboration = (() => {
       let response = await api(connectionListPath(cursor, useHost));
       const capabilities = useHost ? response.connection_capabilities || {} : {};
       if (useHost && capabilities.host_reference === true && !response.next_cursor) {
-        // Retain legacy anchors that have yet to be adopted. The two catalogs
-        // use separate cursors.
         const legacy = await api(connectionListPath('', false));
         response = {
           items: [...(response.items || []), ...(legacy.items || [])],
@@ -2282,7 +2042,7 @@ window.CodePierCollaboration = (() => {
       const select = root.querySelector('[name="reuse_member_id"]'),
         selected = select.value;
       select.innerHTML =
-        '<option value="">选择已验证的 dot</option>' +
+        '<option value="">\u9009\u62E9\u5DF2\u9A8C\u8BC1\u7684 dot</option>' +
         current.connections
           .map(
             (item) =>
@@ -2299,15 +2059,15 @@ window.CodePierCollaboration = (() => {
       status.textContent = current.connections.length
         ? ''
         : current.connectionsCursor
-          ? '当前页没有可复用的连接，可以继续查看。'
-          : '其他房间还没有连好的 dot。';
+          ? '\u5F53\u524D\u9875\u6CA1\u6709\u53EF\u590D\u7528\u7684\u8FDE\u63A5\uFF0C\u53EF\u4EE5\u7EE7\u7EED\u67E5\u770B\u3002'
+          : '\u5176\u4ED6\u623F\u95F4\u8FD8\u6CA1\u6709\u8FDE\u597D\u7684 dot\u3002';
       moreButton.hidden = !current.connectionsCursor;
-      moreButton.textContent = '更多已验证连接';
+      moreButton.textContent = '\u66F4\u591A\u5DF2\u9A8C\u8BC1\u8FDE\u63A5';
     } catch (error) {
       if (current === panel) {
         status.textContent = error.message;
         moreButton.hidden = false;
-        moreButton.textContent = '重新读取';
+        moreButton.textContent = '\u91CD\u65B0\u8BFB\u53D6';
       }
     } finally {
       current.connectionsLoading = false;
@@ -2317,10 +2077,14 @@ window.CodePierCollaboration = (() => {
   function hostListPanel() {
     openPanel(
       'host-list',
-      'dot 连接',
-      '<p class="cr-info">旧房间可能各自登记了同名连接。每条连接独立管理，撤销前可核对受影响的房间。</p>' +
-        '<div data-cr-host-list aria-live="polite"></div>' +
-        btn('more-hosts', '更多连接', 'data-cr-more-hosts hidden', 'cr-text-button'),
+      'dot \u8FDE\u63A5',
+      '<p class="cr-info">\u65E7\u623F\u95F4\u53EF\u80FD\u5404\u81EA\u767B\u8BB0\u4E86\u540C\u540D\u8FDE\u63A5\u3002\u6BCF\u6761\u8FDE\u63A5\u72EC\u7ACB\u7BA1\u7406\uFF0C\u64A4\u9500\u524D\u53EF\u6838\u5BF9\u53D7\u5F71\u54CD\u7684\u623F\u95F4\u3002</p><div data-cr-host-list aria-live="polite"></div>' +
+        btn(
+          'more-hosts',
+          '\u66F4\u591A\u8FDE\u63A5',
+          'data-cr-more-hosts hidden',
+          'cr-text-button',
+        ),
       { hostCursor: '', hosts: [] },
     );
     return loadHostList();
@@ -2332,7 +2096,7 @@ window.CodePierCollaboration = (() => {
     const box = root.querySelector('[data-cr-host-list]');
     const more = root.querySelector('[data-cr-more-hosts]');
     more.disabled = true;
-    if (!current.hosts.length) box.textContent = '正在读取 dot 连接…';
+    if (!current.hosts.length) box.textContent = '\u6B63\u5728\u8BFB\u53D6 dot \u8FDE\u63A5\u2026';
     try {
       const result = await api(connectionListPath(current.hostCursor));
       if (panel !== current) return;
@@ -2348,18 +2112,18 @@ window.CodePierCollaboration = (() => {
             .map((item) => {
               const last = item.last_round_trip_at || item.verified_at;
               const summary = connectionRoomSummary(item);
-              const label = [connectionName(item), summary].filter(Boolean).join(' · ');
-              return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E([connectionState(item), summary].filter(Boolean).join(' · '))}</p>${last ? `<small>最近往返 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '详情', `data-id="${E(item.host_connection_id)}" aria-label="查看 ${E(label)} 的连接详情"`)}</article>`;
+              const label = [connectionName(item), summary].filter(Boolean).join(' \xB7 ');
+              return `<article class="cr-member"><div><h3>${E(connectionName(item))}</h3><p>${E([connectionState(item), summary].filter(Boolean).join(' \xB7 '))}</p>${last ? `<small>\u6700\u8FD1\u5F80\u8FD4 ${E(dateTime(last))}</small>` : ''}</div>${btn('host-detail', '\u8BE6\u60C5', `data-id="${E(item.host_connection_id)}" aria-label="\u67E5\u770B ${E(label)} \u7684\u8FDE\u63A5\u8BE6\u60C5"`)}</article>`;
             })
             .join('')
-        : '<p class="cr-muted">当前没有已登记的独立连接。仍可在房间管理成员。</p>';
+        : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u5DF2\u767B\u8BB0\u7684\u72EC\u7ACB\u8FDE\u63A5\u3002\u4ECD\u53EF\u5728\u623F\u95F4\u7BA1\u7406\u6210\u5458\u3002</p>';
       more.hidden = !current.hostCursor;
-      more.textContent = '更多连接';
+      more.textContent = '\u66F4\u591A\u8FDE\u63A5';
     } catch (error) {
       if (panel === current) {
         panelError(error.message);
         more.hidden = false;
-        more.textContent = '重新读取';
+        more.textContent = '\u91CD\u65B0\u8BFB\u53D6';
       }
     } finally {
       current.loading = false;
@@ -2371,18 +2135,23 @@ window.CodePierCollaboration = (() => {
     const original = rememberedBatch(id);
     openPanel(
       'host-detail',
-      'dot 连接详情',
-      '<div data-cr-host-summary aria-live="polite"><p class="cr-muted">正在读取连接状态…</p></div>' +
-        btn('host-impact', '查看影响范围与连接操作', 'hidden', 'cr-text-button cr-full') +
+      'dot \u8FDE\u63A5\u8BE6\u60C5',
+      '<div data-cr-host-summary aria-live="polite"><p class="cr-muted">\u6B63\u5728\u8BFB\u53D6\u8FDE\u63A5\u72B6\u6001\u2026</p></div>' +
+        btn(
+          'host-impact',
+          '\u67E5\u770B\u5F71\u54CD\u8303\u56F4\u4E0E\u8FDE\u63A5\u64CD\u4F5C',
+          'hidden',
+          'cr-text-button cr-full',
+        ) +
         (original
           ? btn(
               'view-host-batch',
-              '查看最近一次更换',
+              '\u67E5\u770B\u6700\u8FD1\u4E00\u6B21\u66F4\u6362',
               `data-id="${E(original)}"`,
               'cr-text-button cr-full',
             )
           : '') +
-        btn('host-list', '所有 dot 连接', '', 'cr-text-button cr-full') +
+        btn('host-list', '\u6240\u6709 dot \u8FDE\u63A5', '', 'cr-text-button cr-full') +
         '<div data-cr-host-impact></div>',
       { hostId: id },
     );
@@ -2408,11 +2177,17 @@ window.CodePierCollaboration = (() => {
       const box = root.querySelector('[data-cr-host-summary]');
       const markup = `<section class="cr-connect-summary"><h3>${E(connectionName(host))}</h3>${facts(
         [
-          ['连接状态', connectionState(host)],
-          ['使用中的房间', host.single_room_title || supplied(host.room_count)],
-          ['最近一次往返', last ? dateTime(last) : '等待真实往返'],
+          ['\u8FDE\u63A5\u72B6\u6001', connectionState(host)],
+          [
+            '\u4F7F\u7528\u4E2D\u7684\u623F\u95F4',
+            host.single_room_title || supplied(host.room_count),
+          ],
+          [
+            '\u6700\u8FD1\u4E00\u6B21\u5F80\u8FD4',
+            last ? dateTime(last) : '\u7B49\u5F85\u771F\u5B9E\u5F80\u8FD4',
+          ],
         ],
-      )}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>请在原 dot 中继续连接。</p>' : ''}</section>`;
+      )}${['wait_for_host_refresh', 'awaiting_host_refresh'].includes(host.next_action) ? '<p>\u8BF7\u5728\u539F dot \u4E2D\u7EE7\u7EED\u8FDE\u63A5\u3002</p>' : ''}</section>`;
       if (box._markup !== markup) {
         box.innerHTML = markup;
         box._markup = markup;
@@ -2427,30 +2202,27 @@ window.CodePierCollaboration = (() => {
       current.hostLoading = false;
     }
   }
-  const hostImpactLabel = (item) =>
-    item.room_title || item.conversation_title || '房间 ' + identifier(item.conversation_id);
-  const hostImpactBinding = (item) => [item.member_id, item.binding_generation].join(':');
   function renderHostImpact(current, more, changed, added, removed) {
     const box = root.querySelector('[data-cr-host-impact]');
     if (!box) return;
     const impact = current.impact;
     const selected = changed
-      ? new Set()
+      ? /* @__PURE__ */ new Set()
       : new Set(
           [...box.querySelectorAll('[data-cr-host-member]:checked')].map((input) => input.value),
         );
     if (!more || !box.querySelector('[data-cr-impact-members]')) {
       const changedNotice = changed
-        ? `<p role="status">影响范围已更新。${added.length ? ` 新增 ${E(added.map(hostImpactLabel).join('、'))}。` : ''}${removed.length ? ` 移出 ${E(removed.map(hostImpactLabel).join('、'))}。` : ''}</p>`
+        ? `<p role="status">\u5F71\u54CD\u8303\u56F4\u5DF2\u66F4\u65B0\u3002${added.length ? ` \u65B0\u589E ${E(added.map(hostImpactLabel).join('\u3001'))}\u3002` : ''}${removed.length ? ` \u79FB\u51FA ${E(removed.map(hostImpactLabel).join('\u3001'))}\u3002` : ''}</p>`
         : '';
       const canBatch = current.host.connection_capabilities?.batch_rebind === true;
-      box.innerHTML = `<section class="cr-connect-summary" aria-label="受影响的房间"><h3>受影响的房间</h3>${changedNotice}${facts(
+      box.innerHTML = `<section class="cr-connect-summary" aria-label="\u53D7\u5F71\u54CD\u7684\u623F\u95F4"><h3>\u53D7\u5F71\u54CD\u7684\u623F\u95F4</h3>${changedNotice}${facts(
         [
-          ['房间', supplied(impact.room_count)],
-          ['排队工作', supplied(impact.queued_work_count)],
-          ['已派发操作', supplied(impact.dispatched_operation_count)],
+          ['\u623F\u95F4', supplied(impact.room_count)],
+          ['\u6392\u961F\u5DE5\u4F5C', supplied(impact.queued_work_count)],
+          ['\u5DF2\u6D3E\u53D1\u64CD\u4F5C', supplied(impact.dispatched_operation_count)],
         ],
-      )}<p class="cr-muted">撤销这条连接会影响此处列出的房间。同名的其他连接继续使用。已派发的操作可能仍在结束，原结果会继续核对。</p>${canBatch ? '<p class="cr-muted">勾选成员可单独发起批量更换。</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '更多受影响房间', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('更换为', '<select name="batch_host_connection"><option value="">分别验证新连接</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '查看已有 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '为所选成员更换连接', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '撤销这条连接', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
+      )}<p class="cr-muted">\u64A4\u9500\u8FD9\u6761\u8FDE\u63A5\u4F1A\u5F71\u54CD\u6B64\u5904\u5217\u51FA\u7684\u623F\u95F4\u3002\u540C\u540D\u7684\u5176\u4ED6\u8FDE\u63A5\u7EE7\u7EED\u4F7F\u7528\u3002\u5DF2\u6D3E\u53D1\u7684\u64CD\u4F5C\u53EF\u80FD\u4ECD\u5728\u7ED3\u675F\uFF0C\u539F\u7ED3\u679C\u4F1A\u7EE7\u7EED\u6838\u5BF9\u3002</p>${canBatch ? '<p class="cr-muted">\u52FE\u9009\u6210\u5458\u53EF\u5355\u72EC\u53D1\u8D77\u6279\u91CF\u66F4\u6362\u3002</p>' : ''}<ul class="cr-host-members" data-cr-impact-members></ul>${btn('more-host-impact', '\u66F4\u591A\u53D7\u5F71\u54CD\u623F\u95F4', 'data-cr-more-impact hidden', 'cr-text-button')}${canBatch ? `<div data-cr-batch-target hidden>${field('\u66F4\u6362\u4E3A', '<select name="batch_host_connection"><option value="">\u5206\u522B\u9A8C\u8BC1\u65B0\u8FDE\u63A5</option></select>')}<p class="cr-muted" data-cr-batch-target-status aria-live="polite"></p>${btn('load-batch-targets', '\u67E5\u770B\u5DF2\u6709 dot', 'data-cr-more-targets', 'cr-text-button')}</div>${btn('start-host-batch', '\u4E3A\u6240\u9009\u6210\u5458\u66F4\u6362\u8FDE\u63A5', 'data-cr-start-batch disabled', 'cr-text-button')}` : ''}${btn('revoke-host', '\u64A4\u9500\u8FD9\u6761\u8FDE\u63A5', 'data-cr-revoke-host', 'cr-danger cr-full')}</section>`;
     }
     const membersBox = box.querySelector('[data-cr-impact-members]');
     const displayed = new Set([...membersBox.children].map((row) => row.dataset.binding));
@@ -2464,7 +2236,7 @@ window.CodePierCollaboration = (() => {
         Number.isInteger(item.binding_generation ?? item.expected_generation);
       membersBox.insertAdjacentHTML(
         'beforeend',
-        `<li data-binding="${E(binding)}">${selectable ? `<label><input type="checkbox" data-cr-host-member value="${E(item.member_id)}" ${selected.has(item.member_id) ? 'checked' : ''}>${E(hostImpactLabel(item))}</label>` : E(hostImpactLabel(item)) + (item.candidate ? ' · 待验证的新连接' : '')}</li>`,
+        `<li data-binding="${E(binding)}">${selectable ? `<label><input type="checkbox" data-cr-host-member value="${E(item.member_id)}" ${selected.has(item.member_id) ? 'checked' : ''}>${E(hostImpactLabel(item))}</label>` : E(hostImpactLabel(item)) + (item.candidate ? ' \xB7 \u5F85\u9A8C\u8BC1\u7684\u65B0\u8FDE\u63A5' : '')}</li>`,
       );
     }
     updateHostBatchControls();
@@ -2482,7 +2254,8 @@ window.CodePierCollaboration = (() => {
       more ? '[data-cr-more-impact]' : '[data-cr-action="host-impact"]',
     );
     if (trigger) trigger.disabled = true;
-    if (!current.impact) box.textContent = '正在核对受影响的房间…';
+    if (!current.impact)
+      box.textContent = '\u6B63\u5728\u6838\u5BF9\u53D7\u5F71\u54CD\u7684\u623F\u95F4\u2026';
     try {
       const result = await api(
         hostPath(current.hostId) +
@@ -2521,7 +2294,10 @@ window.CodePierCollaboration = (() => {
         ).values(),
       ];
       renderHostImpact(current, more, changed, added, removed);
-      if (changed) panelError('连接影响范围已变化，请核对当前房间列表后再确认。');
+      if (changed)
+        panelError(
+          '\u8FDE\u63A5\u5F71\u54CD\u8303\u56F4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u6838\u5BF9\u5F53\u524D\u623F\u95F4\u5217\u8868\u540E\u518D\u786E\u8BA4\u3002',
+        );
       if (!more) box.querySelector('h3')?.scrollIntoView({ block: 'nearest' });
     } catch (error) {
       if (panel === current) {
@@ -2555,7 +2331,9 @@ window.CodePierCollaboration = (() => {
       if (result) {
         await hostDetailPanel(current.hostId);
         await store.refresh();
-        announce('这条连接已撤销。已派发操作会继续核对原结果。');
+        announce(
+          '\u8FD9\u6761\u8FDE\u63A5\u5DF2\u64A4\u9500\u3002\u5DF2\u6D3E\u53D1\u64CD\u4F5C\u4F1A\u7EE7\u7EED\u6838\u5BF9\u539F\u7ED3\u679C\u3002',
+        );
       }
     } catch (error) {
       if (panel === current && error.code === 'ROOM_CONNECTION_IMPACT_CHANGED') {
@@ -2586,7 +2364,7 @@ window.CodePierCollaboration = (() => {
     const select = root.querySelector('[name="batch_host_connection"]');
     const selected = select.value;
     select.innerHTML =
-      '<option value="">分别验证新连接</option>' +
+      '<option value="">\u5206\u522B\u9A8C\u8BC1\u65B0\u8FDE\u63A5</option>' +
       current.batchTargets
         .map(
           (item) =>
@@ -2596,12 +2374,12 @@ window.CodePierCollaboration = (() => {
     if ([...select.options].some((option) => option.value === selected)) select.value = selected;
     const button = root.querySelector('[data-cr-more-targets]');
     button.hidden = !current.batchTargetCursor;
-    button.textContent = '更多已登记的 dot';
+    button.textContent = '\u66F4\u591A\u5DF2\u767B\u8BB0\u7684 dot';
     root.querySelector('[data-cr-batch-target-status]').textContent = current.batchTargets.length
       ? ''
       : current.batchTargetCursor
-        ? '这一页没有可用连接。'
-        : '当前没有其他可复用的 dot。';
+        ? '\u8FD9\u4E00\u9875\u6CA1\u6709\u53EF\u7528\u8FDE\u63A5\u3002'
+        : '\u5F53\u524D\u6CA1\u6709\u5176\u4ED6\u53EF\u590D\u7528\u7684 dot\u3002';
   }
   async function loadHostBatchTargets() {
     const current = panel;
@@ -2609,7 +2387,7 @@ window.CodePierCollaboration = (() => {
     current.batchTargetsLoading = true;
     const status = root.querySelector('[data-cr-batch-target-status]');
     const button = root.querySelector('[data-cr-more-targets]');
-    status.textContent = '正在读取已有 dot…';
+    status.textContent = '\u6B63\u5728\u8BFB\u53D6\u5DF2\u6709 dot\u2026';
     button.disabled = true;
     try {
       const response = await api(connectionListPath(current.batchTargetCursor));
@@ -2633,7 +2411,7 @@ window.CodePierCollaboration = (() => {
     } catch (error) {
       if (panel === current && button.isConnected) {
         status.textContent = error.message;
-        button.textContent = '重新读取已有 dot';
+        button.textContent = '\u91CD\u65B0\u8BFB\u53D6\u5DF2\u6709 dot';
       }
     } finally {
       current.batchTargetsLoading = false;
@@ -2665,44 +2443,25 @@ window.CodePierCollaboration = (() => {
       await hostBatchPanel(result.batch_id, current.hostId, result);
     }
   }
-  const hostBatchLabels = {
-    queued: '等待验证',
-    pending: '等待验证',
-    pending_validation: '等待验证',
-    invited: '等待 dot 接入',
-    bound: '正在验证',
-    activated: '已更换',
-    waiting: '等待 dot 接入',
-    waiting_host: '等待 dot 接入',
-    waiting_connection: '等待 dot 接入',
-    prepared: '等待 dot 接入',
-    candidate: '等待 dot 接入',
-    verifying: '正在验证',
-    switched: '已更换',
-    succeeded: '已更换',
-    completed: '已更换',
-    failed: '更换失败',
-    expired: '候选已过期',
-    cancelled: '更换已取消',
-  };
-  const hostBatchErrors = {
-    ROOM_MEMBER_INACTIVE: '该房间成员当前已停用',
-    ROOM_BINDING_CHANGED: '成员的连接已更换',
-    ROOM_BINDING_PENDING: '该成员已有待验证的新连接',
-    ROOM_BINDING_CANCELLED: '接入流程已关闭',
-    ROOM_BINDING_EXPIRED: '接入邀请已过期',
-    CONNECT_FLOW_NOT_FOUND: '原接入流程已不可用',
-  };
   async function hostBatchPanel(batchId, hostId = '', result = null) {
     if (!batchId) return;
     openPanel(
       'host-batch',
-      '批量更换连接',
-      '<p class="cr-muted">各房间会分别验证新连接，原连接在验证通过后切换。</p>' +
-        '<div data-cr-batch-results aria-live="polite"></div>' +
-        btn('more-host-batch', '更多结果', 'data-cr-more-batch hidden', 'cr-text-button') +
+      '\u6279\u91CF\u66F4\u6362\u8FDE\u63A5',
+      '<p class="cr-muted">\u5404\u623F\u95F4\u4F1A\u5206\u522B\u9A8C\u8BC1\u65B0\u8FDE\u63A5\uFF0C\u539F\u8FDE\u63A5\u5728\u9A8C\u8BC1\u901A\u8FC7\u540E\u5207\u6362\u3002</p><div data-cr-batch-results aria-live="polite"></div>' +
+        btn(
+          'more-host-batch',
+          '\u66F4\u591A\u7ED3\u679C',
+          'data-cr-more-batch hidden',
+          'cr-text-button',
+        ) +
         (hostId
-          ? btn('host-detail', '返回连接详情', `data-id="${E(hostId)}"`, 'cr-text-button cr-full')
+          ? btn(
+              'host-detail',
+              '\u8FD4\u56DE\u8FDE\u63A5\u8BE6\u60C5',
+              `data-id="${E(hostId)}"`,
+              'cr-text-button cr-full',
+            )
           : ''),
       { batchId, batchItems: [], batchCursor: '' },
     );
@@ -2723,10 +2482,10 @@ window.CodePierCollaboration = (() => {
     const box = root.querySelector('[data-cr-batch-results]');
     const markup = `<ul class="cr-host-members">${current.batchItems
       .map((item) => {
-        const label = hostBatchLabels[item.status] || '正在读取状态';
+        const label = hostBatchLabels[item.status] || '\u6B63\u5728\u8BFB\u53D6\u72B6\u6001';
         const message = item.message || hostBatchErrors[item.error_code];
         const canOpen = item.conversation_id && item.member_id && item.flow_id;
-        return `<li><span>${E(hostImpactLabel(item))} · ${E(label)}${message ? ` · ${E(message)}` : ''}</span>${canOpen ? btn('open-batch-member', '查看成员', `data-id="${E(item.member_id)}" data-room-id="${E(item.conversation_id)}"`, 'cr-text-button') : ''}</li>`;
+        return `<li><span>${E(hostImpactLabel(item))} \xB7 ${E(label)}${message ? ` \xB7 ${E(message)}` : ''}</span>${canOpen ? btn('open-batch-member', '\u67E5\u770B\u6210\u5458', `data-id="${E(item.member_id)}" data-room-id="${E(item.conversation_id)}"`, 'cr-text-button') : ''}</li>`;
       })
       .join('')}</ul>`;
     if (box._markup !== markup) {
@@ -2745,8 +2504,6 @@ window.CodePierCollaboration = (() => {
     if (current?.name !== 'host-batch' || current.batchLoading) return;
     current.batchLoading = true;
     try {
-      // Reload from the beginning after a hint so statuses are reconciled in
-      // order, even when the owner has already viewed additional pages.
       let cursor = more ? current.batchCursor : '';
       const items = [];
       let result;
@@ -2769,13 +2526,14 @@ window.CodePierCollaboration = (() => {
   }
   async function returnToChannel(current) {
     if (panel !== current || current.roomId !== state.roomId || !current.returnChannel) return;
-    openPanel('weixin', '连接微信', '<div data-cr-channel-view></div>');
+    openPanel('weixin', '\u8FDE\u63A5\u5FAE\u4FE1', '<div data-cr-channel-view></div>');
     const destination = panel;
     renderChannel(current.returnChannel);
     try {
       await refreshChannel();
     } catch (error) {
-      if (panel === destination) panelError('微信状态刷新失败：' + error.message);
+      if (panel === destination)
+        panelError('\u5FAE\u4FE1\u72B6\u6001\u5237\u65B0\u5931\u8D25\uFF1A' + error.message);
     }
     return destination;
   }
@@ -2785,7 +2543,7 @@ window.CodePierCollaboration = (() => {
     openPanel(
       'member',
       member.name || member.label,
-      `<div data-cr-flow-view><p class="cr-muted">正在读取连接状态…</p></div>`,
+      `<div data-cr-flow-view><p class="cr-muted">\u6B63\u5728\u8BFB\u53D6\u8FDE\u63A5\u72B6\u6001\u2026</p></div>`,
       { member, flowId: member.flow_id },
     );
     if (member.flow_id) await refreshFlow();
@@ -2803,37 +2561,49 @@ window.CodePierCollaboration = (() => {
     if (!renewal || member?.host_connection_state === 'revoked') return '';
     const managed = renewal.approved === true && renewal.mode === 'managed';
     const status = {
-      stopped: renewal.reason_code === 'authorization_expired' ? '授权已到期' : '自动恢复已停止',
-      awaiting_probe: '等待连接验证',
-      waiting: '等待 dot 恢复',
-      recovering: '正在恢复',
-      expired: '等待宿主续订',
-      awaiting_host_refresh: '等待宿主续订',
+      stopped:
+        renewal.reason_code === 'authorization_expired'
+          ? '\u6388\u6743\u5DF2\u5230\u671F'
+          : '\u81EA\u52A8\u6062\u590D\u5DF2\u505C\u6B62',
+      awaiting_probe: '\u7B49\u5F85\u8FDE\u63A5\u9A8C\u8BC1',
+      waiting: '\u7B49\u5F85 dot \u6062\u590D',
+      recovering: '\u6B63\u5728\u6062\u590D',
+      expired: '\u7B49\u5F85\u5BBF\u4E3B\u7EED\u8BA2',
+      awaiting_host_refresh: '\u7B49\u5F85\u5BBF\u4E3B\u7EED\u8BA2',
     }[renewal.state];
     const control =
       activeRoom() && member && !member.legacy && member.state !== 'removed' && !pendingBinding
         ? btn(
             'connection-renewal',
-            managed ? '关闭自动恢复' : '开启自动恢复',
+            managed
+              ? '\u5173\u95ED\u81EA\u52A8\u6062\u590D'
+              : '\u5F00\u542F\u81EA\u52A8\u6062\u590D',
             `data-renewal-enable="${!managed}"`,
             'cr-text-button',
           )
         : '';
-    return `<section class="cr-connect-summary" aria-label="连接保持方式"><strong>由 dot 宿主续订</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${facts(
+    return `<section class="cr-connect-summary" aria-label="\u8FDE\u63A5\u4FDD\u6301\u65B9\u5F0F"><strong>\u7531 dot \u5BBF\u4E3B\u7EED\u8BA2</strong>${status ? `<p class="cr-muted">${E(status)}</p>` : ''}${facts(
       [
-        ['自动恢复', managed ? '已开启' : '已关闭'],
-        ['恢复授权至', managed && renewal.approved_until ? dateTime(renewal.approved_until) : null],
-        ['当前订阅到期', renewal.expires_at ? dateTime(renewal.expires_at) : null],
+        ['\u81EA\u52A8\u6062\u590D', managed ? '\u5DF2\u5F00\u542F' : '\u5DF2\u5173\u95ED'],
+        [
+          '\u6062\u590D\u6388\u6743\u81F3',
+          managed && renewal.approved_until ? dateTime(renewal.approved_until) : null,
+        ],
+        [
+          '\u5F53\u524D\u8BA2\u9605\u5230\u671F',
+          renewal.expires_at ? dateTime(renewal.expires_at) : null,
+        ],
       ],
     )}${control}</section>`;
   }
   function renderFlow(result) {
+    var _a;
     if (!panel || !root) return;
     const flow = result.flow || result,
       member = result.member || panel.member;
     if (panel.flow && Number(panel.flow.version || 0) > Number(flow.version || 0)) return;
     panel.flow = flow;
-    panel.flowId ||= flow.id;
+    (_a = panel).flowId || (_a.flowId = flow.id);
     panel.member = member;
     panel.joinInstructions = instructions(
       result.join_instructions || result.resume_instructions || result.continue_instructions,
@@ -2850,12 +2620,12 @@ window.CodePierCollaboration = (() => {
     if (ready || flow.awaiting_host_control) panel.joinInstructions = '';
     const renewal = flow.subscription_renewal || member?.subscription_renewal;
     const renewalMarkup = connectionRenewalMarkup(renewal, member, flow.pending_binding);
-    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '✓' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">新连接验证通过后才会替换当前连接。原成员和工作保持原来的身份。</p>' : !ready && (member?.host_connection_id || member?.connection_source || member?.connection_source_member_id) ? '<p class="cr-info">请在所选 dot 中完成本房间的接入验证。此房间的参与范围单独生效。</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>加入说明</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot 加入说明"></textarea></label>${btn('copy-instructions', '复制加入说明', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '权限设置')}${member.host_connection_id ? btn('host-detail', '管理这条连接', `data-id="${E(member.host_connection_id)}"`) : ''}${member.legacy ? btn('flow-action', '迁移此连接', 'data-flow-action="migrate"') : member.state !== 'removed' && primary !== 'rebind' ? btn('rebind-member', flow.pending_binding ? '查看更换说明' : '更换连接') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '设为主责', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '暂停此成员', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '移除成员', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>连接详情</summary><dl>${Object.entries(
+    const markup = `<div class="cr-flow-state" data-stage="${E(stage)}"><span class="cr-flow-symbol ${ready ? 'is-ready' : ''}" aria-hidden="true">${ready ? '\u2713' : icon('network')}</span><h3>${E(flow.display?.title || title(flow))}</h3>${flow.display?.reason ? `<p>${E(flow.display.reason)}</p>` : ''}</div>${renewalMarkup}${flow.pending_binding ? '<p class="cr-info">\u65B0\u8FDE\u63A5\u9A8C\u8BC1\u901A\u8FC7\u540E\u624D\u4F1A\u66FF\u6362\u5F53\u524D\u8FDE\u63A5\u3002\u539F\u6210\u5458\u548C\u5DE5\u4F5C\u4FDD\u6301\u539F\u6765\u7684\u8EAB\u4EFD\u3002</p>' : !ready && (member?.host_connection_id || member?.connection_source || member?.connection_source_member_id) ? '<p class="cr-info">\u8BF7\u5728\u6240\u9009 dot \u4E2D\u5B8C\u6210\u672C\u623F\u95F4\u7684\u63A5\u5165\u9A8C\u8BC1\u3002\u6B64\u623F\u95F4\u7684\u53C2\u4E0E\u8303\u56F4\u5355\u72EC\u751F\u6548\u3002</p>' : ''}${panel.joinInstructions ? `<label class="cr-field"><span>\u52A0\u5165\u8BF4\u660E</span><textarea class="cr-instructions" readonly rows="7" aria-label="dot \u52A0\u5165\u8BF4\u660E"></textarea></label>${btn('copy-instructions', '\u590D\u5236\u52A0\u5165\u8BF4\u660E', '', 'cr-primary cr-full')}` : ''}${primary && !['copy_instructions', 'copy_join_instructions', 'send_message', 'start_work', 'none'].includes(primary) ? btn('flow-action', actionLabel(primary), `data-flow-action="${E(primary)}"`, 'cr-primary cr-full') : ''}${member ? `<section class="cr-member-controls">${btn('permissions', '\u6743\u9650\u8BBE\u7F6E')}${member.host_connection_id ? btn('host-detail', '\u7BA1\u7406\u8FD9\u6761\u8FDE\u63A5', `data-id="${E(member.host_connection_id)}"`) : ''}${member.legacy ? btn('flow-action', '\u8FC1\u79FB\u6B64\u8FDE\u63A5', 'data-flow-action="migrate"') : member.state !== 'removed' && primary !== 'rebind' ? btn('rebind-member', flow.pending_binding ? '\u67E5\u770B\u66F4\u6362\u8BF4\u660E' : '\u66F4\u6362\u8FDE\u63A5') : ''}${state.room?.lead_member_id !== memberId(member) && member.state !== 'removed' ? btn('lead', '\u8BBE\u4E3A\u4E3B\u8D23', `data-id="${E(memberId(member))}"`) : ''}${member.state !== 'removed' && member.state !== 'paused' ? btn('flow-action', '\u6682\u505C\u6B64\u6210\u5458', 'data-flow-action="pause"') : ''}${member.state !== 'removed' ? btn('remove-member', '\u79FB\u9664\u6210\u5458', '', 'cr-danger') : ''}</section>` : ''}<details class="cr-diagnostics"><summary>\u8FDE\u63A5\u8BE6\u60C5</summary><dl>${Object.entries(
       flow.evidence || {},
     )
       .map(
         ([key, value]) =>
-          `<div><dt>${E({ member_created: '成员已创建', host_bound: '宿主已登记', subscription_verified: '通知通路已验证', round_trip_verified: '消息往返已验证' }[key] || key)}</dt><dd>${value === true ? '已完成' : value === false ? '尚未完成' : E(value)}</dd></div>`,
+          `<div><dt>${E({ member_created: '\u6210\u5458\u5DF2\u521B\u5EFA', host_bound: '\u5BBF\u4E3B\u5DF2\u767B\u8BB0', subscription_verified: '\u901A\u77E5\u901A\u8DEF\u5DF2\u9A8C\u8BC1', round_trip_verified: '\u6D88\u606F\u5F80\u8FD4\u5DF2\u9A8C\u8BC1' }[key] || key)}</dt><dd>${value === true ? '\u5DF2\u5B8C\u6210' : value === false ? '\u5C1A\u672A\u5B8C\u6210' : E(value)}</dd></div>`,
       )
       .join('')}</dl><p>${E(flow.last_error_code || '')}</p></details>`;
     if (box._markup !== markup) {
@@ -2875,10 +2645,10 @@ window.CodePierCollaboration = (() => {
     if (panel === current && epoch === panelEpoch && writeEpoch === (current.writeEpoch || 0))
       renderFlow(response);
   }
+
+  // ../collaboration-room/mutations.mjs
   async function mutation(method, url, body, current = panel, options = {}) {
     requireMutation(method, url, body, current?.roomId || state.roomId);
-    // Background polls (QR status) are read-like and keyed per flow version.
-    // They never hijack, and are never hijacked by, an explicit user action.
     const unresolved = options.transient
       ? null
       : [...state.mutations.values()].find(
@@ -2926,16 +2696,16 @@ window.CodePierCollaboration = (() => {
       hostId: current?.hostId,
       kind,
       label: {
-        create: '创建房间',
-        member: '添加成员',
-        flow: '成员连接调整',
-        channel: '微信连接调整',
-        work: '工作控制',
-        room: '房间设置调整',
-        migration: '启用新房间界面',
-        'legacy-channel': '暂停原渠道连接',
-        'host-batch': '批量更换 dot 连接',
-        'host-revoke': '撤销 dot 连接',
+        create: '\u521B\u5EFA\u623F\u95F4',
+        member: '\u6DFB\u52A0\u6210\u5458',
+        flow: '\u6210\u5458\u8FDE\u63A5\u8C03\u6574',
+        channel: '\u5FAE\u4FE1\u8FDE\u63A5\u8C03\u6574',
+        work: '\u5DE5\u4F5C\u63A7\u5236',
+        room: '\u623F\u95F4\u8BBE\u7F6E\u8C03\u6574',
+        migration: '\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762',
+        'legacy-channel': '\u6682\u505C\u539F\u6E20\u9053\u8FDE\u63A5',
+        'host-batch': '\u6279\u91CF\u66F4\u6362 dot \u8FDE\u63A5',
+        'host-revoke': '\u64A4\u9500 dot \u8FDE\u63A5',
       }[kind],
       state: 'unknown',
     };
@@ -2974,15 +2744,11 @@ window.CodePierCollaboration = (() => {
         patchPending();
       }
       if (options.transient) throw error;
-      // A late rejection belongs to its original room and panel opening.
-      // Keep uncertain receipts above, but never overwrite a newer view.
       if (epoch !== state.epoch || receipt.roomId !== state.roomId || opening !== panelEpoch)
         throw error;
       if (current === panel) {
         panelError(error.message);
         if (current?.name === 'permissions') {
-          // A rejected permission write may be corrected, but an uncertain
-          // result or reused identity must retain its original recovery key.
           if (
             error.status >= 400 &&
             error.status < 500 &&
@@ -2994,15 +2760,18 @@ window.CodePierCollaboration = (() => {
             current.key = store.key();
           if (error.code === 'STALE_VERSION') {
             current.stale = true;
-            panelError('权限已在其他位置更新。你的选择尚未保存，请重新载入后核对。');
+            panelError(
+              '\u6743\u9650\u5DF2\u5728\u5176\u4ED6\u4F4D\u7F6E\u66F4\u65B0\u3002\u4F60\u7684\u9009\u62E9\u5C1A\u672A\u4FDD\u5B58\uFF0C\u8BF7\u91CD\u65B0\u8F7D\u5165\u540E\u6838\u5BF9\u3002',
+            );
           }
-          // Other 409s are business errors, not proof of a newer policy.
           throw error;
         }
         if (error.status === 409) {
           await store.refresh().catch(() => {});
           if (current !== panel || owner !== state.owner || epoch !== state.epoch) throw error;
-          panelError('房间刚有更新。你的选择已保留，请核对后再次保存。');
+          panelError(
+            '\u623F\u95F4\u521A\u6709\u66F4\u65B0\u3002\u4F60\u7684\u9009\u62E9\u5DF2\u4FDD\u7559\uFF0C\u8BF7\u6838\u5BF9\u540E\u518D\u6B21\u4FDD\u5B58\u3002',
+          );
           if (panel && state.room) {
             panel.version = state.room.version;
             panel.key = panel.name === 'migration' ? '' : store.key();
@@ -3013,7 +2782,9 @@ window.CodePierCollaboration = (() => {
                 const latest = state.works.find((work) => work.id === reviewing.work.id);
                 if (latest || state.workDetail?.id === reviewing.work.id)
                   renderWork(latest || state.workDetail);
-                panelError('原工作刚有更新，请核对当前连接和原操作后再继续。');
+                panelError(
+                  '\u539F\u5DE5\u4F5C\u521A\u6709\u66F4\u65B0\uFF0C\u8BF7\u6838\u5BF9\u5F53\u524D\u8FDE\u63A5\u548C\u539F\u64CD\u4F5C\u540E\u518D\u7EE7\u7EED\u3002',
+                );
               }
             }
             if (panel.name === 'migration') {
@@ -3021,7 +2792,9 @@ window.CodePierCollaboration = (() => {
               const box = root.querySelector('[data-cr-migration-view]');
               if (box) delete box._markup;
               renderMigration();
-              panelError('房间或迁移条件已变化，请重新核对并确认。');
+              panelError(
+                '\u623F\u95F4\u6216\u8FC1\u79FB\u6761\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9\u5E76\u786E\u8BA4\u3002',
+              );
             }
           }
         }
@@ -3038,288 +2811,29 @@ window.CodePierCollaboration = (() => {
       patchRoomPermissions();
     }
   }
-  async function recoverAction(id) {
-    const receipt = state.mutations.get(id);
-    if (
-      !receipt ||
-      ['recovering', 'not_saved'].includes(receipt.state) ||
-      receipt.owner !== state.owner
-    )
-      return;
-    // Exact original receipts remain queryable after a room becomes read-only.
-    // Hub returns an existing receipt, or rejects unsaved work using the live
-    // read-only/CAS boundary. Never refresh a version or mint a replacement key.
-    if (JSON.parse(receipt.body).idempotency_key !== receipt.id)
-      throw new Error('原请求身份无法核对，请保留当前记录。');
-    const epoch = state.epoch;
-    receipt.state = 'recovering';
-    patchPending();
-    let saved = false;
-    try {
-      // The exact serialized request survives dialog closure. A new form or
-      // newer scope projection must never silently mint a replacement write.
-      const result = await api(receipt.url, { method: receipt.method, body: receipt.body });
-      if (receipt.owner !== state.owner) return;
-      saved = true;
-      state.mutations.delete(id);
-      patchPending();
-      if (result.continuation?.batch_id)
-        store.draft(receipt.roomId).permissionContinuation = result.continuation.batch_id;
-      if (receipt.kind === 'create') await store.list();
-      if (!root || epoch !== state.epoch) return;
-      store.invalidateReads();
-      if (result.room) store.applyRoom(result);
-      if (receipt.kind === 'create') {
-        closePanel();
-        requestedProject = '';
-        await selectRoom(result.room.id);
-      } else if (receipt.roomId === state.roomId) {
-        if (receipt.kind === 'member' || receipt.kind === 'flow') {
-          openPanel('member', result.member?.name || 'dot 连接', '<div data-cr-flow-view></div>', {
-            member: result.member,
-            flowId: result.flow?.id,
-          });
-          renderFlow(result);
-        } else if (receipt.kind === 'channel') {
-          openPanel('weixin', '连接微信', '<div data-cr-channel-view></div>');
-          renderChannel(result);
-        } else if (receipt.kind === 'work') {
-          store.applyWork(result.work);
-          workPanel(result.work.id);
-        } else if (receipt.kind === 'host-batch' && result.batch_id) {
-          if (receipt.hostId) rememberedBatch(receipt.hostId, result.batch_id);
-          await hostBatchPanel(result.batch_id, receipt.hostId, result);
-        } else if (receipt.kind === 'host-revoke' && receipt.hostId) {
-          await hostDetailPanel(receipt.hostId);
-        } else closePanel();
-        await store.refresh();
-      }
-      announce('已核对并恢复原操作');
-    } catch (error) {
-      if (receipt.owner === state.owner) {
-        if (!saved && receipt.kind === 'migration' && error.not_saved === true) {
-          receipt.state = 'not_saved';
-          receipt.error = '服务器已确认原启用请求未保存。请重新核对当前迁移条件，再明确确认。';
-          patchPending();
-          if (root && epoch === state.epoch && receipt.roomId === state.roomId) {
-            if (panel?.name === 'migration') {
-              panel.key = '';
-              panel.migrationRevision = null;
-              const box = root.querySelector('[data-cr-migration-view]');
-              if (box) delete box._markup;
-              renderMigration();
-            }
-            await store.refresh().catch(() => {});
-            if (epoch === state.epoch)
-              panel?.name === 'migration' ? panelError(receipt.error) : announce(receipt.error);
-          }
-          return;
-        }
-        if (!saved && receipt.kind === 'channel' && error.status === 409) {
-          // A WeChat step is checked against its flow version before any
-          // write, so a conflict on the exact original key proves it was not
-          // saved. Drop it instead of replaying it on every later click.
-          state.mutations.delete(id);
-          patchPending();
-          if (root && epoch === state.epoch && receipt.roomId === state.roomId) {
-            if (panel?.name === 'weixin') {
-              panelError('原请求未保存（连接状态已前进），已按当前状态刷新。');
-              await refreshChannel().catch(() => {});
-            } else announce('原微信连接请求未保存，状态已前进。');
-          }
-          return;
-        }
-        if (!saved) receipt.state = 'unknown';
-        const message =
-          (saved ? '原操作已保存，视图需要重新读取：' : '原操作尚未确认：') + error.message;
-        if (!saved) receipt.error = message;
-        panel ? panelError(message) : announce(message, true);
-        patchPending();
-      }
-      throw error;
-    }
-  }
-  async function submitForm(form) {
-    const current = panel;
-    if (!current || current.busy) return;
-    const data = new FormData(form),
-      type = form.dataset.crForm;
-    if (type === 'create') {
-      const result = await mutation('POST', base + '/rooms', {
-        title: data.get('title').trim(),
-        projects: data
-          .getAll('project')
-          .map((project) => ({ project, environment_id: 'production' })),
-      });
-      if (!result) return;
-      const room = result.room || result;
-      await store.list();
-      closePanel();
-      requestedProject = '';
-      await selectRoom(room.id);
-      const pausedNotice = pausedProjectNotice(result);
-      if (pausedNotice) announce('房间已创建。' + pausedNotice);
-    } else if (type === 'migration') {
-      if (current.migrationRevision !== migrationRevision()) {
-        renderMigration();
-        panelError('房间或迁移条件已变化，请重新核对并确认。');
-        return;
-      }
-      if (!state.room?.legacy || state.room?.migration?.eligible !== true) {
-        panelError('请先处理服务器列出的迁移条件，再明确确认启用。');
-        return;
-      }
-      const revision = current.migrationRevision;
-      const expectedVersion = current.version;
-      const confirmed = await uiConfirmAction(
-        {
-          title: '启用新版房间？',
-          body: '沿用当前已批准的范围。',
-          confirmLabel: '启用',
-        },
-        {
-          owner: form,
-          current: () => panel === current && revision === migrationRevision(),
-        },
-      );
-      if (!confirmed) return;
-      const result = await mutation('POST', store.path() + '/migration', {
-        action: 'activate',
-        expected_version: expectedVersion,
-      });
-      if (result) {
-        closePanel();
-        await store.refresh();
-        announce('已切换到新版房间。');
-      }
-    } else if (type === 'permissions') {
-      await savePermissions(form, current);
-    } else if (type === 'member') {
-      const existing = data.get('connection_mode') === 'existing';
-      const chosen = current.connections.find(
-        (item) => connectionChoice(item) === data.get('reuse_member_id'),
-      );
-      if (existing && !chosen) {
-        panelError('请选择要使用的 dot 连接。');
-        return;
-      }
-      const verifiedReuse =
-        chosen?.host_connection_id &&
-        supportsHostReuse(chosen, current.connectionCapabilities || {});
-      const reuse = !existing
-        ? {}
-        : verifiedReuse
-          ? { host_connection_id: chosen.host_connection_id }
-          : {
-              reuse_member_id: reuseAnchor(chosen),
-              reuse_binding_generation:
-                chosen.reuse_binding_generation ?? chosen.binding_generation,
-            };
-      const result = await mutation('POST', store.path() + '/members', {
-        name: data.get('name').trim(),
-        expected_version: current.version,
-        ...(data.get('keep_connected') ? { keep_connected: true } : {}),
-        ...reuse,
-      });
-      if (!result) return;
-      await store.refresh();
-      if (panel !== current) return;
-      openPanel(
-        'member',
-        result.member?.name || data.get('name'),
-        '<div data-cr-flow-view></div>',
-        { member: result.member, flowId: result.flow?.id || result.flow_id },
-      );
-      renderFlow(result);
-    } else if (type === 'work-recovery') {
-      const action = form.dataset.workAction;
-      const candidates =
-        current.work.recovery?.[
-          action === 'takeover' ? 'takeover_candidates' : 'restore_candidates'
-        ] || [];
-      const selected = candidates.find(
-        (member) => member.member_id === data.get('target_member_id'),
-      );
-      if (!selected) {
-        panelError('请选择此工作当前允许的成员。');
-        return;
-      }
-      await controlWork(action, selected.member_id);
-    } else if (type === 'settings') {
-      const result = await mutation('PATCH', store.path(), {
-        title: data.get('title').trim(),
-        expected_version: current.version,
-      });
-      if (result) {
-        closePanel();
-        await store.refresh();
-      }
-    } else if (type === 'weixin') await submitChannel(form);
-  }
-  async function selectRoom(id) {
-    remember();
-    rememberReading();
-    closeHints();
-    accessBlocked = false;
-    closePanel();
-    announce('');
-    root?.classList.remove('cr-show-rooms');
-    root?.querySelector('[data-cr-action="rooms"]')?.setAttribute('aria-expanded', 'false');
-    const list = root?.querySelector('[data-cr-messages]');
-    list?.replaceChildren();
-    try {
-      const promise = store.select(id);
-      if (root) root._restoringReading = !!store.draft().reading;
-      selection(id);
-      const editor = root?.querySelector('#cr-message');
-      if (editor) {
-        editor.value = store.draft().text;
-        sizeEditor(editor);
-      }
-      patchHeader();
-      patchWorks();
-      patchPending();
-      await promise;
-      if (state.roomId === id) {
-        patchHeader();
-        patchMessages();
-        patchWorks();
-        patchPending();
-        await restoreReading();
-        connectHints();
-      }
-    } catch (error) {
-      if (error.name !== 'AbortError') announce(error.message, true);
-    }
-  }
+
+  // ../collaboration-room/diagnostics.mjs
   function diagnosticFields(fields) {
     return `<dl class="cr-facts">${fields.map(([label, value]) => `<div><dt>${E(label)}</dt><dd>${E(supplied(value))}</dd></div>`).join('')}</dl>`;
   }
-  const wakeEvidenceLabels = {
-    redeemed: '已开始处理',
-    coalesced_before_send: '发送前已合并',
-    accepted_waiting_claim: '宿主接口已受理，等待领取',
-    accepted_without_observed_claim: '宿主接口已受理，尚未观察到领取',
-    insufficient_evidence: '证据不足',
-  };
   function wakeEvidenceMarkup(item) {
-    const title = wakeEvidenceLabels[item.state] || '证据不足';
-    return `<details><summary>${E(title)} · ${E(dateTime(item.created_at))}</summary>${diagnosticFields(
+    const title2 = wakeEvidenceLabels[item.state] || '\u8BC1\u636E\u4E0D\u8DB3';
+    return `<details><summary>${E(title2)} \xB7 ${E(dateTime(item.created_at))}</summary>${diagnosticFields(
       [
-        ['原通知', identifier(item.notification_delivery_id)],
-        ['接口受理', dateTime(item.accepted_at)],
-        ['票据到期', dateTime(item.ticket_expires_at)],
-        ['原回合', identifier(item.consumer_session_id)],
-        ['实际领取', dateTime(item.claimed_at)],
+        ['\u539F\u901A\u77E5', identifier(item.notification_delivery_id)],
+        ['\u63A5\u53E3\u53D7\u7406', dateTime(item.accepted_at)],
+        ['\u7968\u636E\u5230\u671F', dateTime(item.ticket_expires_at)],
+        ['\u539F\u56DE\u5408', identifier(item.consumer_session_id)],
+        ['\u5B9E\u9645\u9886\u53D6', dateTime(item.claimed_at)],
         [
-          '回合创建回复',
+          '\u56DE\u5408\u521B\u5EFA\u56DE\u590D',
           item.reply_origin_truncated
-            ? '至少 ' + item.created_reply_count
+            ? '\u81F3\u5C11 ' + item.created_reply_count
             : item.created_reply_count,
         ],
-        ['保留的通知', identifier(item.retained_notification_delivery_id)],
+        ['\u4FDD\u7559\u7684\u901A\u77E5', identifier(item.retained_notification_delivery_id)],
       ],
-    )}${item.claim_preceded_recorded_acceptance ? '<p>先观察到领取，随后保存接口受理回执。</p>' : ''}</details>`;
+    )}${item.claim_preceded_recorded_acceptance ? '<p>\u5148\u89C2\u5BDF\u5230\u9886\u53D6\uFF0C\u968F\u540E\u4FDD\u5B58\u63A5\u53E3\u53D7\u7406\u56DE\u6267\u3002</p>' : ''}</details>`;
   }
   async function loadWakeEvidence(button) {
     const current = panel;
@@ -3335,11 +2849,11 @@ window.CodePierCollaboration = (() => {
       button.insertAdjacentHTML(
         'beforebegin',
         (data.items || []).map(wakeEvidenceMarkup).join('') ||
-          '<p class="cr-muted">当前路线没有可显示的通知证据。</p>',
+          '<p class="cr-muted">\u5F53\u524D\u8DEF\u7EBF\u6CA1\u6709\u53EF\u663E\u793A\u7684\u901A\u77E5\u8BC1\u636E\u3002</p>',
       );
       if (data.next_cursor) {
         button.dataset.cursor = data.next_cursor;
-        button.textContent = '读取更早的通知';
+        button.textContent = '\u8BFB\u53D6\u66F4\u65E9\u7684\u901A\u77E5';
       } else {
         button.remove();
         target.setAttribute('tabindex', '-1');
@@ -3356,138 +2870,152 @@ window.CodePierCollaboration = (() => {
     const restoreRefresh = refresh && refresh === document.activeElement;
     const truncated = Object.values(data.truncated || {}).some(Boolean);
     const labels = {
-      members: '成员',
-      traces: '原记录',
-      budgets: '额度',
-      pending: '待处理输入',
-      goals: '工作',
-      anomalies: '待核对项',
+      members: '\u6210\u5458',
+      traces: '\u539F\u8BB0\u5F55',
+      budgets: '\u989D\u5EA6',
+      pending: '\u5F85\u5904\u7406\u8F93\u5165',
+      goals: '\u5DE5\u4F5C',
+      anomalies: '\u5F85\u6838\u5BF9\u9879',
     };
     const traceLabels = {
-      member: '成员',
-      message: '原输入',
-      goal: '工作',
-      work: '步骤',
-      operation: '原操作',
-      delivery: '渠道投递',
-      reply: '原回复',
+      member: '\u6210\u5458',
+      message: '\u539F\u8F93\u5165',
+      goal: '\u5DE5\u4F5C',
+      work: '\u6B65\u9AA4',
+      operation: '\u539F\u64CD\u4F5C',
+      delivery: '\u6E20\u9053\u6295\u9012',
+      reply: '\u539F\u56DE\u590D',
     };
     const limitLabels = {
-      members: '成员',
-      goals: '工作',
-      pending_per_member: '每成员待处理输入',
-      traces: '原记录',
-      budgets: '额度',
-      messages: '原消息',
-      parts_per_delivery: '每投递分项',
-      dispatch_concurrency: '通知并发',
+      members: '\u6210\u5458',
+      goals: '\u5DE5\u4F5C',
+      pending_per_member: '\u6BCF\u6210\u5458\u5F85\u5904\u7406\u8F93\u5165',
+      traces: '\u539F\u8BB0\u5F55',
+      budgets: '\u989D\u5EA6',
+      messages: '\u539F\u6D88\u606F',
+      parts_per_delivery: '\u6BCF\u6295\u9012\u5206\u9879',
+      dispatch_concurrency: '\u901A\u77E5\u5E76\u53D1',
     };
-    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">只读快照 · ${E(dateTime(data.observed_at))}</p>${btn('refresh-diagnostics', '刷新')}</div><p class="cr-info">${data.read_only === true ? '查询不领取输入、不确认消费。' : '查询是否只读：未提供。'} ${data.redacted === true ? '仅显示已脱敏的当前授权记录。' : '脱敏状态：未提供。'} ${data.grants_authority === false ? '这些记录和额度不授予工作权限。' : '授权含义：未提供。'}</p><p class="cr-muted">有界观察窗口；待处理数量不是全局总数。未提供的值保持未知。</p>${
+    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">\u53EA\u8BFB\u5FEB\u7167 \xB7 ${E(dateTime(data.observed_at))}</p>${btn('refresh-diagnostics', '\u5237\u65B0')}</div><p class="cr-info">${data.read_only === true ? '\u67E5\u8BE2\u4E0D\u9886\u53D6\u8F93\u5165\u3001\u4E0D\u786E\u8BA4\u6D88\u8D39\u3002' : '\u67E5\u8BE2\u662F\u5426\u53EA\u8BFB\uFF1A\u672A\u63D0\u4F9B\u3002'} ${data.redacted === true ? '\u4EC5\u663E\u793A\u5DF2\u8131\u654F\u7684\u5F53\u524D\u6388\u6743\u8BB0\u5F55\u3002' : '\u8131\u654F\u72B6\u6001\uFF1A\u672A\u63D0\u4F9B\u3002'} ${data.grants_authority === false ? '\u8FD9\u4E9B\u8BB0\u5F55\u548C\u989D\u5EA6\u4E0D\u6388\u4E88\u5DE5\u4F5C\u6743\u9650\u3002' : '\u6388\u6743\u542B\u4E49\uFF1A\u672A\u63D0\u4F9B\u3002'}</p><p class="cr-muted">\u6709\u754C\u89C2\u5BDF\u7A97\u53E3\uFF1B\u5F85\u5904\u7406\u6570\u91CF\u4E0D\u662F\u5168\u5C40\u603B\u6570\u3002\u672A\u63D0\u4F9B\u7684\u503C\u4FDD\u6301\u672A\u77E5\u3002</p>${
       truncated
-        ? `<p class="cr-info" data-cr-diagnostics-incomplete>部分记录未载入：${E(
+        ? `<p class="cr-info" data-cr-diagnostics-incomplete>\u90E8\u5206\u8BB0\u5F55\u672A\u8F7D\u5165\uFF1A${E(
             Object.entries(data.truncated || {})
               .filter(([, value]) => value)
               .map(([name]) => labels[name] || name)
-              .join('、'),
-          )}。</p>`
+              .join('\u3001'),
+          )}\u3002</p>`
         : ''
     }
-      <section class="cr-inspection-section" data-cr-diagnostic-anomalies><h3>当前待核对</h3>${
-        data.anomalies?.length
-          ? `<ul>${data.anomalies.map((item) => `<li>${E(item.display?.title || wakeEvidenceLabels[item.state] || '证据待核对')} · ${E(dateTime(item.created_at))}</li>`).join('')}</ul>`
-          : '<p class="cr-muted">本次查看范围内没有待核对项。</p>'
-      }</section>
-      <section class="cr-inspection-section" data-cr-diagnostic-queues><h3>等待与队列</h3>${
-        data.queues?.length
-          ? data.queues
-              .map(
-                (queue) =>
-                  `<article><h4>${E(queue.label || queue.kind)}</h4>${diagnosticFields([
-                    ['窗口内待处理', queue.pending_count],
-                    ['最早等待（秒）', queue.oldest_age_seconds],
-                  ])}</article>`,
-              )
-              .join('')
-          : '<p class="cr-muted">未提供队列数据。</p>'
-      }</section>
-      <section class="cr-inspection-section" data-cr-diagnostic-budgets><h3>额度与下一可用时间</h3>${
-        data.budgets?.length
-          ? data.budgets
-              .map(
-                (budget) =>
-                  `<details><summary>${E(budget.title || '工作额度')}${budget.goal_id ? ' · ' + E(identifier(budget.goal_id)) : ''}</summary>${diagnosticFields((budget.counters || []).map((counter) => [counter.label || '额度', supplied(counter.used) + ' / ' + supplied(counter.limit)]))}${diagnosticFields(
+    <section class="cr-inspection-section" data-cr-diagnostic-anomalies><h3>\u5F53\u524D\u5F85\u6838\u5BF9</h3>${data.anomalies?.length ? `<ul>${data.anomalies.map((item) => `<li>${E(item.display?.title || wakeEvidenceLabels[item.state] || '\u8BC1\u636E\u5F85\u6838\u5BF9')} \xB7 ${E(dateTime(item.created_at))}</li>`).join('')}</ul>` : '<p class="cr-muted">\u672C\u6B21\u67E5\u770B\u8303\u56F4\u5185\u6CA1\u6709\u5F85\u6838\u5BF9\u9879\u3002</p>'}</section>
+    <section class="cr-inspection-section" data-cr-diagnostic-queues><h3>\u7B49\u5F85\u4E0E\u961F\u5217</h3>${
+      data.queues?.length
+        ? data.queues
+            .map(
+              (queue) =>
+                `<article><h4>${E(queue.label || queue.kind)}</h4>${diagnosticFields([
+                  ['\u7A97\u53E3\u5185\u5F85\u5904\u7406', queue.pending_count],
+                  ['\u6700\u65E9\u7B49\u5F85\uFF08\u79D2\uFF09', queue.oldest_age_seconds],
+                ])}</article>`,
+            )
+            .join('')
+        : '<p class="cr-muted">\u672A\u63D0\u4F9B\u961F\u5217\u6570\u636E\u3002</p>'
+    }</section>
+    <section class="cr-inspection-section" data-cr-diagnostic-budgets><h3>\u989D\u5EA6\u4E0E\u4E0B\u4E00\u53EF\u7528\u65F6\u95F4</h3>${
+      data.budgets?.length
+        ? data.budgets
+            .map(
+              (budget) =>
+                `<details><summary>${E(budget.title || '\u5DE5\u4F5C\u989D\u5EA6')}${budget.goal_id ? ' \xB7 ' + E(identifier(budget.goal_id)) : ''}</summary>${diagnosticFields((budget.counters || []).map((counter) => [counter.label || '\u989D\u5EA6', supplied(counter.used) + ' / ' + supplied(counter.limit)]))}${diagnosticFields(
+                  [
+                    ['\u5230\u671F\u65F6\u95F4', dateTime(budget.expires_at)],
+                    ['\u4E0B\u4E00\u53EF\u7528\u65F6\u95F4', dateTime(budget.next_available_at)],
+                  ],
+                )}${budget.display?.reason || budget.reason_code ? `<p>${E(budget.display?.reason || budget.reason_code)}</p>` : ''}</details>`,
+            )
+            .join('')
+        : '<p class="cr-muted">\u672A\u63D0\u4F9B\u989D\u5EA6\u6570\u636E\u3002</p>'
+    }</section>
+    <section class="cr-inspection-section" data-cr-diagnostic-members><h3>\u6210\u5458\u4E0E\u6D88\u8D39\u8BC1\u636E</h3>${
+      data.members?.length
+        ? data.members
+            .map(
+              (member) =>
+                `<details><summary>${E(identifier(member.member_id))} \xB7 ${E(stages[member.state] || member.state)}</summary>${diagnosticFields(
+                  [
+                    ['\u7ED1\u5B9A\u4E16\u4EE3', member.binding_generation],
+                    ['\u8BA2\u9605\u72B6\u6001', member.subscription?.state],
                     [
-                      ['到期时间', dateTime(budget.expires_at)],
-                      ['下一可用时间', dateTime(budget.next_available_at)],
+                      '\u539F\u751F\u8BA2\u9605\u5DF2\u9A8C\u8BC1',
+                      dateTime(member.subscription_verified_at),
                     ],
-                  )}${budget.display?.reason || budget.reason_code ? `<p>${E(budget.display?.reason || budget.reason_code)}</p>` : ''}</details>`,
-              )
-              .join('')
-          : '<p class="cr-muted">未提供额度数据。</p>'
-      }</section>
-      <section class="cr-inspection-section" data-cr-diagnostic-members><h3>成员与消费证据</h3>${
-        data.members?.length
-          ? data.members
-              .map(
-                (member) =>
-                  `<details><summary>${E(identifier(member.member_id))} · ${E(stages[member.state] || member.state)}</summary>${diagnosticFields(
+                    ['\u63A2\u6D4B\u5DF2\u8BFB\u53D6', dateTime(member.probe_read_at)],
                     [
-                      ['绑定世代', member.binding_generation],
-                      ['订阅状态', member.subscription?.state],
-                      ['原生订阅已验证', dateTime(member.subscription_verified_at)],
-                      ['探测已读取', dateTime(member.probe_read_at)],
-                      ['规范探测已回复', dateTime(member.probe_replied_at)],
-                      ['消费者状态', member.consumer?.state],
-                      ['消费者 fence', member.consumer?.fence],
-                      ['租约截止', dateTime(member.consumer?.lease_until)],
-                      ['待处理原输入', member.inbox?.pending_count],
-                      ['输入水位', member.inbox?.dirty_revision],
-                      ['完成水位', member.inbox?.drained_revision],
-                      ['最早输入等待（秒）', member.inbox?.oldest_age_seconds],
-                      ['通知待发送', member.notification?.pending_count],
-                      ['通知最早等待（秒）', member.notification?.oldest_age_seconds],
-                      ['平台接受时间', dateTime(member.notification?.last_accepted_at)],
-                      ['下一通知尝试', dateTime(member.notification?.next_attempt_at)],
+                      '\u89C4\u8303\u63A2\u6D4B\u5DF2\u56DE\u590D',
+                      dateTime(member.probe_replied_at),
                     ],
-                  )}<p class="cr-muted">宿主接口受理、票据领取和回复保存各有记录。${member.inbox?.complete === false ? '输入列表尚不完整。' : ''}</p>${member.notification?.latest_wake ? `<p>${E(wakeEvidenceLabels[member.notification.latest_wake.state] || '证据不足')}</p>` : ''}<div data-cr-wake-evidence>${btn('wake-evidence', '查看通知证据', `data-id="${E(member.member_id)}"`, 'cr-text-button')}</div></details>`,
-              )
-              .join('')
-          : '<p class="cr-muted">当前没有可显示的成员证据。</p>'
-      }</section>
-      <section class="cr-inspection-section" data-cr-diagnostic-traces><h3>原记录关联</h3>${
-        data.traces?.length
-          ? data.traces
-              .map(
-                (trace) =>
-                  `<details data-trace-id="${E(trace.id)}"><summary>${E(traceLabels[trace.kind] || trace.kind)} ${E(identifier(trace.id))} · ${E(trace.display?.title || workLabels[trace.state] || deliveryLabels[trace.state] || trace.state)}</summary>${trace.display?.reason || trace.reason_code ? `<p>${E(trace.display?.reason || trace.reason_code)}</p>` : ''}${diagnosticFields(
+                    ['\u6D88\u8D39\u8005\u72B6\u6001', member.consumer?.state],
+                    ['\u6D88\u8D39\u8005 fence', member.consumer?.fence],
+                    ['\u79DF\u7EA6\u622A\u6B62', dateTime(member.consumer?.lease_until)],
+                    ['\u5F85\u5904\u7406\u539F\u8F93\u5165', member.inbox?.pending_count],
+                    ['\u8F93\u5165\u6C34\u4F4D', member.inbox?.dirty_revision],
+                    ['\u5B8C\u6210\u6C34\u4F4D', member.inbox?.drained_revision],
                     [
-                      ['记录时间', dateTime(trace.updated_at)],
-                      ...[
-                        ['成员', 'member_id'],
-                        ['绑定世代', 'binding_generation'],
-                        ['原消息', 'message_id'],
-                        ['工作', 'goal_id'],
-                        ['步骤', 'work_item_id'],
-                        ['原操作', 'operation_id'],
-                        ['原投递', 'delivery_id'],
-                        ['原回合', 'consumer_session_id'],
-                      ]
-                        .filter(([, key]) => trace[key] !== undefined && trace[key] !== '')
-                        .map(([label, key]) => [
-                          label,
-                          key === 'binding_generation' ? trace[key] : identifier(trace[key]),
-                        ]),
+                      '\u6700\u65E9\u8F93\u5165\u7B49\u5F85\uFF08\u79D2\uFF09',
+                      member.inbox?.oldest_age_seconds,
                     ],
-                  )}${trace.kind === 'delivery' ? deliveryMarkup([trace]) : ''}</details>`,
-              )
-              .join('')
-          : '<p class="cr-muted">当前窗口没有可显示的原记录。</p>'
-      }</section>
-      <details class="cr-diagnostics"><summary>本次观察上限</summary>${diagnosticFields(
-        Object.entries(limitLabels)
-          .filter(([key]) => data.limits?.[key] !== undefined)
-          .map(([key, label]) => [label, data.limits[key]]),
-      )}</details>`;
+                    ['\u901A\u77E5\u5F85\u53D1\u9001', member.notification?.pending_count],
+                    [
+                      '\u901A\u77E5\u6700\u65E9\u7B49\u5F85\uFF08\u79D2\uFF09',
+                      member.notification?.oldest_age_seconds,
+                    ],
+                    [
+                      '\u5E73\u53F0\u63A5\u53D7\u65F6\u95F4',
+                      dateTime(member.notification?.last_accepted_at),
+                    ],
+                    [
+                      '\u4E0B\u4E00\u901A\u77E5\u5C1D\u8BD5',
+                      dateTime(member.notification?.next_attempt_at),
+                    ],
+                  ],
+                )}<p class="cr-muted">\u5BBF\u4E3B\u63A5\u53E3\u53D7\u7406\u3001\u7968\u636E\u9886\u53D6\u548C\u56DE\u590D\u4FDD\u5B58\u5404\u6709\u8BB0\u5F55\u3002${member.inbox?.complete === false ? '\u8F93\u5165\u5217\u8868\u5C1A\u4E0D\u5B8C\u6574\u3002' : ''}</p>${member.notification?.latest_wake ? `<p>${E(wakeEvidenceLabels[member.notification.latest_wake.state] || '\u8BC1\u636E\u4E0D\u8DB3')}</p>` : ''}<div data-cr-wake-evidence>${btn('wake-evidence', '\u67E5\u770B\u901A\u77E5\u8BC1\u636E', `data-id="${E(member.member_id)}"`, 'cr-text-button')}</div></details>`,
+            )
+            .join('')
+        : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u53EF\u663E\u793A\u7684\u6210\u5458\u8BC1\u636E\u3002</p>'
+    }</section>
+    <section class="cr-inspection-section" data-cr-diagnostic-traces><h3>\u539F\u8BB0\u5F55\u5173\u8054</h3>${
+      data.traces?.length
+        ? data.traces
+            .map(
+              (trace) =>
+                `<details data-trace-id="${E(trace.id)}"><summary>${E(traceLabels[trace.kind] || trace.kind)} ${E(identifier(trace.id))} \xB7 ${E(trace.display?.title || workLabels[trace.state] || deliveryLabels[trace.state] || trace.state)}</summary>${trace.display?.reason || trace.reason_code ? `<p>${E(trace.display?.reason || trace.reason_code)}</p>` : ''}${diagnosticFields(
+                  [
+                    ['\u8BB0\u5F55\u65F6\u95F4', dateTime(trace.updated_at)],
+                    ...[
+                      ['\u6210\u5458', 'member_id'],
+                      ['\u7ED1\u5B9A\u4E16\u4EE3', 'binding_generation'],
+                      ['\u539F\u6D88\u606F', 'message_id'],
+                      ['\u5DE5\u4F5C', 'goal_id'],
+                      ['\u6B65\u9AA4', 'work_item_id'],
+                      ['\u539F\u64CD\u4F5C', 'operation_id'],
+                      ['\u539F\u6295\u9012', 'delivery_id'],
+                      ['\u539F\u56DE\u5408', 'consumer_session_id'],
+                    ]
+                      .filter(([, key]) => trace[key] !== void 0 && trace[key] !== '')
+                      .map(([label, key]) => [
+                        label,
+                        key === 'binding_generation' ? trace[key] : identifier(trace[key]),
+                      ]),
+                  ],
+                )}${trace.kind === 'delivery' ? deliveryMarkup([trace]) : ''}</details>`,
+            )
+            .join('')
+        : '<p class="cr-muted">\u5F53\u524D\u7A97\u53E3\u6CA1\u6709\u53EF\u663E\u793A\u7684\u539F\u8BB0\u5F55\u3002</p>'
+    }</section>
+    <details class="cr-diagnostics"><summary>\u672C\u6B21\u89C2\u5BDF\u4E0A\u9650</summary>${diagnosticFields(
+      Object.entries(limitLabels)
+        .filter(([key]) => data.limits?.[key] !== void 0)
+        .map(([key, label]) => [label, data.limits[key]]),
+    )}</details>`;
     if (restoreRefresh)
       box.querySelector('[data-cr-action="refresh-diagnostics"]')?.focus({ preventScroll: true });
   }
@@ -3506,7 +3034,7 @@ window.CodePierCollaboration = (() => {
     } catch (error) {
       if (!isCurrent() || error.name === 'AbortError') return;
       const loading = root.querySelector('[data-cr-diagnostics-loading]');
-      if (loading) loading.outerHTML = btn('refresh-diagnostics', '重试读取');
+      if (loading) loading.outerHTML = btn('refresh-diagnostics', '\u91CD\u8BD5\u8BFB\u53D6');
       panelError(error.message);
     } finally {
       current.loading = false;
@@ -3527,17 +3055,19 @@ window.CodePierCollaboration = (() => {
     const value = panel?.context;
     if (!box || panel?.name !== 'context' || !value) return;
     const reasonLabels = {
-      unreviewed_input: '还有新的原输入等待核对',
-      byte_budget: '本页内容达到大小上限',
-      page_limit: '还有事实未载入',
-      more_facts: '还有事实未载入',
-      history_is_paginated: '完整历史按页读取',
-      not_summarized: '原输入尚未形成经核对的摘要',
-      source_needs_review: '事实来源需要重新核对',
-      recent_messages_omitted: '近期原消息未包含在本页',
-      visibility_limited: '当前范围只允许查看部分来源',
+      unreviewed_input: '\u8FD8\u6709\u65B0\u7684\u539F\u8F93\u5165\u7B49\u5F85\u6838\u5BF9',
+      byte_budget: '\u672C\u9875\u5185\u5BB9\u8FBE\u5230\u5927\u5C0F\u4E0A\u9650',
+      page_limit: '\u8FD8\u6709\u4E8B\u5B9E\u672A\u8F7D\u5165',
+      more_facts: '\u8FD8\u6709\u4E8B\u5B9E\u672A\u8F7D\u5165',
+      history_is_paginated: '\u5B8C\u6574\u5386\u53F2\u6309\u9875\u8BFB\u53D6',
+      not_summarized:
+        '\u539F\u8F93\u5165\u5C1A\u672A\u5F62\u6210\u7ECF\u6838\u5BF9\u7684\u6458\u8981',
+      source_needs_review: '\u4E8B\u5B9E\u6765\u6E90\u9700\u8981\u91CD\u65B0\u6838\u5BF9',
+      recent_messages_omitted: '\u8FD1\u671F\u539F\u6D88\u606F\u672A\u5305\u542B\u5728\u672C\u9875',
+      visibility_limited:
+        '\u5F53\u524D\u8303\u56F4\u53EA\u5141\u8BB8\u67E5\u770B\u90E8\u5206\u6765\u6E90',
     };
-    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">房间要点</p>${btn('refresh-context', '刷新')}</div><p class="cr-muted">点“纠正”后，在输入框写出正确内容。</p>${value.incomplete ? `<p class="cr-info" data-cr-context-incomplete>上下文尚不完整。${E((value.incomplete_reasons || []).map((reason) => reasonLabels[reason] || reason).join('；'))}</p>` : ''}${value.active_projects?.length ? `<p class="cr-muted">当前项目：${E(value.active_projects.map((project) => (typeof project === 'string' ? S.projects.find((item) => item.id === project)?.alias || project : project.project_label || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id)).join('、'))}</p>` : ''}<div class="cr-context-facts">${value.facts?.length ? value.facts.map((fact) => `<article class="cr-context-fact" data-context-id="${E(fact.id)}"><h3>${E(contextKinds[fact.kind] || fact.kind || '当前事实')}${fact.review_state === 'needs_review' || value.review_state === 'needs_review' ? '<span class="cr-tag">待重新核对</span>' : ''}</h3><p class="cr-context-text">${E(fact.text)}</p>${fact.sources?.length ? `<div class="cr-context-sources" aria-label="事实来源">${fact.sources.map((source) => btn('context-source', source.created_at ? '来源（' + E(time(source.created_at)) + '）' : '查看来源', `data-id="${E(source.message_id)}" data-source-version="${E(source.version)}"`, 'cr-text-button')).join('')}</div>` : '<p class="cr-muted">未提供来源。</p>'}${fact.artifact_refs?.length ? `<p class="cr-muted">产物：${E(fact.artifact_refs.map((artifact) => (typeof artifact === 'string' ? artifact : artifact.name || artifact.label || artifact.id || '原产物引用')).join('、'))}</p>` : ''}${!activeRoom() || value.writable === false || value.archived ? '' : btn('correct-context', '纠正这条事实', `data-id="${E(fact.id)}"`, 'cr-text-button')}</article>`).join('') : '<p class="cr-muted">尚无已核对的当前事实。原消息仍保存在房间中。</p>'}</div>${value.next_cursor ? btn('more-context', '载入更多事实', '', 'cr-full') : ''}`;
+    box.innerHTML = `<div class="cr-inspection-heading"><p class="cr-muted">\u623F\u95F4\u8981\u70B9</p>${btn('refresh-context', '\u5237\u65B0')}</div><p class="cr-muted">\u70B9\u201C\u7EA0\u6B63\u201D\u540E\uFF0C\u5728\u8F93\u5165\u6846\u5199\u51FA\u6B63\u786E\u5185\u5BB9\u3002</p>${value.incomplete ? `<p class="cr-info" data-cr-context-incomplete>\u4E0A\u4E0B\u6587\u5C1A\u4E0D\u5B8C\u6574\u3002${E((value.incomplete_reasons || []).map((reason) => reasonLabels[reason] || reason).join('\uFF1B'))}</p>` : ''}${value.active_projects?.length ? `<p class="cr-muted">\u5F53\u524D\u9879\u76EE\uFF1A${E(value.active_projects.map((project) => (typeof project === 'string' ? S.projects.find((item) => item.id === project)?.alias || project : project.project_label || S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id)).join('\u3001'))}</p>` : ''}<div class="cr-context-facts">${value.facts?.length ? value.facts.map((fact) => `<article class="cr-context-fact" data-context-id="${E(fact.id)}"><h3>${E(contextKinds[fact.kind] || fact.kind || '\u5F53\u524D\u4E8B\u5B9E')}${fact.review_state === 'needs_review' || value.review_state === 'needs_review' ? '<span class="cr-tag">\u5F85\u91CD\u65B0\u6838\u5BF9</span>' : ''}</h3><p class="cr-context-text">${E(fact.text)}</p>${fact.sources?.length ? `<div class="cr-context-sources" aria-label="\u4E8B\u5B9E\u6765\u6E90">${fact.sources.map((source) => btn('context-source', source.created_at ? '\u6765\u6E90\uFF08' + E(time(source.created_at)) + '\uFF09' : '\u67E5\u770B\u6765\u6E90', `data-id="${E(source.message_id)}" data-source-version="${E(source.version)}"`, 'cr-text-button')).join('')}</div>` : '<p class="cr-muted">\u672A\u63D0\u4F9B\u6765\u6E90\u3002</p>'}${fact.artifact_refs?.length ? `<p class="cr-muted">\u4EA7\u7269\uFF1A${E(fact.artifact_refs.map((artifact) => (typeof artifact === 'string' ? artifact : artifact.name || artifact.label || artifact.id || '\u539F\u4EA7\u7269\u5F15\u7528')).join('\u3001'))}</p>` : ''}${!activeRoom() || value.writable === false || value.archived ? '' : btn('correct-context', '\u7EA0\u6B63\u8FD9\u6761\u4E8B\u5B9E', `data-id="${E(fact.id)}"`, 'cr-text-button')}</article>`).join('') : '<p class="cr-muted">\u5C1A\u65E0\u5DF2\u6838\u5BF9\u7684\u5F53\u524D\u4E8B\u5B9E\u3002\u539F\u6D88\u606F\u4ECD\u4FDD\u5B58\u5728\u623F\u95F4\u4E2D\u3002</p>'}</div>${value.next_cursor ? btn('more-context', '\u8F7D\u5165\u66F4\u591A\u4E8B\u5B9E', '', 'cr-full') : ''}`;
   }
   async function loadContext(more = false) {
     const current = panel,
@@ -3597,8 +3127,8 @@ window.CodePierCollaboration = (() => {
   async function contextSource(id, sourceVersion) {
     openPanel(
       'context-source',
-      '原消息',
-      '<div data-cr-context-source><p class="cr-muted">正在核对当前可读原消息…</p></div>',
+      '\u539F\u6D88\u606F',
+      '<div data-cr-context-source><p class="cr-muted">\u6B63\u5728\u6838\u5BF9\u5F53\u524D\u53EF\u8BFB\u539F\u6D88\u606F\u2026</p></div>',
     );
     const current = panel,
       owner = state.owner;
@@ -3609,10 +3139,11 @@ window.CodePierCollaboration = (() => {
     const message = result.message || result.messages?.find((item) => item.id === id);
     const box = root.querySelector('[data-cr-context-source]');
     if (!message) {
-      box.textContent = '原消息当前不可见，请刷新上下文。';
+      box.textContent =
+        '\u539F\u6D88\u606F\u5F53\u524D\u4E0D\u53EF\u89C1\uFF0C\u8BF7\u5237\u65B0\u4E0A\u4E0B\u6587\u3002';
       return;
     }
-    box.innerHTML = `<p class="cr-muted">原消息 ${E(identifier(message.id))} · 当前版本 ${E(supplied(message.version))}</p>${Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">原消息已更新。此处是当前可读版本，摘要引用的旧版本需重新核对。</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '在房间中查看', `data-id="${E(id)}"`) : ''}${btn('context', '返回当前上下文')}`;
+    box.innerHTML = `<p class="cr-muted">\u539F\u6D88\u606F ${E(identifier(message.id))} \xB7 \u5F53\u524D\u7248\u672C ${E(supplied(message.version))}</p>${Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">\u539F\u6D88\u606F\u5DF2\u66F4\u65B0\u3002\u6B64\u5904\u662F\u5F53\u524D\u53EF\u8BFB\u7248\u672C\uFF0C\u6458\u8981\u5F15\u7528\u7684\u65E7\u7248\u672C\u9700\u91CD\u65B0\u6838\u5BF9\u3002</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '\u5728\u623F\u95F4\u4E2D\u67E5\u770B', `data-id="${E(id)}"`) : ''}${btn('context', '\u8FD4\u56DE\u5F53\u524D\u4E0A\u4E0B\u6587')}`;
     const body = box.querySelector('.cr-message-body');
     if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, message.body_text || '');
     else body.textContent = message.body_text || '';
@@ -3621,17 +3152,19 @@ window.CodePierCollaboration = (() => {
     const room = state.room;
     openPanel(
       'settings',
-      '房间设置',
-      `<form data-cr-form="settings">${field('房间名称', `<input name="title" value="${E(room.title)}" required maxlength="120" autofocus>`)}<button type="submit" class="cr-button cr-primary">保存名称</button></form><section class="cr-setting-actions">${btn('context', '房间要点')}${btn('diagnostics', '运行诊断')}${btn('room-state', room.state === 'paused' ? '继续房间' : '暂停房间', `data-state="${room.state === 'paused' ? 'active' : 'paused'}"`)}${btn('archive-room', room.state === 'archived' ? '恢复房间' : '归档房间', '', 'cr-danger')}</section>`,
+      '\u623F\u95F4\u8BBE\u7F6E',
+      `<form data-cr-form="settings">${field('\u623F\u95F4\u540D\u79F0', `<input name="title" value="${E(room.title)}" required maxlength="120" autofocus>`)}<button type="submit" class="cr-button cr-primary">\u4FDD\u5B58\u540D\u79F0</button></form><section class="cr-setting-actions">${btn('context', '\u623F\u95F4\u8981\u70B9')}${btn('diagnostics', '\u8FD0\u884C\u8BCA\u65AD')}${btn('room-state', room.state === 'paused' ? '\u7EE7\u7EED\u623F\u95F4' : '\u6682\u505C\u623F\u95F4', `data-state="${room.state === 'paused' ? 'active' : 'paused'}"`)}${btn('archive-room', room.state === 'archived' ? '\u6062\u590D\u623F\u95F4' : '\u5F52\u6863\u623F\u95F4', '', 'cr-danger')}</section>`,
       { version: room.version },
     );
   }
+
+  // ../collaboration-room/work.mjs
   async function workPanel(id) {
     const work = state.works.find((item) => item.id === id);
     openPanel(
       'work',
-      work?.title || '当前工作',
-      '<div data-cr-work-view><p class="cr-muted">正在读取工作…</p></div>',
+      work?.title || '\u5F53\u524D\u5DE5\u4F5C',
+      '<div data-cr-work-view><p class="cr-muted">\u6B63\u5728\u8BFB\u53D6\u5DE5\u4F5C\u2026</p></div>',
       { work: work || { id } },
     );
     state.workDetail = work || { id };
@@ -3642,7 +3175,7 @@ window.CodePierCollaboration = (() => {
     } catch (error) {
       if (panel === current && [401, 403, 404].includes(error.status)) {
         root.querySelector('[data-cr-work-view]').textContent =
-          '这项工作当前不可查看，请刷新房间。';
+          '\u8FD9\u9879\u5DE5\u4F5C\u5F53\u524D\u4E0D\u53EF\u67E5\u770B\uFF0C\u8BF7\u5237\u65B0\u623F\u95F4\u3002';
         state.works = state.works.filter((item) => item.id !== id);
         patchWorks();
       }
@@ -3656,8 +3189,10 @@ window.CodePierCollaboration = (() => {
   }
   function workRecoveryForm(action, candidates) {
     const takeover = action === 'takeover';
-    const heading = takeover ? '接替这项工作的主责' : '恢复原成员的当前连接';
-    return `<form class="cr-work-recovery" data-cr-form="work-recovery" data-work-action="${action}"><h3>${heading}</h3><p class="cr-muted">${takeover ? '只可选择这项工作原已批准且当前范围有效的成员。接替仅作用于此工作。' : '在同一工作中核对并恢复所选成员的连接。原操作及其结果继续保留，不自动重跑。'}</p>${field(takeover ? '接替成员' : '恢复成员', `<select name="target_member_id" required><option value="">请选择成员</option>${candidates.map((member) => `<option value="${E(member.member_id)}">${E(member.name || 'dot')} · #${E(member.member_id.slice(0, 8))}</option>`).join('')}</select>`)}<div class="cr-muted" data-cr-recovery-scope></div><button type="submit" class="cr-button cr-primary">${takeover ? '确认接替原工作' : '确认恢复原工作'}</button></form>`;
+    const heading = takeover
+      ? '\u63A5\u66FF\u8FD9\u9879\u5DE5\u4F5C\u7684\u4E3B\u8D23'
+      : '\u6062\u590D\u539F\u6210\u5458\u7684\u5F53\u524D\u8FDE\u63A5';
+    return `<form class="cr-work-recovery" data-cr-form="work-recovery" data-work-action="${action}"><h3>${heading}</h3><p class="cr-muted">${takeover ? '\u53EA\u53EF\u9009\u62E9\u8FD9\u9879\u5DE5\u4F5C\u539F\u5DF2\u6279\u51C6\u4E14\u5F53\u524D\u8303\u56F4\u6709\u6548\u7684\u6210\u5458\u3002\u63A5\u66FF\u4EC5\u4F5C\u7528\u4E8E\u6B64\u5DE5\u4F5C\u3002' : '\u5728\u540C\u4E00\u5DE5\u4F5C\u4E2D\u6838\u5BF9\u5E76\u6062\u590D\u6240\u9009\u6210\u5458\u7684\u8FDE\u63A5\u3002\u539F\u64CD\u4F5C\u53CA\u5176\u7ED3\u679C\u7EE7\u7EED\u4FDD\u7559\uFF0C\u4E0D\u81EA\u52A8\u91CD\u8DD1\u3002'}</p>${field(takeover ? '\u63A5\u66FF\u6210\u5458' : '\u6062\u590D\u6210\u5458', `<select name="target_member_id" required><option value="">\u8BF7\u9009\u62E9\u6210\u5458</option>${candidates.map((member) => `<option value="${E(member.member_id)}">${E(member.name || 'dot')} \xB7 #${E(member.member_id.slice(0, 8))}</option>`).join('')}</select>`)}<div class="cr-muted" data-cr-recovery-scope></div><button type="submit" class="cr-button cr-primary">${takeover ? '\u786E\u8BA4\u63A5\u66FF\u539F\u5DE5\u4F5C' : '\u786E\u8BA4\u6062\u590D\u539F\u5DE5\u4F5C'}</button></form>`;
   }
   function renderWork(work) {
     if (panel?.name !== 'work') return;
@@ -3684,33 +3219,39 @@ window.CodePierCollaboration = (() => {
     ]);
     const changedReview = panel.workReviewRevision && panel.workReviewRevision !== reviewRevision;
     const selected = [...box.querySelectorAll('form[data-cr-form="work-recovery"]')].map(
-      (form) => ({ action: form.dataset.workAction, value: form.querySelector('select').value }),
+      (form) => ({
+        action: form.dataset.workAction,
+        value: form.querySelector('select').value,
+      }),
     );
     const focusedAction = document.activeElement?.closest?.('[data-cr-form="work-recovery"]')
       ?.dataset.workAction;
     panel.work = work;
-    const markup = `<div class="cr-flow-state"><h3>${E(workStatus(work))}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${!activeRoom() ? '<p class="cr-info">房间已暂停或归档。可以查看历史，也可以停止已有工作。</p>' : ''}${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
-      <section class="cr-work-summary">${work.acceptance ? `<h3>完成条件</h3><p>${E(work.acceptance)}</p>` : ''}${coordinatorId ? `<p data-cr-work-coordinator><strong>当前主责</strong> ${E(coordinator?.name || recovery.coordinator_name || 'dot')}</p>` : ''}${team.length ? `<h3>参与成员</h3><ul>${team.map((member) => `<li>${E(member.name || 'dot')}${(member.member_id || member.id) === coordinatorId ? ' · 主责' : ''}</li>`).join('')}</ul>` : ''}</section>
-      <details class="cr-diagnostics cr-work-evidence"><summary>步骤与执行记录</summary>${work.items?.length ? `<ul>${work.items.map((item) => `<li><strong>${E(item.title || '工作步骤')}</strong> · ${E(workLabels[item.state] || item.state)}${item.display?.reason || item.reason_code ? `<p>${E(item.display?.reason || item.reason_code)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">当前没有可显示的执行步骤。</p>'}<div data-cr-operation-receipts>${operations.length ? `<ul>${operations.map((operation) => `<li data-operation-id="${E(operation.id || operation.operation_id)}"><strong>${E(operation.display?.title || workLabels[operation.state] || operation.state)}</strong>${operation.cancel_requested && !['succeeded', 'failed', 'cancelled'].includes(operation.state) ? '<p>已请求停止，等待原操作回执</p>' : ''}${operation.display?.reason ? `<p>${E(operation.display.reason)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">还没开始执行。</p>'}</div></details>
-      ${recovery.state === 'waiting_operations' ? '<p class="cr-info">等当前操作结束后才能恢复或接替。</p>' : ''}
-      ${actions.includes('restore_binding') && recovery.restore_candidates?.length ? workRecoveryForm('restore_binding', recovery.restore_candidates) : ''}
-      ${actions.includes('takeover') && recovery.takeover_candidates?.length ? workRecoveryForm('takeover', recovery.takeover_candidates) : ''}
-      ${workProject ? `<button type="button" class="cr-button cr-text-button" data-wf-action="project" data-project="${E(workProject)}">查看项目任务进度</button>` : ''}
-      <div class="cr-work-controls">${actions
-        .filter((action) => ['pause', 'resume', 'cancel', 'stop'].includes(action))
-        .map((action) =>
-          btn(
-            'work-control',
-            { pause: '暂停工作', resume: '继续原工作', cancel: '停止工作', stop: '停止工作' }[
-              action
-            ],
-            `data-work-action="${action}"`,
-            ['cancel', 'stop'].includes(action) ? 'cr-danger' : 'cr-primary',
-          ),
-        )
-        .join(
-          '',
-        )}${activeRoom() && workSourceId(work) ? btn('reply-work', '在对话中追问') : ''}${actions.includes('supplement') ? btn('supplement', '修改交办') : ''}</div>`;
+    const markup = `<div class="cr-flow-state"><h3>${E(workStatus(work))}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${!activeRoom() ? '<p class="cr-info">\u623F\u95F4\u5DF2\u6682\u505C\u6216\u5F52\u6863\u3002\u53EF\u4EE5\u67E5\u770B\u5386\u53F2\uFF0C\u4E5F\u53EF\u4EE5\u505C\u6B62\u5DF2\u6709\u5DE5\u4F5C\u3002</p>' : ''}${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
+    <section class="cr-work-summary">${work.acceptance ? `<h3>\u5B8C\u6210\u6761\u4EF6</h3><p>${E(work.acceptance)}</p>` : ''}${coordinatorId ? `<p data-cr-work-coordinator><strong>\u5F53\u524D\u4E3B\u8D23</strong> ${E(coordinator?.name || recovery.coordinator_name || 'dot')}</p>` : ''}${team.length ? `<h3>\u53C2\u4E0E\u6210\u5458</h3><ul>${team.map((member) => `<li>${E(member.name || 'dot')}${(member.member_id || member.id) === coordinatorId ? ' \xB7 \u4E3B\u8D23' : ''}</li>`).join('')}</ul>` : ''}</section>
+    <details class="cr-diagnostics cr-work-evidence"><summary>\u6B65\u9AA4\u4E0E\u6267\u884C\u8BB0\u5F55</summary>${work.items?.length ? `<ul>${work.items.map((item) => `<li><strong>${E(item.title || '\u5DE5\u4F5C\u6B65\u9AA4')}</strong> \xB7 ${E(workLabels[item.state] || item.state)}${item.display?.reason || item.reason_code ? `<p>${E(item.display?.reason || item.reason_code)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u53EF\u663E\u793A\u7684\u6267\u884C\u6B65\u9AA4\u3002</p>'}<div data-cr-operation-receipts>${operations.length ? `<ul>${operations.map((operation) => `<li data-operation-id="${E(operation.id || operation.operation_id)}"><strong>${E(operation.display?.title || workLabels[operation.state] || operation.state)}</strong>${operation.cancel_requested && !['succeeded', 'failed', 'cancelled'].includes(operation.state) ? '<p>\u5DF2\u8BF7\u6C42\u505C\u6B62\uFF0C\u7B49\u5F85\u539F\u64CD\u4F5C\u56DE\u6267</p>' : ''}${operation.display?.reason ? `<p>${E(operation.display.reason)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">\u8FD8\u6CA1\u5F00\u59CB\u6267\u884C\u3002</p>'}</div></details>
+    ${recovery.state === 'waiting_operations' ? '<p class="cr-info">\u7B49\u5F53\u524D\u64CD\u4F5C\u7ED3\u675F\u540E\u624D\u80FD\u6062\u590D\u6216\u63A5\u66FF\u3002</p>' : ''}
+    ${actions.includes('restore_binding') && recovery.restore_candidates?.length ? workRecoveryForm('restore_binding', recovery.restore_candidates) : ''}
+    ${actions.includes('takeover') && recovery.takeover_candidates?.length ? workRecoveryForm('takeover', recovery.takeover_candidates) : ''}
+    ${workProject ? `<button type="button" class="cr-button cr-text-button" data-wf-action="project" data-project="${E(workProject)}">\u67E5\u770B\u9879\u76EE\u4EFB\u52A1\u8FDB\u5EA6</button>` : ''}
+    <div class="cr-work-controls">${actions
+      .filter((action) => ['pause', 'resume', 'cancel', 'stop'].includes(action))
+      .map((action) =>
+        btn(
+          'work-control',
+          {
+            pause: '\u6682\u505C\u5DE5\u4F5C',
+            resume: '\u7EE7\u7EED\u539F\u5DE5\u4F5C',
+            cancel: '\u505C\u6B62\u5DE5\u4F5C',
+            stop: '\u505C\u6B62\u5DE5\u4F5C',
+          }[action],
+          `data-work-action="${action}"`,
+          ['cancel', 'stop'].includes(action) ? 'cr-danger' : 'cr-primary',
+        ),
+      )
+      .join(
+        '',
+      )}${activeRoom() && workSourceId(work) ? btn('reply-work', '\u5728\u5BF9\u8BDD\u4E2D\u8FFD\u95EE') : ''}${actions.includes('supplement') ? btn('supplement', '\u4FEE\u6539\u4EA4\u529E') : ''}</div>`;
     if (box._markup !== markup || changedReview) {
       box.innerHTML = markup;
       box._markup = markup;
@@ -3732,7 +3273,9 @@ window.CodePierCollaboration = (() => {
     }
     panel.workReviewRevision = reviewRevision;
     if (changedReview && selected.some((item) => item.value))
-      panelError('工作或连接范围已变化，请查看结果后重新选择成员。');
+      panelError(
+        '\u5DE5\u4F5C\u6216\u8FDE\u63A5\u8303\u56F4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u67E5\u770B\u7ED3\u679C\u540E\u91CD\u65B0\u9009\u62E9\u6210\u5458\u3002',
+      );
   }
   function updateWorkRecoveryScope(form) {
     const action = form.dataset.workAction;
@@ -3748,15 +3291,17 @@ window.CodePierCollaboration = (() => {
       ? (selected.projects || [])
           .map(
             (project) =>
-              `${S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id} · ${(project.capabilities || []).map((capability) => ({ read: '读取', write: '修改', execute: '执行' })[capability] || capability).join('、')}${project.execution_targets?.length ? ' · ' + project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、') : ''}`,
+              `${S.projects.find((item) => item.id === project.project_id)?.alias || project.project_id} \xB7 ${(project.capabilities || []).map((capability) => ({ read: '\u8BFB\u53D6', write: '\u4FEE\u6539', execute: '\u6267\u884C' })[capability] || capability).join('\u3001')}${project.execution_targets?.length ? ' \xB7 ' + project.execution_targets.map((target) => (target === 'project_agent' ? '\u9879\u76EE Agent' : target)).join('\u3001') : ''}`,
           )
-          .join('；')
+          .join('\uFF1B')
       : '';
   }
   async function controlWork(action, targetMemberId) {
     const work = panel.work;
     if (!(work.allowed_actions || work.display?.allowed_actions || []).includes(action)) {
-      panelError('原工作当前不允许此动作，请重新读取后核对。');
+      panelError(
+        '\u539F\u5DE5\u4F5C\u5F53\u524D\u4E0D\u5141\u8BB8\u6B64\u52A8\u4F5C\uFF0C\u8BF7\u91CD\u65B0\u8BFB\u53D6\u540E\u6838\u5BF9\u3002',
+      );
       return;
     }
     const result = await mutation(
@@ -3782,20 +3327,22 @@ window.CodePierCollaboration = (() => {
       workPanel(work.id);
     }
   }
+
+  // ../collaboration-room/channels.mjs
   async function weixinPanel() {
     openPanel(
       'weixin',
-      '连接微信',
-      '<div data-cr-channel-view><p class="cr-muted">正在读取连接状态…</p></div>',
+      '\u8FDE\u63A5\u5FAE\u4FE1',
+      '<div data-cr-channel-view><p class="cr-muted">\u6B63\u5728\u8BFB\u53D6\u8FDE\u63A5\u72B6\u6001\u2026</p></div>',
     );
     const current = panel;
     if (!activeRoom()) {
-      const existing = state.room?.channels?.find(
+      const existing2 = state.room?.channels?.find(
         (channel) => channel.kind === 'weixin' && channel.flow_id,
       );
-      if (existing) {
+      if (existing2) {
         const result = await api(
-          base + '/channel-connect-flows/' + encodeURIComponent(existing.flow_id),
+          base + '/channel-connect-flows/' + encodeURIComponent(existing2.flow_id),
         );
         if (panel === current) renderChannel(result);
       } else {
@@ -3803,8 +3350,8 @@ window.CodePierCollaboration = (() => {
           (blocker) => blocker.code === 'LEGACY_CHANNEL_ACTIVE',
         );
         root.querySelector('[data-cr-channel-view]').innerHTML = state.room?.legacy
-          ? `<ol class="cr-steps" aria-label="连接微信进度"><li class="is-current" aria-current="step"><span>!</span>先完成房间迁移</li><li><span>1</span>登录微信</li><li><span>2</span>本人验证</li></ol><div class="cr-wx-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>迁移后就能连接微信</h3><p>这个房间还在旧版协作中心，此处不会创建新的微信接入或批准工作许可。完成迁移条目并启用新房间界面后，回到这里扫码；之前登记过的微信可以直接沿用。</p></div></div>${legacyChannels.length ? `<p class="cr-info">这个房间还有 ${legacyChannels.length} 条旧渠道连接需要先暂停。暂停会保留账号、历史和投递回执。</p><ul class="cr-wx-legacy">${legacyChannels.map((item) => migrationBlockerMarkup(item, true)).join('')}</ul>` : ''}${btn('migration', '查看旧连接与迁移要求', '', 'cr-primary cr-full')}`
-          : `<p class="cr-info">${E(readOnlyReason())}</p><p>此处不会创建新的微信接入或批准工作许可。</p>${btn('settings', '查看房间状态')}`;
+          ? `<ol class="cr-steps" aria-label="\u8FDE\u63A5\u5FAE\u4FE1\u8FDB\u5EA6"><li class="is-current" aria-current="step"><span>!</span>\u5148\u5B8C\u6210\u623F\u95F4\u8FC1\u79FB</li><li><span>1</span>\u767B\u5F55\u5FAE\u4FE1</li><li><span>2</span>\u672C\u4EBA\u9A8C\u8BC1</li></ol><div class="cr-wx-head"><span class="cr-legacy-icon" aria-hidden="true">!</span><div><h3>\u8FC1\u79FB\u540E\u5C31\u80FD\u8FDE\u63A5\u5FAE\u4FE1</h3><p>\u8FD9\u4E2A\u623F\u95F4\u8FD8\u5728\u65E7\u7248\u534F\u4F5C\u4E2D\u5FC3\uFF0C\u6B64\u5904\u4E0D\u4F1A\u521B\u5EFA\u65B0\u7684\u5FAE\u4FE1\u63A5\u5165\u6216\u6279\u51C6\u5DE5\u4F5C\u8BB8\u53EF\u3002\u5B8C\u6210\u8FC1\u79FB\u6761\u76EE\u5E76\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762\u540E\uFF0C\u56DE\u5230\u8FD9\u91CC\u626B\u7801\uFF1B\u4E4B\u524D\u767B\u8BB0\u8FC7\u7684\u5FAE\u4FE1\u53EF\u4EE5\u76F4\u63A5\u6CBF\u7528\u3002</p></div></div>${legacyChannels.length ? `<p class="cr-info">\u8FD9\u4E2A\u623F\u95F4\u8FD8\u6709 ${legacyChannels.length} \u6761\u65E7\u6E20\u9053\u8FDE\u63A5\u9700\u8981\u5148\u6682\u505C\u3002\u6682\u505C\u4F1A\u4FDD\u7559\u8D26\u53F7\u3001\u5386\u53F2\u548C\u6295\u9012\u56DE\u6267\u3002</p><ul class="cr-wx-legacy">${legacyChannels.map((item) => migrationBlockerMarkup(item, true)).join('')}</ul>` : ''}${btn('migration', '\u67E5\u770B\u65E7\u8FDE\u63A5\u4E0E\u8FC1\u79FB\u8981\u6C42', '', 'cr-primary cr-full')}`
+          : `<p class="cr-info">${E(readOnlyReason())}</p><p>\u6B64\u5904\u4E0D\u4F1A\u521B\u5EFA\u65B0\u7684\u5FAE\u4FE1\u63A5\u5165\u6216\u6279\u51C6\u5DE5\u4F5C\u8BB8\u53EF\u3002</p>${btn('settings', '\u67E5\u770B\u623F\u95F4\u72B6\u6001')}`;
       }
       return;
     }
@@ -3820,7 +3367,6 @@ window.CodePierCollaboration = (() => {
       );
       if (panel === current) renderChannel(result);
     } else {
-      // Opening the local flow does not start QR login. That needs its own consent.
       await startWeixin(current);
     }
   }
@@ -3835,7 +3381,6 @@ window.CodePierCollaboration = (() => {
     );
     if (result && panel === current) renderChannel(result);
   }
-
   function inboundHealthMarkup(accounts) {
     const items = (accounts || []).flatMap((account) =>
       (account.inbound_health || [])
@@ -3844,136 +3389,54 @@ window.CodePierCollaboration = (() => {
         )
         .map(
           (item) =>
-            `<li><strong>${E(account.label || account.bot_id || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`,
+            `<li><strong>${E(account.label || account.bot_id || '\u5F53\u524D\u8D26\u53F7')}</strong> \xB7 ${item.state === 'deferred' ? '\u7B49\u5F85\u79EF\u538B\u6D88\u5316' : '\u5DF2\u9694\u79BB'} ${E(item.count)} \u6761 \xB7 <code>${E(item.reason_code || 'unknown')}</code></li>`,
         ),
     );
     return items.length
-      ? `<section class="cr-info" aria-label="渠道收件状态"><strong>部分消息需要留意</strong><ul>${items.join('')}</ul><p>延后消息保留在原连接，积压消化后自动核对；隔离消息不会执行任务。后续正常消息仍可接收。</p></section>`
+      ? `<section class="cr-info" aria-label="\u6E20\u9053\u6536\u4EF6\u72B6\u6001"><strong>\u90E8\u5206\u6D88\u606F\u9700\u8981\u7559\u610F</strong><ul>${items.join('')}</ul><p>\u5EF6\u540E\u6D88\u606F\u4FDD\u7559\u5728\u539F\u8FDE\u63A5\uFF0C\u79EF\u538B\u6D88\u5316\u540E\u81EA\u52A8\u6838\u5BF9\uFF1B\u9694\u79BB\u6D88\u606F\u4E0D\u4F1A\u6267\u884C\u4EFB\u52A1\u3002\u540E\u7EED\u6B63\u5E38\u6D88\u606F\u4ECD\u53EF\u63A5\u6536\u3002</p></section>`
       : '';
   }
   function uploadEstimateMarkup(estimate) {
     if (!estimate || !Number.isFinite(Number(estimate.estimated_seconds))) return '';
     const seconds = Math.max(0, Math.ceil(Number(estimate.estimated_seconds)));
-    const duration = seconds >= 60 ? Math.ceil(seconds / 60) + ' 分钟' : seconds + ' 秒';
-    return `<p class="cr-muted" data-cr-upload-estimate>附件外发参考：${estimate.reference_bytes ? E(fileSize(estimate.reference_bytes)) + ' 文件' : '所选文件'}约 ${E(duration)}。 ${E(estimate.note || '')} 外发文件仍需单独批准。</p>`;
+    const duration =
+      seconds >= 60 ? Math.ceil(seconds / 60) + ' \u5206\u949F' : seconds + ' \u79D2';
+    return `<p class="cr-muted" data-cr-upload-estimate>\u9644\u4EF6\u5916\u53D1\u53C2\u8003\uFF1A${estimate.reference_bytes ? E(fileSize(estimate.reference_bytes)) + ' \u6587\u4EF6' : '\u6240\u9009\u6587\u4EF6'}\u7EA6 ${E(duration)}\u3002 ${E(estimate.note || '')} \u5916\u53D1\u6587\u4EF6\u4ECD\u9700\u5355\u72EC\u6279\u51C6\u3002</p>`;
   }
-  const channelSteps = [
-    ['扫码', ['choose_account', 'scan', 'confirm_account', 'needs_reconnect']],
-    [
-      '确认范围',
-      [
-        'choose_member',
-        'waiting_member',
-        'waiting_project',
-        'route_conflict',
-        'confirm_binding',
-        'pairing',
-        'pairing_expired',
-        'confirm_owner',
-      ],
-    ],
-    ['完成', ['ready', 'paused', 'disconnected', 'closed', 'cancelled']],
-  ];
-  const channelCopy = {
-    choose_account: ['连接你的微信', '用手机微信扫码登录，或选择已登记的微信。'],
-    scan: ['用手机微信扫一扫', '扫码后在手机上确认登录。二维码 5 分钟内有效，本页会自动刷新状态。'],
-    confirm_account: [
-      '确认扫码的是你',
-      '核对手机返回的扫码身份。确认后加密保存这个微信的登录凭据。',
-    ],
-    needs_reconnect: [
-      '微信需要重新登录',
-      '原登录已过期或被微信拒绝。重新扫码后沿用原账号和原房间连接。',
-    ],
-    choose_member: [
-      '选择接收微信消息的 dot',
-      '房间里有多个 dot 但还没有主责。微信消息会交给这里选择的 dot 处理和回复。',
-    ],
-    waiting_member: [
-      '先为房间添加一个 dot',
-      '微信消息需要一个 dot 来接收和回复。添加并连上 dot 后回到这里继续。',
-    ],
-    waiting_project: ['先为原连接关联项目', '旧连接需要先关联一个项目才能继续。'],
-    route_conflict: ['先解除原来的微信连接', ''],
-    confirm_binding: [
-      '确认这个房间的私聊范围',
-      '允许你本人微信私聊里的消息进入这个房间；也可以选择允许你在微信里直接交办工作。',
-    ],
-    pairing: ['在微信里发送配对码', '把配对码发到机器人私聊，这里会自动继续。'],
-    pairing_expired: ['配对码已过期', '配对码 15 分钟内有效。生成新的配对码后再发送一次。'],
-    confirm_owner: ['确认是你本人发送的', '已收到配对码。核对发送者后完成连接。'],
-    ready: ['微信已连接', ''],
-    paused: ['微信已暂停', '暂停期间不接收新的微信消息。恢复后沿用原联系人和原房间。'],
-    disconnected: ['微信已断开', '可以重新确认连接范围后再次配对。'],
-    cancelled: ['已取消连接', '可以随时重新开始。'],
-    closed: ['微信已解除', '历史消息保留在房间。'],
-  };
-  const channelReasons = {
-    WEIXIN_QR_EXPIRED: '二维码已过期，请重新生成。',
-    WEIXIN_QR_ATTENTION: '微信没有返回可用的扫码结果，请重新生成二维码。',
-    WEIXIN_QR_CANCELLED: '上一次扫码已取消。',
-    WEIXIN_QR_RESPONSE_UNCONFIRMED: '暂时连不上微信扫码服务，请稍后重新生成二维码。',
-    WEIXIN_QR_RESPONSE_UNSUPPORTED: '微信返回了无法识别的扫码结果，请重新生成二维码。',
-    WEIXIN_CREDENTIAL_CHANGED: '微信登录凭据已变化，请重新扫码。',
-    WEIXIN_ACCOUNT_CONFLICT: '这个微信已由其他账号登记，不能在这里接入。',
-    WEIXIN_SESSION_EXPIRED: '微信登录已过期，请重新扫码。',
-    WEIXIN_AUTH_REJECTED: '微信拒绝了当前登录凭据，请重新扫码。',
-    WEIXIN_RENEWAL_BOT_MISMATCH: '扫码的不是原来的微信，请用原微信重新扫码。',
-    WEIXIN_DISABLED: '空间管理员已关闭微信接入。',
-  };
-  const quietInbound = new Set([
-    '',
-    'WEIXIN_POLL_IDLE',
-    'WEIXIN_POLL_FENCE_LOST',
-    'WEIXIN_BINDING_CHANGED',
-    'WEIXIN_POLL_CANCELLED',
-    'WEIXIN_PAIRING_EXPIRED',
-  ]);
-  const safeImage = (value) =>
-    typeof value === 'string' &&
-    value.length <= 1500000 &&
-    /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
-  const reasonText = (code) =>
-    !code ? '' : channelReasons[code] || (/^[A-Z0-9_]+$/.test(code) ? '状态代码：' + code : code);
-  const facts = (rows) =>
-    `<dl class="cr-wx-facts">${rows
-      .filter(([, value]) => value)
-      .map(([name, value]) => `<div><dt>${E(name)}</dt><dd>${E(value)}</dd></div>`)
-      .join('')}</dl>`;
   function channelLiveParts(box, flow) {
-    // Clock-driven text is patched in place so a poll never re-renders the
-    // form (and never clears boxes the owner has already ticked).
     const inbound = box.querySelector('[data-cr-inbound]');
     if (inbound) {
       const value = flow.inbound || {};
       const code = value.reason_code || '';
       const problem = !quietInbound.has(code);
       const age = value.last_sync_at
-        ? Math.max(0, Math.round(Date.now() / 1000 - Number(value.last_sync_at)))
+        ? Math.max(0, Math.round(Date.now() / 1e3 - Number(value.last_sync_at)))
         : null;
       inbound.className = 'cr-inbound ' + (problem ? 'is-problem' : age !== null ? 'is-live' : '');
       inbound.textContent = problem
-        ? '收件通道异常：' + reasonText(code)
+        ? '\u6536\u4EF6\u901A\u9053\u5F02\u5E38\uFF1A' + reasonText(code)
         : age === null
-          ? '正在连接微信收件通道…'
-          : '收件通道正常 · ' +
-            (age < 60 ? Math.max(1, age) + ' 秒前同步' : Math.round(age / 60) + ' 分钟前同步');
+          ? '\u6B63\u5728\u8FDE\u63A5\u5FAE\u4FE1\u6536\u4EF6\u901A\u9053\u2026'
+          : '\u6536\u4EF6\u901A\u9053\u6B63\u5E38 \xB7 ' +
+            (age < 60
+              ? Math.max(1, age) + ' \u79D2\u524D\u540C\u6B65'
+              : Math.round(age / 60) + ' \u5206\u949F\u524D\u540C\u6B65');
     }
     const countdown = box.querySelector('[data-cr-countdown]');
     if (countdown) {
-      const left = Math.max(0, Math.round(Number(countdown.dataset.until) - Date.now() / 1000));
+      const left = Math.max(0, Math.round(Number(countdown.dataset.until) - Date.now() / 1e3));
       countdown.textContent = left
         ? String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0')
-        : '已到期';
+        : '\u5DF2\u5230\u671F';
     }
   }
   function channelIdentity(nickname, id) {
     if (nickname) return nickname;
     const value = String(id || '');
     return value.length > 8
-      ? value.slice(0, 4) + '…' + value.slice(-4)
+      ? value.slice(0, 4) + '\u2026' + value.slice(-4)
       : value
-        ? value.slice(0, 1) + '…'
+        ? value.slice(0, 1) + '\u2026'
         : '';
   }
   function channelScopeMarkup(preview, flow) {
@@ -3988,43 +3451,56 @@ window.CodePierCollaboration = (() => {
     );
     const renewal = member?.subscription_renewal || flow.member?.subscription_renewal;
     const paired = flow.stage === 'ready';
-    return `<section class="cr-connect-summary" aria-label="微信交办授权摘要">
-      <h3>微信交办授权</h3>
-      ${facts([
-        ['房间', roomName(state.room)],
-        [
-          '本人微信',
-          paired
-            ? channelIdentity(flow.binding?.peer_nickname, flow.binding?.peer_id) ||
-              '当前已配对联系人'
-            : '发送配对码并由房主确认的联系人',
-        ],
-        ['新消息交给', following ? '房间当前主责 dot' : flow.member?.name || '已指定的 dot'],
-        ['回传', '当前房间和发起任务的原私聊'],
-        ['连接保持', renewal ? '由 dot 宿主续订' : null],
-        ['当前订阅到期', renewal?.expires_at ? dateTime(renewal.expires_at) : null],
-      ])}
-      ${
-        projects.length
-          ? `<ul>${projects
-              .map((project) => {
-                const name =
-                  project.project_label ||
-                  project.alias ||
-                  S.projects.find((item) => item.id === project.project_id)?.alias ||
-                  project.project_id ||
-                  project;
-                const caps = (project.capabilities || []).map(
-                  (cap) => ({ read: '读取', write: '修改', execute: '执行' })[cap] || cap,
-                );
-                const expires = project.lifetime?.expires_at || project.expires_at;
-                return `<li>${E(name)}${caps.length ? ' · ' + E(caps.join('、')) : ''}${expires ? ' · 至 ' + E(dateTime(expires)) : ''}${project.execution_targets?.length ? '<br>执行位置：' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '项目 Agent' : target)).join('、')) : ''}</li>`;
-              })
-              .join('')}</ul>`
-          : '<p class="cr-muted">当前没有可交办的项目，私聊可以正常收发消息。</p>'
-      }
-      <p class="cr-muted">配对后可在此关闭交办工作，或在权限设置中调整项目与能力。</p>
-    </section>`;
+    return `<section class="cr-connect-summary" aria-label="\u5FAE\u4FE1\u4EA4\u529E\u6388\u6743\u6458\u8981">
+    <h3>\u5FAE\u4FE1\u4EA4\u529E\u6388\u6743</h3>
+    ${facts([
+      ['\u623F\u95F4', roomName(state.room)],
+      [
+        '\u672C\u4EBA\u5FAE\u4FE1',
+        paired
+          ? channelIdentity(flow.binding?.peer_nickname, flow.binding?.peer_id) ||
+            '\u5F53\u524D\u5DF2\u914D\u5BF9\u8054\u7CFB\u4EBA'
+          : '\u53D1\u9001\u914D\u5BF9\u7801\u5E76\u7531\u623F\u4E3B\u786E\u8BA4\u7684\u8054\u7CFB\u4EBA',
+      ],
+      [
+        '\u65B0\u6D88\u606F\u4EA4\u7ED9',
+        following
+          ? '\u623F\u95F4\u5F53\u524D\u4E3B\u8D23 dot'
+          : flow.member?.name || '\u5DF2\u6307\u5B9A\u7684 dot',
+      ],
+      [
+        '\u56DE\u4F20',
+        '\u5F53\u524D\u623F\u95F4\u548C\u53D1\u8D77\u4EFB\u52A1\u7684\u539F\u79C1\u804A',
+      ],
+      ['\u8FDE\u63A5\u4FDD\u6301', renewal ? '\u7531 dot \u5BBF\u4E3B\u7EED\u8BA2' : null],
+      [
+        '\u5F53\u524D\u8BA2\u9605\u5230\u671F',
+        renewal?.expires_at ? dateTime(renewal.expires_at) : null,
+      ],
+    ])}
+    ${
+      projects.length
+        ? `<ul>${projects
+            .map((project) => {
+              const name =
+                project.project_label ||
+                project.alias ||
+                S.projects.find((item) => item.id === project.project_id)?.alias ||
+                project.project_id ||
+                project;
+              const caps = (project.capabilities || []).map(
+                (cap) =>
+                  ({ read: '\u8BFB\u53D6', write: '\u4FEE\u6539', execute: '\u6267\u884C' })[cap] ||
+                  cap,
+              );
+              const expires = project.lifetime?.expires_at || project.expires_at;
+              return `<li>${E(name)}${caps.length ? ' \xB7 ' + E(caps.join('\u3001')) : ''}${expires ? ' \xB7 \u81F3 ' + E(dateTime(expires)) : ''}${project.execution_targets?.length ? '<br>\u6267\u884C\u4F4D\u7F6E\uFF1A' + E(project.execution_targets.map((target) => (target === 'project_agent' ? '\u9879\u76EE Agent' : target)).join('\u3001')) : ''}</li>`;
+            })
+            .join('')}</ul>`
+        : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u53EF\u4EA4\u529E\u7684\u9879\u76EE\uFF0C\u79C1\u804A\u53EF\u4EE5\u6B63\u5E38\u6536\u53D1\u6D88\u606F\u3002</p>'
+    }
+    <p class="cr-muted">\u914D\u5BF9\u540E\u53EF\u5728\u6B64\u5173\u95ED\u4EA4\u529E\u5DE5\u4F5C\uFF0C\u6216\u5728\u6743\u9650\u8BBE\u7F6E\u4E2D\u8C03\u6574\u9879\u76EE\u4E0E\u80FD\u529B\u3002</p>
+  </section>`;
   }
   function renderChannel(result) {
     if (!panel || !root) return;
@@ -4050,96 +3526,104 @@ window.CodePierCollaboration = (() => {
         : [];
     const label =
       flow.actions?.find((item) => item.action === action)?.label || actionLabel(action);
-    const current = channelSteps.findIndex(([, stages]) => stages.includes(stage));
+    const current = channelSteps.findIndex(([, stages2]) => stages2.includes(stage));
     const existing = flow.existing_binding;
     const [heading, copy] = channelCopy[stage] || [flow.display?.title || title(flow), ''];
     const lead =
       stage === 'route_conflict' && existing
         ? existing.same_room
-          ? `这个房间还保留着一条${existing.legacy ? '旧版' : ''}微信连接（${existing.state === 'paused' ? '已暂停' : '仍在使用'}）。解除后才能绑定新的连接；原消息和投递回执会保留。`
-          : `这个微信目前连接在「${existing.room_title ? roomName({ title: existing.room_title }) : '另一个房间'}」。一个私聊只能连接一个房间，确认后新消息进入当前房间，原房间的历史保留。`
+          ? `\u8FD9\u4E2A\u623F\u95F4\u8FD8\u4FDD\u7559\u7740\u4E00\u6761${existing.legacy ? '\u65E7\u7248' : ''}\u5FAE\u4FE1\u8FDE\u63A5\uFF08${existing.state === 'paused' ? '\u5DF2\u6682\u505C' : '\u4ECD\u5728\u4F7F\u7528'}\uFF09\u3002\u89E3\u9664\u540E\u624D\u80FD\u7ED1\u5B9A\u65B0\u7684\u8FDE\u63A5\uFF1B\u539F\u6D88\u606F\u548C\u6295\u9012\u56DE\u6267\u4F1A\u4FDD\u7559\u3002`
+          : `\u8FD9\u4E2A\u5FAE\u4FE1\u76EE\u524D\u8FDE\u63A5\u5728\u300C${existing.room_title ? roomName({ title: existing.room_title }) : '\u53E6\u4E00\u4E2A\u623F\u95F4'}\u300D\u3002\u4E00\u4E2A\u79C1\u804A\u53EA\u80FD\u8FDE\u63A5\u4E00\u4E2A\u623F\u95F4\uFF0C\u786E\u8BA4\u540E\u65B0\u6D88\u606F\u8FDB\u5165\u5F53\u524D\u623F\u95F4\uFF0C\u539F\u623F\u95F4\u7684\u5386\u53F2\u4FDD\u7559\u3002`
         : stage === 'ready'
           ? flow.work_authorized
-            ? '已允许本人交办工作：你在微信里提出的明确请求，会在批准范围内自动转成工作。'
-            : '已连接房间聊天：微信私聊的消息会进入这个房间，dot 的回复会发回私聊。'
+            ? '\u5DF2\u5141\u8BB8\u672C\u4EBA\u4EA4\u529E\u5DE5\u4F5C\uFF1A\u4F60\u5728\u5FAE\u4FE1\u91CC\u63D0\u51FA\u7684\u660E\u786E\u8BF7\u6C42\uFF0C\u4F1A\u5728\u6279\u51C6\u8303\u56F4\u5185\u81EA\u52A8\u8F6C\u6210\u5DE5\u4F5C\u3002'
+            : '\u5DF2\u8FDE\u63A5\u623F\u95F4\u804A\u5929\uFF1A\u5FAE\u4FE1\u79C1\u804A\u7684\u6D88\u606F\u4F1A\u8FDB\u5165\u8FD9\u4E2A\u623F\u95F4\uFF0Cdot \u7684\u56DE\u590D\u4F1A\u53D1\u56DE\u79C1\u804A\u3002'
           : copy;
     const reason = reasonText(flow.reason_code || flow.display?.reason);
     const parts = [
-      `<ol class="cr-steps" aria-label="连接微信进度">${channelSteps
+      `<ol class="cr-steps" aria-label="\u8FDE\u63A5\u5FAE\u4FE1\u8FDB\u5EA6">${channelSteps
         .map(
           ([name], index) =>
-            `<li class="${index < current || (index === current && stage === 'ready') ? 'is-done' : index === current ? 'is-current' : ''}" ${index === current ? 'aria-current="step"' : ''}><span>${index < current || stage === 'ready' ? '✓' : index + 1}</span>${E(name)}</li>`,
+            `<li class="${index < current || (index === current && stage === 'ready') ? 'is-done' : index === current ? 'is-current' : ''}" ${index === current ? 'aria-current="step"' : ''}><span>${index < current || stage === 'ready' ? '\u2713' : index + 1}</span>${E(name)}</li>`,
         )
         .join('')}</ol>`,
-      `<div class="cr-wx-head ${stage === 'ready' ? 'is-ready' : ''}"><span class="cr-flow-symbol ${stage === 'ready' ? 'is-ready' : ''}" aria-hidden="true">${stage === 'ready' ? '✓' : icon('message')}</span><div><h3>${E(heading)}</h3>${lead ? `<p>${E(lead)}</p>` : ''}</div></div>`,
+      `<div class="cr-wx-head ${stage === 'ready' ? 'is-ready' : ''}"><span class="cr-flow-symbol ${stage === 'ready' ? 'is-ready' : ''}" aria-hidden="true">${stage === 'ready' ? '\u2713' : icon('message')}</span><div><h3>${E(heading)}</h3>${lead ? `<p>${E(lead)}</p>` : ''}</div></div>`,
     ];
     if (reason && !['ready', 'pairing'].includes(stage))
       parts.push(`<p class="cr-warning" role="status">${E(reason)}</p>`);
     if (!writable)
-      parts.push(`<p class="cr-info">${E(readOnlyReason())} 此处仅保留安全暂停或撤销操作。</p>`);
+      parts.push(
+        `<p class="cr-info">${E(readOnlyReason())} \u6B64\u5904\u4EC5\u4FDD\u7559\u5B89\u5168\u6682\u505C\u6216\u64A4\u9500\u64CD\u4F5C\u3002</p>`,
+      );
     if (accounts.length)
       parts.push(
-        `<section class="cr-wx-option cr-channel-existing"><h4>沿用已登记的微信</h4>${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || channelIdentity(null, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section><p class="cr-or"><span>或者扫码登录新的微信</span></p>`,
+        `<section class="cr-wx-option cr-channel-existing"><h4>\u6CBF\u7528\u5DF2\u767B\u8BB0\u7684\u5FAE\u4FE1</h4>${field('\u5DF2\u8FDE\u63A5\u7684\u5FAE\u4FE1', `<select name="existing_account_id"><option value="">\u9009\u62E9\u8D26\u53F7</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || channelIdentity(null, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '\u4F7F\u7528\u6B64\u8D26\u53F7', '', 'cr-full')}</section><p class="cr-or"><span>\u6216\u8005\u626B\u7801\u767B\u5F55\u65B0\u7684\u5FAE\u4FE1</span></p>`,
       );
     parts.push(inboundHealthMarkup(flow.account ? [flow.account] : accounts));
     const qr = flow.qr || {};
     if (safeImage(qr.qrcode_image))
       parts.push(
-        `<figure class="cr-qr-frame"><img class="cr-qr" src="${E(qr.qrcode_image)}" alt="用微信扫描二维码登录" referrerpolicy="no-referrer"><figcaption>${qr.state === 'scaned' ? '已扫码，请在手机上点“确认登录”' : qr.state === 'need_verifycode' ? '请在下方输入手机上显示的数字' : '打开手机微信 → 右上角 ＋ → 扫一扫'}</figcaption></figure>`,
+        `<figure class="cr-qr-frame"><img class="cr-qr" src="${E(qr.qrcode_image)}" alt="\u7528\u5FAE\u4FE1\u626B\u63CF\u4E8C\u7EF4\u7801\u767B\u5F55" referrerpolicy="no-referrer"><figcaption>${qr.state === 'scaned' ? '\u5DF2\u626B\u7801\uFF0C\u8BF7\u5728\u624B\u673A\u4E0A\u70B9\u201C\u786E\u8BA4\u767B\u5F55\u201D' : qr.state === 'need_verifycode' ? '\u8BF7\u5728\u4E0B\u65B9\u8F93\u5165\u624B\u673A\u4E0A\u663E\u793A\u7684\u6570\u5B57' : '\u6253\u5F00\u624B\u673A\u5FAE\u4FE1 \u2192 \u53F3\u4E0A\u89D2 \uFF0B \u2192 \u626B\u4E00\u626B'}</figcaption></figure>`,
       );
     if (stage === 'confirm_account' && (qr.re_pair_required || qr.account_conflict))
       parts.push(
         facts([
-          ['微信', channelIdentity(qr.scanner_nickname, qr.scanner_id)],
-          ['已登记账号', qr.existing_account?.label],
+          ['\u5FAE\u4FE1', channelIdentity(qr.scanner_nickname, qr.scanner_id)],
+          ['\u5DF2\u767B\u8BB0\u8D26\u53F7', qr.existing_account?.label],
         ]) +
           (qr.re_pair_required
-            ? '<p class="cr-info">这个微信之前登记过。确认后沿用原账号；它在其他房间的连接需要重新确认。</p>'
+            ? '<p class="cr-info">\u8FD9\u4E2A\u5FAE\u4FE1\u4E4B\u524D\u767B\u8BB0\u8FC7\u3002\u786E\u8BA4\u540E\u6CBF\u7528\u539F\u8D26\u53F7\uFF1B\u5B83\u5728\u5176\u4ED6\u623F\u95F4\u7684\u8FDE\u63A5\u9700\u8981\u91CD\u65B0\u786E\u8BA4\u3002</p>'
             : ''),
       );
     if (stage === 'route_conflict' && existing)
       parts.push(
         facts([
-          ['原连接', identifier(existing.id)],
+          ['\u539F\u8FDE\u63A5', identifier(existing.id)],
           [
-            '所在房间',
+            '\u6240\u5728\u623F\u95F4',
             existing.same_room
-              ? '当前房间'
-              : roomName({ title: existing.room_title }) || '另一个房间',
+              ? '\u5F53\u524D\u623F\u95F4'
+              : roomName({ title: existing.room_title }) || '\u53E6\u4E00\u4E2A\u623F\u95F4',
           ],
           [
-            '状态',
-            { paused: '已暂停', active: '使用中', pairing: '等待配对', awaiting_owner: '等待确认' }[
-              existing.state
-            ] || existing.state,
+            '\u72B6\u6001',
+            {
+              paused: '\u5DF2\u6682\u505C',
+              active: '\u4F7F\u7528\u4E2D',
+              pairing: '\u7B49\u5F85\u914D\u5BF9',
+              awaiting_owner: '\u7B49\u5F85\u786E\u8BA4',
+            }[existing.state] || existing.state,
           ],
         ]),
       );
     if (['confirm_binding', 'choose_member'].includes(stage))
       parts.push(
         facts([
-          ['房间', roomName(state.room)],
-          ['接收消息的 dot', flow.member?.name],
-          ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+          ['\u623F\u95F4', roomName(state.room)],
+          ['\u63A5\u6536\u6D88\u606F\u7684 dot', flow.member?.name],
+          ['\u5FAE\u4FE1', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
         ]),
       );
     if (stage === 'waiting_member' && writable)
-      parts.push(btn('add-member', '添加 dot', '', 'cr-primary cr-full'));
+      parts.push(btn('add-member', '\u6DFB\u52A0 dot', '', 'cr-primary cr-full'));
     const binding = flow.binding || {};
     if (binding.pairing_challenge) {
       parts.push(
-        `<section class="cr-pair" aria-label="配对码"><div class="cr-pair-code"><code class="cr-pairing-code">${E(binding.pairing_challenge)}</code>${btn('copy-pairing', '复制', 'aria-label="复制配对码"', 'cr-copy')}</div>${safeImage(binding.pairing_qr) ? `<figure class="cr-pair-qr"><img src="${E(binding.pairing_qr)}" alt="配对码二维码：用手机扫码后可直接复制" referrerpolicy="no-referrer"><figcaption>手机扫一扫，可直接复制配对码</figcaption></figure>` : ''}<ol class="cr-pair-steps"><li>在手机微信里打开与这个微信机器人的私聊。</li><li>把配对码原样发过去（大小写、空格都没关系）。</li><li>收到后这里会自动进入下一步。</li></ol><p class="cr-muted">剩余有效时间 <span data-cr-countdown data-until="${E(binding.pairing_until || 0)}"></span></p></section>`,
+        `<section class="cr-pair" aria-label="\u914D\u5BF9\u7801"><div class="cr-pair-code"><code class="cr-pairing-code">${E(binding.pairing_challenge)}</code>${btn('copy-pairing', '\u590D\u5236', 'aria-label="\u590D\u5236\u914D\u5BF9\u7801"', 'cr-copy')}</div>${safeImage(binding.pairing_qr) ? `<figure class="cr-pair-qr"><img src="${E(binding.pairing_qr)}" alt="\u914D\u5BF9\u7801\u4E8C\u7EF4\u7801\uFF1A\u7528\u624B\u673A\u626B\u7801\u540E\u53EF\u76F4\u63A5\u590D\u5236" referrerpolicy="no-referrer"><figcaption>\u624B\u673A\u626B\u4E00\u626B\uFF0C\u53EF\u76F4\u63A5\u590D\u5236\u914D\u5BF9\u7801</figcaption></figure>` : ''}<ol class="cr-pair-steps"><li>\u5728\u624B\u673A\u5FAE\u4FE1\u91CC\u6253\u5F00\u4E0E\u8FD9\u4E2A\u5FAE\u4FE1\u673A\u5668\u4EBA\u7684\u79C1\u804A\u3002</li><li>\u628A\u914D\u5BF9\u7801\u539F\u6837\u53D1\u8FC7\u53BB\uFF08\u5927\u5C0F\u5199\u3001\u7A7A\u683C\u90FD\u6CA1\u5173\u7CFB\uFF09\u3002</li><li>\u6536\u5230\u540E\u8FD9\u91CC\u4F1A\u81EA\u52A8\u8FDB\u5165\u4E0B\u4E00\u6B65\u3002</li></ol><p class="cr-muted">\u5269\u4F59\u6709\u6548\u65F6\u95F4 <span data-cr-countdown data-until="${E(binding.pairing_until || 0)}"></span></p></section>`,
       );
       if (flow.pairing_feedback)
         parts.push(
-          `<p class="cr-warning" role="status">${flow.pairing_feedback.state === 'different_peer' ? '收到的配对码来自另一位联系人。恢复连接必须由原联系人发送。' : '收到了一条微信消息，但不是当前配对码。请复制完整的配对码再发一次。'}</p>`,
+          `<p class="cr-warning" role="status">${flow.pairing_feedback.state === 'different_peer' ? '\u6536\u5230\u7684\u914D\u5BF9\u7801\u6765\u81EA\u53E6\u4E00\u4F4D\u8054\u7CFB\u4EBA\u3002\u6062\u590D\u8FDE\u63A5\u5FC5\u987B\u7531\u539F\u8054\u7CFB\u4EBA\u53D1\u9001\u3002' : '\u6536\u5230\u4E86\u4E00\u6761\u5FAE\u4FE1\u6D88\u606F\uFF0C\u4F46\u4E0D\u662F\u5F53\u524D\u914D\u5BF9\u7801\u3002\u8BF7\u590D\u5236\u5B8C\u6574\u7684\u914D\u5BF9\u7801\u518D\u53D1\u4E00\u6B21\u3002'}</p>`,
         );
     }
     if (stage === 'confirm_owner')
       parts.push(
         facts([
-          ['联系人', channelIdentity(binding.pending_peer_nickname, binding.pending_peer_id)],
-          ['房间', roomName(state.room)],
+          [
+            '\u8054\u7CFB\u4EBA',
+            channelIdentity(binding.pending_peer_nickname, binding.pending_peer_id),
+          ],
+          ['\u623F\u95F4', roomName(state.room)],
         ]),
       );
     if (['pairing', 'confirm_owner', 'ready', 'confirm_binding'].includes(stage) && flow.inbound)
@@ -4147,18 +3631,18 @@ window.CodePierCollaboration = (() => {
     if (stage === 'ready')
       parts.push(
         facts([
-          ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
-          ['房间', roomName(state.room)],
-          ['本人配对', '已验证'],
+          ['\u5FAE\u4FE1', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+          ['\u623F\u95F4', roomName(state.room)],
+          ['\u672C\u4EBA\u914D\u5BF9', '\u5DF2\u9A8C\u8BC1'],
           [
-            '新消息交给',
+            '\u65B0\u6D88\u606F\u4EA4\u7ED9',
             flow.routing_mode === 'follow_room'
-              ? '房间当前主责 dot'
-              : flow.member?.name || '已指定的 dot',
+              ? '\u623F\u95F4\u5F53\u524D\u4E3B\u8D23 dot'
+              : flow.member?.name || '\u5DF2\u6307\u5B9A\u7684 dot',
           ],
         ]) +
-          `<p class="cr-wx-toggle">在微信里交办工作：${flow.work_authorized ? '已允许' : '未开启'} ${flow.work_authorized ? btn('channel-action', '关闭', 'data-channel-action="revoke_tasks" title="保留聊天连接" aria-label="关闭微信交办工作"', 'cr-text-button') : ''}</p>` +
-          btn('channel-project-permissions', '修改权限', '', 'cr-text-button'),
+          `<p class="cr-wx-toggle">\u5728\u5FAE\u4FE1\u91CC\u4EA4\u529E\u5DE5\u4F5C\uFF1A${flow.work_authorized ? '\u5DF2\u5141\u8BB8' : '\u672A\u5F00\u542F'} ${flow.work_authorized ? btn('channel-action', '\u5173\u95ED', 'data-channel-action="revoke_tasks" title="\u4FDD\u7559\u804A\u5929\u8FDE\u63A5" aria-label="\u5173\u95ED\u5FAE\u4FE1\u4EA4\u529E\u5DE5\u4F5C"', 'cr-text-button') : ''}</p>` +
+          btn('channel-project-permissions', '\u4FEE\u6539\u6743\u9650', '', 'cr-text-button'),
       );
     if ((flow.task_scope || followPreview) && (stage !== 'ready' || action === 'approve_tasks'))
       parts.push('<div data-cr-wx-scope></div>');
@@ -4178,11 +3662,10 @@ window.CodePierCollaboration = (() => {
           ? []
           : fields.filter((item) => !optional.includes(item));
       const explanation = bindingConsent
-        ? '<p>发送配对码的微信将连到此房间，直到你解除。请用本人微信发送。如果开启交办工作，后续请求按上面所列权限执行，结果发回该私聊。</p>'
+        ? '<p>\u53D1\u9001\u914D\u5BF9\u7801\u7684\u5FAE\u4FE1\u5C06\u8FDE\u5230\u6B64\u623F\u95F4\uFF0C\u76F4\u5230\u4F60\u89E3\u9664\u3002\u8BF7\u7528\u672C\u4EBA\u5FAE\u4FE1\u53D1\u9001\u3002\u5982\u679C\u5F00\u542F\u4EA4\u529E\u5DE5\u4F5C\uFF0C\u540E\u7EED\u8BF7\u6C42\u6309\u4E0A\u9762\u6240\u5217\u6743\u9650\u6267\u884C\uFF0C\u7ED3\u679C\u53D1\u56DE\u8BE5\u79C1\u804A\u3002</p>'
         : startConsent
-          ? '<p>点击扫码即同意使用微信机器人服务，并加密保存扫码返回的登录凭据。</p>'
+          ? '<p>\u70B9\u51FB\u626B\u7801\u5373\u540C\u610F\u4F7F\u7528\u5FAE\u4FE1\u673A\u5668\u4EBA\u670D\u52A1\uFF0C\u5E76\u52A0\u5BC6\u4FDD\u5B58\u626B\u7801\u8FD4\u56DE\u7684\u767B\u5F55\u51ED\u636E\u3002</p>'
           : '';
-
       const quiet =
         ['pairing', 'waiting_member', 'waiting_project'].includes(stage) && action === 'refresh';
       const followRequired =
@@ -4191,10 +3674,10 @@ window.CodePierCollaboration = (() => {
           !flow.task_scope &&
           followPreview?.project_ids?.length === 0);
       const follow = followPreview
-        ? `<label class="cr-choice"><input type="checkbox" name="confirm_follow_room" ${followRequired ? 'required' : ''}><span>跟随房间主责<small>房主更换主责后，新消息交给新主责处理。</small></span></label>`
+        ? `<label class="cr-choice"><input type="checkbox" name="confirm_follow_room" ${followRequired ? 'required' : ''}><span>\u8DDF\u968F\u623F\u95F4\u4E3B\u8D23<small>\u623F\u4E3B\u66F4\u6362\u4E3B\u8D23\u540E\uFF0C\u65B0\u6D88\u606F\u4EA4\u7ED9\u65B0\u4E3B\u8D23\u5904\u7406\u3002</small></span></label>`
         : '';
       parts.push(
-        `<form data-cr-form="weixin" data-channel-action="${E(action)}" class="cr-wx-form">${explanation}${basic.map(channelField).join('')}${optional.length ? `<fieldset class="cr-wx-optional"><legend>可选：在微信里交办工作</legend>${optional.map(channelField).join('')}</fieldset>` : ''}${follow}<button type="submit" class="cr-button ${quiet ? '' : 'cr-primary'} cr-full">${E(quiet ? '刷新状态' : bindingConsent ? '确认范围并生成配对码' : label)}</button></form>`,
+        `<form data-cr-form="weixin" data-channel-action="${E(action)}" class="cr-wx-form">${explanation}${basic.map(channelField).join('')}${optional.length ? `<fieldset class="cr-wx-optional"><legend>\u53EF\u9009\uFF1A\u5728\u5FAE\u4FE1\u91CC\u4EA4\u529E\u5DE5\u4F5C</legend>${optional.map(channelField).join('')}</fieldset>` : ''}${follow}<button type="submit" class="cr-button ${quiet ? '' : 'cr-primary'} cr-full">${E(quiet ? '\u5237\u65B0\u72B6\u6001' : bindingConsent ? '\u786E\u8BA4\u8303\u56F4\u5E76\u751F\u6210\u914D\u5BF9\u7801' : label)}</button></form>`,
       );
     }
     const secondary = (flow.actions || []).filter(
@@ -4205,7 +3688,7 @@ window.CodePierCollaboration = (() => {
     );
     if (secondary.length)
       parts.push(
-        `<div class="cr-setting-actions cr-wx-secondary">${secondary.map((item) => btn('channel-action', E(item.action === 'revoke_tasks' ? '仅撤销工作许可' : item.label), `data-channel-action="${E(item.action)}"`, ['disconnect', 'revoke_tasks'].includes(item.action) ? 'cr-danger' : 'cr-text-button')).join('')}</div>`,
+        `<div class="cr-setting-actions cr-wx-secondary">${secondary.map((item) => btn('channel-action', E(item.action === 'revoke_tasks' ? '\u4EC5\u64A4\u9500\u5DE5\u4F5C\u8BB8\u53EF' : item.label), `data-channel-action="${E(item.action)}"`, ['disconnect', 'revoke_tasks'].includes(item.action) ? 'cr-danger' : 'cr-text-button')).join('')}</div>`,
       );
     const markup = parts.join('');
     const consentRevision = JSON.stringify([
@@ -4235,7 +3718,10 @@ window.CodePierCollaboration = (() => {
     }
     box._consentRevision = consentRevision;
     channelLiveParts(box, flow);
-    if (checkedBeforeChange) panelError('连接身份或参与范围已变化，请核对后重新确认。');
+    if (checkedBeforeChange)
+      panelError(
+        '\u8FDE\u63A5\u8EAB\u4EFD\u6216\u53C2\u4E0E\u8303\u56F4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u6838\u5BF9\u540E\u91CD\u65B0\u786E\u8BA4\u3002',
+      );
     updateChannelDependencies();
     patchRoomPermissions();
   }
@@ -4264,8 +3750,6 @@ window.CodePierCollaboration = (() => {
     const name = item.name || item.key,
       label = item.label || name;
     if (!name) return '';
-    // Identity confirmations carry the exact value the server showed above;
-    // they are confirmed by submitting, not retyped.
     if (['confirm_scanner_id', 'confirm_peer_id', 'confirm_migrate_binding_id'].includes(name))
       return `<input type="hidden" name="${E(name)}" value="${E(item.value || '')}">`;
     if (item.options)
@@ -4298,7 +3782,9 @@ window.CodePierCollaboration = (() => {
       });
       if (values.allow_owner_tasks) {
         if (!values.allow_replies) {
-          panelError('在微信里交办工作需要允许回复回到本人微信。');
+          panelError(
+            '\u5728\u5FAE\u4FE1\u91CC\u4EA4\u529E\u5DE5\u4F5C\u9700\u8981\u5141\u8BB8\u56DE\u590D\u56DE\u5230\u672C\u4EBA\u5FAE\u4FE1\u3002',
+          );
           return;
         }
         Object.assign(values, {
@@ -4378,8 +3864,6 @@ window.CodePierCollaboration = (() => {
           current,
           { transient: true },
         ).catch(() => {
-          // A failed background poll is retried by the next tick; it is not a
-          // pending user action and must not block the wizard.
           return null;
         });
         if (response && current === panel) renderChannel(response);
@@ -4410,9 +3894,16 @@ window.CodePierCollaboration = (() => {
     } else if (result.not_saved === true && store.writable(receipt.roomId))
       await store.send(receipt);
     else if (result.not_saved === true)
-      announce('原消息尚未保存。房间当前只读，原草稿与请求已保留，没有重新发送。');
-    else announce('原消息仍在核对，恢复连接后继续查看。');
+      announce(
+        '\u539F\u6D88\u606F\u5C1A\u672A\u4FDD\u5B58\u3002\u623F\u95F4\u5F53\u524D\u53EA\u8BFB\uFF0C\u539F\u8349\u7A3F\u4E0E\u8BF7\u6C42\u5DF2\u4FDD\u7559\uFF0C\u6CA1\u6709\u91CD\u65B0\u53D1\u9001\u3002',
+      );
+    else
+      announce(
+        '\u539F\u6D88\u606F\u4ECD\u5728\u6838\u5BF9\uFF0C\u6062\u590D\u8FDE\u63A5\u540E\u7EE7\u7EED\u67E5\u770B\u3002',
+      );
   }
+
+  // ../collaboration-room/events.mjs
   async function click(button) {
     const action = button.dataset.crAction,
       id = button.dataset.id;
@@ -4447,13 +3938,17 @@ window.CodePierCollaboration = (() => {
       const blocker = state.room?.migration?.blockers.find((item) => item.binding_id === id);
       const remediation = blocker && legacyChannelRemediation(blocker);
       if (!remediation) {
-        panelError('原连接已变化，请重新核对迁移条件。');
+        panelError(
+          '\u539F\u8FDE\u63A5\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9\u8FC1\u79FB\u6761\u4EF6\u3002',
+        );
         return;
       }
       openPanel(
         'legacy-channel-pause',
-        blocker.channel === 'weixin' ? '暂停原微信连接' : '暂停原 Telegram 连接',
-        `<p>暂停此房间的原渠道连接，停止接收新的渠道输入。账号、历史与已记录的投递回执保留，不会创建新连接、重新批准工作或自动重发旧消息。</p><p class="cr-muted">原连接 ${E(identifier(blocker.binding_id))} · 版本 ${E(blocker.binding_version)}</p>${btn('confirm-legacy-channel-pause', '确认暂停原连接', '', 'cr-danger cr-full')}${btn('migration', '重新核对迁移条件', '', 'cr-text-button')}`,
+        blocker.channel === 'weixin'
+          ? '\u6682\u505C\u539F\u5FAE\u4FE1\u8FDE\u63A5'
+          : '\u6682\u505C\u539F Telegram \u8FDE\u63A5',
+        `<p>\u6682\u505C\u6B64\u623F\u95F4\u7684\u539F\u6E20\u9053\u8FDE\u63A5\uFF0C\u505C\u6B62\u63A5\u6536\u65B0\u7684\u6E20\u9053\u8F93\u5165\u3002\u8D26\u53F7\u3001\u5386\u53F2\u4E0E\u5DF2\u8BB0\u5F55\u7684\u6295\u9012\u56DE\u6267\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u521B\u5EFA\u65B0\u8FDE\u63A5\u3001\u91CD\u65B0\u6279\u51C6\u5DE5\u4F5C\u6216\u81EA\u52A8\u91CD\u53D1\u65E7\u6D88\u606F\u3002</p><p class="cr-muted">\u539F\u8FDE\u63A5 ${E(identifier(blocker.binding_id))} \xB7 \u7248\u672C ${E(blocker.binding_version)}</p>${btn('confirm-legacy-channel-pause', '\u786E\u8BA4\u6682\u505C\u539F\u8FDE\u63A5', '', 'cr-danger cr-full')}${btn('migration', '\u91CD\u65B0\u6838\u5BF9\u8FC1\u79FB\u6761\u4EF6', '', 'cr-text-button')}`,
         { remediation },
       );
     } else if (action === 'confirm-legacy-channel-pause') {
@@ -4470,7 +3965,7 @@ window.CodePierCollaboration = (() => {
       const form = button.closest('[data-cr-form="permissions"]');
       if (form && activeRoom()) await previewContinuation(form, panel);
     } else if (action === 'work-list') {
-      openPanel('work-list', '房间工作', '<div data-cr-work-list-view></div>');
+      openPanel('work-list', '\u623F\u95F4\u5DE5\u4F5C', '<div data-cr-work-list-view></div>');
       renderWorkList();
     } else if (action === 'members') membersPanel();
     else if (action === 'add-member') await addMemberPanel();
@@ -4502,19 +3997,21 @@ window.CodePierCollaboration = (() => {
       if (!code) return;
       try {
         await navigator.clipboard.writeText(code);
-        button.textContent = '已复制';
+        button.textContent = '\u5DF2\u590D\u5236';
         setTimeout(() => {
-          if (button.isConnected) button.textContent = '复制';
+          if (button.isConnected) button.textContent = '\u590D\u5236';
         }, 1600);
       } catch {
         const node = root.querySelector('.cr-pairing-code');
         if (node) window.getSelection()?.selectAllChildren(node);
-        panelError('浏览器不允许写入剪贴板，已选中配对码，请按 ⌘C / Ctrl+C 复制。');
+        panelError(
+          '\u6D4F\u89C8\u5668\u4E0D\u5141\u8BB8\u5199\u5165\u526A\u8D34\u677F\uFF0C\u5DF2\u9009\u4E2D\u914D\u5BF9\u7801\uFF0C\u8BF7\u6309 \u2318C / Ctrl+C \u590D\u5236\u3002',
+        );
       }
     } else if (action === 'channel-existing') {
       const account = root.querySelector('[name="existing_account_id"]')?.value;
       if (!account) {
-        panelError('请选择微信账号。');
+        panelError('\u8BF7\u9009\u62E9\u5FAE\u4FE1\u8D26\u53F7\u3002');
         return;
       }
       const result = await mutation(
@@ -4559,11 +4056,11 @@ window.CodePierCollaboration = (() => {
       );
       if (result) {
         await store.messages();
-        announce('已重新排队发送');
+        announce('\u5DF2\u91CD\u65B0\u6392\u961F\u53D1\u9001');
       }
     } else if (action === 'copy-instructions') {
       await navigator.clipboard.writeText(panel.joinInstructions);
-      button.textContent = '已复制';
+      button.textContent = '\u5DF2\u590D\u5236';
     } else if (action === 'reply' || action === 'reply-work') {
       const source = action === 'reply-work' ? workSourceId(panel.work) : id;
       if (!source) return;
@@ -4669,20 +4166,23 @@ window.CodePierCollaboration = (() => {
       );
       if (result) {
         renderFlow(result);
-        if (requestAction === 'retry_probe') announce('连接检查已排队，等待 dot 回复');
+        if (requestAction === 'retry_probe')
+          announce('\u8FDE\u63A5\u68C0\u67E5\u5DF2\u6392\u961F\uFF0C\u7B49\u5F85 dot \u56DE\u590D');
         await store.refresh();
       }
     } else if (action === 'rebind-member') {
       if (panel.flow.pending_binding) {
         root.querySelector('.cr-instructions')?.focus();
-        panelError('请继续本页的更换连接说明。验证成功前，当前连接仍然保留。');
+        panelError(
+          '\u8BF7\u7EE7\u7EED\u672C\u9875\u7684\u66F4\u6362\u8FDE\u63A5\u8BF4\u660E\u3002\u9A8C\u8BC1\u6210\u529F\u524D\uFF0C\u5F53\u524D\u8FDE\u63A5\u4ECD\u7136\u4FDD\u7559\u3002',
+        );
         return;
       }
       const current = panel;
       openPanel(
         'rebind-member',
-        '更换 dot 连接',
-        `<p>为 ${E(current.member.name || '此成员')} 生成新的接入流程。新宿主完成原生订阅和往返验证后，才会替换当前连接；成员与原工作仍保留。</p>${btn('confirm-rebind', '开始更换连接', '', 'cr-primary cr-full')}`,
+        '\u66F4\u6362 dot \u8FDE\u63A5',
+        `<p>\u4E3A ${E(current.member.name || '\u6B64\u6210\u5458')} \u751F\u6210\u65B0\u7684\u63A5\u5165\u6D41\u7A0B\u3002\u65B0\u5BBF\u4E3B\u5B8C\u6210\u539F\u751F\u8BA2\u9605\u548C\u5F80\u8FD4\u9A8C\u8BC1\u540E\uFF0C\u624D\u4F1A\u66FF\u6362\u5F53\u524D\u8FDE\u63A5\uFF1B\u6210\u5458\u4E0E\u539F\u5DE5\u4F5C\u4ECD\u4FDD\u7559\u3002</p>${btn('confirm-rebind', '\u5F00\u59CB\u66F4\u6362\u8FDE\u63A5', '', 'cr-primary cr-full')}`,
         { member: current.member, flow: current.flow, flowId: current.flowId },
       );
     } else if (action === 'confirm-rebind') {
@@ -4692,10 +4192,15 @@ window.CodePierCollaboration = (() => {
         { action: 'rebind', expected_version: panel.flow.version },
       );
       if (result) {
-        openPanel('member', result.member?.name || 'dot 连接', '<div data-cr-flow-view></div>', {
-          member: result.member,
-          flowId: result.flow.id,
-        });
+        openPanel(
+          'member',
+          result.member?.name || 'dot \u8FDE\u63A5',
+          '<div data-cr-flow-view></div>',
+          {
+            member: result.member,
+            flowId: result.flow.id,
+          },
+        );
         renderFlow(result);
         await store.refresh();
       }
@@ -4703,8 +4208,8 @@ window.CodePierCollaboration = (() => {
       const current = panel;
       openPanel(
         'remove-member',
-        '移出成员',
-        `<p>成员将不再接收新消息或开始新步骤；已有操作仍保留原回执。</p>${btn('confirm-remove-member', '移除成员', '', 'cr-danger cr-full')}`,
+        '\u79FB\u51FA\u6210\u5458',
+        `<p>\u6210\u5458\u5C06\u4E0D\u518D\u63A5\u6536\u65B0\u6D88\u606F\u6216\u5F00\u59CB\u65B0\u6B65\u9AA4\uFF1B\u5DF2\u6709\u64CD\u4F5C\u4ECD\u4FDD\u7559\u539F\u56DE\u6267\u3002</p>${btn('confirm-remove-member', '\u79FB\u9664\u6210\u5458', '', 'cr-danger cr-full')}`,
         { member: current.member, flow: current.flow, flowId: current.flowId },
       );
     } else if (action === 'confirm-remove-member') {
@@ -4750,9 +4255,14 @@ window.CodePierCollaboration = (() => {
       } else
         openPanel(
           'archive',
-          '归档房间',
-          '<p>归档会停止工作并撤销当前连接、授权和订阅，历史记录会保留。恢复只恢复历史和项目关联，不会自动恢复执行权限，需重新确认接入。</p>' +
-            btn('room-state', '归档房间', 'data-state="archived"', 'cr-danger cr-full'),
+          '\u5F52\u6863\u623F\u95F4',
+          '<p>\u5F52\u6863\u4F1A\u505C\u6B62\u5DE5\u4F5C\u5E76\u64A4\u9500\u5F53\u524D\u8FDE\u63A5\u3001\u6388\u6743\u548C\u8BA2\u9605\uFF0C\u5386\u53F2\u8BB0\u5F55\u4F1A\u4FDD\u7559\u3002\u6062\u590D\u53EA\u6062\u590D\u5386\u53F2\u548C\u9879\u76EE\u5173\u8054\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u6062\u590D\u6267\u884C\u6743\u9650\uFF0C\u9700\u91CD\u65B0\u786E\u8BA4\u63A5\u5165\u3002</p>' +
+            btn(
+              'room-state',
+              '\u5F52\u6863\u623F\u95F4',
+              'data-state="archived"',
+              'cr-danger cr-full',
+            ),
         );
     } else if (action === 'work-detail') await workPanel(id);
     else if (action === 'more-work') {
@@ -4776,12 +4286,12 @@ window.CodePierCollaboration = (() => {
       closePanel({ restoreFocus: false });
       patchComposer();
       root.querySelector('#cr-message').focus();
-      announce('下一条消息将更新原交办');
+      announce('\u4E0B\u4E00\u6761\u6D88\u606F\u5C06\u66F4\u65B0\u539F\u4EA4\u529E');
     } else if (action === 'diagnostics') {
       openPanel(
         'diagnostics',
-        '运行诊断',
-        '<div data-cr-diagnostics-view><p class="cr-muted" data-cr-diagnostics-loading role="status">正在读取…</p></div>',
+        '\u8FD0\u884C\u8BCA\u65AD',
+        '<div data-cr-diagnostics-view><p class="cr-muted" data-cr-diagnostics-loading role="status">\u6B63\u5728\u8BFB\u53D6\u2026</p></div>',
       );
       await loadDiagnostics();
     } else if (action === 'refresh-diagnostics') await loadDiagnostics();
@@ -4789,8 +4299,8 @@ window.CodePierCollaboration = (() => {
     else if (action === 'context') {
       openPanel(
         'context',
-        '房间要点',
-        '<div data-cr-context-view><p class="cr-muted">正在核对…</p></div>',
+        '\u623F\u95F4\u8981\u70B9',
+        '<div data-cr-context-view><p class="cr-muted">\u6B63\u5728\u6838\u5BF9\u2026</p></div>',
         { context: state.room?.context },
       );
       renderContext();
@@ -4819,7 +4329,9 @@ window.CodePierCollaboration = (() => {
       closePanel();
       patchComposer();
       root.querySelector('#cr-message').focus();
-      announce('请在原输入框写明纠正内容。发送后才会撤下所选旧事实。');
+      announce(
+        '\u8BF7\u5728\u539F\u8F93\u5165\u6846\u5199\u660E\u7EA0\u6B63\u5185\u5BB9\u3002\u53D1\u9001\u540E\u624D\u4F1A\u64A4\u4E0B\u6240\u9009\u65E7\u4E8B\u5B9E\u3002',
+      );
     } else if (action === 'cancel-context-correction') {
       store.draft().contextCorrection = null;
       patchComposer();
@@ -4835,6 +4347,781 @@ window.CodePierCollaboration = (() => {
       }
     }
   }
+
+  // ../collaboration-room/index.mjs
+  var store = window.CodePierRoomStore.create((...args) => api(...args));
+  var state = store.state;
+  var E = (value) => CP.ui.esc(String(value ?? ''));
+  var icon = (name) =>
+    name === 'message'
+      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2Z"/></svg>'
+      : CP.ui.icon(name);
+  var btn = (action, label, extra = '', cls = '') =>
+    `<button type="button" class="cr-button ${cls}" data-cr-action="${action}" ${extra}>${label}</button>`;
+  var field = (label, control) => `<label class="cr-field"><span>${label}</span>${control}</label>`;
+  var base = '/api/collaboration';
+  var connectionsPath = base + '/connections';
+  var hostPath = (id) => connectionsPath + '/' + encodeURIComponent(id);
+  var batchPath = connectionsPath + '/rebind-batch';
+  var hostStates = {
+    invited: '\u7B49\u5F85\u63A5\u5165',
+    pending: '\u7B49\u5F85\u63A5\u5165',
+    waiting_host: '\u7B49\u5F85\u63A5\u5165',
+    waiting_for_host: '\u7B49\u5F85\u63A5\u5165',
+    verifying: '\u6B63\u5728\u9A8C\u8BC1',
+    connected: '\u5DF2\u8FDE\u63A5',
+    ready: '\u5DF2\u8FDE\u63A5',
+    ready_chat: '\u5DF2\u8FDE\u63A5',
+    ready_work: '\u5DF2\u8FDE\u63A5',
+    active: '\u5DF2\u767B\u8BB0',
+    recovering: '\u6B63\u5728\u6062\u590D',
+    awaiting_host_refresh: '\u7B49\u5F85\u5BBF\u4E3B\u7EED\u8BA2',
+    waiting_host_refresh: '\u7B49\u5F85\u5BBF\u4E3B\u7EED\u8BA2',
+    waiting_host_renewal: '\u7B49\u5F85\u5BBF\u4E3B\u7EED\u8BA2',
+    authorization_expired: '\u6388\u6743\u5DF2\u5230\u671F',
+    grant_expired: '\u6388\u6743\u5DF2\u5230\u671F',
+    paused: '\u5DF2\u6682\u505C',
+    revoked: '\u5DF2\u64A4\u9500',
+  };
+  var connectionState = (item) =>
+    hostStates[item.display_state || item.state] || '\u8FDE\u63A5\u72B6\u6001\u5F85\u786E\u8BA4';
+  var connectionName = (item) => item.label || item.name || 'dot \u8FDE\u63A5';
+  var connectionRoomSummary = (item) =>
+    item.single_room_title ||
+    (Number.isInteger(item.room_count) ? `${item.room_count} \u4E2A\u623F\u95F4` : '');
+  var reuseAnchor = (item) =>
+    item.host_connection_id ? item.reuse_member_id : item.member_id || item.id;
+  var supportsHostReuse = (item, capabilities) =>
+    item.connection_capabilities?.verified_reuse ?? capabilities.verified_reuse ?? false;
+  var connectionChoice = (item) => item.host_connection_id || reuseAnchor(item);
+  var connectionChoiceLabel = (item) => {
+    if (!item.host_connection_id)
+      return connectionName(item) + ' \xB7 ' + (item.room_title || '\u539F\u623F\u95F4');
+    const last = item.last_round_trip_at || item.verified_at;
+    return [
+      connectionName(item),
+      connectionState(item),
+      connectionRoomSummary(item),
+      last ? `\u6700\u8FD1\u5F80\u8FD4 ${dateTime(last)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' \xB7 ');
+  };
+  var connectionListPath = (cursor, host = true) =>
+    connectionsPath +
+    '?limit=40' +
+    (host ? '&host_connections=true' : '') +
+    (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+  var stages = {
+    invited: '\u7B49\u5F85 dot \u63A5\u5165',
+    joining: '\u6B63\u5728\u8FDE\u63A5',
+    waiting_host: '\u7B49\u5F85\u5728 dot \u4E2D\u786E\u8BA4',
+    verifying: '\u6B63\u5728\u9A8C\u8BC1\u56DE\u590D',
+    ready_chat: '\u53EF\u4EE5\u804A\u5929',
+    ready_work: '\u53EF\u4EE5\u534F\u4F5C',
+    degraded: '\u9700\u8981\u6062\u590D\u8FDE\u63A5',
+    paused: '\u5DF2\u6682\u505C',
+    removed: '\u5DF2\u79FB\u9664',
+    choose_account: '\u9009\u62E9\u5FAE\u4FE1\u8D26\u53F7',
+    scan: '\u626B\u7801\u767B\u5F55',
+    confirm_account: '\u786E\u8BA4\u5FAE\u4FE1\u8D26\u53F7',
+    pairing: '\u786E\u8BA4\u672C\u4EBA',
+    confirm_owner: '\u786E\u8BA4\u623F\u95F4\u4E0E\u8303\u56F4',
+    ready: '\u5FAE\u4FE1\u5DF2\u8FDE\u63A5',
+    expired: '\u8FDE\u63A5\u5DF2\u8FC7\u671F',
+  };
+  var workLabels = {
+    queued: '\u6392\u961F\u4E2D',
+    leased: '\u6392\u961F\u4E2D',
+    running: '\u8FDB\u884C\u4E2D',
+    verifying: '\u68C0\u67E5\u7ED3\u679C',
+    waiting_input: '\u7B49\u4F60\u56DE\u590D',
+    waiting_user: '\u7B49\u4F60\u56DE\u590D',
+    waiting_member: '\u7B49\u5F85 dot \u5904\u7406',
+    waiting_authorization: '\u7B49\u5F85\u6388\u6743',
+    waiting_target: '\u7B49\u5F85\u6267\u884C\u73AF\u5883',
+    reconciling: '\u786E\u8BA4\u6267\u884C\u7ED3\u679C',
+    blocked: '\u6682\u65F6\u53D7\u963B',
+    unknown: '\u7ED3\u679C\u5F85\u786E\u8BA4',
+    reconnecting: '\u7B49\u5F85\u8FDE\u63A5\u6062\u590D',
+    succeeded: '\u5DF2\u5B8C\u6210',
+    completed: '\u5DF2\u5B8C\u6210',
+    paused: '\u5DF2\u6682\u505C',
+    cancelling: '\u6B63\u5728\u505C\u6B62',
+    stopping: '\u6B63\u5728\u505C\u6B62',
+    cancelled: '\u5DF2\u505C\u6B62',
+    failed: '\u5931\u8D25',
+    expired: '\u5DF2\u8FC7\u671F',
+  };
+  var memberBadges = {
+    invited: '\u8FDE\u63A5\u4E2D',
+    joining: '\u8FDE\u63A5\u4E2D',
+    waiting_host: '\u8FDE\u63A5\u4E2D',
+    verifying: '\u8FDE\u63A5\u4E2D',
+    ready_chat: '\u5728\u7EBF',
+    ready_work: '\u5728\u7EBF',
+    degraded: '\u9700\u8981\u5904\u7406',
+    paused: '\u5DF2\u6682\u505C',
+    removed: '\u5DF2\u79FB\u9664',
+  };
+  var deliveryLabels = {
+    queued: '\u5F85\u53D1\u9001',
+    pending: '\u5F85\u53D1\u9001',
+    preparing: '\u5F85\u53D1\u9001',
+    leased: '\u5F85\u53D1\u9001',
+    sending: '\u53D1\u9001\u4E2D',
+    waiting_context: '\u7B49\u5F85\u53D1\u9001\u6761\u4EF6',
+    waiting_media: '\u7B49\u5F85\u9644\u4EF6',
+    blocked: '\u7B49\u5F85\u524D\u4E00\u6761\u56DE\u590D',
+    accepted: '\u5DF2\u53D7\u7406',
+    owner_confirmed: '\u672C\u4EBA\u5DF2\u6838\u5BF9\u6536\u5230',
+    needs_attention: '\u53D1\u9001\u5931\u8D25',
+    attention: '\u53D1\u9001\u5931\u8D25',
+    rejected: '\u53D1\u9001\u5931\u8D25',
+    failed: '\u53D1\u9001\u5931\u8D25',
+    unknown: '\u53D1\u9001\u7ED3\u679C\u5F85\u786E\u8BA4',
+    insufficient_evidence: '\u5C1A\u65E0\u9001\u8FBE\u786E\u8BA4',
+    cancelled: '\u5DF2\u53D6\u6D88',
+    superseded: '\u5DF2\u66FF\u6362',
+  };
+  var finishedWork = (work) =>
+    ['succeeded', 'completed', 'cancelled', 'failed', 'expired'].includes(work.state);
+  var workSourceId = (work) =>
+    work.original_source_message_id || work.source_message_id || work.intent?.source_message_id;
+  var workStatus = (work) =>
+    work.display?.title || workLabels[work.state] || '\u72B6\u6001\u5F85\u6838\u5BF9';
+  var contextKinds = {
+    objective: '\u5F53\u524D\u76EE\u6807',
+    decision: '\u5DF2\u786E\u8BA4\u51B3\u7B56',
+    constraint: '\u5F53\u524D\u7EA6\u675F',
+    question: '\u5F85\u56DE\u7B54\u95EE\u9898',
+    artifact: '\u76F8\u5173\u6587\u4EF6',
+  };
+  var root = null;
+  var timer = null;
+  var bound = null;
+  var panel = null;
+  var panelEpoch = 0;
+  var pollPromise = null;
+  var pollAgain = false;
+  var hints = null;
+  var hintsConnected = false;
+  var accessBlocked = false;
+  var requestedProject = '';
+  var unsubscribe = null;
+  var abortEvents = null;
+  var suspended = false;
+  var activeRoom = () => store.writable();
+  var readOnlyReason = () =>
+    state.room?.legacy
+      ? '\u8FD9\u662F\u65E7\u7248\u623F\u95F4\u3002\u5904\u7406\u5B8C\u8FC1\u79FB\u6E05\u5355\u540E\u5373\u53EF\u7EE7\u7EED\u4F7F\u7528\u3002'
+      : '\u623F\u95F4\u5DF2\u6682\u505C\u6216\u5F52\u6863\uFF0C\u6062\u590D\u540E\u624D\u80FD\u53D1\u6D88\u606F\u3002';
+  var retryableContinuationPreview = /* @__PURE__ */ new Set([
+    'ROOM_CONTINUATION_PREVIEW_EXPIRED',
+    'ROOM_CONTINUATION_PREVIEW_CHANGED',
+    'ROOM_CONTINUATION_SELECTION_CHANGED',
+  ]);
+  var safeWorkActions = /* @__PURE__ */ new Set(['pause', 'cancel', 'stop']);
+  var safeChannelActions = /* @__PURE__ */ new Set([
+    'pause',
+    'disconnect',
+    'revoke_tasks',
+    'cancel',
+  ]);
+  var currentOwner = () =>
+    [S.session?.user_id || S.session?.username || '', S.space_id || ''].join(':');
+  var memberId = (item) => item.member_id || item.id;
+  var memberShort = (item) => '#' + memberId(item).slice(0, 8);
+  var memberOrigin = (item) =>
+    item.host_label ||
+    (item.host_connection_id
+      ? '\u72EC\u7ACB dot \u8FDE\u63A5'
+      : item.connection_source_member_id
+        ? '\u6765\u81EA\u8FDE\u63A5 #' + item.connection_source_member_id.slice(0, 8)
+        : item.legacy
+          ? '\u539F\u8FDE\u63A5\u5F85\u8FC1\u79FB'
+          : item.evidence?.host_bound
+            ? '\u672C\u623F\u95F4\u5DF2\u767B\u8BB0\u7684\u5BBF\u4E3B'
+            : '\u5BBF\u4E3B\u5C1A\u672A\u767B\u8BB0');
+  var members = () => (state.room?.members || []).filter((item) => item.state !== 'removed');
+  var title = (item) =>
+    item?.display?.title || stages[item?.stage || item?.state] || '\u7B49\u5F85\u8FDE\u63A5';
+  var rawPartitionTitle = /^([0-9a-f]{32})(?:\s*·\s*(.+))?$/i;
+  var projectLabel = (id, room) =>
+    S.projects?.find((p) => p.id === id)?.alias ||
+    S.projects?.find((p) => p.id === id)?.name ||
+    room?.projects?.find((p) => p.project_id === id)?.project_label ||
+    room?.projects?.find((p) => p.project_id === id)?.alias ||
+    '';
+  var roomProjects = (room) =>
+    (room?.projects || [])
+      .filter((p) => p.state !== 'removed')
+      .map((p) => projectLabel(p.project_id, room) || p.project_id?.slice(0, 6))
+      .filter(Boolean);
+  var roomFilter = '';
+  var hue = (value) =>
+    [...String(value || '')].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 7);
+  var actionLabel = (action) =>
+    ({
+      refresh_invite: '\u5237\u65B0\u52A0\u5165\u8BF4\u660E',
+      resume: '\u7EE7\u7EED\u8FDE\u63A5',
+      retry_probe: '\u91CD\u65B0\u53D1\u9001\u8FDE\u63A5\u68C0\u67E5',
+      pause: '\u6682\u505C',
+      remove: '\u79FB\u9664\u6210\u5458',
+      continue_connection: '\u7EE7\u7EED\u8FDE\u63A5',
+      recover_connection: '\u6062\u590D\u8FDE\u63A5',
+      wait_for_host_refresh: '\u5728\u539F dot \u7EE7\u7EED\u8FDE\u63A5',
+      awaiting_host_refresh: '\u5728\u539F dot \u7EE7\u7EED\u8FDE\u63A5',
+      copy_instructions: '\u590D\u5236\u52A0\u5165\u8BF4\u660E',
+      view_details: '\u67E5\u770B\u8BE6\u60C5',
+      start_qr: '\u751F\u6210\u4E8C\u7EF4\u7801',
+      poll_qr: '\u68C0\u67E5\u626B\u7801\u72B6\u6001',
+      accept_account: '\u786E\u8BA4\u8D26\u53F7',
+      bind: '\u751F\u6210\u914D\u5BF9\u8BF4\u660E',
+      confirm_owner: '\u5B8C\u6210\u8FDE\u63A5',
+      refresh_pairing: '\u5237\u65B0\u914D\u5BF9\u8BF4\u660E',
+      cancel: '\u53D6\u6D88\u8FDE\u63A5',
+      approve_tasks: '\u5141\u8BB8\u5FAE\u4FE1\u4EA4\u529E\u5DE5\u4F5C',
+      revoke_tasks: '\u4EC5\u64A4\u9500\u5DE5\u4F5C\u8BB8\u53EF',
+      rebind: '\u66F4\u6362\u8FDE\u63A5',
+    })[action] || '\u7EE7\u7EED';
+  var time = (value) =>
+    value
+      ? new Date(typeof value === 'number' ? value * 1e3 : value).toLocaleTimeString('zh-CN', {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '';
+  var dateTime = (value) =>
+    value === null || value === void 0 || value === ''
+      ? '\u672A\u63D0\u4F9B'
+      : new Date(typeof value === 'number' ? value * 1e3 : value).toLocaleString('zh-CN');
+  var supplied = (value) =>
+    value === null || value === void 0 ? '\u672A\u63D0\u4F9B' : String(value);
+  var identifier = (value) => (value ? '#' + String(value).slice(0, 12) : '\u672A\u63D0\u4F9B');
+  function detach() {
+    remember();
+    rememberReading();
+    clearTimeout(timer);
+    timer = null;
+    closeHints();
+    pollAgain = false;
+    store.abort();
+    abortEvents?.abort();
+    abortEvents = null;
+    unsubscribe?.();
+    unsubscribe = null;
+    CP.ui.closeModalLayer(root?.querySelector('dialog'));
+    root = null;
+    bound = null;
+    panelEpoch++;
+    panel = null;
+  }
+  var deliveryControlPreviews = /* @__PURE__ */ new Map();
+  function closePanel({ restoreFocus = true } = {}) {
+    const dialog = root?.querySelector('dialog');
+    if (!dialog) return;
+    if (!restoreFocus) dialog._crOpener = null;
+    panel?.impactController?.abort();
+    if (panel?.name === 'work') state.workDetail = null;
+    panelEpoch++;
+    panel = null;
+    CP.ui.closeModalLayer(dialog);
+  }
+  function openPanel(name, heading, content, data = {}) {
+    panel?.impactController?.abort();
+    if (panel?.name === 'work') state.workDetail = null;
+    panelEpoch++;
+    panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
+    const dialog = root.querySelector('dialog');
+    dialog._crOpeningEpoch = panel.epoch;
+    if (!dialog.open)
+      dialog._crOpener = root._panelOpener?.isConnected
+        ? root._panelOpener
+        : document.activeElement;
+    dialog.querySelector('h2').textContent = heading;
+    dialog.querySelector('.cr-panel-content').innerHTML = content;
+    dialog.scrollTop = 0;
+    panelError('');
+    patchMutationRecovery();
+    patchRoomPermissions();
+    if (!dialog.open) CP.ui.showModalLayer(dialog);
+    const openingEpoch = panel.epoch;
+    requestAnimationFrame(() => {
+      if (!dialog.open || panel?.epoch !== openingEpoch) return;
+      const focused = document.activeElement;
+      if (focused && focused !== dialog && dialog.contains(focused)) return;
+      const controls = CP.ui.focusable(dialog);
+      (controls.find((control) => control.matches('[autofocus]')) || controls[0])?.focus();
+    });
+  }
+  var permissionCaps = ['read', 'write', 'execute'];
+  var permissionLevels = {
+    '': ['\u4E0D\u52A0\u5165', []],
+    read: ['\u53EA\u8BFB', ['read']],
+    write: ['\u8BFB\u5199', ['read', 'write']],
+    run: ['\u8BFB\u53D6\u548C\u8FD0\u884C', ['read', 'execute']],
+    execute: ['\u8BFB\u5199\u548C\u8FD0\u884C', ['read', 'write', 'execute']],
+  };
+  var permissionLevel = (caps) =>
+    caps.includes('execute')
+      ? caps.includes('write')
+        ? 'execute'
+        : 'run'
+      : caps.includes('write')
+        ? 'write'
+        : caps.includes('read')
+          ? 'read'
+          : '';
+  var permissionOptions = (value = '', bulk = false) =>
+    Object.entries(permissionLevels)
+      .filter(([key]) => !bulk || key !== 'run')
+      .map(
+        ([key, [label]]) =>
+          `<option value="${key}" ${key === value ? 'selected' : ''}>${label}</option>`,
+      )
+      .join('');
+  var permissionKey = (value) =>
+    JSON.stringify([value.project_id, value.environment_id || 'production']);
+  var hostImpactLabel = (item) =>
+    item.room_title ||
+    item.conversation_title ||
+    '\u623F\u95F4 ' + identifier(item.conversation_id);
+  var hostImpactBinding = (item) => [item.member_id, item.binding_generation].join(':');
+  var hostBatchLabels = {
+    queued: '\u7B49\u5F85\u9A8C\u8BC1',
+    pending: '\u7B49\u5F85\u9A8C\u8BC1',
+    pending_validation: '\u7B49\u5F85\u9A8C\u8BC1',
+    invited: '\u7B49\u5F85 dot \u63A5\u5165',
+    bound: '\u6B63\u5728\u9A8C\u8BC1',
+    activated: '\u5DF2\u66F4\u6362',
+    waiting: '\u7B49\u5F85 dot \u63A5\u5165',
+    waiting_host: '\u7B49\u5F85 dot \u63A5\u5165',
+    waiting_connection: '\u7B49\u5F85 dot \u63A5\u5165',
+    prepared: '\u7B49\u5F85 dot \u63A5\u5165',
+    candidate: '\u7B49\u5F85 dot \u63A5\u5165',
+    verifying: '\u6B63\u5728\u9A8C\u8BC1',
+    switched: '\u5DF2\u66F4\u6362',
+    succeeded: '\u5DF2\u66F4\u6362',
+    completed: '\u5DF2\u66F4\u6362',
+    failed: '\u66F4\u6362\u5931\u8D25',
+    expired: '\u5019\u9009\u5DF2\u8FC7\u671F',
+    cancelled: '\u66F4\u6362\u5DF2\u53D6\u6D88',
+  };
+  var hostBatchErrors = {
+    ROOM_MEMBER_INACTIVE: '\u8BE5\u623F\u95F4\u6210\u5458\u5F53\u524D\u5DF2\u505C\u7528',
+    ROOM_BINDING_CHANGED: '\u6210\u5458\u7684\u8FDE\u63A5\u5DF2\u66F4\u6362',
+    ROOM_BINDING_PENDING:
+      '\u8BE5\u6210\u5458\u5DF2\u6709\u5F85\u9A8C\u8BC1\u7684\u65B0\u8FDE\u63A5',
+    ROOM_BINDING_CANCELLED: '\u63A5\u5165\u6D41\u7A0B\u5DF2\u5173\u95ED',
+    ROOM_BINDING_EXPIRED: '\u63A5\u5165\u9080\u8BF7\u5DF2\u8FC7\u671F',
+    CONNECT_FLOW_NOT_FOUND: '\u539F\u63A5\u5165\u6D41\u7A0B\u5DF2\u4E0D\u53EF\u7528',
+  };
+  async function recoverAction(id) {
+    const receipt = state.mutations.get(id);
+    if (
+      !receipt ||
+      ['recovering', 'not_saved'].includes(receipt.state) ||
+      receipt.owner !== state.owner
+    )
+      return;
+    if (JSON.parse(receipt.body).idempotency_key !== receipt.id)
+      throw new Error(
+        '\u539F\u8BF7\u6C42\u8EAB\u4EFD\u65E0\u6CD5\u6838\u5BF9\uFF0C\u8BF7\u4FDD\u7559\u5F53\u524D\u8BB0\u5F55\u3002',
+      );
+    const epoch = state.epoch;
+    receipt.state = 'recovering';
+    patchPending();
+    let saved = false;
+    try {
+      const result = await api(receipt.url, { method: receipt.method, body: receipt.body });
+      if (receipt.owner !== state.owner) return;
+      saved = true;
+      state.mutations.delete(id);
+      patchPending();
+      if (result.continuation?.batch_id)
+        store.draft(receipt.roomId).permissionContinuation = result.continuation.batch_id;
+      if (receipt.kind === 'create') await store.list();
+      if (!root || epoch !== state.epoch) return;
+      store.invalidateReads();
+      if (result.room) store.applyRoom(result);
+      if (receipt.kind === 'create') {
+        closePanel();
+        requestedProject = '';
+        await selectRoom(result.room.id);
+      } else if (receipt.roomId === state.roomId) {
+        if (receipt.kind === 'member' || receipt.kind === 'flow') {
+          openPanel(
+            'member',
+            result.member?.name || 'dot \u8FDE\u63A5',
+            '<div data-cr-flow-view></div>',
+            {
+              member: result.member,
+              flowId: result.flow?.id,
+            },
+          );
+          renderFlow(result);
+        } else if (receipt.kind === 'channel') {
+          openPanel('weixin', '\u8FDE\u63A5\u5FAE\u4FE1', '<div data-cr-channel-view></div>');
+          renderChannel(result);
+        } else if (receipt.kind === 'work') {
+          store.applyWork(result.work);
+          workPanel(result.work.id);
+        } else if (receipt.kind === 'host-batch' && result.batch_id) {
+          if (receipt.hostId) rememberedBatch(receipt.hostId, result.batch_id);
+          await hostBatchPanel(result.batch_id, receipt.hostId, result);
+        } else if (receipt.kind === 'host-revoke' && receipt.hostId) {
+          await hostDetailPanel(receipt.hostId);
+        } else closePanel();
+        await store.refresh();
+      }
+      announce('\u5DF2\u6838\u5BF9\u5E76\u6062\u590D\u539F\u64CD\u4F5C');
+    } catch (error) {
+      if (receipt.owner === state.owner) {
+        if (!saved && receipt.kind === 'migration' && error.not_saved === true) {
+          receipt.state = 'not_saved';
+          receipt.error =
+            '\u670D\u52A1\u5668\u5DF2\u786E\u8BA4\u539F\u542F\u7528\u8BF7\u6C42\u672A\u4FDD\u5B58\u3002\u8BF7\u91CD\u65B0\u6838\u5BF9\u5F53\u524D\u8FC1\u79FB\u6761\u4EF6\uFF0C\u518D\u660E\u786E\u786E\u8BA4\u3002';
+          patchPending();
+          if (root && epoch === state.epoch && receipt.roomId === state.roomId) {
+            if (panel?.name === 'migration') {
+              panel.key = '';
+              panel.migrationRevision = null;
+              const box = root.querySelector('[data-cr-migration-view]');
+              if (box) delete box._markup;
+              renderMigration();
+            }
+            await store.refresh().catch(() => {});
+            if (epoch === state.epoch)
+              panel?.name === 'migration' ? panelError(receipt.error) : announce(receipt.error);
+          }
+          return;
+        }
+        if (!saved && receipt.kind === 'channel' && error.status === 409) {
+          state.mutations.delete(id);
+          patchPending();
+          if (root && epoch === state.epoch && receipt.roomId === state.roomId) {
+            if (panel?.name === 'weixin') {
+              panelError(
+                '\u539F\u8BF7\u6C42\u672A\u4FDD\u5B58\uFF08\u8FDE\u63A5\u72B6\u6001\u5DF2\u524D\u8FDB\uFF09\uFF0C\u5DF2\u6309\u5F53\u524D\u72B6\u6001\u5237\u65B0\u3002',
+              );
+              await refreshChannel().catch(() => {});
+            } else
+              announce(
+                '\u539F\u5FAE\u4FE1\u8FDE\u63A5\u8BF7\u6C42\u672A\u4FDD\u5B58\uFF0C\u72B6\u6001\u5DF2\u524D\u8FDB\u3002',
+              );
+          }
+          return;
+        }
+        if (!saved) receipt.state = 'unknown';
+        const message =
+          (saved
+            ? '\u539F\u64CD\u4F5C\u5DF2\u4FDD\u5B58\uFF0C\u89C6\u56FE\u9700\u8981\u91CD\u65B0\u8BFB\u53D6\uFF1A'
+            : '\u539F\u64CD\u4F5C\u5C1A\u672A\u786E\u8BA4\uFF1A') + error.message;
+        if (!saved) receipt.error = message;
+        panel ? panelError(message) : announce(message, true);
+        patchPending();
+      }
+      throw error;
+    }
+  }
+  async function submitForm(form) {
+    const current = panel;
+    if (!current || current.busy) return;
+    const data = new FormData(form),
+      type = form.dataset.crForm;
+    if (type === 'create') {
+      const result = await mutation('POST', base + '/rooms', {
+        title: data.get('title').trim(),
+        projects: data
+          .getAll('project')
+          .map((project) => ({ project, environment_id: 'production' })),
+      });
+      if (!result) return;
+      const room = result.room || result;
+      await store.list();
+      closePanel();
+      requestedProject = '';
+      await selectRoom(room.id);
+      const pausedNotice = pausedProjectNotice(result);
+      if (pausedNotice) announce('\u623F\u95F4\u5DF2\u521B\u5EFA\u3002' + pausedNotice);
+    } else if (type === 'migration') {
+      if (current.migrationRevision !== migrationRevision()) {
+        renderMigration();
+        panelError(
+          '\u623F\u95F4\u6216\u8FC1\u79FB\u6761\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9\u5E76\u786E\u8BA4\u3002',
+        );
+        return;
+      }
+      if (!state.room?.legacy || state.room?.migration?.eligible !== true) {
+        panelError(
+          '\u8BF7\u5148\u5904\u7406\u670D\u52A1\u5668\u5217\u51FA\u7684\u8FC1\u79FB\u6761\u4EF6\uFF0C\u518D\u660E\u786E\u786E\u8BA4\u542F\u7528\u3002',
+        );
+        return;
+      }
+      const revision = current.migrationRevision;
+      const expectedVersion = current.version;
+      const confirmed = await uiConfirmAction(
+        {
+          title: '\u542F\u7528\u65B0\u7248\u623F\u95F4\uFF1F',
+          body: '\u6CBF\u7528\u5F53\u524D\u5DF2\u6279\u51C6\u7684\u8303\u56F4\u3002',
+          confirmLabel: '\u542F\u7528',
+        },
+        {
+          owner: form,
+          current: () => panel === current && revision === migrationRevision(),
+        },
+      );
+      if (!confirmed) return;
+      const result = await mutation('POST', store.path() + '/migration', {
+        action: 'activate',
+        expected_version: expectedVersion,
+      });
+      if (result) {
+        closePanel();
+        await store.refresh();
+        announce('\u5DF2\u5207\u6362\u5230\u65B0\u7248\u623F\u95F4\u3002');
+      }
+    } else if (type === 'permissions') {
+      await savePermissions(form, current);
+    } else if (type === 'member') {
+      const existing = data.get('connection_mode') === 'existing';
+      const chosen = current.connections.find(
+        (item) => connectionChoice(item) === data.get('reuse_member_id'),
+      );
+      if (existing && !chosen) {
+        panelError('\u8BF7\u9009\u62E9\u8981\u4F7F\u7528\u7684 dot \u8FDE\u63A5\u3002');
+        return;
+      }
+      const verifiedReuse =
+        chosen?.host_connection_id &&
+        supportsHostReuse(chosen, current.connectionCapabilities || {});
+      const reuse = !existing
+        ? {}
+        : verifiedReuse
+          ? { host_connection_id: chosen.host_connection_id }
+          : {
+              reuse_member_id: reuseAnchor(chosen),
+              reuse_binding_generation:
+                chosen.reuse_binding_generation ?? chosen.binding_generation,
+            };
+      const result = await mutation('POST', store.path() + '/members', {
+        name: data.get('name').trim(),
+        expected_version: current.version,
+        ...(data.get('keep_connected') ? { keep_connected: true } : {}),
+        ...reuse,
+      });
+      if (!result) return;
+      await store.refresh();
+      if (panel !== current) return;
+      openPanel(
+        'member',
+        result.member?.name || data.get('name'),
+        '<div data-cr-flow-view></div>',
+        {
+          member: result.member,
+          flowId: result.flow?.id || result.flow_id,
+        },
+      );
+      renderFlow(result);
+    } else if (type === 'work-recovery') {
+      const action = form.dataset.workAction;
+      const candidates =
+        current.work.recovery?.[
+          action === 'takeover' ? 'takeover_candidates' : 'restore_candidates'
+        ] || [];
+      const selected = candidates.find(
+        (member) => member.member_id === data.get('target_member_id'),
+      );
+      if (!selected) {
+        panelError(
+          '\u8BF7\u9009\u62E9\u6B64\u5DE5\u4F5C\u5F53\u524D\u5141\u8BB8\u7684\u6210\u5458\u3002',
+        );
+        return;
+      }
+      await controlWork(action, selected.member_id);
+    } else if (type === 'settings') {
+      const result = await mutation('PATCH', store.path(), {
+        title: data.get('title').trim(),
+        expected_version: current.version,
+      });
+      if (result) {
+        closePanel();
+        await store.refresh();
+      }
+    } else if (type === 'weixin') await submitChannel(form);
+  }
+  async function selectRoom(id) {
+    remember();
+    rememberReading();
+    closeHints();
+    accessBlocked = false;
+    closePanel();
+    announce('');
+    root?.classList.remove('cr-show-rooms');
+    root?.querySelector('[data-cr-action="rooms"]')?.setAttribute('aria-expanded', 'false');
+    const list = root?.querySelector('[data-cr-messages]');
+    list?.replaceChildren();
+    try {
+      const promise = store.select(id);
+      if (root) root._restoringReading = !!store.draft().reading;
+      selection(id);
+      const editor = root?.querySelector('#cr-message');
+      if (editor) {
+        editor.value = store.draft().text;
+        sizeEditor(editor);
+      }
+      patchHeader();
+      patchWorks();
+      patchPending();
+      await promise;
+      if (state.roomId === id) {
+        patchHeader();
+        patchMessages();
+        patchWorks();
+        patchPending();
+        await restoreReading();
+        connectHints();
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') announce(error.message, true);
+    }
+  }
+  var wakeEvidenceLabels = {
+    redeemed: '\u5DF2\u5F00\u59CB\u5904\u7406',
+    coalesced_before_send: '\u53D1\u9001\u524D\u5DF2\u5408\u5E76',
+    accepted_waiting_claim:
+      '\u5BBF\u4E3B\u63A5\u53E3\u5DF2\u53D7\u7406\uFF0C\u7B49\u5F85\u9886\u53D6',
+    accepted_without_observed_claim:
+      '\u5BBF\u4E3B\u63A5\u53E3\u5DF2\u53D7\u7406\uFF0C\u5C1A\u672A\u89C2\u5BDF\u5230\u9886\u53D6',
+    insufficient_evidence: '\u8BC1\u636E\u4E0D\u8DB3',
+  };
+  var channelSteps = [
+    ['\u626B\u7801', ['choose_account', 'scan', 'confirm_account', 'needs_reconnect']],
+    [
+      '\u786E\u8BA4\u8303\u56F4',
+      [
+        'choose_member',
+        'waiting_member',
+        'waiting_project',
+        'route_conflict',
+        'confirm_binding',
+        'pairing',
+        'pairing_expired',
+        'confirm_owner',
+      ],
+    ],
+    ['\u5B8C\u6210', ['ready', 'paused', 'disconnected', 'closed', 'cancelled']],
+  ];
+  var channelCopy = {
+    choose_account: [
+      '\u8FDE\u63A5\u4F60\u7684\u5FAE\u4FE1',
+      '\u7528\u624B\u673A\u5FAE\u4FE1\u626B\u7801\u767B\u5F55\uFF0C\u6216\u9009\u62E9\u5DF2\u767B\u8BB0\u7684\u5FAE\u4FE1\u3002',
+    ],
+    scan: [
+      '\u7528\u624B\u673A\u5FAE\u4FE1\u626B\u4E00\u626B',
+      '\u626B\u7801\u540E\u5728\u624B\u673A\u4E0A\u786E\u8BA4\u767B\u5F55\u3002\u4E8C\u7EF4\u7801 5 \u5206\u949F\u5185\u6709\u6548\uFF0C\u672C\u9875\u4F1A\u81EA\u52A8\u5237\u65B0\u72B6\u6001\u3002',
+    ],
+    confirm_account: [
+      '\u786E\u8BA4\u626B\u7801\u7684\u662F\u4F60',
+      '\u6838\u5BF9\u624B\u673A\u8FD4\u56DE\u7684\u626B\u7801\u8EAB\u4EFD\u3002\u786E\u8BA4\u540E\u52A0\u5BC6\u4FDD\u5B58\u8FD9\u4E2A\u5FAE\u4FE1\u7684\u767B\u5F55\u51ED\u636E\u3002',
+    ],
+    needs_reconnect: [
+      '\u5FAE\u4FE1\u9700\u8981\u91CD\u65B0\u767B\u5F55',
+      '\u539F\u767B\u5F55\u5DF2\u8FC7\u671F\u6216\u88AB\u5FAE\u4FE1\u62D2\u7EDD\u3002\u91CD\u65B0\u626B\u7801\u540E\u6CBF\u7528\u539F\u8D26\u53F7\u548C\u539F\u623F\u95F4\u8FDE\u63A5\u3002',
+    ],
+    choose_member: [
+      '\u9009\u62E9\u63A5\u6536\u5FAE\u4FE1\u6D88\u606F\u7684 dot',
+      '\u623F\u95F4\u91CC\u6709\u591A\u4E2A dot \u4F46\u8FD8\u6CA1\u6709\u4E3B\u8D23\u3002\u5FAE\u4FE1\u6D88\u606F\u4F1A\u4EA4\u7ED9\u8FD9\u91CC\u9009\u62E9\u7684 dot \u5904\u7406\u548C\u56DE\u590D\u3002',
+    ],
+    waiting_member: [
+      '\u5148\u4E3A\u623F\u95F4\u6DFB\u52A0\u4E00\u4E2A dot',
+      '\u5FAE\u4FE1\u6D88\u606F\u9700\u8981\u4E00\u4E2A dot \u6765\u63A5\u6536\u548C\u56DE\u590D\u3002\u6DFB\u52A0\u5E76\u8FDE\u4E0A dot \u540E\u56DE\u5230\u8FD9\u91CC\u7EE7\u7EED\u3002',
+    ],
+    waiting_project: [
+      '\u5148\u4E3A\u539F\u8FDE\u63A5\u5173\u8054\u9879\u76EE',
+      '\u65E7\u8FDE\u63A5\u9700\u8981\u5148\u5173\u8054\u4E00\u4E2A\u9879\u76EE\u624D\u80FD\u7EE7\u7EED\u3002',
+    ],
+    route_conflict: ['\u5148\u89E3\u9664\u539F\u6765\u7684\u5FAE\u4FE1\u8FDE\u63A5', ''],
+    confirm_binding: [
+      '\u786E\u8BA4\u8FD9\u4E2A\u623F\u95F4\u7684\u79C1\u804A\u8303\u56F4',
+      '\u5141\u8BB8\u4F60\u672C\u4EBA\u5FAE\u4FE1\u79C1\u804A\u91CC\u7684\u6D88\u606F\u8FDB\u5165\u8FD9\u4E2A\u623F\u95F4\uFF1B\u4E5F\u53EF\u4EE5\u9009\u62E9\u5141\u8BB8\u4F60\u5728\u5FAE\u4FE1\u91CC\u76F4\u63A5\u4EA4\u529E\u5DE5\u4F5C\u3002',
+    ],
+    pairing: [
+      '\u5728\u5FAE\u4FE1\u91CC\u53D1\u9001\u914D\u5BF9\u7801',
+      '\u628A\u914D\u5BF9\u7801\u53D1\u5230\u673A\u5668\u4EBA\u79C1\u804A\uFF0C\u8FD9\u91CC\u4F1A\u81EA\u52A8\u7EE7\u7EED\u3002',
+    ],
+    pairing_expired: [
+      '\u914D\u5BF9\u7801\u5DF2\u8FC7\u671F',
+      '\u914D\u5BF9\u7801 15 \u5206\u949F\u5185\u6709\u6548\u3002\u751F\u6210\u65B0\u7684\u914D\u5BF9\u7801\u540E\u518D\u53D1\u9001\u4E00\u6B21\u3002',
+    ],
+    confirm_owner: [
+      '\u786E\u8BA4\u662F\u4F60\u672C\u4EBA\u53D1\u9001\u7684',
+      '\u5DF2\u6536\u5230\u914D\u5BF9\u7801\u3002\u6838\u5BF9\u53D1\u9001\u8005\u540E\u5B8C\u6210\u8FDE\u63A5\u3002',
+    ],
+    ready: ['\u5FAE\u4FE1\u5DF2\u8FDE\u63A5', ''],
+    paused: [
+      '\u5FAE\u4FE1\u5DF2\u6682\u505C',
+      '\u6682\u505C\u671F\u95F4\u4E0D\u63A5\u6536\u65B0\u7684\u5FAE\u4FE1\u6D88\u606F\u3002\u6062\u590D\u540E\u6CBF\u7528\u539F\u8054\u7CFB\u4EBA\u548C\u539F\u623F\u95F4\u3002',
+    ],
+    disconnected: [
+      '\u5FAE\u4FE1\u5DF2\u65AD\u5F00',
+      '\u53EF\u4EE5\u91CD\u65B0\u786E\u8BA4\u8FDE\u63A5\u8303\u56F4\u540E\u518D\u6B21\u914D\u5BF9\u3002',
+    ],
+    cancelled: [
+      '\u5DF2\u53D6\u6D88\u8FDE\u63A5',
+      '\u53EF\u4EE5\u968F\u65F6\u91CD\u65B0\u5F00\u59CB\u3002',
+    ],
+    closed: [
+      '\u5FAE\u4FE1\u5DF2\u89E3\u9664',
+      '\u5386\u53F2\u6D88\u606F\u4FDD\u7559\u5728\u623F\u95F4\u3002',
+    ],
+  };
+  var channelReasons = {
+    WEIXIN_QR_EXPIRED:
+      '\u4E8C\u7EF4\u7801\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u3002',
+    WEIXIN_QR_ATTENTION:
+      '\u5FAE\u4FE1\u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u7684\u626B\u7801\u7ED3\u679C\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u4E8C\u7EF4\u7801\u3002',
+    WEIXIN_QR_CANCELLED: '\u4E0A\u4E00\u6B21\u626B\u7801\u5DF2\u53D6\u6D88\u3002',
+    WEIXIN_QR_RESPONSE_UNCONFIRMED:
+      '\u6682\u65F6\u8FDE\u4E0D\u4E0A\u5FAE\u4FE1\u626B\u7801\u670D\u52A1\uFF0C\u8BF7\u7A0D\u540E\u91CD\u65B0\u751F\u6210\u4E8C\u7EF4\u7801\u3002',
+    WEIXIN_QR_RESPONSE_UNSUPPORTED:
+      '\u5FAE\u4FE1\u8FD4\u56DE\u4E86\u65E0\u6CD5\u8BC6\u522B\u7684\u626B\u7801\u7ED3\u679C\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u4E8C\u7EF4\u7801\u3002',
+    WEIXIN_CREDENTIAL_CHANGED:
+      '\u5FAE\u4FE1\u767B\u5F55\u51ED\u636E\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u626B\u7801\u3002',
+    WEIXIN_ACCOUNT_CONFLICT:
+      '\u8FD9\u4E2A\u5FAE\u4FE1\u5DF2\u7531\u5176\u4ED6\u8D26\u53F7\u767B\u8BB0\uFF0C\u4E0D\u80FD\u5728\u8FD9\u91CC\u63A5\u5165\u3002',
+    WEIXIN_SESSION_EXPIRED:
+      '\u5FAE\u4FE1\u767B\u5F55\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u626B\u7801\u3002',
+    WEIXIN_AUTH_REJECTED:
+      '\u5FAE\u4FE1\u62D2\u7EDD\u4E86\u5F53\u524D\u767B\u5F55\u51ED\u636E\uFF0C\u8BF7\u91CD\u65B0\u626B\u7801\u3002',
+    WEIXIN_RENEWAL_BOT_MISMATCH:
+      '\u626B\u7801\u7684\u4E0D\u662F\u539F\u6765\u7684\u5FAE\u4FE1\uFF0C\u8BF7\u7528\u539F\u5FAE\u4FE1\u91CD\u65B0\u626B\u7801\u3002',
+    WEIXIN_DISABLED:
+      '\u7A7A\u95F4\u7BA1\u7406\u5458\u5DF2\u5173\u95ED\u5FAE\u4FE1\u63A5\u5165\u3002',
+  };
+  var quietInbound = /* @__PURE__ */ new Set([
+    '',
+    'WEIXIN_POLL_IDLE',
+    'WEIXIN_POLL_FENCE_LOST',
+    'WEIXIN_BINDING_CHANGED',
+    'WEIXIN_POLL_CANCELLED',
+    'WEIXIN_PAIRING_EXPIRED',
+  ]);
+  var safeImage = (value) =>
+    typeof value === 'string' &&
+    value.length <= 15e5 &&
+    /^data:image\/svg\+xml;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
+  var reasonText = (code) =>
+    !code
+      ? ''
+      : channelReasons[code] ||
+        (/^[A-Z0-9_]+$/.test(code) ? '\u72B6\u6001\u4EE3\u7801\uFF1A' + code : code);
+  var facts = (rows) =>
+    `<dl class="cr-wx-facts">${rows
+      .filter(([, value]) => value)
+      .map(([name, value]) => `<div><dt>${E(name)}</dt><dd>${E(value)}</dd></div>`)
+      .join('')}</dl>`;
   function closeHints() {
     hints?.close();
     hints = null;
@@ -4896,16 +5183,12 @@ window.CodePierCollaboration = (() => {
     });
     source.addEventListener('access_changed', () => {
       if (!current()) return;
-      // Clear the old projection before waiting on a new authorization check.
       const invalidatedPanel = panel;
       closeHints();
       store.abort();
       store.clearWindows();
       root._restoringReading = false;
       closePanel();
-      // A project edit can invalidate its own room stream before its PUT
-      // response arrives. Retain only the identity of that closed submission,
-      // never its old projection or permission. A later panel changes the fence.
       if (invalidatedPanel?.name === 'permissions' && invalidatedPanel.busy)
         invalidatedPanel.accessInvalidation = {
           owner,
@@ -4951,10 +5234,12 @@ window.CodePierCollaboration = (() => {
           (result) =>
             result.status === 'rejected' && [401, 403, 404].includes(result.reason?.status),
         );
-        if (denied) announce('房间权限已变化，请重新选择可用房间。', true);
+        if (denied)
+          announce(
+            '\u623F\u95F4\u6743\u9650\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u53EF\u7528\u623F\u95F4\u3002',
+            true,
+          );
         else {
-          // A successful write may supersede this read. Abort is a transport
-          // fence, never evidence that the owner lost room access.
           accessBlocked = false;
           patchHeader();
           patchPending();
@@ -4993,7 +5278,9 @@ window.CodePierCollaboration = (() => {
             !panel &&
             saved.openingEpoch === root.querySelector('dialog')?._crOpeningEpoch;
           announce(
-            (confirmed ? saved.message + ' 视图刷新失败：' : '刷新暂时失败，草稿与原工作已保留。') +
+            (confirmed
+              ? saved.message + ' \u89C6\u56FE\u5237\u65B0\u5931\u8D25\uFF1A'
+              : '\u5237\u65B0\u6682\u65F6\u5931\u8D25\uFF0C\u8349\u7A3F\u4E0E\u539F\u5DE5\u4F5C\u5DF2\u4FDD\u7559\u3002') +
               error.message,
             true,
           );
@@ -5012,7 +5299,7 @@ window.CodePierCollaboration = (() => {
   function schedule() {
     clearTimeout(timer);
     if (root && !accessBlocked)
-      timer = setTimeout(poll, panel?.flowId ? 1500 : hintsConnected ? 15000 : 5000);
+      timer = setTimeout(poll, panel?.flowId ? 1500 : hintsConnected ? 15e3 : 5e3);
   }
   function bind() {
     root = document.querySelector('.cr-shell');
@@ -5096,10 +5383,12 @@ window.CodePierCollaboration = (() => {
               epoch !== state.epoch
             )
               return;
-            // mutation() owns HTTP/CAS messages; also surface failures thrown
-            // before it runs, while preserving this submission's precise hint.
             const existing = root?.querySelector('[data-cr-panel-error]')?.textContent;
-            panelError(existing || error.message || '未能完成提交，请核对当前选择。');
+            panelError(
+              existing ||
+                error.message ||
+                '\u672A\u80FD\u5B8C\u6210\u63D0\u4EA4\uFF0C\u8BF7\u6838\u5BF9\u5F53\u524D\u9009\u62E9\u3002',
+            );
           });
         }
       },
@@ -5270,8 +5559,6 @@ window.CodePierCollaboration = (() => {
       'close',
       () => {
         const dialog = root?.querySelector('dialog');
-        // A queued close event can belong to an earlier opening of this same
-        // dialog. Do not tear down a panel that has already been reopened.
         if (dialog?.open) return;
         panelEpoch++;
         if (panel?.name === 'work') state.workDetail = null;
@@ -5330,7 +5617,7 @@ window.CodePierCollaboration = (() => {
         renderPage(false).catch((error) => toast(error.message, true));
     }
   });
-  return {
+  window.CodePierCollaboration = {
     html,
     bind,
     detach,

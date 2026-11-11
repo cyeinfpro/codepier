@@ -10,7 +10,7 @@ from hub.auth import Auth
 from hub.store import Store
 from shared.crypto import digest
 from shared.util import DevError
-from tests.test_bug_report_auth_20261020 import auth as auth, request
+from tests.test_auth_account_budgets import auth as auth, request
 
 
 def counts(auth):

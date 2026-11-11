@@ -40,9 +40,7 @@ class TelegramAdapter:
             raise DevError("TELEGRAM_TOKEN_INVALID", "Telegram 凭据格式无效", 422)
         self.token, self.transport = token, transport
 
-    async def call(
-        self, method, payload, *, body=None, content_type="application/json"
-    ):
+    async def call(self, method, payload, *, body=None, content_type="application/json"):
         if method not in {
             "getMe",
             "getWebhookInfo",
@@ -58,10 +56,10 @@ class TelegramAdapter:
                 "POST",
                 API_BASE + "/bot" + self.token + "/" + method,
                 {"Content-Type": content_type},
-                body
-                if body is not None
-                else json.dumps(payload, ensure_ascii=False).encode(),
-                timeout=upload_timeout(len(body)) if method == "sendDocument" and body is not None else 40,
+                body if body is not None else json.dumps(payload, ensure_ascii=False).encode(),
+                timeout=upload_timeout(len(body))
+                if method == "sendDocument" and body is not None
+                else 40,
                 maximum=2 * 1024 * 1024,
             )
         except Exception:
@@ -96,9 +94,7 @@ class TelegramAdapter:
                     "Telegram 明确拒绝此操作，请核对账号或原目标",
                     status,
                 )
-            raise DevError(
-                "TELEGRAM_RESPONSE_UNKNOWN", "Telegram 结果不确定，不自动重发", 502
-            )
+            raise DevError("TELEGRAM_RESPONSE_UNKNOWN", "Telegram 结果不确定，不自动重发", 502)
         return result.get("result")
 
     async def verify(self, bot_id):
@@ -109,9 +105,7 @@ class TelegramAdapter:
             or identifier(me.get("id")) != bot_id
             or me.get("is_bot") is not True
         ):
-            raise DevError(
-                "TELEGRAM_BOT_MISMATCH", "凭据对应的机器人与登记编号不一致", 409
-            )
+            raise DevError("TELEGRAM_BOT_MISMATCH", "凭据对应的机器人与登记编号不一致", 409)
         if not isinstance(webhook, dict) or webhook.get("url"):
             raise DevError(
                 "TELEGRAM_WEBHOOK_CONFLICT",
@@ -144,10 +138,7 @@ class TelegramAdapter:
                 "allow_sending_without_reply": True,
             }
         result = await self.call("sendMessage", payload)
-        if (
-            not isinstance(result, dict)
-            or identifier(result.get("chat", {}).get("id")) != chat_id
-        ):
+        if not isinstance(result, dict) or identifier(result.get("chat", {}).get("id")) != chat_id:
             raise DevError(
                 "TELEGRAM_RECEIPT_UNKNOWN",
                 "Telegram 返回目标不一致，不能证明原投递成功",
@@ -155,13 +146,9 @@ class TelegramAdapter:
             )
         return identifier(result.get("message_id"))
 
-    async def send_document(
-        self, chat_id, content, filename, *, silent=False, reply_to=""
-    ):
+    async def send_document(self, chat_id, content, filename, *, silent=False, reply_to=""):
         if not isinstance(content, bytes) or len(content) > UPLOAD_LIMIT:
-            raise DevError(
-                "TELEGRAM_UPLOAD_LIMIT", "附件超过50MB上限，请在面板读取", 413
-            )
+            raise DevError("TELEGRAM_UPLOAD_LIMIT", "附件超过50MB上限，请在面板读取", 413)
         boundary = "CodePier" + secrets.token_hex(16)
         fields = {
             "chat_id": chat_id,
@@ -184,12 +171,7 @@ class TelegramAdapter:
                     + "\r\n"
                 ).encode()
             )
-        name = (
-            safe_filename(filename)
-            .replace('"', "_")
-            .replace("\r", "_")
-            .replace("\n", "_")
-        )
+        name = safe_filename(filename).replace('"', "_").replace("\r", "_").replace("\n", "_")
         parts.append(
             (
                 "--"
@@ -208,13 +190,8 @@ class TelegramAdapter:
             body=b"".join(parts),
             content_type="multipart/form-data; boundary=" + boundary,
         )
-        if (
-            not isinstance(result, dict)
-            or identifier(result.get("chat", {}).get("id")) != chat_id
-        ):
-            raise DevError(
-                "TELEGRAM_RECEIPT_UNKNOWN", "Telegram附件回执目标无法确认", 502
-            )
+        if not isinstance(result, dict) or identifier(result.get("chat", {}).get("id")) != chat_id:
+            raise DevError("TELEGRAM_RECEIPT_UNKNOWN", "Telegram附件回执目标无法确认", 502)
         return identifier(result.get("message_id"))
 
     async def download(self, file_id):
@@ -228,9 +205,7 @@ class TelegramAdapter:
             or type(size) is not int
             or size > DOWNLOAD_LIMIT
         ):
-            raise DevError(
-                "TELEGRAM_FILE_UNAVAILABLE", "附件不在可下载预算或安全路径内", 413
-            )
+            raise DevError("TELEGRAM_FILE_UNAVAILABLE", "附件不在可下载预算或安全路径内", 413)
         try:
             wire = await self.transport(
                 "GET",

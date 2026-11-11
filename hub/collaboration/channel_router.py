@@ -50,9 +50,7 @@ class ChannelRouter:
 
     def consent_weixin(self, raw, principal):
         with self.store.transaction():
-            args, principal, room = self.c.weixin.owner(
-                raw, principal, models.MirrorConsent
-            )
+            args, principal, room = self.c.weixin.owner(raw, principal, models.MirrorConsent)
             row, *_ = self.bindings.validate("weixin", args["binding_id"])
             if (
                 row["room_id"] != room["id"]
@@ -94,11 +92,19 @@ class ChannelRouter:
 
     def queue_reply_dispositions(self, message, *, reply_sources=None, delivery_dependency=None):
         dispositions = []
-        self.queue(message, dispositions=dispositions, reply_sources=reply_sources,
-                   delivery_dependency=delivery_dependency)
-        return dispositions[:24] or [{
-            "channel": "weixin", "disposition": "not_requested", "reason_code": "no_external_reply"
-        }]
+        self.queue(
+            message,
+            dispositions=dispositions,
+            reply_sources=reply_sources,
+            delivery_dependency=delivery_dependency,
+        )
+        return dispositions[:24] or [
+            {
+                "channel": "weixin",
+                "disposition": "not_requested",
+                "reason_code": "no_external_reply",
+            }
+        ]
 
     def queue(self, message, *, dispositions=None, reply_sources=None, delivery_dependency=None):
         self.store.require_transaction()
@@ -121,7 +127,9 @@ class ChannelRouter:
                 direct_sources.setdefault(recipient, source)
         required_recipient, dependency = delivery_dependency or (None, {})
         if required_recipient is not None and required_recipient not in direct_sources:
-            raise DevError('WEIXIN_DELIVERY_RELATION_INVALID', '当前回复没有可承接原依赖的微信收件人', 409)
+            raise DevError(
+                "WEIXIN_DELIVERY_RELATION_INVALID", "当前回复没有可承接原依赖的微信收件人", 409
+            )
         direct_replies = {}
         for recipient, source in direct_sources.items():
             options = dependency if recipient == required_recipient else {}
@@ -154,7 +162,11 @@ class ChannelRouter:
         for channel, binding in targets:
             # Keep the original Weixin source-reply/file ledger as the single
             # transport owner; full mirroring must not add a duplicate text.
-            direct_reply = direct_replies.get((binding["account_id"], binding["peer_id"])) if channel == "weixin" else None
+            direct_reply = (
+                direct_replies.get((binding["account_id"], binding["peer_id"]))
+                if channel == "weixin"
+                else None
+            )
             if direct_reply:
                 older = self.store.all(
                     """SELECT d.id FROM channel_mirrors d JOIN collaboration_messages m ON m.id=d.message_id
@@ -170,10 +182,7 @@ class ChannelRouter:
                     self.refresh(prior["id"])
                 continue
             direct = body.get("external_origin", {})
-            if (
-                direct.get("channel") == channel
-                and direct.get("binding_id") == binding["id"]
-            ):
+            if direct.get("channel") == channel and direct.get("binding_id") == binding["id"]:
                 continue
             try:
                 self.bindings.message(
@@ -185,8 +194,14 @@ class ChannelRouter:
                 )
             except DevError as exc:
                 if dispositions is not None:
-                    dispositions.append({"channel": channel, "binding_id": binding["id"],
-                                         "disposition": "blocked", "reason_code": exc.code})
+                    dispositions.append(
+                        {
+                            "channel": channel,
+                            "binding_id": binding["id"],
+                            "disposition": "blocked",
+                            "reason_code": exc.code,
+                        }
+                    )
                 continue
             if body.get("sender_dot_id") and body["sender_dot_id"] != binding["dot_id"]:
                 continue
@@ -204,8 +219,15 @@ class ChannelRouter:
             if old:
                 queued.append(old)
                 if dispositions is not None:
-                    dispositions.append({"channel": channel, "binding_id": binding["id"],
-                                         "disposition": "existing", "reason_code": "", "delivery_id": old["id"]})
+                    dispositions.append(
+                        {
+                            "channel": channel,
+                            "binding_id": binding["id"],
+                            "disposition": "existing",
+                            "reason_code": "",
+                            "delivery_id": old["id"],
+                        }
+                    )
                 continue
             limited = (
                 self.store.one(
@@ -253,12 +275,16 @@ class ChannelRouter:
                 )
                 self.refresh(did)
                 if dispositions is not None:
-                    dispositions.append({"channel": channel, "binding_id": binding["id"],
-                                         "disposition": "rejected", "reason_code": "daily_mirror_quota",
-                                         "delivery_id": did})
-                queued.append(
-                    {"id": did, "channel": channel, "state": "needs_attention"}
-                )
+                    dispositions.append(
+                        {
+                            "channel": channel,
+                            "binding_id": binding["id"],
+                            "disposition": "rejected",
+                            "reason_code": "daily_mirror_quota",
+                            "delivery_id": did,
+                        }
+                    )
+                queued.append({"id": did, "channel": channel, "state": "needs_attention"})
                 continue
             incomplete = body.get("dot_reply_complete") is False
             # Coalesce unsent progress for the same original reply thread only.
@@ -293,9 +319,7 @@ class ChannelRouter:
             )
             if body.get("sender_dot_id"):
                 label = "dot · " + ("处理中" if incomplete else "最终回复")
-            prefix = (
-                "[" + label + " · 协作室 " + message["conversation_id"][-8:] + "]\n"
-            )
+            prefix = "[" + label + " · 协作室 " + message["conversation_id"][-8:] + "]\n"
             text = prefix + body.get("body_text", "")
             if message["reply_to_id"]:
                 text += "\n↳ 原消息 " + message["reply_to_id"][-8:]
@@ -312,9 +336,7 @@ class ChannelRouter:
             pieces = split_text(text, 3500 if channel == "telegram" else 700)
             for ordinal, piece in enumerate(pieces):
                 if len(pieces) > 1:
-                    piece = (
-                        "(" + str(ordinal + 1) + "/" + str(len(pieces)) + ") " + piece
-                    )
+                    piece = "(" + str(ordinal + 1) + "/" + str(len(pieces)) + ") " + piece
                 self.store.execute(
                     """INSERT INTO channel_mirror_parts
                     (id,delivery_id,ordinal,kind,body,state,not_before,created,updated)
@@ -331,9 +353,18 @@ class ChannelRouter:
                 )
             queued.append({"id": did, "channel": channel, "state": "queued"})
             if dispositions is not None:
-                dispositions.append({"channel": channel, "binding_id": binding["id"],
-                                     "disposition": "queued", "reason_code": "", "delivery_id": did})
-        return queued or next((reply.delivery for reply in direct_replies.values() if reply.delivery), None)
+                dispositions.append(
+                    {
+                        "channel": channel,
+                        "binding_id": binding["id"],
+                        "disposition": "queued",
+                        "reason_code": "",
+                        "delivery_id": did,
+                    }
+                )
+        return queued or next(
+            (reply.delivery for reply in direct_replies.values() if reply.delivery), None
+        )
 
     def validate(self, delivery):
         message = self.store.one(
@@ -420,9 +451,7 @@ class ChannelRouter:
 
     def claim(self, pid):
         with self.store.transaction():
-            row = self.store.one(
-                "SELECT * FROM channel_mirror_parts WHERE id=?", (pid,)
-            )
+            row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (pid,))
             now = self.c.clock()
             if (
                 not row
@@ -451,13 +480,8 @@ class ChannelRouter:
                 aid = json.loads(row["body"])["attachment_id"]
                 try:
                     media = self.media.row(aid, owner)
-                    if (
-                        media["binding_id"] != binding["id"]
-                        or media["direction"] != "outbound"
-                    ):
-                        raise DevError(
-                            "ATTACHMENT_EGRESS_NOT_APPROVED", "附件目标不匹配", 403
-                        )
+                    if media["binding_id"] != binding["id"] or media["direction"] != "outbound":
+                        raise DevError("ATTACHMENT_EGRESS_NOT_APPROVED", "附件目标不匹配", 403)
                 except DevError as exc:
                     self.store.execute(
                         "UPDATE channel_mirror_parts SET state='rejected',reason_code=? WHERE id=?",
@@ -515,9 +539,7 @@ class ChannelRouter:
 
     def begin_send(self, claim):
         with self.store.transaction():
-            row = self.store.one(
-                "SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],)
-            )
+            row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],))
             if (
                 not row
                 or row["state"] != "preparing"
@@ -540,7 +562,11 @@ class ChannelRouter:
                 )
             self.store.execute(
                 "UPDATE channel_mirror_parts SET state='sending',lease_until=?,updated=? WHERE id=?",
-                (self.c.clock() + (960 if row["kind"] == "attachment" else 60), self.c.clock(), row["id"]),
+                (
+                    self.c.clock() + (960 if row["kind"] == "attachment" else 60),
+                    self.c.clock(),
+                    row["id"],
+                ),
             )
             self.refresh(row["delivery_id"])
             reference = self.store.one(
@@ -562,27 +588,23 @@ class ChannelRouter:
         with self.store.transaction(immediate=False):
             self.c.channel_settings.require_enabled(claim["delivery"]["channel"], claim["account"])
             row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],))
-            if (not row or row["state"] != "sending" or row["lease_fence"] != claim["lease_fence"]
-                    or row["lease_until"] <= self.c.clock()):
+            if (
+                not row
+                or row["state"] != "sending"
+                or row["lease_fence"] != claim["lease_fence"]
+                or row["lease_until"] <= self.c.clock()
+            ):
                 raise DevError("CHANNEL_SEND_FENCE_LOST", "原发送准备世代已失效", 409)
             self.validate(claim["delivery"])
 
     def finish(self, claim, external_id="", error=None):
         with self.store.transaction():
-            row = self.store.one(
-                "SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],)
-            )
-            if (
-                not row
-                or row["state"] != "sending"
-                or row["lease_fence"] != claim["lease_fence"]
-            ):
+            row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],))
+            if not row or row["state"] != "sending" or row["lease_fence"] != claim["lease_fence"]:
                 return
             state, reason, delay = "accepted", "", 0
             if error:
-                reason = (
-                    error.code if isinstance(error, DevError) else "transport_unknown"
-                )
+                reason = error.code if isinstance(error, DevError) else "transport_unknown"
                 if isinstance(error, DevError) and error.status == 429:
                     state, delay = (
                         "queued",
@@ -593,10 +615,7 @@ class ChannelRouter:
                             "UPDATE telegram_accounts SET next_send=MAX(next_send,?) WHERE id=?",
                             (self.c.clock() + delay, claim["account"]["id"]),
                         )
-                elif (
-                    isinstance(error, DevError)
-                    and error.code == "TELEGRAM_PROVIDER_REJECTED"
-                ):
+                elif isinstance(error, DevError) and error.code == "TELEGRAM_PROVIDER_REJECTED":
                     state = "rejected"
                 else:
                     state = "unknown"
@@ -633,8 +652,14 @@ class ChannelRouter:
             with self.store.transaction():
                 row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (pid,))
                 if row and row["state"] in {"queued", "waiting_context"}:
-                    self.store.execute("UPDATE channel_mirror_parts SET state='rejected',reason_code=?,updated=? WHERE id=?",
-                        (exc.code if isinstance(exc, DevError) else "claim_internal_error", self.c.clock(), pid))
+                    self.store.execute(
+                        "UPDATE channel_mirror_parts SET state='rejected',reason_code=?,updated=? WHERE id=?",
+                        (
+                            exc.code if isinstance(exc, DevError) else "claim_internal_error",
+                            self.c.clock(),
+                            pid,
+                        ),
+                    )
                     self.refresh(row["delivery_id"])
             return None
 
@@ -658,7 +683,11 @@ class ChannelRouter:
             def reject(exc=exc):
                 self.store.execute(
                     "UPDATE channel_mirror_parts SET state='rejected',reason_code=? WHERE id=? AND state='preparing' AND lease_fence=?",
-                    (exc.code if isinstance(exc, DevError) else "preparation_internal_error", claim["id"], claim["lease_fence"]),
+                    (
+                        exc.code if isinstance(exc, DevError) else "preparation_internal_error",
+                        claim["id"],
+                        claim["lease_fence"],
+                    ),
                 )
                 self.refresh(claim["delivery"]["id"])
 
@@ -768,7 +797,8 @@ class ChannelRouter:
         if rows:
             for part in self.store.all(
                 "SELECT delivery_id,ordinal,kind,state,reason_code FROM channel_mirror_parts WHERE delivery_id IN ("
-                + ",".join("?" for _ in rows) + ") ORDER BY delivery_id,ordinal",
+                + ",".join("?" for _ in rows)
+                + ") ORDER BY delivery_id,ordinal",
                 tuple(row["id"] for row in rows),
             ):
                 delivery_id = part.pop("delivery_id")
@@ -777,23 +807,35 @@ class ChannelRouter:
             row["parts"] = parts.get(row["id"], [])
             result.setdefault(row["message_id"], []).append(row)
         for message_id, recorded in self.reply_dispositions(ids).items():
-            active = {(item["channel"], item.get("binding_id")) for item in result.get(message_id, [])
-                      if item.get("kind") != "status"}
+            active = {
+                (item["channel"], item.get("binding_id"))
+                for item in result.get(message_id, [])
+                if item.get("kind") != "status"
+            }
             for disposition in recorded:
                 if disposition["disposition"] not in {"blocked", "rejected"}:
                     continue
                 if (disposition["channel"], disposition.get("binding_id")) in active:
                     continue
                 # A blocked intent without an outbox has no control target.
-                result.setdefault(message_id, []).append({
-                    **disposition, "state": disposition["disposition"], "parts": [],
-                    "delivered_verified": False, "read_verified": False,
-                })
+                result.setdefault(message_id, []).append(
+                    {
+                        **disposition,
+                        "state": disposition["disposition"],
+                        "parts": [],
+                        "delivered_verified": False,
+                        "read_verified": False,
+                    }
+                )
             if not recorded and message_id not in result:
-                result[message_id] = [{
-                    "channel": "weixin", "state": "insufficient_evidence", "parts": [],
-                    "reason_code": "legacy_disposition_unavailable",
-                }]
+                result[message_id] = [
+                    {
+                        "channel": "weixin",
+                        "state": "insufficient_evidence",
+                        "parts": [],
+                        "reason_code": "legacy_disposition_unavailable",
+                    }
+                ]
         return result
 
     def reply_dispositions(self, ids):
@@ -802,7 +844,8 @@ class ChannelRouter:
         if not ids:
             return {}
         marks = ",".join("?" for _ in ids)
-        rows = self.store.all(f"""SELECT m.id, (
+        rows = self.store.all(
+            f"""SELECT m.id, (
             SELECT r.result FROM room_runtime_receipts r
             WHERE r.owner_user_id=c.owner_user_id AND r.conversation_id=c.id
                 AND json_valid(r.result) AND json_extract(r.result,'$.message_id')=m.id
@@ -814,8 +857,10 @@ class ChannelRouter:
             WHERE m.id IN ({marks}) AND m.kind='reply' AND m.source_id LIKE 'room-reply:%'""",
             tuple(ids),
         )
-        return {row["id"]: json.loads(row["receipt"])["channel_dispositions"] if row["receipt"] else []
-                for row in rows}
+        return {
+            row["id"]: json.loads(row["receipt"])["channel_dispositions"] if row["receipt"] else []
+            for row in rows
+        }
 
     def control(self, raw, principal):
         with self.store.transaction():
@@ -832,9 +877,7 @@ class ChannelRouter:
             def save():
                 if args["action"] == "confirm_received":
                     if not args["confirmation_note"].strip():
-                        raise DevError(
-                            "CHANNEL_CONFIRMATION_REQUIRED", "须填写人工核对依据", 422
-                        )
+                        raise DevError("CHANNEL_CONFIRMATION_REQUIRED", "须填写人工核对依据", 422)
                     self.store.execute(
                         "UPDATE channel_mirror_parts SET state='owner_confirmed' WHERE delivery_id=? AND state='unknown'",
                         (row["id"],),
@@ -854,6 +897,4 @@ class ChannelRouter:
                 )
                 return {"delivery_id": row["id"], "automatic_resend": False}
 
-            return self.c.mutation(
-                principal, room, "channel_delivery_control", args, save
-            )
+            return self.c.mutation(principal, room, "channel_delivery_control", args, save)

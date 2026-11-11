@@ -918,6 +918,8 @@ async function renderPage(showLoading = true) {
     $('#page').innerHTML = uiLoadingPage(page);
   }
   try {
+    await window.CodePierAssets.load(page);
+    if (seq !== S.renderSeq || !S.session || page !== S.page) return;
     let html = '';
     if (['identity', 'members', 'identity-admin'].includes(page)) {
       html = await CodePierIdentity.html(page);
@@ -1527,7 +1529,7 @@ function workbenchHTML() {
   return (
     heading(
       '远程工作台',
-      'DEVELOPMENT / WORKBENCH',
+      '项目开发',
       '',
       `<button class="btn ghost" data-devtools="validation">${icon('check')}测试验收</button><button class="btn ghost" data-insight="search">${icon('search')}项目检索</button><button class="btn ghost" data-local-skills>${icon('file')}本地技能</button>${uiMenu('工具', more)}`,
     ) +
@@ -2191,8 +2193,7 @@ async function runTask() {
       if (S.work.operation) {
         try {
           const old = await api('/api/operations/' + S.work.operation);
-          if (old.pending)
-            throw new Error('当前任务仍在执行或恢复连接，请查看原任务，不要重复运行。');
+          if (old.pending) throw new Error('当前任务仍在执行或恢复连接，请打开任务查看进度。');
         } catch (error) {
           if (error.code !== 'OPERATION_NOT_FOUND') throw error;
           trackTask(null);
@@ -2324,7 +2325,7 @@ async function auditHTML(seq = S.renderSeq) {
   return (
     heading(
       '操作审计',
-      'AUDIT TRAIL / OBSERVABILITY',
+      '调用记录',
       '',
       `<button class="btn ghost" data-action="export-audit">${icon('download')}导出审计 CSV</button>`,
     ) +
@@ -2788,6 +2789,8 @@ panelActions.register(['edit-project'], async (b, e) => {
   return;
 });
 panelActions.register(['project-collaboration'], async (b) => {
+  await window.CodePierAssets.load('collaboration');
+  if (!S.session) return;
   await CodePierCollaboration.open(b.dataset.id);
 });
 panelActions.register(['open-project'], async (b, e) => {

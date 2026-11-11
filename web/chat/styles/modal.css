@@ -1,0 +1,215 @@
+/* Native modal: a deliberate, cancellable project choice, bounded at every size. */
+.chat-workspace .chat-project-sheet {
+  width: min(580px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 24px;
+  border: 1px solid var(--chat-border);
+  border-radius: var(--ui-radius-xl, 20px);
+  background: var(--chat-bg);
+  color: var(--chat-fg);
+  box-shadow: var(--chat-shadow);
+  overflow: hidden;
+}
+.chat-workspace .chat-project-sheet[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.chat-project-sheet::backdrop {
+  background: var(--chat-scrim);
+}
+.chat-project-sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex: none;
+}
+.chat-project-sheet-head > div {
+  min-width: 0;
+}
+.chat-project-sheet-head h2 {
+  margin: 5px 0 0;
+  font-size: var(--ui-text-h2, 22px);
+  line-height: 1.3;
+  font-weight: var(--ui-weight-bold, 700);
+  letter-spacing: -0.4px;
+}
+.chat-project-sheet-head .chat-eyebrow {
+  font-size: var(--ui-text-xs, 12px);
+  color: var(--chat-muted);
+}
+.chat-project-sheet-head .chat-square {
+  margin-top: -6px;
+  margin-right: -8px;
+  font-size: var(--ui-text-h2, 22px);
+}
+#chat-project-dialog-description {
+  flex: none;
+  margin: 0;
+  font-size: var(--ui-text-xs, 12px);
+  line-height: 1.7;
+  color: var(--chat-muted);
+}
+#chat-project-search {
+  flex: none;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  font-size: var(--ui-text-base, 14px);
+}
+#chat-project-results {
+  min-height: 0;
+  max-height: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 3px;
+  margin: -3px;
+}
+.chat-project-option {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  padding: 13px 11px;
+  margin: 2px 0;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-md, 12px);
+  background: none;
+}
+.chat-project-option > span:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.chat-project-option strong {
+  font-size: var(--ui-text-base, 14px);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.chat-project-option small {
+  font-size: var(--ui-text-xs, 12px);
+  color: var(--chat-muted);
+  line-height: 1.5;
+}
+.chat-project-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-text-xs, 12px);
+  font-family: var(--chat-mono);
+  color: var(--chat-soft);
+}
+.chat-project-initial {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-accent-soft);
+  font-size: var(--ui-text-input, 16px);
+  font-weight: var(--ui-weight-bold, 700);
+  color: var(--chat-accent);
+}
+.chat-project-option:hover:not(:disabled),
+.chat-project-option[data-keyboard='true'] {
+  background: var(--chat-hover);
+  border-color: var(--chat-border);
+}
+.chat-project-option:disabled {
+  opacity: 0.6;
+}
+.chat-project-sheet-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--chat-line);
+  flex: none;
+}
+.chat-project-sheet-foot > span {
+  color: var(--chat-soft);
+  font-size: var(--ui-text-xs, 12px);
+}
+.chat-project-sheet-foot button {
+  min-height: 36px;
+}
+
+@media (max-width: 760px) {
+  .chat-history-scope select,
+  .chat-history-heading button,
+  .chat-history-pages button {
+    min-height: 40px;
+  }
+  .chat-new-context {
+    padding: 7px 9px;
+    margin-bottom: 7px;
+    gap: 2px 4px;
+  }
+  .chat-new-context select,
+  #chat-change-project {
+    min-height: 40px;
+  }
+  .chat-workspace .chat-project-sheet {
+    width: calc(100vw - 20px);
+    max-width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+    padding: 18px;
+    border-radius: var(--ui-radius-xl, 20px);
+  }
+  .chat-project-sheet-head h2 {
+    font-size: var(--ui-text-h2, 22px);
+  }
+  #chat-project-search {
+    font-size: var(--ui-text-input, 16px);
+  }
+  .chat-project-sheet-foot button {
+    min-height: 44px;
+  }
+}
+@media (max-height: 520px) {
+  .chat-history-heading {
+    min-height: 24px;
+  }
+  .chat-sidebar {
+    gap: 5px;
+  }
+  .chat-sidebar-footer {
+    gap: 0;
+    padding-top: 3px;
+  }
+  .chat-new-context {
+    padding-block: 4px;
+    margin-bottom: 4px;
+  }
+  #chat-target-info {
+    display: none;
+  }
+  .chat-workspace .chat-project-sheet[open] {
+    gap: 8px;
+    padding: 13px 18px;
+  }
+  .chat-project-sheet-head h2 {
+    font-size: var(--ui-text-title, 18px);
+    margin: 0;
+  }
+  .chat-project-sheet-head .chat-eyebrow,
+  .chat-project-sheet-foot > span {
+    display: none;
+  }
+  #chat-project-dialog-description {
+    font-size: var(--ui-text-xs, 12px);
+    line-height: 1.4;
+  }
+  .chat-project-option {
+    padding: 8px;
+  }
+}

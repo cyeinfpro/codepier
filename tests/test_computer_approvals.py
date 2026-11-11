@@ -117,5 +117,5 @@ async def test_hub_codepier_live_operation_and_panel_only_routes(tmp_path):
     assert sent[0]['action']=='decline' and not inbox.list()
     with pytest.raises(DevError):await inbox.decide(key,'accept',principal)
     inbox.receive('d',connection,{**data,'request_id':uuid.uuid4().hex})
-    rt.detach_connection('d',connection);assert not inbox.list()
+    await rt.detach('d',connection);assert not inbox.list()
     store.close()

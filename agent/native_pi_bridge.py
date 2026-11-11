@@ -5,15 +5,15 @@ be attached. Native config, auth, tools, approvals and other extensions are inta
 The source lives in a Python package member so existing Agent ZIP allowlists and
 one-click update installers transport it without additional package exceptions.
 """
+
 from __future__ import annotations
 import hashlib
-import json
 import os
 from pathlib import Path
 from shared.native_cli import identifier
 from shared.util import atomic_json
 
-BRIDGE_SOURCE = r'''import fs from 'node:fs';
+BRIDGE_SOURCE = r"""import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -68,10 +68,10 @@ export default function codepierNativeImageInput(pi) {
     }
   });
 }
-'''
+"""
 
 
-SHELL_GUARD_SOURCE = r'''export default function codepierShellTimeout(pi) {
+SHELL_GUARD_SOURCE = r"""export default function codepierShellTimeout(pi) {
   pi.on('tool_call', (event) => {
     // Pi applies in-place input changes before invoking its native Bash tool.
     // Keep explicit deadlines and native validation; never replay a timed-out command.
@@ -80,31 +80,33 @@ SHELL_GUARD_SOURCE = r'''export default function codepierShellTimeout(pi) {
     }
   });
 }
-'''
+"""
 
 
 def prepare_shell_guard(directory: Path) -> Path:
-    return _prepare_extension(directory, SHELL_GUARD_SOURCE, 'codepier-shell-timeout')
+    return _prepare_extension(directory, SHELL_GUARD_SOURCE, "codepier-shell-timeout")
 
 
 def prepare_extension(directory: Path) -> Path:
-    return _prepare_extension(directory, BRIDGE_SOURCE, 'codepier-images')
+    return _prepare_extension(directory, BRIDGE_SOURCE, "codepier-images")
 
 
 def _prepare_extension(directory: Path, source: str, prefix: str) -> Path:
-    folder = directory / 'extensions'
+    folder = directory / "extensions"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     if folder.is_symlink():
-        raise ValueError('Unsafe Pi extension directory')
+        raise ValueError("Unsafe Pi extension directory")
     raw = source.encode()
-    target = folder / (prefix + '-' + hashlib.sha256(raw).hexdigest()[:16] + '.mjs')
+    target = folder / (prefix + "-" + hashlib.sha256(raw).hexdigest()[:16] + ".mjs")
     try:
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        fd = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
     except FileExistsError:
         if target.is_symlink() or target.read_bytes() != raw:
-            raise ValueError('Pi extension integrity mismatch')
+            raise ValueError("Pi extension integrity mismatch") from None
     else:
-        with os.fdopen(fd, 'wb') as output:
+        with os.fdopen(fd, "wb") as output:
             output.write(raw)
             output.flush()
             os.fsync(output.fileno())
@@ -112,18 +114,24 @@ def _prepare_extension(directory: Path, source: str, prefix: str) -> Path:
 
 
 def image_manifest(directory: Path, sid: str) -> Path:
-    folder = directory / 'image-manifests'
+    folder = directory / "image-manifests"
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     if folder.is_symlink():
-        raise ValueError('Unsafe image manifest directory')
-    return folder / (identifier(sid) + '.json')
+        raise ValueError("Unsafe image manifest directory")
+    return folder / (identifier(sid) + ".json")
 
 
 def sync_manifest(directory: Path, db, sid: str) -> Path:
-    records = db.execute('SELECT a.* FROM attachments a JOIN session_files s ON s.file=a.id WHERE s.session=? AND a.ready=1', (sid,)).fetchall()
-    files = {r['id']: {'path':r['path'],'name':r['name'],'size':r['size'],'sha256':r['sha']} for r in records}
-    destination = image_manifest(directory,sid)
+    records = db.execute(
+        "SELECT a.* FROM attachments a JOIN session_files s ON s.file=a.id WHERE s.session=? AND a.ready=1",
+        (sid,),
+    ).fetchall()
+    files = {
+        r["id"]: {"path": r["path"], "name": r["name"], "size": r["size"], "sha256": r["sha"]}
+        for r in records
+    }
+    destination = image_manifest(directory, sid)
     if destination.is_symlink():
-        raise ValueError('Unsafe image manifest path')
-    atomic_json(destination, {'version':1,'session_id':sid,'files':files})
+        raise ValueError("Unsafe image manifest path")
+    atomic_json(destination, {"version": 1, "session_id": sid, "files": files})
     return destination

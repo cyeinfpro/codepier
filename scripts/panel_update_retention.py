@@ -18,6 +18,7 @@ Old unlabelled objects are intentionally manual-only. Job/key records are never
 candidates. A plan is not permission to delete: any future executor needs separate
 approval and fresh state-hash comparison under the deployment lock.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,7 +38,9 @@ REF_FIELDS = ("current_mount_refs", "env_refs", "current_json_refs", "rollback_r
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
 
 
 def digest(value):
@@ -47,6 +50,7 @@ def digest(value):
 @dataclass(frozen=True)
 class RetentionManifest:
     """Immutable bytes-equivalent manifest; decoded views cannot mutate approval."""
+
     canonical_json: str
     sha256: str
 
@@ -62,8 +66,13 @@ def _refs(value):
 
 def _job_refs(job):
     refs = list(_refs(job.get("refs", [])))
-    for field, kind in (("old_volume", "volume"), ("new_volume", "volume"),
-                        ("old_image", "image"), ("image", "image"), ("source", "source")):
+    for field, kind in (
+        ("old_volume", "volume"),
+        ("new_volume", "volume"),
+        ("old_image", "image"),
+        ("image", "image"),
+        ("source", "source"),
+    ):
         if job.get(field):
             refs.append(kind + ":" + str(job[field]))
     backup = job.get("backup", {})
@@ -91,8 +100,13 @@ def plan_retention(inventory):
     deployment = data.get("deployment")
     current = data.get("current_version")
     global_reasons = []
-    if (data.get("complete") is not True or not isinstance(deployment, str) or not deployment
-            or not isinstance(current, str) or not VERSION.fullmatch(current)):
+    if (
+        data.get("complete") is not True
+        or not isinstance(deployment, str)
+        or not deployment
+        or not isinstance(current, str)
+        or not VERSION.fullmatch(current)
+    ):
         global_reasons.append("incomplete_inventory")
     if data.get("deploy_lock") is not False:
         global_reasons.append("deployment_lock_or_unknown")
@@ -100,8 +114,10 @@ def plan_retention(inventory):
         if field not in data:
             global_reasons.append("missing_" + field)
     protected = {}
+
     def pin(ref, reason):
         protected.setdefault(ref, set()).add(reason)
+
     for field in REF_FIELDS:
         for ref in _refs(data.get(field, [])):
             pin(ref, field)
@@ -117,7 +133,12 @@ def plan_retention(inventory):
     failed_refs = set()
     for job in jobs:
         refs = _job_refs(job)
-        if not job.get("id") or not job.get("kind") or not job.get("state") or not job.get("deployment"):
+        if (
+            not job.get("id")
+            or not job.get("kind")
+            or not job.get("state")
+            or not job.get("deployment")
+        ):
             global_reasons.append("incomplete_job_metadata")
         if job.get("deployment") != deployment:
             # Cross-deployment records cannot establish successful history.
@@ -135,7 +156,11 @@ def plan_retention(inventory):
         if state in {"failed", "rolled_back", "cancelled"}:
             candidate_refs = {
                 kind + ":" + str(job[field])
-                for field, kind in (("new_volume", "volume"), ("image", "image"), ("source", "source"))
+                for field, kind in (
+                    ("new_volume", "volume"),
+                    ("image", "image"),
+                    ("source", "source"),
+                )
                 if job.get(field)
             }
             failed_refs.update(candidate_refs)
@@ -154,8 +179,12 @@ def plan_retention(inventory):
                 pin(ref, "failed_job_rollback_reference")
         if state == "succeeded":
             timestamp = job.get("updated")
-            if (job.get("commit_decided") is not True or not isinstance(timestamp, (int, float))
-                    or isinstance(timestamp, bool) or not math.isfinite(timestamp)):
+            if (
+                job.get("commit_decided") is not True
+                or not isinstance(timestamp, (int, float))
+                or isinstance(timestamp, bool)
+                or not math.isfinite(timestamp)
+            ):
                 global_reasons.append("ambiguous_successful_job")
                 continue
             for version in (job.get("from_version"), job.get("target_version")):
@@ -164,11 +193,13 @@ def plan_retention(inventory):
                 elif version != current:
                     historical[version] = max(historical.get(version, -1), timestamp)
     # A successful transition's target is newer than its from_version on ties.
-    retained = sorted(historical, key=lambda v: (historical[v], tuple(map(int, v.split(".")))), reverse=True)[:2]
+    retained = sorted(
+        historical, key=lambda v: (historical[v], tuple(map(int, v.split(".")))), reverse=True
+    )[:2]
     ids = [str(o.get("kind", "")) + ":" + str(o.get("name", "")) for o in objects]
     duplicates = Counter(ids)
     entries = []
-    for obj, identity in zip(objects, ids):
+    for obj, identity in zip(objects, ids):  # noqa: B905 -- host Python 3.9; ids is derived from objects.
         reasons = set(global_reasons) | protected.get(identity, set())
         labels = obj.get("labels")
         version = obj.get("version")
@@ -176,7 +207,11 @@ def plan_retention(inventory):
         reasons.update("object_reference:" + ref for ref in refs)
         if duplicates[identity] > 1:
             reasons.add("ambiguous_duplicate_identity")
-        if obj.get("kind") not in KINDS or not isinstance(obj.get("name"), str) or not obj.get("name"):
+        if (
+            obj.get("kind") not in KINDS
+            or not isinstance(obj.get("name"), str)
+            or not obj.get("name")
+        ):
             reasons.add("unknown_object_kind_or_name")
         if not isinstance(labels, dict):
             reasons.add("missing_labels")
@@ -199,24 +234,47 @@ def plan_retention(inventory):
         elif version in retained:
             reasons.add("retained_historical_version")
         known_version = isinstance(version, str) and bool(VERSION.fullmatch(version))
-        group = "failed_candidate" if identity in failed_refs and (not known_version or version not in historical) else "historical"
-        if group == "historical" and version != current and (not known_version or version not in historical):
+        group = (
+            "failed_candidate"
+            if identity in failed_refs and (not known_version or version not in historical)
+            else "historical"
+        )
+        if (
+            group == "historical"
+            and version != current
+            and (not known_version or version not in historical)
+        ):
             reasons.add("no_successful_version_evidence")
-        entries.append({
-            "id": identity, "kind": obj.get("kind"), "name": obj.get("name"),
-            "labels": labels, "version": version, "allocated_bytes": size,
-            "references": sorted(set(refs) | protected.get(identity, set())),
-            "protection_reasons": sorted(reasons), "group": group,
-            "disposition": "protected" if reasons else "review_candidate",
-            "expected_object_sha256": digest(obj),
-        })
+        entries.append(
+            {
+                "id": identity,
+                "kind": obj.get("kind"),
+                "name": obj.get("name"),
+                "labels": labels,
+                "version": version,
+                "allocated_bytes": size,
+                "references": sorted(set(refs) | protected.get(identity, set())),
+                "protection_reasons": sorted(reasons),
+                "group": group,
+                "disposition": "protected" if reasons else "review_candidate",
+                "expected_object_sha256": digest(obj),
+            }
+        )
     body = {
-        "schema_version": 1, "mode": "read_only", "deletion_authorized": False,
-        "deployment": deployment, "current_version": current,
-        "historical_versions_to_keep": retained, "history_limit": 2,
+        "schema_version": 1,
+        "mode": "read_only",
+        "deletion_authorized": False,
+        "deployment": deployment,
+        "current_version": current,
+        "historical_versions_to_keep": retained,
+        "history_limit": 2,
         "expected_state_sha256": digest(data),
-        "expected_reference_sha256": digest({k: data.get(k) for k in (*REF_FIELDS, "containers", "jobs", "deploy_lock")}),
-        "objects": sorted(entries, key=lambda entry: (entry["id"], entry["expected_object_sha256"])),
+        "expected_reference_sha256": digest(
+            {k: data.get(k) for k in (*REF_FIELDS, "containers", "jobs", "deploy_lock")}
+        ),
+        "objects": sorted(
+            entries, key=lambda entry: (entry["id"], entry["expected_object_sha256"])
+        ),
         "warnings": sorted(set(global_reasons)),
     }
     encoded = canonical(body)
@@ -224,7 +282,9 @@ def plan_retention(inventory):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Read-only retention manifest from trusted inventory JSON; never deletes")
+    parser = argparse.ArgumentParser(
+        description="Read-only retention manifest from trusted inventory JSON; never deletes"
+    )
     parser.add_argument("inventory", type=Path)
     args = parser.parse_args(argv)
     manifest = plan_retention(json.loads(args.inventory.read_text(encoding="utf-8")))

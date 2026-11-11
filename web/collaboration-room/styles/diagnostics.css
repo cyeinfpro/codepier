@@ -1,0 +1,191 @@
+/* ------------------------------------------------------------------------
+   Diagnostics, Context & Deliveries
+   ------------------------------------------------------------------------ */
+.cr-diagnostics {
+  margin-top: 22px;
+  border-top: 1px solid var(--cr-line);
+  padding-top: 14px;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-diagnostics summary {
+  cursor: pointer;
+}
+
+.cr-diagnostics dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.cr-diagnostics dd {
+  margin: 0;
+}
+
+.cr-error {
+  font-size: var(--ui-text-xs);
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 22px 20px;
+  overflow-wrap: anywhere;
+}
+
+.cr-diagnostic-output {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--ui-text-xs);
+  line-height: 1.7;
+}
+
+.cr-deliveries {
+  margin: 12px 0;
+  font-size: var(--ui-text-xs);
+  line-height: 1.6;
+}
+
+.cr-delivery {
+  border-top: 1px solid var(--cr-line);
+}
+
+.cr-delivery summary,
+.cr-inspection-section summary,
+.cr-impact summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 11px 0;
+  box-sizing: border-box;
+  font-weight: var(--ui-weight-semibold);
+}
+
+.cr-work-delivery {
+  color: var(--cr-blue);
+}
+
+.cr-delivery-title {
+  display: block;
+  padding-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.cr-delivery[data-state='unknown'] .cr-delivery-title {
+  font-weight: var(--ui-weight-semibold);
+}
+
+.cr-delivery [data-cr-delivery-control-preview]:not(:empty) {
+  border-inline-start: 2px solid var(--ui-warning);
+  padding-inline-start: 10px;
+}
+
+.cr-delivery-parts {
+  padding-left: 20px;
+}
+
+.cr-delivery-parts li {
+  padding: 5px 0;
+  overflow-wrap: anywhere;
+}
+
+.cr-delivery-parts p,
+.cr-delivery p {
+  margin: 5px 0;
+}
+
+.cr-delivery-parts small,
+.cr-impact small {
+  display: block;
+}
+
+.cr-delivery [data-state='unknown'] strong,
+.cr-delivery [data-state='needs_attention'] strong {
+  color: var(--ui-warning);
+}
+
+.cr-inspection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cr-inspection-section {
+  margin: 22px 0;
+  font-size: var(--ui-text-xs);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.cr-inspection-section h3 {
+  font-size: var(--ui-text-base);
+  margin-bottom: 10px;
+}
+
+.cr-inspection-section h4 {
+  margin: 12px 0 4px;
+  font-size: var(--ui-text-xs);
+}
+
+.cr-inspection-section > details,
+.cr-inspection-section > article {
+  border-top: 1px solid var(--cr-line);
+}
+
+.cr-facts {
+  margin: 5px 0 14px;
+  font-size: var(--ui-text-xs);
+  line-height: 1.7;
+}
+
+.cr-facts > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) minmax(0, 1.3fr);
+  gap: 14px;
+  padding: 4px 0;
+}
+
+.cr-facts dt {
+  color: var(--cr-muted);
+}
+
+.cr-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cr-context-fact {
+  margin: 18px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--cr-line);
+}
+
+.cr-context-fact h3 {
+  font-size: var(--ui-text-sm);
+  margin: 0 0 8px;
+}
+
+.cr-context-text {
+  font-size: var(--ui-text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+
+.cr-context-sources {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.cr-mobile {
+  display: none;
+}
+
+@keyframes cr-panel-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

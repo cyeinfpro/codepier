@@ -130,7 +130,7 @@ def test_records_bind_owner_mapping_device_and_workspace(workspace):
     assert records.load('validation',identifier,admin)['state']=='passed'
     records.save('validation',identifier,admin,{'state':'rejected'},replace=True)
     assert records.load('validation',identifier,project)['state']=='rejected'
-    assert records.list('validation',{**project,'_integration_owner':'other'})==[]
+    assert records.list_page('validation',{**project,'_integration_owner':'other'})=={'records':[],'record_errors':[]}
 
 
 def test_source_fingerprint_tracks_content_and_mode_not_secrets(workspace):
@@ -154,7 +154,8 @@ def test_source_budget_is_not_a_valid_whole_project_pass(workspace,monkeypatch):
 def test_validation_is_bound_to_exact_version_and_acceptance_requires_owner(workspace):
     engine,project,root=workspace;project=bound(project);(root/'source.py').write_text('answer=42\n')
     async def execute(*_):return {'exit_code':0,'output':'controlled validation result','duration_ms':1,'timed_out':False,'cancelled':False}
-    agent=SimpleNamespace(engine=engine,execute=execute);service=Validations(agent,Records(engine.journal));identifier=uuid.uuid4().hex
+    from agent.runner import Agent
+    agent=SimpleNamespace(engine=engine,execute=execute,disk_call=Agent.disk_call);service=Validations(agent,Records(engine.journal));identifier=uuid.uuid4().hex
     args={'project':'P','command':'fixture','cwd':'.','env':{},'timeout_seconds':5,'label':'Unit fixture'}
     result=asyncio.run(service.run(identifier,project,args));assert result['state']=='passed'
     decision={'validation_id':identifier,'confirm':identifier,'decision':'accept','note':'Reviewed'}

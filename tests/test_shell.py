@@ -19,7 +19,7 @@ from agent.config import validate_config
 from agent.runner import Agent
 from agent.journal import Journal
 from agent.shell import execution_info
-from hub.runtime import Principal, Runtime, remote_codex_denial
+from hub.runtime import Principal, Runtime, remote_execution_denial
 from shared.contracts import ShellExec, tool_definitions
 from shared.crypto import token
 from shared.util import DevError, atomic_json, safe_summary
@@ -190,11 +190,11 @@ async def test_remote_codex_policy_blocks_before_dispatch_but_preserves_admin_an
 
     assert len(store.rows) == len(attempts)
     assert all(row[1]["status"] == "denied" for row in store.rows)
-    assert remote_codex_denial("shell_exec", {"command": "printf ordinary-shell"}, principal) is None
-    assert remote_codex_denial("computer_status", {"probe": False}, principal) is None
-    assert remote_codex_denial("computer_session_close", {}, principal) is None
+    assert remote_execution_denial("shell_exec", {"command": "printf ordinary-shell"}, principal) is None
+    assert remote_execution_denial("computer_status", {"probe": False}, principal) is None
+    assert remote_execution_denial("computer_session_close", {}, principal) is None
     admin = Principal("panel:admin", "user", {"read", "execute", "computer"}, ["*"], admin=True)
-    assert remote_codex_denial("shell_exec", {"command": "codex --version"}, admin) is None
+    assert remote_execution_denial("shell_exec", {"command": "codex --version"}, admin) is None
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ Never trust a storage-provider suffix or a caller-supplied file_id. New native
 hosts require an independently verified host-file roundtrip or owner approval.
 Signed URLs, object paths and file IDs must not appear in this registry/logs.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -11,60 +12,71 @@ import re
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
-FILE_SOURCE_POLICY_VERSION = '2026-10-09'
-FILE_SOURCE_PROVIDERS = MappingProxyType({
-    'openai': (
-        'files.oaiusercontent.com',
-        'cdn.openai.com',
-        # Observed through the native top-level file parameter on 2026-09-26.
-        # Exact storage account only: other Azure tenants/prefixes are untrusted.
-        'oaisdmntprkoreacentral.blob.core.windows.net',
-    ),
-})
-DEFAULT_FILE_HOSTS = tuple(dict.fromkeys(host for hosts in FILE_SOURCE_PROVIDERS.values() for host in hosts))
+FILE_SOURCE_POLICY_VERSION = "2026-10-09"
+FILE_SOURCE_PROVIDERS = MappingProxyType(
+    {
+        "openai": (
+            "files.oaiusercontent.com",
+            "cdn.openai.com",
+            # Observed through the native top-level file parameter on 2026-09-26.
+            # Exact storage account only: other Azure tenants/prefixes are untrusted.
+            "oaisdmntprkoreacentral.blob.core.windows.net",
+        ),
+    }
+)
+DEFAULT_FILE_HOSTS = tuple(
+    dict.fromkeys(host for hosts in FILE_SOURCE_PROVIDERS.values() for host in hosts)
+)
 DEFAULT_MAX_IMPORT_BYTES = 128 * 1024 * 1024
 MAX_IMPORT_BYTES = 512 * 1024 * 1024
 # Optional, named profiles are OFF by default and never inferred from a file.
 # Only a single label beneath OpenAI's own content domain is eligible. No
 # Azure/AWS suffix is trusted: those namespaces include unrelated tenants.
-FILE_SOURCE_PROFILE_NAMES = frozenset({'openai_sediment'})
-_OPENAI_SEDIMENT_HOST = re.compile(r'sdmntpr[a-z0-9]{1,56}\.oaiusercontent\.com\Z')
-_LABEL = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z')
+FILE_SOURCE_PROFILE_NAMES = frozenset({"openai_sediment"})
+_OPENAI_SEDIMENT_HOST = re.compile(r"sdmntpr[a-z0-9]{1,56}\.oaiusercontent\.com\Z")
+_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 def normalize_file_host(value: str) -> str:
     """Canonicalize one exact DNS name; never accept patterns, URLs or IPs."""
     if not isinstance(value, str) or not value or len(value) > 254 or not value.isascii():
-        raise ValueError('文件来源应为精确 ASCII 主机名')
-    host = value.lower().removesuffix('.')
-    if len(host) > 253 or '.' not in host or any(not _LABEL.fullmatch(label) for label in host.split('.')):
-        raise ValueError('文件来源不接受通配符、URL、端口、凭据或无效 DNS 标签')
+        raise ValueError("文件来源应为精确 ASCII 主机名")
+    host = value.lower().removesuffix(".")
+    if (
+        len(host) > 253
+        or "." not in host
+        or any(not _LABEL.fullmatch(label) for label in host.split("."))
+    ):
+        raise ValueError("文件来源不接受通配符、URL、端口、凭据或无效 DNS 标签")
     try:
         ipaddress.ip_address(host)
     except ValueError:
         return host
-    raise ValueError('文件来源必须为 DNS 主机名，不能是 IP 地址')
+    raise ValueError("文件来源必须为 DNS 主机名，不能是 IP 地址")
 
 
 def normalize_file_hosts(value: object, label: str) -> list[str]:
     if not isinstance(value, (list, tuple)) or len(value) > 20:
-        raise ValueError(label + ' 必须为至多 20 个精确主机名的数组')
+        raise ValueError(label + " 必须为至多 20 个精确主机名的数组")
     # Empty is an intentional deny-all base, not a request for defaults.
     return list(dict.fromkeys(normalize_file_host(host) for host in value))
 
 
 def file_source_hosts(config: dict) -> tuple[str, ...]:
     """Preserve explicit restrictions; extensions add only owner-named hosts."""
-    base = normalize_file_hosts(config.get('file_hosts', DEFAULT_FILE_HOSTS), 'file_hosts')
-    extra = normalize_file_hosts(config.get('extra_file_hosts', []), 'extra_file_hosts')
+    base = normalize_file_hosts(config.get("file_hosts", DEFAULT_FILE_HOSTS), "file_hosts")
+    extra = normalize_file_hosts(config.get("extra_file_hosts", []), "extra_file_hosts")
     return tuple(dict.fromkeys([*base, *extra]))
 
 
 def normalize_file_source_providers(value: object) -> list[str]:
     """Accept only explicit named profiles; never arbitrary regex/wildcards."""
-    if (not isinstance(value, (list, tuple)) or len(value) > 20
-            or any(not isinstance(item, str) or item not in FILE_SOURCE_PROFILE_NAMES for item in value)):
-        raise ValueError('file_source_providers 仅接受受支持的命名来源数组：openai_sediment')
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) > 20
+        or any(not isinstance(item, str) or item not in FILE_SOURCE_PROFILE_NAMES for item in value)
+    ):
+        raise ValueError("file_source_providers 仅接受受支持的命名来源数组：openai_sediment")
     return list(dict.fromkeys(value))
 
 
@@ -72,19 +84,23 @@ def source_host_allowed(host: str, hosts, providers=()) -> bool:
     """Match normalized exact hosts or a separately owner-enabled profile."""
     host = normalize_file_host(host)
     enabled = normalize_file_source_providers(providers)
-    return host in hosts or ('openai_sediment' in enabled and _OPENAI_SEDIMENT_HOST.fullmatch(host) is not None)
+    return host in hosts or (
+        "openai_sediment" in enabled and _OPENAI_SEDIMENT_HOST.fullmatch(host) is not None
+    )
 
 
 def file_source_policy(config: dict) -> dict:
     """Describe current exact-host policy without changing or guessing consent."""
     return {
-        'source_policy_version': FILE_SOURCE_POLICY_VERSION,
-        'allowed_hosts': list(file_source_hosts(config)),
-        'max_bytes': config.get('max_import_bytes', DEFAULT_MAX_IMPORT_BYTES),
-        'policy_scope': 'execution_node',
-        'policy_mode': 'explicit' if 'file_hosts' in config else 'default',
-        'extra_hosts': normalize_file_hosts(config.get('extra_file_hosts', []), 'extra_file_hosts'),
-        'file_source_providers': normalize_file_source_providers(config.get('file_source_providers', [])),
+        "source_policy_version": FILE_SOURCE_POLICY_VERSION,
+        "allowed_hosts": list(file_source_hosts(config)),
+        "max_bytes": config.get("max_import_bytes", DEFAULT_MAX_IMPORT_BYTES),
+        "policy_scope": "execution_node",
+        "policy_mode": "explicit" if "file_hosts" in config else "default",
+        "extra_hosts": normalize_file_hosts(config.get("extra_file_hosts", []), "extra_file_hosts"),
+        "file_source_providers": normalize_file_source_providers(
+            config.get("file_source_providers", [])
+        ),
     }
 
 
@@ -92,46 +108,70 @@ def safe_import_error_detail(details: dict) -> dict:
     """Keep only bounded, source-safe diagnostics through durable receipts."""
     result = {}
     enums = {
-        'reason': {'invalid_url', 'unsupported_scheme', 'host_not_allowed',
-                   'dns_failed', 'dns_timeout', 'non_public_address', 'connect_failed',
-                   'tls_failed', 'source_access_or_expiry', 'http_error', 'transfer_failed'},
-        'stage': {'source_validation', 'redirect_validation', 'dns', 'connect', 'response', 'transfer'},
-        'recovery': {'review_local_file_sources', 'review_hub_file_sources', 'provide_native_file', 'check_agent_network',
-                     'refresh_native_file', 'retry_later', 'check_file_source'},
+        "reason": {
+            "invalid_url",
+            "unsupported_scheme",
+            "host_not_allowed",
+            "dns_failed",
+            "dns_timeout",
+            "non_public_address",
+            "connect_failed",
+            "tls_failed",
+            "source_access_or_expiry",
+            "http_error",
+            "transfer_failed",
+        },
+        "stage": {
+            "source_validation",
+            "redirect_validation",
+            "dns",
+            "connect",
+            "response",
+            "transfer",
+        },
+        "recovery": {
+            "review_local_file_sources",
+            "review_hub_file_sources",
+            "provide_native_file",
+            "check_agent_network",
+            "refresh_native_file",
+            "retry_later",
+            "check_file_source",
+        },
     }
     for key, values in enums.items():
         value = details.get(key)
         if isinstance(value, str) and value in values:
             result[key] = value
-    host = details.get('source_host')
-    if host == '':
-        result['source_host'] = ''
+    host = details.get("source_host")
+    if host == "":
+        result["source_host"] = ""
     elif isinstance(host, str):
         try:
-            result['source_host'] = normalize_file_host(host)
+            result["source_host"] = normalize_file_host(host)
         except ValueError:
             pass
-    scheme = details.get('source_scheme')
-    if isinstance(scheme, str) and re.fullmatch(r'[a-z][a-z0-9+.-]{0,31}|', scheme):
-        result['source_scheme'] = scheme
-    if type(details.get('request_sent')) is bool:
-        result['request_sent'] = details['request_sent']
-    status = details.get('http_status')
+    scheme = details.get("source_scheme")
+    if isinstance(scheme, str) and re.fullmatch(r"[a-z][a-z0-9+.-]{0,31}|", scheme):
+        result["source_scheme"] = scheme
+    if type(details.get("request_sent")) is bool:
+        result["request_sent"] = details["request_sent"]
+    status = details.get("http_status")
     if type(status) is int and 100 <= status <= 599:
-        result['http_status'] = status
+        result["http_status"] = status
     return result
 
 
 def source_metadata(value: object) -> dict[str, str]:
     """Return bounded scheme/host only, even for a rejected or malformed URL."""
-    result = {'source_scheme': '', 'source_host': ''}
+    result = {"source_scheme": "", "source_host": ""}
     if not isinstance(value, str) or len(value) > 8192:
         return result
     try:
         parsed = urlsplit(value)
-        if re.fullmatch(r'[a-z][a-z0-9+.-]{0,31}', parsed.scheme):
-            result['source_scheme'] = parsed.scheme
-        result['source_host'] = normalize_file_host(parsed.hostname or '')
+        if re.fullmatch(r"[a-z][a-z0-9+.-]{0,31}", parsed.scheme):
+            result["source_scheme"] = parsed.scheme
+        result["source_host"] = normalize_file_host(parsed.hostname or "")
     except (ValueError, UnicodeError):
         pass
     return result

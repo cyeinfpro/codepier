@@ -11,7 +11,7 @@ import agent.runner as runner
 from agent.journal import Journal
 from agent.runner import Agent
 from shared.crypto import token
-from shared.dot_outbox import DotOutbox
+from docs.examples.dot_outbox import DotOutbox
 from shared.util import DevError, atomic_json
 
 

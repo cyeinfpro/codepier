@@ -15,8 +15,12 @@ from shared.token_cost import DEFAULT_CACHE_READ_PERCENT
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
 from hub.api.activity import operation_rows, audit_rows
-from hub.token_dashboard import Period, token_dashboard_async, overview_token_snapshot, validate_dashboard_snapshot
-
+from hub.token_dashboard import (
+    Period,
+    token_dashboard_async,
+    overview_token_snapshot,
+    validate_dashboard_snapshot,
+)
 
 
 def make_system_router(context: HubContext):
@@ -29,14 +33,25 @@ def make_system_router(context: HubContext):
     @database_endpoint(store)
     def health():
         try:
-            ready = bool(not runtime.stopping and runtime.worker and not runtime.worker.done() and store.one("SELECT 1 AS ok"))
+            ready = bool(
+                not runtime.stopping
+                and runtime.worker
+                and not runtime.worker.done()
+                and store.one("SELECT 1 AS ok")
+            )
         except sqlite3.Error:
             ready = False
         if not ready:
             return JSONResponse({"status": "unavailable", "version": VERSION}, status_code=503)
-        return {"status": "ok", "version": VERSION, "panel_update": maintenance.status(),
-                "diagnostics": {"write_errors": runtime.diagnostics.errors,
-                                "activity_write_errors": runtime.integrations.write_errors}}
+        return {
+            "status": "ok",
+            "version": VERSION,
+            "panel_update": maintenance.status(),
+            "diagnostics": {
+                "write_errors": runtime.diagnostics.errors,
+                "activity_write_errors": runtime.integrations.write_errors,
+            },
+        }
 
     def overview_data(request, token_usage, token_snapshot):
         principal = auth.panel(request)
@@ -48,9 +63,19 @@ def make_system_router(context: HubContext):
         projects = runtime.list_projects(principal)
         clause, args = iam.private_sql(principal)
         if not principal.admin:
-            clause += ' AND (project_id IS NULL OR project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL')
+            clause += " AND (project_id IS NULL OR project_id IN (%s))" % (
+                ",".join("?" for _ in principal.projects) or "NULL"
+            )
             args.extend(principal.projects)
-        counts = {r['state']:r['n'] for r in store.all('SELECT state,count(*) AS n FROM operations WHERE '+clause+' AND created>=? GROUP BY state', (*args,today))}
+        counts = {
+            r["state"]: r["n"]
+            for r in store.all(
+                "SELECT state,count(*) AS n FROM operations WHERE "
+                + clause
+                + " AND created>=? GROUP BY state",
+                (*args, today),
+            )
+        }
         now = time.time()
         active_grants = store.one(
             """SELECT count(*) AS n FROM grants g
@@ -61,12 +86,30 @@ def make_system_router(context: HubContext):
                              AND t.kind IN ('access','refresh') AND t.expires>?)""",
             (principal.user_id, principal.space_id, now, now),
         )["n"]
-        return {"devices": devices, "projects": projects, "online_devices": sum(1 for d in devices if d["online"]),
-            "active_grants": active_grants, "today_operations": sum(counts.values()), "today_succeeded": counts.get("succeeded", 0), "today_failed": counts.get("failed", 0),
-            "active_operations": store.one("SELECT count(*) AS n FROM operations WHERE "+clause+" AND state IN ('running','queued','reconnecting','cancelling')",args)["n"],
-            "recent_operations": operation_rows(store, principal, limit=8), "recent_audit": audit_rows(store, principal, limit=6),
+        return {
+            "devices": devices,
+            "projects": projects,
+            "online_devices": sum(1 for d in devices if d["online"]),
+            "active_grants": active_grants,
+            "today_operations": sum(counts.values()),
+            "today_succeeded": counts.get("succeeded", 0),
+            "today_failed": counts.get("failed", 0),
+            "active_operations": store.one(
+                "SELECT count(*) AS n FROM operations WHERE "
+                + clause
+                + " AND state IN ('running','queued','reconnecting','cancelling')",
+                args,
+            )["n"],
+            "recent_operations": operation_rows(store, principal, limit=8),
+            "recent_audit": audit_rows(store, principal, limit=6),
             "token_usage": token_usage,
-            "mcp_url": public_url() + "/mcp", "role_mcp_url": public_url() + "/mcp?authorization=role", "version": VERSION, "tool_count": len(tool_definitions()), "native_core_tool_count": len(CORE_TOOLS), "timezone": str(tz)}
+            "mcp_url": public_url() + "/mcp",
+            "role_mcp_url": public_url() + "/mcp?authorization=role",
+            "version": VERSION,
+            "tool_count": len(tool_definitions()),
+            "native_core_tool_count": len(CORE_TOOLS),
+            "timezone": str(tz),
+        }
 
     def overview_snapshot(request, token_usage, token_snapshot):
         with store.transaction(immediate=False), iam.read_scope(store):
@@ -78,7 +121,11 @@ def make_system_router(context: HubContext):
         auth.instance(request)
         from hub.collaboration.telemetry import collaboration_telemetry
         from hub.collaboration.weixin_delivery_transport import backlog_snapshot
-        return {**collaboration_telemetry.snapshot(), 'weixin_backlog': backlog_snapshot(store, time.time())}
+
+        return {
+            **collaboration_telemetry.snapshot(),
+            "weixin_backlog": backlog_snapshot(store, time.time()),
+        }
 
     @router.get("/api/overview")
     async def overview(request: Request, include_token_usage: bool = True):
@@ -88,20 +135,33 @@ def make_system_router(context: HubContext):
         token_usage, token_snapshot = None, None
         if include_token_usage:
             principal = await store.run(auth.panel, request)
-            token_usage, token_snapshot = await overview_token_snapshot(runtime, principal, config.timezone)
+            token_usage, token_snapshot = await overview_token_snapshot(
+                runtime, principal, config.timezone
+            )
         return await store.run(overview_snapshot, request, token_usage, token_snapshot)
 
     @router.get("/api/token-usage")
-    async def token_usage(request: Request, period: Period = "today",
-                    project: str = Query(default="", max_length=128),
-                    connection: str = Query(default="", max_length=128),
-                    session: str = Query(default="", max_length=128),
-                    cache_read_percent: int = Query(default=DEFAULT_CACHE_READ_PERCENT, ge=0, le=100),
-                    reference_model: str = Query(default="gpt-6-astra", max_length=64)):
+    async def token_usage(
+        request: Request,
+        period: Period = "today",
+        project: str = Query(default="", max_length=128),
+        connection: str = Query(default="", max_length=128),
+        session: str = Query(default="", max_length=128),
+        cache_read_percent: int = Query(default=DEFAULT_CACHE_READ_PERCENT, ge=0, le=100),
+        reference_model: str = Query(default="gpt-6-astra", max_length=64),
+    ):
         principal = await store.run(auth.panel, request)
-        return await token_dashboard_async(runtime, principal, config.timezone,
-                                          period=period, project=project, connection=connection, session=session,
-                                          cache_read_percent=cache_read_percent, reference_model=reference_model)
+        return await token_dashboard_async(
+            runtime,
+            principal,
+            config.timezone,
+            period=period,
+            project=project,
+            connection=connection,
+            session=session,
+            cache_read_percent=cache_read_percent,
+            reference_model=reference_model,
+        )
 
     @router.post("/api/tools/call")
     async def call_tool(request: Request, body: ToolCall):
@@ -125,6 +185,5 @@ def make_system_router(context: HubContext):
     @router.get("/")
     async def index():
         return FileResponse(BASE / "web" / "index.html", headers={"Cache-Control": "no-cache"})
-
 
     return router

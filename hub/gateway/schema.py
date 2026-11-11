@@ -54,9 +54,9 @@ CREATE INDEX IF NOT EXISTS gateway_calls_cleanup ON gateway_calls(space_id,updat
 
 def migrate(db):
     row = db.execute("SELECT value FROM meta WHERE key='gateway_schema'").fetchone()
-    if row and row[0] not in {'1', '2'}:
-        raise RuntimeError('Unsupported gateway database schema')
-    for statement in SCHEMA.split(';'):
+    if row and row[0] not in {"1", "2"}:
+        raise RuntimeError("Unsupported gateway database schema")
+    for statement in SCHEMA.split(";"):
         if statement.strip():
             db.execute(statement)
     db.execute("INSERT OR REPLACE INTO meta VALUES ('gateway_schema','2')")

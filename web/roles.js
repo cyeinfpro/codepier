@@ -9,7 +9,7 @@ window.CodePierRoles = (() => {
     'projects.create': '创建项目映射',
   };
   const note =
-    '动态角色的能力和项目范围会影响所有已同意该角色的连接，无需重新 OAuth。不会修改旧固定授权，也不允许模型自行修改角色。';
+    '动态角色的能力和项目范围会影响所有已同意该角色的连接，无需重新 OAuth。旧固定授权保持原状，角色设置由你管理。';
   const names = (ids, items) =>
     ids
       .map(

@@ -219,7 +219,7 @@ def test_preflight_never_resolves_downloads_or_creates_files(workspace, monkeypa
     with monkeypatch.context() as patch:
         patch.setattr(socket, 'getaddrinfo', forbidden)
         patch.setattr(socket, 'socket', forbidden)
-        patch.setattr(incoming, 'PublicTLSConnection', forbidden)
+        patch.setattr('shared.file_download.PublicTLSConnection', forbidden)
         patch.setattr(incoming, 'download_chunks', forbidden)
         patch.setattr(incoming, 'AnchoredDestination', forbidden)
         patch.setattr(Path, 'mkdir', forbidden)

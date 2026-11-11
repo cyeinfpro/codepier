@@ -4,6 +4,7 @@ Shrinking capacity never cancels admitted operations. A reserved admission per
 lane prevents one project's backlog from occupying every slot before another
 project arrives. No caller-supplied priority or shell-command classification.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,8 +21,6 @@ from shared.scheduler_config import validate_scheduler
 LANES = ("execution", "read", "remote")
 
 
-
-
 @dataclass(frozen=True)
 class Pressure:
     measured_at: float
@@ -33,16 +32,26 @@ class Pressure:
 
     def valid(self, now):
         def ratio(value):
-            return value is None or (type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1)
-        return (type(self.measured_at) in (int, float) and math.isfinite(self.measured_at)
-                and 0 <= now - self.measured_at <= 15
-                and ratio(self.cpu_busy) and ratio(self.io_stall)
-                and type(self.memory_available) is int and type(self.memory_total) is int
-                and 0 <= self.memory_available <= self.memory_total and self.memory_total > 0)
+            return value is None or (
+                type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
+            )
+
+        return (
+            type(self.measured_at) in (int, float)
+            and math.isfinite(self.measured_at)
+            and 0 <= now - self.measured_at <= 15
+            and ratio(self.cpu_busy)
+            and ratio(self.io_stall)
+            and type(self.memory_available) is int
+            and type(self.memory_total) is int
+            and 0 <= self.memory_available <= self.memory_total
+            and self.memory_total > 0
+        )
 
 
 class AdaptiveCapacity:
     """Hysteresis: three healthy samples and cooldown to grow; fast safe shrink."""
+
     def __init__(self, config, clock=time.monotonic):
         self.config = validate_scheduler(config, effective=True)
         self.clock = clock
@@ -59,8 +68,10 @@ class AdaptiveCapacity:
         cfg = self.config
         valid = isinstance(sample, Pressure) and sample.valid(now)
         # Absolute reserves must remain reachable on small, real cgroup budgets.
-        critical = valid and (sample.memory_available < min(256 * 1024**2, sample.memory_total * .10)
-                              or sample.memory_available / sample.memory_total < .025)
+        critical = valid and (
+            sample.memory_available < min(256 * 1024**2, sample.memory_total * 0.10)
+            or sample.memory_available / sample.memory_total < 0.025
+        )
         if critical:
             self.healthy = 0
             self.limit = 0
@@ -71,9 +82,13 @@ class AdaptiveCapacity:
         if self.memory_paused:
             # An unavailable counter cannot clear a known emergency. Require
             # healthy observations and cooldown even when adaptive mode is off.
-            safe = (valid and sample.cpu_busy is not None and sample.cpu_busy < .90
-                    and sample.memory_available >= max(min(512 * 1024**2, sample.memory_total * .20),
-                                                       sample.memory_total * .10))
+            safe = (
+                valid
+                and sample.cpu_busy is not None
+                and sample.cpu_busy < 0.90
+                and sample.memory_available
+                >= max(min(512 * 1024**2, sample.memory_total * 0.20), sample.memory_total * 0.10)
+            )
             self.healthy = self.healthy + 1 if safe else 0
             self.reason = "memory_recovery" if safe else "memory_critical"
             if self.healthy >= 3 and now - self.changed_at >= 15:
@@ -95,14 +110,19 @@ class AdaptiveCapacity:
             return self.limit
         available = sample.memory_available
         fraction = available / sample.memory_total
-        high = fraction < .10 or sample.cpu_busy >= .90 or (sample.io_stall or 0) >= .25
+        high = fraction < 0.10 or sample.cpu_busy >= 0.90 or (sample.io_stall or 0) >= 0.25
         if high:
             self.healthy = 0
             self.limit = max(cfg["minimum"], self.limit - max(1, self.limit // 4))
             self.reason = "resource_pressure"
             self.changed_at = now
             return self.limit
-        healthy = fraction >= .20 and available >= 1024**3 and sample.cpu_busy <= .65 and (sample.io_stall or 0) < .10
+        healthy = (
+            fraction >= 0.20
+            and available >= 1024**3
+            and sample.cpu_busy <= 0.65
+            and (sample.io_stall or 0) < 0.10
+        )
         self.healthy = self.healthy + 1 if healthy else 0
         self.reason = "healthy" if healthy else "cooldown"
         if self.healthy >= 3 and now - self.changed_at >= 15:
@@ -159,7 +179,11 @@ class ProjectScheduler:
         project_cap = min(self.config["project_limits"].get(item.project, 64), max(1, limit - 1))
         if sum(entry.project == item.project for entry in same_lane) >= project_cap:
             return "project_limit"
-        if item.lane == "remote" and sum(entry.lane == "remote" and entry.target == item.target for entry in held) >= self.config["remote_target_limit"]:
+        if (
+            item.lane == "remote"
+            and sum(entry.lane == "remote" and entry.target == item.target for entry in held)
+            >= self.config["remote_target_limit"]
+        ):
             return "remote_target_limit"
         if len(same_lane) >= limit:
             return "resource_pressure" if limit == 0 else "lane_capacity"
@@ -174,15 +198,20 @@ class ProjectScheduler:
             if key in seen:
                 continue
             # A blocked remote target must not block this project's other target.
-            if (item.token in self._resource_tokens and self.resources.blocked(item.token)) or self._reason(item):
+            if (
+                item.token in self._resource_tokens and self.resources.blocked(item.token)
+            ) or self._reason(item):
                 continue
             seen.add(key)
             eligible.append((counts[key], self.turn[key], index, item))
         return min(eligible, key=lambda row: row[:3])[-1] if eligible else None
 
     def _blockers(self, item):
-        return (self.resources.blockers(item.token)
-                if item.token in self._resource_tokens and self.resources.blocked(item.token) else [])
+        return (
+            self.resources.blockers(item.token)
+            if item.token in self._resource_tokens and self.resources.blocked(item.token)
+            else []
+        )
 
     def _drain(self):
         """Publish complete grants before waking only their owning coroutine."""
@@ -211,8 +240,11 @@ class ProjectScheduler:
             if self._reported.get(item.token) == detail:
                 continue
             self._reported[item.token] = detail
-            callback = (self._resource_callbacks.get(item.token) if blockers
-                        else self._callbacks.get(item.token))
+            callback = (
+                self._resource_callbacks.get(item.token)
+                if blockers
+                else self._callbacks.get(item.token)
+            )
             if callback:
                 callback(blockers if blockers else reason)
 
@@ -227,8 +259,13 @@ class ProjectScheduler:
         async with self.condition:
             self.config = config
             self.capacity.config = config
-            self.capacity.limit = (0 if self.capacity.memory_paused else config["initial"] if not config["adaptive"]
-                                   else max(config["minimum"], min(self.capacity.limit, config["maximum"])))
+            self.capacity.limit = (
+                0
+                if self.capacity.memory_paused
+                else config["initial"]
+                if not config["adaptive"]
+                else max(config["minimum"], min(self.capacity.limit, config["maximum"]))
+            )
             self.capacity.healthy = 0
             self.capacity.changed_at = self.capacity.clock()
             if self.resources is not None:
@@ -247,7 +284,18 @@ class ProjectScheduler:
         if self._notifications:
             await asyncio.gather(*self._notifications)
 
-    def try_reserve(self, operation_id, project, lane="execution", target="", *, replace, claims=None, strict_order=False, on_bypass=None):
+    def try_reserve(
+        self,
+        operation_id,
+        project,
+        lane="execution",
+        target="",
+        *,
+        replace,
+        claims=None,
+        strict_order=False,
+        on_bypass=None,
+    ):
         """Non-waiting fair admission, converting an owned preflight slot.
 
         All state changes are synchronous on this event loop. No reservation is
@@ -257,21 +305,36 @@ class ProjectScheduler:
             raise ValueError("Invalid scheduler admission identity")
         if self.condition.locked() or self.closed or len(self.waiting) >= 1024:
             return None
-        if (not isinstance(replace, Ticket) or self.active.get(replace.token) is not replace
-                or replace.operation_id != operation_id):
+        if (
+            not isinstance(replace, Ticket)
+            or self.active.get(replace.token) is not replace
+            or replace.operation_id != operation_id
+        ):
             return None
-        if any(item.operation_id == operation_id and item is not replace
-               for item in [*self.active.values(), *self.waiting]):
+        if any(
+            item.operation_id == operation_id and item is not replace
+            for item in [*self.active.values(), *self.waiting]
+        ):
             return None
         if claims is not None:
             if self.resources is None:
                 raise ValueError("Resource claims require a joint resource queue")
-            if (replace.token in self._resource_tokens
-                    or any(identifier == operation_id for identifier, _ in self.resources.active.values())
-                    or any(identifier == operation_id for _, identifier, _ in self.resources.waiting)):
+            if (
+                replace.token in self._resource_tokens
+                or any(
+                    identifier == operation_id for identifier, _ in self.resources.active.values()
+                )
+                or any(identifier == operation_id for _, identifier, _ in self.resources.waiting)
+            ):
                 return None
-            self.resources.enqueue(replace.token, operation_id, claims, bounded=lane == "read",
-                                   strict=strict_order, on_bypass=on_bypass)
+            self.resources.enqueue(
+                replace.token,
+                operation_id,
+                claims,
+                bounded=lane == "read",
+                strict=strict_order,
+                on_bypass=on_bypass,
+            )
             self._resource_tokens.add(replace.token)
         item = Ticket(replace.token, operation_id, project, lane, target)
         self.active.pop(replace.token)
@@ -301,9 +364,13 @@ class ProjectScheduler:
     def _notification_done(self, task):
         self._notifications.discard(task)
         if not task.cancelled() and task.exception() is not None:
-            asyncio.get_running_loop().call_exception_handler({
-                "message": "Scheduler reservation notification failed",
-                "exception": task.exception(), "task": task})
+            asyncio.get_running_loop().call_exception_handler(
+                {
+                    "message": "Scheduler reservation notification failed",
+                    "exception": task.exception(),
+                    "task": task,
+                }
+            )
 
     async def _notify_reservation_change(self):
         async with self.condition:
@@ -327,9 +394,21 @@ class ProjectScheduler:
             self._drain_all()
 
     @asynccontextmanager
-    async def slot(self, operation_id, project, lane="execution", target="", on_wait=None,
-                   *, claims=None, on_resource_wait=None, strict_order=False,
-                   on_bypass=None, wait_policy="queue", initial_wait_seconds=1):
+    async def slot(
+        self,
+        operation_id,
+        project,
+        lane="execution",
+        target="",
+        on_wait=None,
+        *,
+        claims=None,
+        on_resource_wait=None,
+        strict_order=False,
+        on_bypass=None,
+        wait_policy="queue",
+        initial_wait_seconds=1,
+    ):
         if lane not in LANES or not isinstance(project, str) or not project:
             raise ValueError("Invalid scheduler admission identity")
         item = Ticket(object(), operation_id, project, lane, target)
@@ -349,8 +428,14 @@ class ProjectScheduler:
                 if claims is not None:
                     if self.resources is None:
                         raise ValueError("Resource claims require a joint resource queue")
-                    self.resources.enqueue(item.token, operation_id, claims, bounded=lane == "read",
-                                           strict=strict_order, on_bypass=on_bypass)
+                    self.resources.enqueue(
+                        item.token,
+                        operation_id,
+                        claims,
+                        bounded=lane == "read",
+                        strict=strict_order,
+                        on_bypass=on_bypass,
+                    )
                     self._resource_tokens.add(item.token)
                 self._drain_all()
             if wait_policy == "fail_fast":
@@ -359,8 +444,12 @@ class ProjectScheduler:
                 except TimeoutError:
                     async with self.condition:
                         if not event.is_set() and self._blockers(item):
-                            raise DevError("RESOURCE_BUSY", "资源仍被其他操作占用，未执行任何副作用", 409,
-                                           blocked_by=self._blockers(item))
+                            raise DevError(
+                                "RESOURCE_BUSY",
+                                "资源仍被其他操作占用，未执行任何副作用",
+                                409,
+                                blocked_by=self._blockers(item),
+                            ) from None
                     await event.wait()
             else:
                 await event.wait()
@@ -381,20 +470,34 @@ class ProjectScheduler:
         now = self.capacity.clock()
         if not isinstance(sample, Pressure) or not sample.valid(now):
             return None
-        return {"version": 1, "sample": sample.measured_at,
-                "age_seconds": now - sample.measured_at, "source": sample.source,
-                "cpu_busy": sample.cpu_busy, "memory_available": sample.memory_available,
-                "memory_total": sample.memory_total, "io_stall": sample.io_stall}
+        return {
+            "version": 1,
+            "sample": sample.measured_at,
+            "age_seconds": now - sample.measured_at,
+            "source": sample.source,
+            "cpu_busy": sample.cpu_busy,
+            "memory_available": sample.memory_available,
+            "memory_total": sample.memory_total,
+            "io_stall": sample.io_stall,
+        }
 
     def snapshot(self, project=None):
-        active = [entry for entry in self.active.values() if project is None or entry.project == project]
+        active = [
+            entry for entry in self.active.values() if project is None or entry.project == project
+        ]
         waiting = [entry for entry in self.waiting if project is None or entry.project == project]
         return {
-            "running": len(active), "queued": len(waiting),
+            "running": len(active),
+            "queued": len(waiting),
             "reason": self.capacity.reason,
-            "lanes": {lane: {"running": sum(entry.lane == lane for entry in active),
-                             "queued": sum(entry.lane == lane for entry in waiting),
-                             "capacity": self.lane_limit(lane)} for lane in LANES},
+            "lanes": {
+                lane: {
+                    "running": sum(entry.lane == lane for entry in active),
+                    "queued": sum(entry.lane == lane for entry in waiting),
+                    "capacity": self.lane_limit(lane),
+                }
+                for lane in LANES
+            },
             "scope": "node" if project is None else "project",
             "resource_semantics": self.config["resource_semantics"],
         }

@@ -276,7 +276,8 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         def stale_permission(route):
             if route.request.method == 'PUT':
                 conflicts.append(route.request.post_data_json)
-                route.fulfill(status=409, json={'detail': 'synthetic stale policy version'})
+                route.fulfill(status=409, json={'error': {'code': 'STALE_VERSION',
+                    'message': 'synthetic stale policy version'}})
             else:
                 route.continue_()
         page.route(permission_pattern, stale_permission)

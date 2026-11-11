@@ -23,6 +23,7 @@ This module keeps the policy small and testable:
   automatically. Nothing is fabricated: offsets are only ever taken from the
   Hub, and no history is re-homed to another project.
 """
+
 from __future__ import annotations
 
 import base64
@@ -49,8 +50,11 @@ REASON_CHARS = 64
 
 def fingerprint(row) -> str:
     try:
-        material = json.dumps([row.get("project_id"), row.get("root"), row.get("device_id")],
-                              separators=(",", ":"), ensure_ascii=True)
+        material = json.dumps(
+            [row.get("project_id"), row.get("root"), row.get("device_id")],
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
     except (TypeError, ValueError, AttributeError):
         return ""
     return hashlib.sha256(material.encode()).hexdigest()[:32]
@@ -68,9 +72,11 @@ def _decoded_length(data) -> int:
 def _codes(value) -> dict:
     if not isinstance(value, dict):
         return {}
-    return {sid: (reason if isinstance(reason, str) else "rejected")[:REASON_CHARS]
-            for sid, reason in list(value.items())[:4096]
-            if isinstance(sid, str) and 0 < len(sid) <= 128}
+    return {
+        sid: (reason if isinstance(reason, str) else "rejected")[:REASON_CHARS]
+        for sid, reason in list(value.items())[:4096]
+        if isinstance(sid, str) and 0 < len(sid) <= 128
+    }
 
 
 class SyncFlow:
@@ -95,23 +101,37 @@ class SyncFlow:
                 value = json.loads(stream.read(4 * 1024 * 1024))
         except (OSError, ValueError, UnicodeError):
             return
-        sessions = value.get("sessions") if isinstance(value, dict) and value.get("version") == 1 else None
+        sessions = (
+            value.get("sessions") if isinstance(value, dict) and value.get("version") == 1 else None
+        )
         if not isinstance(sessions, dict):
             return
         for sid, item in list(sessions.items())[:MAX_PAUSED]:
-            if (isinstance(sid, str) and 0 < len(sid) <= 128 and isinstance(item, dict)
-                    and isinstance(item.get("fp"), str) and isinstance(item.get("reason"), str)
-                    and type(item.get("failures")) is int and item["failures"] >= 1
-                    and type(item.get("until")) in (int, float) and type(item.get("at")) in (int, float)):
-                self.paused[sid] = {"fp": item["fp"][:64], "reason": item["reason"][:REASON_CHARS],
-                                    "until": float(item["until"]), "failures": min(item["failures"], 64),
-                                    "at": float(item["at"])}
+            if (
+                isinstance(sid, str)
+                and 0 < len(sid) <= 128
+                and isinstance(item, dict)
+                and isinstance(item.get("fp"), str)
+                and isinstance(item.get("reason"), str)
+                and type(item.get("failures")) is int
+                and item["failures"] >= 1
+                and type(item.get("until")) in (int, float)
+                and type(item.get("at")) in (int, float)
+            ):
+                self.paused[sid] = {
+                    "fp": item["fp"][:64],
+                    "reason": item["reason"][:REASON_CHARS],
+                    "until": float(item["until"]),
+                    "failures": min(item["failures"], 64),
+                    "at": float(item["at"]),
+                }
 
     def dump(self) -> bytes:
         """Serialize on the event loop; write the bytes from a worker thread."""
         self.dirty = False
-        return json.dumps({"version": 1, "sessions": self.paused}, separators=(",", ":"),
-                          sort_keys=True).encode()
+        return json.dumps(
+            {"version": 1, "sessions": self.paused}, separators=(",", ":"), sort_keys=True
+        ).encode()
 
     def write(self, payload: bytes) -> None:
         if not self.path:
@@ -119,7 +139,11 @@ class SyncFlow:
         temporary = self.path.with_name(self.path.name + ".tmp")
         try:
             self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
             with os.fdopen(fd, "wb") as stream:
                 stream.write(payload)
                 stream.flush()
@@ -151,9 +175,13 @@ class SyncFlow:
 
     def skip(self) -> frozenset:
         now = self.clock()
-        for sid in [sid for sid, (until, delay) in self.backoff.items() if until + NO_PROGRESS_MAX < now]:
+        for sid in [
+            sid for sid, (until, delay) in self.backoff.items() if until + NO_PROGRESS_MAX < now
+        ]:
             del self.backoff[sid]
-        return frozenset(self.paused) | frozenset(sid for sid, (until, _) in self.backoff.items() if until > now)
+        return frozenset(self.paused) | frozenset(
+            sid for sid, (until, _) in self.backoff.items() if until > now
+        )
 
     def due_probes(self) -> list:
         """Paused sessions due for a metadata-only re-offer to the Hub."""
@@ -194,8 +222,11 @@ class SyncFlow:
         if not isinstance(data, dict):
             return
         raw = data.get("offsets", {})
-        offsets = ({k: v for k, v in raw.items() if isinstance(k, str) and type(v) is int and v >= 0}
-                   if isinstance(raw, dict) else {})
+        offsets = (
+            {k: v for k, v in raw.items() if isinstance(k, str) and type(v) is int and v >= 0}
+            if isinstance(raw, dict)
+            else {}
+        )
         offsets_store.update(offsets)
         seqs = data.get("seqs")
         entries = []
@@ -203,7 +234,9 @@ class SyncFlow:
             wanted = {s for s in seqs[:1024] if type(s) is int}
             entries = [entry for entry in self.inflight if entry["seq"] in wanted]
             if entries:
-                self.inflight = deque(entry for entry in self.inflight if entry["seq"] not in wanted)
+                self.inflight = deque(
+                    entry for entry in self.inflight if entry["seq"] not in wanted
+                )
         elif self.inflight:
             # Legacy Hub: one native_ack per native_sync frame, in wire order.
             entries = [self.inflight.popleft()]
@@ -233,11 +266,17 @@ class SyncFlow:
     def _pause(self, sid, reason, now) -> None:
         prior = self.paused.get(sid)
         failures = min(64, prior["failures"] + 1) if prior else 1
-        self.paused[sid] = {"fp": self.rows.get(sid) or (prior or {}).get("fp", ""),
-                            "reason": reason, "until": now + min(PAUSE_MAX, PAUSE_INITIAL * 2 ** (failures - 1)),
-                            "failures": failures, "at": now}
+        self.paused[sid] = {
+            "fp": self.rows.get(sid) or (prior or {}).get("fp", ""),
+            "reason": reason,
+            "until": now + min(PAUSE_MAX, PAUSE_INITIAL * 2 ** (failures - 1)),
+            "failures": failures,
+            "at": now,
+        }
         self.backoff.pop(sid, None)
         self.dirty = True
         if len(self.paused) > MAX_PAUSED:
-            for oldest in sorted(self.paused, key=lambda key: self.paused[key]["at"])[:len(self.paused) - MAX_PAUSED]:
+            for oldest in sorted(self.paused, key=lambda key: self.paused[key]["at"])[
+                : len(self.paused) - MAX_PAUSED
+            ]:
                 del self.paused[oldest]

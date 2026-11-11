@@ -35,11 +35,9 @@ class TelegramService:
         args = validate(model, raw)
         principal, room = self.c.scope(principal, args)
         self.c.owner(principal)
-        args["conversation_id"] = self.c.conversations.resolve(principal, room, args)[
-            "id"
-        ]
+        args["conversation_id"] = self.c.conversations.resolve(principal, room, args)["id"]
         if enabled:
-            self.c.rooms.migration.legacy_write(args['conversation_id'])
+            self.c.rooms.migration.legacy_write(args["conversation_id"])
             self.require_enabled(principal)
             self.c.live_room(room)
         return args, principal, room
@@ -50,9 +48,7 @@ class TelegramService:
             (value, principal.space_id, principal.user_id),
         )
         if not row:
-            raise DevError(
-                "TELEGRAM_ACCOUNT_NOT_FOUND", "当前房主没有此 Telegram 账号", 404
-            )
+            raise DevError("TELEGRAM_ACCOUNT_NOT_FOUND", "当前房主没有此 Telegram 账号", 404)
         return row
 
     def binding(self, value, principal, room):
@@ -61,9 +57,7 @@ class TelegramService:
             (value, room["id"], principal.space_id, principal.user_id),
         )
         if not row:
-            raise DevError(
-                "TELEGRAM_BINDING_NOT_FOUND", "当前房间没有此 Telegram 绑定", 404
-            )
+            raise DevError("TELEGRAM_BINDING_NOT_FOUND", "当前房间没有此 Telegram 绑定", 404)
         self.c.conversations.object(principal, row["conversation_id"])
         return row
 
@@ -76,9 +70,7 @@ class TelegramService:
             token = args.pop("token").get_secret_value()
             TelegramAdapter(token)
             if token.split(":", 1)[0] != args["bot_id"]:
-                raise DevError(
-                    "TELEGRAM_BOT_MISMATCH", "令牌前缀与机器人编号不一致", 422
-                )
+                raise DevError("TELEGRAM_BOT_MISMATCH", "令牌前缀与机器人编号不一致", 422)
             args["credential_digest"] = hashlib.sha256(token.encode()).hexdigest()
 
             def save():
@@ -89,16 +81,15 @@ class TelegramService:
                     old["space_id"] != principal.space_id
                     or old["owner_user_id"] != principal.user_id
                 ):
-                    raise DevError(
-                        "TELEGRAM_ACCOUNT_CONFLICT", "机器人属于另一个已认证身份", 409
-                    )
-                if (old["credential_version"] if old else 0) != args[
-                    "expected_version"
-                ]:
+                    raise DevError("TELEGRAM_ACCOUNT_CONFLICT", "机器人属于另一个已认证身份", 409)
+                if (old["credential_version"] if old else 0) != args["expected_version"]:
                     raise DevError("STALE_VERSION", "Telegram 账号版本已变化", 409)
                 if old:
-                    for bound in self.store.all("SELECT conversation_id FROM telegram_bindings WHERE account_id=? AND state!='revoked'",(old['id'],)):
-                        self.c.rooms.migration.legacy_write(bound['conversation_id'])
+                    for bound in self.store.all(
+                        "SELECT conversation_id FROM telegram_bindings WHERE account_id=? AND state!='revoked'",
+                        (old["id"],),
+                    ):
+                        self.c.rooms.migration.legacy_write(bound["conversation_id"])
                 if (
                     not old
                     and self.store.one(
@@ -107,9 +98,7 @@ class TelegramService:
                     )["n"]
                     >= 32
                 ):
-                    raise DevError(
-                        "TELEGRAM_ACCOUNT_QUOTA", "机器人登记数量达到上限", 409
-                    )
+                    raise DevError("TELEGRAM_ACCOUNT_QUOTA", "机器人登记数量达到上限", 409)
                 aid, now = old["id"] if old else uuid.uuid4().hex, self.c.clock()
                 generation = old["generation"] + 1 if old else 1
                 self.store.execute(
@@ -133,9 +122,12 @@ class TelegramService:
                     ),
                 )
                 if old:
-                    for previous in self.store.all("SELECT id FROM telegram_bindings WHERE account_id=? AND state!='revoked'", (aid,)):
-                        self.c.channel_owner.revoke(previous['id'], 'credential_changed')
-                        self.c.channel_enrollment.invalidate(previous['id'], 'credential_changed')
+                    for previous in self.store.all(
+                        "SELECT id FROM telegram_bindings WHERE account_id=? AND state!='revoked'",
+                        (aid,),
+                    ):
+                        self.c.channel_owner.revoke(previous["id"], "credential_changed")
+                        self.c.channel_enrollment.invalidate(previous["id"], "credential_changed")
                     self.store.execute(
                         "UPDATE telegram_bindings SET state='revoked',version=version+1 WHERE account_id=?",
                         (aid,),
@@ -147,9 +139,18 @@ class TelegramService:
                     aid,
                     {"credential_version": args["expected_version"] + 1},
                 )
-                self.c.channel_enrollment.evidence('telegram', aid, principal, room, args['conversation_id'],
-                    {'credential_storage': args['confirm_credential_storage'], 'provider_terms': args['confirm_provider_terms']},
-                    {'credential_version': args['expected_version'] + 1})
+                self.c.channel_enrollment.evidence(
+                    "telegram",
+                    aid,
+                    principal,
+                    room,
+                    args["conversation_id"],
+                    {
+                        "credential_storage": args["confirm_credential_storage"],
+                        "provider_terms": args["confirm_provider_terms"],
+                    },
+                    {"credential_version": args["expected_version"] + 1},
+                )
                 return {
                     "account_id": aid,
                     "credential_version": args["expected_version"] + 1,
@@ -183,7 +184,7 @@ class TelegramService:
                         "此机器人已绑定当前话题；先明确撤销旧绑定",
                         409,
                     )
-                self.c.channel_enrollment.prepare('telegram', args, principal, room, account, dot)
+                self.c.channel_enrollment.prepare("telegram", args, principal, room, account, dot)
                 bid, now, challenge = (
                     uuid.uuid4().hex,
                     self.c.clock(),
@@ -230,15 +231,19 @@ class TelegramService:
                     bid,
                     {"full_mirror": True, "automatic_execution": False},
                 )
-                self.c.channel_enrollment.record_binding('telegram', args, principal, room, bid)
+                self.c.channel_enrollment.record_binding("telegram", args, principal, room, bid)
                 return {
-                    'onboarding': self.c.channel_enrollment.view(bid),
-                    'pairing_until': now + 900,
+                    "onboarding": self.c.channel_enrollment.view(bid),
+                    "pairing_until": now + 900,
                     "binding_id": bid,
                     "version": 1,
                     "state": "pairing",
                     "pairing_command": "/start " + challenge,
-                    "instructions": ("仅本人私聊发送此授权码，验证后自动连接并开通已批准范围；无需返回面板确认。" if args.get("owner_preapproval") else "向该机器人私聊发送配对命令，回面板核对实际 user_id 和 chat_id。一个私聊仅路由到一个协作室；其他协作室请使用另一个机器人。"),
+                    "instructions": (
+                        "仅本人私聊发送此授权码，验证后自动连接并开通已批准范围；无需返回面板确认。"
+                        if args.get("owner_preapproval")
+                        else "向该机器人私聊发送配对命令，回面板核对实际 user_id 和 chat_id。一个私聊仅路由到一个协作室；其他协作室请使用另一个机器人。"
+                    ),
                 }
 
             return self.c.mutation(principal, room, "telegram_bind", args, save)
@@ -246,7 +251,9 @@ class TelegramService:
     def control(self, raw, principal, *, room_owner_binding=None):
         with self.store.transaction():
             if room_owner_binding is not None:
-                args,principal,room,row=self.c.room_channels.legacy_stop_scope('telegram',raw,principal,models.Control,room_owner_binding)
+                args, principal, room, row = self.c.room_channels.legacy_stop_scope(
+                    "telegram", raw, principal, models.Control, room_owner_binding
+                )
             else:
                 args, principal, room = self.owner(raw, principal, models.Control, enabled=False)
                 row = self.binding(args["binding_id"], principal, room)
@@ -254,10 +261,15 @@ class TelegramService:
                 raise DevError("TELEGRAM_BINDING_SCOPE", "绑定不属于当前话题", 403)
 
             def save():
-                row=(self.c.room_channels.legacy_stop_scope('telegram',args,principal,models.Control,room_owner_binding)[3]
-                    if room_owner_binding is not None else self.binding(args["binding_id"], principal, room))
-                if args['action'] not in {'pause','revoke'}:
-                    self.c.rooms.migration.legacy_write(row['conversation_id'])
+                row = (
+                    self.c.room_channels.legacy_stop_scope(
+                        "telegram", args, principal, models.Control, room_owner_binding
+                    )[3]
+                    if room_owner_binding is not None
+                    else self.binding(args["binding_id"], principal, room)
+                )
+                if args["action"] not in {"pause", "revoke"}:
+                    self.c.rooms.migration.legacy_write(row["conversation_id"])
                 if row["version"] != args["expected_version"]:
                     raise DevError("STALE_VERSION", "原绑定版本已变化", 409)
                 self.c.channel_enrollment.invalidate(row["id"], "binding_" + args["action"])
@@ -292,9 +304,7 @@ class TelegramService:
                         )
                 elif args["action"] == "resume":
                     if row["state"] != "paused" or not user:
-                        raise DevError(
-                            "TELEGRAM_RESUME_DENIED", "只能恢复原已核对的暂停绑定", 409
-                        )
+                        raise DevError("TELEGRAM_RESUME_DENIED", "只能恢复原已核对的暂停绑定", 409)
                     if self.store.one(
                         "SELECT 1 FROM telegram_bindings WHERE account_id=? AND user_id=? AND chat_id=? AND state='active' AND id!=?",
                         (row["account_id"], user, chat, row["id"]),
@@ -307,9 +317,7 @@ class TelegramService:
                     state = "active"
                 elif args["action"] == "pause":
                     if row["state"] == "revoked":
-                        raise DevError(
-                            "TELEGRAM_REVOKED", "已撤销绑定不能暂停或恢复", 409
-                        )
+                        raise DevError("TELEGRAM_REVOKED", "已撤销绑定不能暂停或恢复", 409)
                     state = "paused"
                 else:
                     state = "revoked"
@@ -326,9 +334,7 @@ class TelegramService:
                     self.c.channel_owner.revoke(row["id"], "binding_revoked")
                 if state == "active":
                     self.valid(row["id"])
-                self.c.channels.quarantine(
-                    "telegram", row["id"], "binding_version_changed"
-                )
+                self.c.channels.quarantine("telegram", row["id"], "binding_version_changed")
                 self.c.audit(
                     room,
                     principal.actor,
@@ -353,7 +359,9 @@ class TelegramService:
             (principal.space_id, principal.user_id),
         )
         for account in accounts:
-            account["inbound_health"] = channel_inbound.summary(self.store, "telegram", account["id"])
+            account["inbound_health"] = channel_inbound.summary(
+                self.store, "telegram", account["id"]
+            )
         bindings = self.store.all(
             """SELECT id,account_id,dot_id,version,generation,state,user_id,chat_id,
             pending_user_id,pending_chat_id,pairing_until,pairing_secret,disable_notification,expires_at,mirror_enabled,lifetime_mode
@@ -361,15 +369,17 @@ class TelegramService:
             (room["id"], args["conversation_id"]),
         )
         for row in bindings:
-            row["effective_capabilities"] = self.c.channels.capabilities.for_binding("telegram", row["id"])
+            row["effective_capabilities"] = self.c.channels.capabilities.for_binding(
+                "telegram", row["id"]
+            )
             row["onboarding"] = self.c.channel_enrollment.view(row["id"])
-            row["owner_authorization"] = self.c.channel_owner.view(self.c.channel_owner.current(row["id"]))
+            row["owner_authorization"] = self.c.channel_owner.view(
+                self.c.channel_owner.current(row["id"])
+            )
             secret = row.pop("pairing_secret")
             row["pairing_command"] = (
                 "/start " + self.store.decrypt(secret)
-                if secret
-                and row["state"] == "pairing"
-                and row["pairing_until"] > self.c.clock()
+                if secret and row["state"] == "pairing" and row["pairing_until"] > self.c.clock()
                 else ""
             )
         setting = self.c.channel_settings.setting("telegram", principal)
@@ -380,7 +390,12 @@ class TelegramService:
             "private_only": True,
             "accounts": accounts,
             "bindings": bindings,
-            "owner_task_options": [self.c.channel_owner.options(self.binding(row["id"], principal, room), channel="telegram") for row in bindings],
+            "owner_task_options": [
+                self.c.channel_owner.options(
+                    self.binding(row["id"], principal, room), channel="telegram"
+                )
+                for row in bindings
+            ],
             "deliveries": self.c.channels.listing(room["id"], args["conversation_id"]),
             "notification_note": "Telegram 无声发送仍可能显示通知；微信需在客户端设置免打扰。",
             **self.files.candidates(principal, room, args["conversation_id"]),
@@ -392,8 +407,12 @@ class TelegramService:
                 "SELECT * FROM telegram_accounts WHERE id=? AND state='active'", (aid,)
             )
             now = self.c.clock()
-            if (not row or not self.c.channel_settings.enabled("telegram", row)
-                    or row["poll_until"] > now or row["next_poll"] > now):
+            if (
+                not row
+                or not self.c.channel_settings.enabled("telegram", row)
+                or row["poll_until"] > now
+                or row["next_poll"] > now
+            ):
                 return None
             bindings = self.store.all(
                 "SELECT id,version FROM telegram_bindings WHERE account_id=? AND state IN ('pairing','awaiting_owner','active')",
@@ -427,9 +446,7 @@ class TelegramService:
     def commit_updates(self, claim, updates):
         """Durable inbox + canonical messages + offset are one transaction."""
         with self.store.transaction():
-            account = self.store.one(
-                "SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],)
-            )
+            account = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],))
             if (
                 not account
                 or account["state"] != "active"
@@ -438,15 +455,11 @@ class TelegramService:
                 or account["credential_version"] != claim["credential_version"]
                 or account["generation"] != claim["generation"]
             ):
-                raise DevError(
-                    "TELEGRAM_POLL_FENCE_LOST", "轮询原世代失效，不推进 offset", 409
-                )
+                raise DevError("TELEGRAM_POLL_FENCE_LOST", "轮询原世代失效，不推进 offset", 409)
             for bid, version in claim["bindings"].items():
                 binding, *_ = self.valid(bid, pairing=True)
                 if binding["version"] != version:
-                    raise DevError(
-                        "TELEGRAM_BINDING_CHANGED", "轮询期间绑定已变化", 409
-                    )
+                    raise DevError("TELEGRAM_BINDING_CHANGED", "轮询期间绑定已变化", 409)
             if (
                 not isinstance(updates, list)
                 or len(updates) > 100
@@ -460,9 +473,7 @@ class TelegramService:
                     or type(update.get("update_id")) is not int
                     or update["update_id"] < 0
                 ):
-                    raise DevError(
-                        "TELEGRAM_UPDATE_INVALID", "无效 update_id，不推进 offset", 422
-                    )
+                    raise DevError("TELEGRAM_UPDATE_INVALID", "无效 update_id，不推进 offset", 422)
                 uid = update["update_id"]
                 old = self.store.one(
                     "SELECT * FROM telegram_inbox WHERE account_id=? AND update_id=?",
@@ -470,9 +481,7 @@ class TelegramService:
                 )
                 if old:
                     if old["source_digest"] != digest(update):
-                        raise DevError(
-                            "TELEGRAM_UPDATE_CONFLICT", "重复 update_id 内容冲突", 409
-                        )
+                        raise DevError("TELEGRAM_UPDATE_CONFLICT", "重复 update_id 内容冲突", 409)
                     if old["message_id"]:
                         ids.append(old["message_id"])
                     offset = max(offset, uid + 1)
@@ -504,13 +513,22 @@ class TelegramService:
                     ),
                 )
                 result, failure = channel_inbound.isolate(
-                    self, "telegram", account, claim["bindings"], update,
-                    lambda: self.ingest(account, update, claim["bindings"]))
+                    self,
+                    "telegram",
+                    account,
+                    claim["bindings"],
+                    update,
+                    lambda *, update=update: self.ingest(account, update, claim["bindings"]),
+                )
                 mid, reason = result if not failure else (None, failure)
                 self.store.execute(
                     "UPDATE telegram_inbox SET state=?,message_id=?,reason_code=? WHERE account_id=? AND update_id=?",
                     (
-                        "committed" if mid else "deferred" if reason.startswith("deferred:") else "quarantined",
+                        "committed"
+                        if mid
+                        else "deferred"
+                        if reason.startswith("deferred:")
+                        else "quarantined",
                         mid,
                         reason,
                         account["id"],
@@ -521,8 +539,7 @@ class TelegramService:
                     ids.append(mid)
                 offset = max(offset, uid + 1)
             gap = bool(
-                account["last_sync_at"]
-                and self.c.clock() - account["last_sync_at"] >= 86400
+                account["last_sync_at"] and self.c.clock() - account["last_sync_at"] >= 86400
             )
             self.store.execute(
                 """UPDATE telegram_accounts SET offset=?,poll_until=0,next_poll=?,last_sync_at=?,
@@ -573,21 +590,34 @@ class TelegramService:
         if value.startswith("/start ") or value.strip().startswith("CPT_"):
             challenge = value[7:].strip() if value.startswith("/start ") else value.strip()
             for bid in eligible:
-                row = self.store.one(
-                    "SELECT * FROM telegram_bindings WHERE id=?", (bid,)
-                )
+                row = self.store.one("SELECT * FROM telegram_bindings WHERE id=?", (bid,))
                 if (
                     row["state"] == "pairing"
                     and row["pairing_until"] > self.c.clock()
                     and hmac.compare_digest(row["pairing_hash"], digest(challenge))
                 ):
                     binding, account, owner, room, dot = self.valid(bid, pairing=True)
-                    self.c.rooms.migration.legacy_write(binding['conversation_id'])
+                    self.c.rooms.migration.legacy_write(binding["conversation_id"])
                     record = self.c.channel_enrollment.current(bid)
-                    date = message.get('date')
-                    fresh = not update.get('edited_message') and (date is None or type(date) is int and (not record or date >= int(record['created'])))
-                    if self.c.channel_enrollment.incoming('telegram', binding, account, owner, room, dot, chat_id, external_id, matched=True, fresh=fresh):
-                        return None, 'pairing_preapproval_processed'
+                    date = message.get("date")
+                    fresh = not update.get("edited_message") and (
+                        date is None
+                        or type(date) is int
+                        and (not record or date >= int(record["created"]))
+                    )
+                    if self.c.channel_enrollment.incoming(
+                        "telegram",
+                        binding,
+                        account,
+                        owner,
+                        room,
+                        dot,
+                        chat_id,
+                        external_id,
+                        matched=True,
+                        fresh=fresh,
+                    ):
+                        return None, "pairing_preapproval_processed"
                     self.store.execute(
                         """UPDATE telegram_bindings SET state='awaiting_owner',pending_user_id=?,pending_chat_id=?,
                         pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?""",
@@ -600,24 +630,39 @@ class TelegramService:
             (account["id"], user_id, chat_id),
         )
         if len(rows) != 1 or rows[0]["id"] not in eligible:
-            self.c.channel_enrollment.quarantine_input('telegram', account, chat_id, external_id)
+            self.c.channel_enrollment.quarantine_input("telegram", account, chat_id, external_id)
             # The generic reminder carries no project data and does not choose
             # a task route, even when several pending rooms share this bot.
             for bid in sorted(eligible):
                 pending = self.c.channel_enrollment.current(bid)
-                if not pending or pending['state'] != 'pending' or pending['expected_peer_id'] not in ('', chat_id):
+                if (
+                    not pending
+                    or pending["state"] != "pending"
+                    or pending["expected_peer_id"] not in ("", chat_id)
+                ):
                     continue
                 binding, account, owner, room, dot = self.valid(bid, pairing=True)
-                if binding['state'] == 'pairing':
-                    self.c.channel_enrollment.incoming('telegram', binding, account, owner, room, dot, chat_id, external_id,
-                        matched=False, fresh=not update.get('edited_message'),
-                        pairing_attempt=value.strip().startswith(('CPW-', 'CPT_')) or len(value.strip()) == 36)
+                if binding["state"] == "pairing":
+                    self.c.channel_enrollment.incoming(
+                        "telegram",
+                        binding,
+                        account,
+                        owner,
+                        room,
+                        dot,
+                        chat_id,
+                        external_id,
+                        matched=False,
+                        fresh=not update.get("edited_message"),
+                        pairing_attempt=value.strip().startswith(("CPW-", "CPT_"))
+                        or len(value.strip()) == 36,
+                    )
                     break
             return None, "unbound_or_ambiguous_private_chat"
         binding, _, owner, room, dot = self.valid(rows[0]["id"])
-        self.c.rooms.migration.legacy_write(binding['conversation_id'])
-        if self.c.channel_enrollment.input_quarantined('telegram', account, chat_id, external_id):
-            return None, 'preauthorization_input_replay'
+        self.c.rooms.migration.legacy_write(binding["conversation_id"])
+        if self.c.channel_enrollment.input_quarantined("telegram", account, chat_id, external_id):
+            return None, "preauthorization_input_replay"
         if self.store.one(
             "SELECT 1 FROM channel_message_map WHERE channel=? AND binding_id=? AND generation=? AND external_id=?",
             ("telegram", binding["id"], binding["generation"], "out:" + external_id),
@@ -667,9 +712,7 @@ class TelegramService:
         mid, now = uuid.uuid4().hex, self.c.clock()
         files = attachment_manifest(message)
         body = {
-            "body_text": redact(
-                value or ("[附件消息]" if files else "[暂不支持的 Telegram 消息]")
-            ),
+            "body_text": redact(value or ("[附件消息]" if files else "[暂不支持的 Telegram 消息]")),
             "mentions": [{"slot_id": dot["id"]}],
             "duplex_recipients": [dot["id"]],
             "provenance_project_ids": [room["project_id"]],
@@ -685,8 +728,10 @@ class TelegramService:
                 "external_message_id": external_id,
                 "execution_authority": False,
                 "peer_pairing_verified": True,
-                "provider_created": str(message['date'] * 1000) if type(message.get('date')) is int and message['date'] > 0 else None,
-                "revision_is_latest_at_commit": not bool(update.get('edited_message')),
+                "provider_created": str(message["date"] * 1000)
+                if type(message.get("date")) is int and message["date"] > 0
+                else None,
+                "revision_is_latest_at_commit": not bool(update.get("edited_message")),
                 "provider_deleted": False,
                 "supersedes_message_id": old["message_id"] if old else "",
             },
@@ -721,10 +766,8 @@ class TelegramService:
         stored = self.c.object("collaboration_messages", room, mid)
         self.c.channel_owner.attest(stored)
         stored = self.c.owner_task_context.incoming(room, dot, stored, owner)
-        body = json.loads(stored['body'])
-        body["notifications"] = self.c.chatroom.notify(
-            room, stored, owner, body["mentions"]
-        )
+        body = json.loads(stored["body"])
+        body["notifications"] = self.c.chatroom.notify(room, stored, owner, body["mentions"])
         self.store.execute(
             "UPDATE collaboration_messages SET body=? WHERE id=?",
             (canonical(body), mid),
@@ -736,9 +779,7 @@ class TelegramService:
 
     def poll_failed(self, claim, error):
         with self.store.transaction():
-            row = self.store.one(
-                "SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],)
-            )
+            row = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],))
             if not row or row["poll_fence"] != claim["poll_fence"]:
                 return
             code = error.code if isinstance(error, DevError) else "TELEGRAM_POLL_FAILED"
@@ -749,7 +790,9 @@ class TelegramService:
             )
             state = (
                 "attention"
-                if isinstance(error, DevError) and error.code == "TELEGRAM_PROVIDER_REJECTED" and error.status == 401
+                if isinstance(error, DevError)
+                and error.code == "TELEGRAM_PROVIDER_REJECTED"
+                and error.status == 401
                 else row["state"]
             )
             self.store.execute(
@@ -760,38 +803,68 @@ class TelegramService:
     def poll_current(self, claim):
         self.require_enabled(claim)
         row = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (claim["id"],))
-        if (not row or row["state"] != "active" or row["poll_fence"] != claim["poll_fence"]
-                or row["poll_until"] <= self.c.clock()):
+        if (
+            not row
+            or row["state"] != "active"
+            or row["poll_fence"] != claim["poll_fence"]
+            or row["poll_until"] <= self.c.clock()
+        ):
             raise DevError("TELEGRAM_POLL_FENCE_LOST", "原轮询世代已失效", 409)
         return row
 
     def replay_deferred(self, aid):
         with self.store.transaction():
             account = self.store.one("SELECT * FROM telegram_accounts WHERE id=?", (aid,))
-            if not account or account['state'] != 'active':
+            if not account or account["state"] != "active":
                 return
             self.require_enabled(account)
-            for row in channel_inbound.pending(self, 'telegram', aid):
+            for row in channel_inbound.pending(self, "telegram", aid):
                 saved = channel_inbound.unpack(self, row)
                 if saved is None:
                     continue
-                scope = saved['scope']
-                current = {r['id']: r['version'] for r in self.store.all(
-                    "SELECT id,version FROM telegram_bindings WHERE account_id=? AND state IN ('active','pairing')", (aid,))}
-                if (saved['credential_version'] != account['credential_version']
-                        or saved['generation'] != account['generation']
-                        or any(current.get(bid) != version for bid, version in scope.items())):
+                scope = saved["scope"]
+                current = {
+                    r["id"]: r["version"]
+                    for r in self.store.all(
+                        "SELECT id,version FROM telegram_bindings WHERE account_id=? AND state IN ('active','pairing')",
+                        (aid,),
+                    )
+                }
+                if (
+                    saved["credential_version"] != account["credential_version"]
+                    or saved["generation"] != account["generation"]
+                    or any(current.get(bid) != version for bid, version in scope.items())
+                ):
                     channel_inbound.stale(self, row)
-                    self.store.execute("UPDATE telegram_inbox SET state='quarantined',reason_code='binding_changed_before_replay' WHERE account_id=? AND update_id=?",
-                                       (aid, saved['source']['update_id']))
+                    self.store.execute(
+                        "UPDATE telegram_inbox SET state='quarantined',reason_code='binding_changed_before_replay' WHERE account_id=? AND update_id=?",
+                        (aid, saved["source"]["update_id"]),
+                    )
                     continue
-                result, failure = channel_inbound.isolate(self, 'telegram', account, scope, saved['source'],
-                    lambda: self.ingest(account, saved['source'], scope), replay=True)
-                if failure.startswith('deferred:'):
+                result, failure = channel_inbound.isolate(
+                    self,
+                    "telegram",
+                    account,
+                    scope,
+                    saved["source"],
+                    lambda *, saved=saved, scope=scope: self.ingest(
+                        account, saved["source"], scope
+                    ),
+                    replay=True,
+                )
+                if failure.startswith("deferred:"):
                     break
                 mid, reason = result if not failure else (None, failure)
-                self.store.execute("UPDATE telegram_inbox SET state=?,message_id=?,reason_code=? WHERE account_id=? AND update_id=?",
-                    ('committed' if mid else 'quarantined', mid, reason, aid, saved['source']['update_id']))
+                self.store.execute(
+                    "UPDATE telegram_inbox SET state=?,message_id=?,reason_code=? WHERE account_id=? AND update_id=?",
+                    (
+                        "committed" if mid else "quarantined",
+                        mid,
+                        reason,
+                        aid,
+                        saved["source"]["update_id"],
+                    ),
+                )
 
     async def poll_once(self, aid):
         await self.store.run(self.replay_deferred, aid)

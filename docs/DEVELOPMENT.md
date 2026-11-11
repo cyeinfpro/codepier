@@ -4,11 +4,12 @@
 
 ## 依赖与单一版本源
 
-运行环境推荐 Python 3.13，前端构建使用 Node.js 24。六套 requirements 的 `.in` 是审阅直接依赖的入口，`.txt` 是包含传递依赖、版本和哈希的可安装锁文件。不要手工删去哈希来绕过安装失败。兼容性 SDK 使用独立环境，避免污染 Hub 依赖。
+运行环境推荐 Python 3.13，前端构建使用 Node.js 24。六套 requirements 的 `.in` 是审阅直接依赖的入口，`.txt` 是包含传递依赖、版本和哈希的可安装锁文件。不要手工删去哈希来绕过安装失败。兼容性 SDK 使用独立环境，避免污染 Hub 依赖。已有 `.venv` 不代表其中的包与当前锁文件一致；正式验证应在新建隔离环境按哈希安装并记录解释器/依赖版本，不覆盖其他任务正在使用的环境。
 
 ```bash
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
+.venv/bin/python scripts/check_dependencies.py
 python3.13 -m venv .venv-compat
 .venv-compat/bin/python -m pip install --require-hashes -r requirements-compat.txt
 .venv/bin/python -m playwright install chromium webkit
@@ -36,6 +37,10 @@ npm --prefix web/mcp-apps run build
 ```
 
 主动排版使用 npm run format。ES Module 公共层在 web/core，已有功能通过生成的 CP bundle 渐进接入；不要手工编辑 bundle.js、index.html 或 assets-manifest.json。页面模板 index.source.html 不手写版本号。修改任何入口资源后重新构建并校验哈希，否则启动或发布检查应失败，而不是发布混合版本资源。
+
+协作房间源码在 `web/collaboration-room/*.mjs`，共享视图状态和生命周期集中于 `index.mjs`。聊天源码在 `web/chat/*.js`，按 `manifest.json` 顺序组合并保留现有全局接口；两个 `styles/manifest.json` 维持 CSS 层叠顺序。修改源码后运行 `npm --prefix web/mcp-apps run build`，再生成面板资源清单。不要直接编辑生成的 `web/collaboration-room.js`、`web/chat.js` 或对应的两个 CSS 文件；`node web/mcp-apps/build-room.mjs --check` 验证生成物一致性。
+
+文案检查 `node scripts/check-ui-copy.mjs --check` 阻止明确的连续否定、装饰英文等问题；`--audit` 另列操作记录、权限、设备与目录用词供场景检查。工程诊断、真实协议名称及容量单位可以保留，不把模式命中数当成产品缺陷数。
 
 ## UI 设计系统约定
 
@@ -70,9 +75,11 @@ CSS 覆盖报告只是保守候选，不是自动删除授权。合并样式必�
 .venv/bin/python -m ruff check agent hub shared scripts tests
 ```
 
-browser/integration/slow 由实际导入及 fixture 依赖分类，smoke 和独立 matrix case 显式标记。新增重型 fixture 时同步分类并验证收集。类型检查当前覆盖配置与回归规划模块，不声称全部历史业务代码已严格类型化。共享浏览器、登录和证据工具放在 tests/browser_support.py 等支持模块，不从 test_*.py 导入 fixture。
+browser/integration/slow 由实际导入及 fixture 依赖分类，smoke 和独立 matrix case 显式标记。新增重型 fixture 时同步分类并验证收集。类型检查当前覆盖 9 个配置、回归规划、异步收尾、记录范围、保留策略及执行策略/运行结果合同文件，不声称全部历史业务代码已严格类型化。共享浏览器、登录和证据工具放在 tests/browser_support.py 等支持模块，不从 test_*.py 导入 fixture。
 
 通过 CodePier 清洁模式运行这些测试时，默认临时目录可能位于 Agent 私有状态目录中；测试创建的合成项目会因此触发 `PROTECTED_ROOT`。应为本次测试命令选择私有状态目录之外的临时位置，保留产品路径保护。macOS / Linux 可使用 `TMPDIR=/tmp .venv/bin/python -m pytest -q -m smoke`；Windows 应在本次测试进程中将 `TEMP` / `TMP` 指向专用测试临时目录。不要修改 Agent 的全局环境或把状态目录加入项目授权。
+
+清洁模式的 HOME 也可能看不到执行账号已安装的 Playwright 测试浏览器。可为本次测试命令设置 `PLAYWRIGHT_BROWSERS_PATH` 指向已安装的测试浏览器缓存，或在隔离环境安装锁定版本需要的浏览器；测试仍使用新建的临时上下文，不复用个人浏览器档案。
 
 完整回归使用全新目录；workers 不超过可用 CPU，资源受限时可更低：
 
@@ -108,6 +115,17 @@ CI 的 Linux 源码构建 job 与 macOS 的第 0 片分别保留本平台的构�
 覆盖率采集包括 Python 子进程，保存 XML/JSON 和可合并的数据。diff coverage 仅报告新增/修改的可执行 Python 行、未测量文件和未覆盖行，不设置旧代码全仓 80% 门槛，也不把没有数据说成 100%。分片先合并覆盖数据，再计算整个变更的覆盖率。
 
 Windows CI 运行明确选出的核心 pytest 文件、真实 PowerShell 参数行为和临时计划任务恢复验收，不只是解析脚本文本。Windows 核心子集与 Linux/macOS 全量证明分别报告；本机未执行的远端作业不能写成已通过。临时任务验证不重启电脑，不等于完成未登录启动的目标机演练。
+
+## Hub 历史维护
+
+默认保留终态正文 30 天、审计 365 天；维护不会在启动或升级时自动执行。先用现有 Hub 数据目录预览候选与引用保护来源，再按同一策略执行：
+
+```bash
+.venv/bin/python scripts/maintain_history.py --data-dir /path/to/hub-data
+.venv/bin/python scripts/maintain_history.py --data-dir /path/to/hub-data --apply
+```
+
+预览只读打开已有数据库，缺失路径直接报错，不创建新状态或运行迁移。`--operation-days` 最低 30、`--audit-days` 最低 365，`--batch` 为 1–500；一次最多处理这个批量，重复执行可继续推进。每次执行仍在事务内重新检查引用，预览不是对之后数据状态的承诺。JSON 报告包含候选记录、正文/归档字节、保护总数及原因计数；多个保护原因可重叠。身份、指纹、幂等键、墓碑、未决操作、冻结结果和强引用保留；不会删除附件/备份或执行 VACUUM。使用分离状态目录的部署沿用既有 `HUB_STATE_DIR` 配置。
 
 ## 证据、归档和隐私
 

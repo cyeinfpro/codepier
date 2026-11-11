@@ -130,7 +130,7 @@ def transport(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(incoming, 'PublicTLSConnection', Connection)
+    monkeypatch.setattr('shared.file_download.PublicTLSConnection', Connection)
     return responses, connected
 
 

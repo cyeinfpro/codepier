@@ -4,6 +4,7 @@ asyncio's normal child watcher reaps leaders as soon as they exit, releasing
 PGIDs before descendants have been stopped. This adapter observes with WNOWAIT
 and delegates the only reap to the existing owned-process-group cleanup.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,12 +33,14 @@ class OwnedProcess:
                 self._released = True
             else:
                 if status is not None:
-                    self._observed = (status.si_status if status.si_code == os.CLD_EXITED else -status.si_status)
+                    self._observed = (
+                        status.si_status if status.si_code == os.CLD_EXITED else -status.si_status
+                    )
         return self._observed
 
     async def wait(self):
-        while self.returncode is None and not self._released:
-            await asyncio.sleep(.02)
+        while self.returncode is None and not self._released:  # noqa: ASYNC110 - Observe external process/cancellation state; bounded by the owning lifecycle.
+            await asyncio.sleep(0.02)
         return self.returncode
 
     async def stop_owned(self):
@@ -76,7 +79,8 @@ async def create_owned_process(*command, **options):
     try:
         loop = asyncio.get_running_loop()
         owned._transport, _ = await loop.connect_read_pipe(
-            lambda: asyncio.StreamReaderProtocol(owned.stdout), process.stdout)
+            lambda: asyncio.StreamReaderProtocol(owned.stdout), process.stdout
+        )
     except BaseException:
         await owned.stop_owned()
         raise

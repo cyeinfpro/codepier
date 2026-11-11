@@ -153,7 +153,8 @@ async def test_provider_launch_failure_is_reaped(tmp_path):
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX provider supervisor')
 @pytest.mark.asyncio
-async def test_cancellation_while_spawn_completes_reaps_only_owned_provider(tmp_path, monkeypatch):
+@pytest.mark.parametrize('repeated', [False, True])
+async def test_cancellation_while_spawn_completes_reaps_only_owned_provider(tmp_path, monkeypatch, repeated):
     import agent.computer_process as transport
 
     provider = tmp_path / 'provider.py'
@@ -181,6 +182,11 @@ async def test_cancellation_while_spawn_completes_reaps_only_owned_provider(tmp_
         await wait_until(lambda: (tmp_path / 'ready').exists())
         assert (tmp_path / 'ticks').stat().st_size > 0
         task.cancel()
+        if repeated:
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task

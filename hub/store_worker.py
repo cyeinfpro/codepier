@@ -5,6 +5,7 @@ an executing phase is never preempted. Admission and shutdown retain Executor's
 existing contract: accepted work drains, rather than silently losing writes.
 This bounds priority bursts, not the total number of pending application calls.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -17,7 +18,7 @@ CONTROL_BURST = 8
 
 class StoreWorker(Executor):
     def __init__(self):
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='hub-sqlite')
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hub-sqlite")
         self._lock = Lock()
         self._normal = deque()
         self._control = deque()
@@ -34,7 +35,7 @@ class StoreWorker(Executor):
     def _submit(self, lane, fn, args, kwargs):
         with self._lock:
             if self._closing:
-                raise RuntimeError('cannot schedule new futures after shutdown')
+                raise RuntimeError("cannot schedule new futures after shutdown")
             future = Future()
             lane.append((future, fn, args, kwargs))
             if not self._draining:

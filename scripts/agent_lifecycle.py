@@ -5,6 +5,7 @@ The Agent copies this standard-library-only file to the OS temporary directory
 before acknowledging a lifecycle operation. It therefore keeps running while the
 installed runtime is replaced, and never imports code from that runtime.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,116 +26,158 @@ LABEL = "com.codepier.agent"
 TASK = "CodePierAgent"
 UNIT = "codepier-agent.service"
 
+
 def is_legacy_launchd_name(name):
     """Recognize the historical label format without embedding an owner's name."""
-    return isinstance(name, str) and re.fullmatch(
-        r'com\.[A-Za-z0-9][A-Za-z0-9-]*\.remote-dev-agent', name) is not None
+    return (
+        isinstance(name, str)
+        and re.fullmatch(r"com\.[A-Za-z0-9][A-Za-z0-9-]*\.remote-dev-agent", name) is not None
+    )
 
 
 def _read_owned_service_file(path):
     """Read only an owner-controlled regular file, without following symlinks."""
     path = Path(path)
     before = path.lstat()
-    if (not stat.S_ISREG(before.st_mode)
-            or hasattr(os, 'getuid') and before.st_uid != os.getuid()):
-        raise ValueError('Managed service definition must be an owner-owned regular file')
-    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-    with os.fdopen(fd, 'rb') as stream:
+    if not stat.S_ISREG(before.st_mode) or hasattr(os, "getuid") and before.st_uid != os.getuid():
+        raise ValueError("Managed service definition must be an owner-owned regular file")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as stream:
         opened = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
-                or hasattr(os, 'getuid') and opened.st_uid != os.getuid()):
-            raise ValueError('Managed service definition changed or belongs to another owner')
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or hasattr(os, "getuid")
+            and opened.st_uid != os.getuid()
+        ):
+            raise ValueError("Managed service definition changed or belongs to another owner")
         limit = 1024 * 1024
         if opened.st_size > limit:
-            raise ValueError('Managed service file exceeds the size limit')
+            raise ValueError("Managed service file exceeds the size limit")
         raw = stream.read(limit + 1)
         if len(raw) > limit:
-            raise ValueError('Managed service file exceeds the size limit')
+            raise ValueError("Managed service file exceeds the size limit")
         return raw
 
 
 def _launchd_service_name(base, recorded=None, home=None):
     # Keep this implementation identical in the two standalone bootstrap scripts.
-    canonical = 'com.codepier.agent'
+    canonical = "com.codepier.agent"
     if recorded and recorded != canonical and not is_legacy_launchd_name(recorded):
-        raise ValueError('Unrecognized managed service name')
+        raise ValueError("Unrecognized managed service name")
     home = Path.home() if home is None else Path(home)
-    folder = home/'Library/LaunchAgents'
+    folder = home / "Library/LaunchAgents"
     if folder.is_symlink():
-        raise ValueError('Managed service directory must not be a symlink')
+        raise ValueError("Managed service directory must not be a symlink")
     names = {canonical}
-    names.update(path.stem for path in folder.glob('*.plist') if is_legacy_launchd_name(path.stem))
+    names.update(path.stem for path in folder.glob("*.plist") if is_legacy_launchd_name(path.stem))
     if recorded:
         names.add(recorded)
-    command = [str(base/'runtime/.venv/bin/python'), '-m', 'agent', '--config', str(base/'config.json'), 'run']
+    command = [
+        str(base / "runtime/.venv/bin/python"),
+        "-m",
+        "agent",
+        "--config",
+        str(base / "config.json"),
+        "run",
+    ]
     owned = []
     for name in sorted(names):
-        target = folder/(name+'.plist')
+        target = folder / (name + ".plist")
         try:
             value = plistlib.loads(_read_owned_service_file(target))
-            matches = (isinstance(value, dict) and value.get('Label') == name
-                       and value.get('WorkingDirectory') == str(base/'runtime')
-                       and value.get('ProgramArguments') in (command, [str(base/'CodePier Agent.app/Contents/MacOS/CodePier Agent'), *command])
-                       and value.get('Program') in (None, value['ProgramArguments'][0]))
+            matches = (
+                isinstance(value, dict)
+                and value.get("Label") == name
+                and value.get("WorkingDirectory") == str(base / "runtime")
+                and value.get("ProgramArguments")
+                in (
+                    command,
+                    [str(base / "CodePier Agent.app/Contents/MacOS/CodePier Agent"), *command],
+                )
+                and value.get("Program") in (None, value["ProgramArguments"][0])
+            )
         except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
             matches = False
         if matches:
             owned.append(name)
         elif (name == recorded or name == canonical) and (target.exists() or target.is_symlink()):
-            raise ValueError('Recorded managed service ownership could not be verified')
+            raise ValueError("Recorded managed service ownership could not be verified")
     if len(owned) > 1:
-        raise ValueError('Both legacy and CodePier services exist; inspect before updating')
+        raise ValueError("Both legacy and CodePier services exist; inspect before updating")
     if recorded and recorded != canonical and recorded not in owned:
-        raise ValueError('Recorded managed service definition is missing')
+        raise ValueError("Recorded managed service definition is missing")
     return owned[0] if owned else canonical
 
 
 def managed_service_name(base, kind, scope):
     # Bootstrap runs before shared modules are installed. Keep this discovery
     # standard-library-only, and validate ownership before any service action.
-    names = {'launchd': ('com.codepier.agent', 'com.example.remote-dev-agent'),
-             'systemd': ('codepier-agent.service', 'remote-dev-agent.service'),
-             'schtasks': ('CodePierAgent', 'RemoteDevAgent')}.get(kind)
-    if not names: return ''
-    metadata_path = base/'management.json'
-    metadata = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.is_file() else {}
-    name = metadata.get('service_name')
-    if kind == 'launchd':
-        if scope != 'user' or metadata_path.is_symlink():
-            raise ValueError('Unrecognized managed launchd metadata or scope')
+    names = {
+        "launchd": ("com.codepier.agent", "com.example.remote-dev-agent"),
+        "systemd": ("codepier-agent.service", "remote-dev-agent.service"),
+        "schtasks": ("CodePierAgent", "RemoteDevAgent"),
+    }.get(kind)
+    if not names:
+        return ""
+    metadata_path = base / "management.json"
+    metadata = (
+        json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+    )
+    name = metadata.get("service_name")
+    if kind == "launchd":
+        if scope != "user" or metadata_path.is_symlink():
+            raise ValueError("Unrecognized managed launchd metadata or scope")
         return _launchd_service_name(base, name)
     if name:
-        if name not in names: raise ValueError('Unrecognized managed service name')
+        if name not in names:
+            raise ValueError("Unrecognized managed service name")
         return name
-    if kind == 'schtasks':
-        target = base/'service.xml'
+    if kind == "schtasks":
+        target = base / "service.xml"
         if target.is_file():
-            text = target.read_text(encoding='utf-16')
-            return names[0] if 'CodePierAgent' in text or '.codepier-agent' in text else names[1]
+            text = target.read_text(encoding="utf-16")
+            return names[0] if "CodePierAgent" in text or ".codepier-agent" in text else names[1]
         return names[0]
-    folder = (Path.home()/'Library/LaunchAgents' if kind == 'launchd' else
-              Path('/etc/systemd/system') if scope == 'system' else Path.home()/'.config/systemd/user')
+    folder = (
+        Path.home() / "Library/LaunchAgents"
+        if kind == "launchd"
+        else Path("/etc/systemd/system")
+        if scope == "system"
+        else Path.home() / ".config/systemd/user"
+    )
     owned = []
     for name in names:
-        target = folder/(name+'.plist' if kind == 'launchd' else name)
-        if target.is_symlink(): raise ValueError('Managed service definition must not be a symlink')
-        if not target.is_file(): continue
-        if kind == 'launchd':
+        target = folder / (name + ".plist" if kind == "launchd" else name)
+        if target.is_symlink():
+            raise ValueError("Managed service definition must not be a symlink")
+        if not target.is_file():
+            continue
+        if kind == "launchd":
             value = plistlib.loads(target.read_bytes())
-            matches = value.get('Label') == name and value.get('WorkingDirectory') == str(base/'runtime')
+            matches = value.get("Label") == name and value.get("WorkingDirectory") == str(
+                base / "runtime"
+            )
         else:
-            matches = 'WorkingDirectory='+str(base/'runtime').replace('%','%%') in target.read_text(encoding='utf-8').splitlines()
-        if matches: owned.append(name)
-    if len(owned)>1: raise ValueError('Both legacy and CodePier services exist; inspect before updating')
+            matches = (
+                "WorkingDirectory=" + str(base / "runtime").replace("%", "%%")
+                in target.read_text(encoding="utf-8").splitlines()
+            )
+        if matches:
+            owned.append(name)
+    if len(owned) > 1:
+        raise ValueError("Both legacy and CodePier services exist; inspect before updating")
     return owned[0] if owned else names[0]
-
 
 
 def _service_name(base):
     kind, scope = _service(base)
     name = managed_service_name(base, kind, scope)
-    if kind == 'launchd' and not (Path.home()/'Library/LaunchAgents'/(name+'.plist')).is_file():
-        raise ValueError('Managed launchd service definition is missing')
+    if (
+        kind == "launchd"
+        and not (Path.home() / "Library/LaunchAgents" / (name + ".plist")).is_file()
+    ):
+        raise ValueError("Managed launchd service definition is missing")
     return name
 
 
@@ -215,7 +258,11 @@ def _service_target(base: Path, kind: str, scope: str) -> Path | None:
     if kind == "launchd":
         return Path.home() / "Library" / "LaunchAgents" / f"{name}.plist"
     if kind == "systemd":
-        folder = Path("/etc/systemd/system") if scope == "system" else Path.home() / ".config/systemd/user"
+        folder = (
+            Path("/etc/systemd/system")
+            if scope == "system"
+            else Path.home() / ".config/systemd/user"
+        )
         return folder / name
     if kind == "schtasks":
         return base / "service.xml"
@@ -224,14 +271,16 @@ def _service_target(base: Path, kind: str, scope: str) -> Path | None:
 
 def windows_task_script(name: str) -> str:
     escaped = name.replace("'", "''")
-    return ("$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; "
-            "$s.Connect(); $t=$s.GetFolder('\\').GetTask('"+escaped+"'); ")
+    return (
+        "$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; "
+        "$s.Connect(); $t=$s.GetFolder('\\').GetTask('" + escaped + "'); "
+    )
 
 
 def set_windows_task_enabled(name: str, enabled: bool) -> None:
     # Modify the registered task's Enabled property without re-registering its
     # BootTrigger (which would require elevation in a noninteractive session).
-    script = windows_task_script(name)+"$t.Enabled="+("$true" if enabled else "$false")
+    script = windows_task_script(name) + "$t.Enabled=" + ("$true" if enabled else "$false")
     _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], check=True)
 
 
@@ -241,23 +290,41 @@ def service_is_running(base: Path) -> bool:
     if kind == "launchd":
         # A missing service is harmless only if this user's launchd domain is accessible.
         _run(["launchctl", "print", f"gui/{os.getuid()}"], check=True)
-        result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{name}"],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{name}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
         return result.returncode == 0 and bool(re.search(r"\bpid = [1-9][0-9]*", result.stdout))
     if kind == "systemd":
         # is-active also returns false for 'deactivating'; inspect ActiveState instead.
-        result = subprocess.run(_systemctl(scope) + ["show", "--property=ActiveState", "--value", name],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        result = subprocess.run(
+            _systemctl(scope) + ["show", "--property=ActiveState", "--value", name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
         if result.returncode:
             raise RuntimeError("cannot verify systemd service state; refusing to remove files")
         state = result.stdout.strip()
-        if state not in {"inactive", "failed", "active", "activating", "deactivating", "reloading", "maintenance"}:
+        if state not in {
+            "inactive",
+            "failed",
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+            "maintenance",
+        }:
             raise RuntimeError("unknown systemd service state; refusing to remove files")
         return state not in {"inactive", "failed"}
     if kind == "schtasks":
         # State can be Disabled while a previously started instance still runs.
         # Inspect actual instances so maintenance waits for process termination.
-        script = windows_task_script(name)+"if($t.GetInstances(0).Count -gt 0){exit 10}; exit 0"
+        script = windows_task_script(name) + "if($t.GetInstances(0).Count -gt 0){exit 10}; exit 0"
         code = _run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script])
         if code not in (0, 10):
             raise RuntimeError("cannot verify scheduled task state; refusing to remove files")
@@ -281,10 +348,16 @@ def stop_service(base: Path, *, remove: bool = False) -> None:
         _run(["launchctl", "bootout", f"{domain}/{name}"])
         require_stopped(base)
         if remove:
-            registered = subprocess.run(["launchctl", "print", f"{domain}/{name}"],
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            registered = subprocess.run(
+                ["launchctl", "print", f"{domain}/{name}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
             if registered.returncode == 0:
-                raise RuntimeError("Agent launchd service is still registered; installed files were preserved")
+                raise RuntimeError(
+                    "Agent launchd service is still registered; installed files were preserved"
+                )
             target = _service_target(base, kind, scope)
             if target:
                 target.unlink(missing_ok=True)
@@ -322,10 +395,15 @@ def start_service(base: Path) -> None:
         # installation; do not bypass these when restarting an upgraded runtime.
         runtime = base / "runtime"
         python = runtime / ".venv/bin/python"
-        code = ("import sys; sys.path.insert(0, " + repr(str(runtime)) + "); "
-                "from scripts.install_agent import start_service; "
-                "from pathlib import Path; start_service(Path(" + repr(str(base)) +
-                "), Path(" + repr(str(python)) + "))")
+        code = (
+            "import sys; sys.path.insert(0, " + repr(str(runtime)) + "); "
+            "from scripts.install_agent import start_service; "
+            "from pathlib import Path; start_service(Path("
+            + repr(str(base))
+            + "), Path("
+            + repr(str(python))
+            + "))"
+        )
         _run([python, "-I", "-c", code], check=True)
     elif kind == "systemd":
         command = _systemctl(scope)
@@ -343,8 +421,13 @@ def verify_service(base: Path) -> None:
     time.sleep(2)
     name = _service_name(base)
     if kind == "launchd":
-        result = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{name}"],
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{name}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
         if result.returncode or "state = running" not in result.stdout:
             raise RuntimeError("Agent launchd service did not stay running")
     elif kind == "systemd":
@@ -369,6 +452,7 @@ def _process_alive(pid: int) -> bool:
             return True
     try:
         import ctypes
+
         handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False, pid)
         if not handle:
             return False
@@ -414,7 +498,11 @@ def _move(source: Path, destination: Path) -> None:
 
 def _version(runtime: Path) -> str:
     try:
-        match = re.search(r'^VERSION\s*=\s*["\']([^"\']+)', (runtime / "shared" / "util.py").read_text(encoding="utf-8"), re.M)
+        match = re.search(
+            r'^VERSION\s*=\s*["\']([^"\']+)',
+            (runtime / "shared" / "util.py").read_text(encoding="utf-8"),
+            re.M,
+        )
         return match.group(1) if match else ""
     except OSError:
         return ""
@@ -424,6 +512,7 @@ def refresh_cli_commands(base: Path) -> None:
     # Remote panel updates must install the same local commands as CLI updates.
     # Only load the already verified and installed package, never a remote URL.
     import importlib.util
+
     source = base / "runtime/scripts/install_agent.py"
     if not source.is_file():
         return
@@ -442,8 +531,11 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
     candidate = candidate.resolve()
     if candidate.parent != base or not candidate.name.startswith(".runtime-update-"):
         raise RuntimeError("invalid staged runtime location")
-    for required in (candidate / "agent" / "__main__.py", candidate / "shared" / "util.py",
-                     candidate / "scripts" / "agent_lifecycle.py"):
+    for required in (
+        candidate / "agent" / "__main__.py",
+        candidate / "shared" / "util.py",
+        candidate / "scripts" / "agent_lifecycle.py",
+    ):
         if not required.is_file():
             raise RuntimeError("staged runtime is incomplete")
     runtime = base / "runtime"
@@ -455,7 +547,10 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
     if wrapper.is_file() and not (candidate / "run-service.py").exists():
         if (candidate / "agent/service_watchdog.py").is_file():
             import importlib.util
-            spec = importlib.util.spec_from_file_location("codepier_candidate_installer", candidate / "scripts/install_agent.py")
+
+            spec = importlib.util.spec_from_file_location(
+                "codepier_candidate_installer", candidate / "scripts/install_agent.py"
+            )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             module.write_windows_wrapper(candidate)
@@ -475,8 +570,17 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
         _move(runtime, backup)
         runtime_moved = True
         _move(candidate, runtime)
-        _update_management(base, managed=True, service=True, installed_version=_version(runtime),
-                           previous_version=previous_version, status="starting", last_error="", brand_migration="", brand_migration_error="")
+        _update_management(
+            base,
+            managed=True,
+            service=True,
+            installed_version=_version(runtime),
+            previous_version=previous_version,
+            status="starting",
+            last_error="",
+            brand_migration="",
+            brand_migration_error="",
+        )
         start_service(base)
         verify_service(base)
         _update_management(base, status="ready", last_error="")
@@ -512,8 +616,12 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
                     start_service(base)
                     verify_service(base)
             # Only advertise rollback after the original service was verified.
-            _update_management(base, installed_version=previous_version, status="rollback",
-                               last_error="更新失败，已恢复上一版本" + ("：" + detail if detail else ""))
+            _update_management(
+                base,
+                installed_version=previous_version,
+                status="rollback",
+                last_error="更新失败，已恢复上一版本" + ("：" + detail if detail else ""),
+            )
         except Exception as recovery_error:
             recovery_detail = str(recovery_error).strip()[:200]
             message = "更新失败，自动恢复未完成：" + detail + "；" + recovery_detail
@@ -524,13 +632,15 @@ def apply_update(base: Path, candidate: Path, pid: int) -> None:
             raise RuntimeError(message) from exc
         raise
 
-
     # A verified, committed runtime must never roll back for cosmetic links.
     try:
         refresh_cli_commands(base)
     except Exception as exc:
-        _update_management(base, status="ready",
-                           last_error="Agent 更新成功；命令链接需要修复：" + str(exc).strip()[:200])
+        _update_management(
+            base,
+            status="ready",
+            last_error="Agent 更新成功；命令链接需要修复：" + str(exc).strip()[:200],
+        )
 
 
 def restart(base: Path, pid: int) -> None:
@@ -555,18 +665,31 @@ def _schedule_windows_removal(base: Path) -> None:
         "if(-not (Test-Path -LiteralPath $p)){exit 0}; Start-Sleep -Milliseconds 500}; exit 1"
     )
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-    subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     creationflags=flags, close_fds=True)
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+        subprocess, "DETACHED_PROCESS", 0
+    )
+    subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+        close_fds=True,
+    )
 
 
 def uninstall(base: Path, pid: int) -> None:
     # The helper is also called after remote ACK: never permit arbitrary recursive deletion.
     home = Path.home().resolve()
-    if (not base.is_absolute() or base.is_symlink() or len(base.parts) < 3
-            or base.resolve() == home or base.resolve() in home.parents
-            or (base / "config.json").is_symlink() or (base / "runtime").is_symlink()):
+    if (
+        not base.is_absolute()
+        or base.is_symlink()
+        or len(base.parts) < 3
+        or base.resolve() == home
+        or base.resolve() in home.parents
+        or (base / "config.json").is_symlink()
+        or (base / "runtime").is_symlink()
+    ):
         raise RuntimeError("unsafe Agent uninstall directory")
     base = base.resolve()
     config = _read_json(base / "config.json")
@@ -575,24 +698,59 @@ def uninstall(base: Path, pid: int) -> None:
     for root in config.get("allowed_roots", []):
         raw = root.get("path") if isinstance(root, dict) else root
         if isinstance(raw, str) and Path(raw).expanduser().resolve().is_relative_to(base):
-            raise RuntimeError("authorized project directory is inside installation; refusing to remove files")
-    state=Path(config.get('state_dir') or base/'state').expanduser()
-    receipt=state/'browser-bridge/install-receipt.json'
+            raise RuntimeError(
+                "authorized project directory is inside installation; refusing to remove files"
+            )
+    state = Path(config.get("state_dir") or base / "state").expanduser()
+    receipt = state / "browser-bridge/install-receipt.json"
     if receipt.is_file():
-        python=base/'runtime/.venv'/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
+        python = (
+            base / "runtime/.venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        )
         # Preflight receipt ownership before removing the service or credentials.
-        subprocess.run([str(python),'-m','agent.install_browser_bridge','--config',str(base/'config.json'),'--uninstall'],
-                       cwd=base/'runtime',check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "agent.install_browser_bridge",
+                "--config",
+                str(base / "config.json"),
+                "--uninstall",
+            ],
+            cwd=base / "runtime",
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
     stop_service(base, remove=True)
     _wait_for_exit(pid)
     if receipt.is_file():
-        subprocess.run([str(python),'-m','agent.install_browser_bridge','--config',str(base/'config.json'),'--uninstall','--apply'],
-                       cwd=base/'runtime',check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=60)
-    if base.name=='.codepier-agent':
-        old=base.with_name('.remote-dev-agent')
-        if (old.is_symlink() or getattr(old,'is_junction',lambda:False)()) and old.resolve()==base:
-            if getattr(old,'is_junction',lambda:False)():old.rmdir()
-            else:old.unlink()
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "agent.install_browser_bridge",
+                "--config",
+                str(base / "config.json"),
+                "--uninstall",
+                "--apply",
+            ],
+            cwd=base / "runtime",
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=60,
+        )
+    if base.name == ".codepier-agent":
+        old = base.with_name(".remote-dev-agent")
+        if (
+            old.is_symlink() or getattr(old, "is_junction", lambda: False)()
+        ) and old.resolve() == base:
+            if getattr(old, "is_junction", lambda: False)():
+                old.rmdir()
+            else:
+                old.unlink()
     if os.name == "nt":
         _schedule_windows_removal(base)
     else:
@@ -601,9 +759,11 @@ def uninstall(base: Path, pid: int) -> None:
 
 def record_failure(base: Path, exc: Exception) -> None:
     current = _read_json(base / "management.json")
-    brand_record = _read_json(base / '.codepier-migration.json')
-    if current.get('brand_migration') == 'rollback' and brand_record.get('stage') == 'rolled_back':
-        _update_management(base, status='rollback', last_error='CodePier 命名迁移失败，已验证恢复原安装')
+    brand_record = _read_json(base / ".codepier-migration.json")
+    if current.get("brand_migration") == "rollback" and brand_record.get("stage") == "rolled_back":
+        _update_management(
+            base, status="rollback", last_error="CodePier 命名迁移失败，已验证恢复原安装"
+        )
         return
     if current.get("status") == "rollback":
         # apply_update already restored and verified the previous service. Keep
@@ -618,18 +778,19 @@ def migrate_brand(base, pid):
     # Load verified source into memory before moving the installation.
     import importlib.util
     from types import SimpleNamespace
+
     loaded = {}
-    for name in ('brand_migration', 'brand_browser'):
-        source = base / 'runtime/shared' / (name + '.py')
-        spec = importlib.util.spec_from_file_location('codepier_' + name, source)
+    for name in ("brand_migration", "brand_browser"):
+        source = base / "runtime/shared" / (name + ".py")
+        spec = importlib.util.spec_from_file_location("codepier_" + name, source)
         if not spec or not spec.loader:
-            raise RuntimeError('Missing brand migration component')
+            raise RuntimeError("Missing brand migration component")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         loaded[name] = module
     backend = SimpleNamespace(**globals())
-    backend.brand_browser = loaded['brand_browser']
-    return loaded['brand_migration'].migrate_agent(base, pid, backend)
+    backend.brand_browser = loaded["brand_browser"]
+    return loaded["brand_migration"].migrate_agent(base, pid, backend)
 
 
 def main() -> None:

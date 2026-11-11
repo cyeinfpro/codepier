@@ -5,9 +5,11 @@ foreign key, and the existing delivery journal, leases and replay cursors remain
 unchanged. Store runs this migration in its serialized startup transaction with
 foreign keys disabled, then checks every foreign key before committing.
 """
+
 from __future__ import annotations
 
 import re
+
 
 def migrate(db):
     for table in ("mcp_event_subscriptions", "mcp_event_outbox"):
@@ -24,28 +26,43 @@ def migrate(db):
             raise RuntimeError("Unexpected incomplete room event migration")
         replacement = re.sub(
             r"CREATE TABLE(?: IF NOT EXISTS)?\s+" + table + r"\s*\(",
-            "CREATE TABLE " + temporary + " (", original, count=1, flags=re.I,
+            "CREATE TABLE " + temporary + " (",
+            original,
+            count=1,
+            flags=re.I,
         )
         replacement, changed = re.subn(
             r"room_id TEXT NOT NULL REFERENCES collaboration_rooms\(id\)",
             "room_id TEXT REFERENCES collaboration_rooms(id), "
             "conversation_id TEXT REFERENCES conversation_rooms(id)",
-            replacement, count=1,
+            replacement,
+            count=1,
         )
         if changed != 1:
             raise RuntimeError("Unknown event journal schema; migration refused")
         end = replacement.rfind(")")
-        replacement = replacement[:end] + (
-            ", CHECK ((room_id IS NOT NULL AND conversation_id IS NULL) OR "
-            "(room_id IS NULL AND conversation_id IS NOT NULL))"
-        ) + replacement[end:]
-        indexes = [row[0] for row in db.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
-            (table,),
-        )]
-        triggers = [(row[0], row[1]) for row in db.execute(
-            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL"
-        ) if re.search(r"\b" + table + r"\b", row[1])]
+        replacement = (
+            replacement[:end]
+            + (
+                ", CHECK ((room_id IS NOT NULL AND conversation_id IS NULL) OR "
+                "(room_id IS NULL AND conversation_id IS NOT NULL))"
+            )
+            + replacement[end:]
+        )
+        indexes = [
+            row[0]
+            for row in db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
+                (table,),
+            )
+        ]
+        triggers = [
+            (row[0], row[1])
+            for row in db.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL"
+            )
+            if re.search(r"\b" + table + r"\b", row[1])
+        ]
         sequence = db.execute("SELECT seq FROM sqlite_sequence WHERE name=?", (table,)).fetchone()
         names = ",".join('"' + row[1].replace('"', '""') + '"' for row in columns)
         db.execute(replacement)
@@ -62,7 +79,9 @@ def migrate(db):
         db.execute(f"DROP TABLE {table}")
         db.execute(f"ALTER TABLE {temporary} RENAME TO {table}")
         if sequence:
-            db.execute("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name=?", (sequence[0], table))
+            db.execute(
+                "UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name=?", (sequence[0], table)
+            )
         for statement in indexes:
             db.execute(statement)
         for _, statement in triggers:

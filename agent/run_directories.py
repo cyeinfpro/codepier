@@ -1,4 +1,5 @@
 """Per-operation output directories; never reap a directory still in use."""
+
 from __future__ import annotations
 
 import json
@@ -39,7 +40,10 @@ def _exclude_runs(root: Path) -> None:
     # Git resolves the common metadata directory for registered worktrees.
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     if result.returncode:
         raise DevError("RUN_DIRECTORY_FAILED", "Cannot locate Git exclude file")
@@ -65,8 +69,12 @@ def prepare_run_directory(root: Path, operation_id: str) -> Path:
     try:
         path.mkdir(mode=0o700)
     except FileExistsError as exc:
-        raise DevError("RUN_DIRECTORY_EXISTS", "Operation output directory already exists", 409) from exc
-    (path / _MARKER).write_text(json.dumps({"created": time.time(), "finished": None}), encoding="utf-8")
+        raise DevError(
+            "RUN_DIRECTORY_EXISTS", "Operation output directory already exists", 409
+        ) from exc
+    (path / _MARKER).write_text(
+        json.dumps({"created": time.time(), "finished": None}), encoding="utf-8"
+    )
     return path
 
 
@@ -84,7 +92,9 @@ def finish_run_directory(path: Path) -> None:
         json.dump({"finished": time.time()}, stream)
 
 
-def cleanup_run_directories(root: Path, ttl_seconds: float = 7 * 86400, *, now: float | None = None) -> list[str]:
+def cleanup_run_directories(
+    root: Path, ttl_seconds: float = 7 * 86400, *, now: float | None = None
+) -> list[str]:
     if ttl_seconds < 0:
         raise ValueError("TTL must be nonnegative")
     parent = Path(root) / ".codepier" / "runs"

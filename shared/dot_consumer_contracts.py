@@ -1,4 +1,5 @@
 """Explicit Dot consumer ownership, separate from work/operation authority."""
+
 from pydantic import Field
 from shared.collaboration_contracts import Scope, Identifier, Key
 

@@ -1,5 +1,6 @@
 """Offline resumable-ingress contracts; all files and identities are synthetic."""
 from __future__ import annotations
+from shared import file_download as transport
 
 import hashlib
 import json
@@ -397,7 +398,7 @@ def test_owner_and_node_count_quotas(workspace, monkeypatch):
 def test_ttl_cleanup_only_owned_expired_spool_and_preserves_receipt(workspace, monkeypatch):
     uploads, engine, project, root = workspace
     clock = [1000.0]
-    monkeypatch.setattr(incoming.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(transport.time, 'time', lambda: clock[0])
     success = filled(workspace, path='success')
     uploads.finish(project, {'upload_id': success})
     pending = start(workspace, path='pending')

@@ -4,7 +4,7 @@ from itertools import product
 
 import pytest
 
-from shared.subscription_lifetime import (
+from docs.examples.subscription_lifetime import (
     APPROVAL_PURPOSE, FINITE_TTL_MS, REQUIRED_SOURCES, Current, Evidence,
     EvidenceKind, EvidenceReference, EvidenceSource, EvidenceState,
     ReceiptState, RecoveryObservation, Scope, State, negotiate, recovery_decision,
@@ -92,7 +92,7 @@ def test_every_independent_evidence_kind_is_required(kind):
     assert_no_actions(result)
 
 
-@pytest.mark.parametrize("kind,state", product(EvidenceKind, [EvidenceState.UNKNOWN, EvidenceState.REVOKED, EvidenceState.DENIED]))
+@pytest.mark.parametrize("kind,state", list(product(EvidenceKind, [EvidenceState.UNKNOWN, EvidenceState.REVOKED, EvidenceState.DENIED])))
 def test_unknown_denied_and_revoked_evidence_never_enables(kind, state):
     current, refs, store = setup()
     ref = next(ref for ref in refs if ref.kind is kind)
@@ -129,10 +129,10 @@ def test_unknown_or_changed_current_revisions_keep_lifetime_disabled(field, valu
         assert field + "_unknown" in result["blockers"]
 
 
-@pytest.mark.parametrize("field,state", product(
+@pytest.mark.parametrize("field,state", list(product(
     ["grant_state", "subscription_state", "host_state"],
     [State.UNKNOWN, State.PAUSED, State.REVOKED],
-))
+)))
 def test_current_pause_revocation_or_unknown_cannot_be_overridden_by_positive_evidence(field, state):
     current, refs, store = setup()
     result = propose(replace(current, **{field: state}), refs, store)
@@ -141,7 +141,7 @@ def test_current_pause_revocation_or_unknown_cannot_be_overridden_by_positive_ev
     assert_no_actions(result)
 
 
-@pytest.mark.parametrize("field,value", product(["grant_expires_at", "subscription_expires_at"], [None, NOW - 1, NOW]))
+@pytest.mark.parametrize("field,value", list(product(["grant_expires_at", "subscription_expires_at"], [None, NOW - 1, NOW])))
 def test_current_expiry_or_missing_expiry_is_not_lifetime_approval(field, value):
     current, refs, store = setup()
     result = propose(replace(current, **{field: value}), refs, store)

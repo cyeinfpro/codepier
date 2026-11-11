@@ -3,6 +3,7 @@
 Git metadata and prior CodePier output are deliberately excluded. Commands that
 require Git metadata must use a registered worktree instead of snapshot mode.
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -44,17 +45,32 @@ def _clone_file(source: str, destination: str) -> str:
         clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
         clonefile.restype = ctypes.c_int
         if clonefile(os.fsencode(source), os.fsencode(destination), 0):
-            raise DevError("SNAPSHOT_UNSUPPORTED", "APFS clonefile is unavailable for this filesystem")
+            raise DevError(
+                "SNAPSHOT_UNSUPPORTED", "APFS clonefile is unavailable for this filesystem"
+            )
     elif sys.platform.startswith("linux"):
         try:
             result = subprocess.run(
-                ["cp", "--reflink=always", "--preserve=mode,timestamps", "--", str(source), str(destination)],
-                capture_output=True, timeout=60, check=False,
+                [
+                    "cp",
+                    "--reflink=always",
+                    "--preserve=mode,timestamps",
+                    "--",
+                    str(source),
+                    str(destination),
+                ],
+                capture_output=True,
+                timeout=60,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DevError("SNAPSHOT_UNSUPPORTED", "Required reflink clone command is unavailable") from exc
+            raise DevError(
+                "SNAPSHOT_UNSUPPORTED", "Required reflink clone command is unavailable"
+            ) from exc
         if result.returncode:
-            raise DevError("SNAPSHOT_UNSUPPORTED", "Filesystem does not support required reflink cloning")
+            raise DevError(
+                "SNAPSHOT_UNSUPPORTED", "Filesystem does not support required reflink cloning"
+            )
     else:
         raise DevError("SNAPSHOT_UNSUPPORTED", "Snapshot execution requires APFS or Linux reflink")
     return str(destination)
@@ -77,10 +93,14 @@ def _validate_tree(root: Path, *, artifacts: bool = False) -> None:
                     resolved = path.resolve(strict=True)
                     resolved.relative_to(root)
                 except (ValueError, OSError, RuntimeError) as exc:
-                    raise DevError("SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source") from exc
+                    raise DevError(
+                        "SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source"
+                    ) from exc
                 relative = resolved.relative_to(root)
                 if relative.parts and relative.parts[0] in {".git", ".codepier"}:
-                    raise DevError("SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata")
+                    raise DevError(
+                        "SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata"
+                    )
             elif not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise DevError("SNAPSHOT_UNSAFE", "Snapshot contains a special file")
             elif stat.S_ISREG(mode) and not artifacts:
@@ -99,10 +119,17 @@ def _validate_editable(path: Path, root: Path) -> None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (ValueError, UnicodeError) as exc:
-            raise DevError("SNAPSHOT_UNSAFE", "Cannot validate Python installation metadata") from exc
-        if (not isinstance(data, dict) or not isinstance(data.get("dir_info", {}), dict)
-                or data.get("dir_info", {}).get("editable")):
-            raise DevError("SNAPSHOT_UNSAFE", "Editable Python installs are not supported in snapshots")
+            raise DevError(
+                "SNAPSHOT_UNSAFE", "Cannot validate Python installation metadata"
+            ) from exc
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("dir_info", {}), dict)
+            or data.get("dir_info", {}).get("editable")
+        ):
+            raise DevError(
+                "SNAPSHOT_UNSAFE", "Editable Python installs are not supported in snapshots"
+            )
     if path.suffix == ".pth":
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -118,7 +145,9 @@ def _validate_editable(path: Path, root: Path) -> None:
             try:
                 (path.parent / line).resolve().relative_to(root)
             except ValueError as exc:
-                raise DevError("SNAPSHOT_UNSAFE", "Python path configuration escapes the snapshot") from exc
+                raise DevError(
+                    "SNAPSHOT_UNSAFE", "Python path configuration escapes the snapshot"
+                ) from exc
 
 
 class SnapshotManager:
@@ -145,8 +174,15 @@ class SnapshotManager:
         destination = container / "tree"
         try:
             shutil.copytree(
-                root, destination, symlinks=True, copy_function=_clone_file,
-                ignore=lambda directory, names: [name for name in names if Path(directory) == root and name in {".git", ".codepier"}],
+                root,
+                destination,
+                symlinks=True,
+                copy_function=_clone_file,
+                ignore=lambda directory, names: [
+                    name
+                    for name in names
+                    if Path(directory) == root and name in {".git", ".codepier"}
+                ],
             )
             _validate_tree(destination)
             # Empty projects still require a working clone facility.
@@ -161,13 +197,19 @@ class SnapshotManager:
             shutil.rmtree(container)
             raise
 
-    def extract_artifacts(self, snapshot: Snapshot, relative_paths: list[str], run_dir: Path) -> list[str]:
+    def extract_artifacts(
+        self, snapshot: Snapshot, relative_paths: list[str], run_dir: Path
+    ) -> list[str]:
         self._owned(snapshot)
         run_dir = safe_directory(run_dir)
         extracted = []
         for value in relative_paths:
             relative = _relative(value)
-            if relative == Path(".") or relative.parts[0] in {".git", ".codepier", ".codepier-run.json"}:
+            if relative == Path(".") or relative.parts[0] in {
+                ".git",
+                ".codepier",
+                ".codepier-run.json",
+            }:
                 raise DevError("SNAPSHOT_UNSAFE", "Invalid snapshot artifact path")
             source = snapshot.root / relative
             # Check every component: resolve containment alone permits internal symlinks.
@@ -177,7 +219,9 @@ class SnapshotManager:
                 if component.is_symlink():
                     raise DevError("SNAPSHOT_UNSAFE", "Artifact symlinks are not supported")
             if not source.exists():
-                raise DevError("SNAPSHOT_ARTIFACT_MISSING", "Declared snapshot artifact was not produced")
+                raise DevError(
+                    "SNAPSHOT_ARTIFACT_MISSING", "Declared snapshot artifact was not produced"
+                )
             destination = run_dir / relative
             safe_directory(destination.parent, create=True)
             if destination.exists() or destination.is_symlink():

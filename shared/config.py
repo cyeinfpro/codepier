@@ -1,4 +1,5 @@
 """Validated process settings. Errors name the setting, never echo its value."""
+
 from __future__ import annotations
 
 import math
@@ -6,6 +7,7 @@ import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+DEFAULT_TIMEZONE = "Asia/Taipei"
 DEFAULT_HUB_PORT = 8765
 DEFAULT_PUBLIC_URL = f"http://127.0.0.1:{DEFAULT_HUB_PORT}"
 OPERATION_WAIT_SECONDS = 10
@@ -20,7 +22,9 @@ def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     try:
         value = default if raw is None else int(raw.strip())
     except ValueError:
-        raise ConfigurationError(f"{name} must be an integer between {minimum} and {maximum}") from None
+        raise ConfigurationError(
+            f"{name} must be an integer between {minimum} and {maximum}"
+        ) from None
     if not minimum <= value <= maximum:
         raise ConfigurationError(f"{name} must be an integer between {minimum} and {maximum}")
     return value
@@ -31,7 +35,9 @@ def env_float(name: str, default: float, minimum: float, maximum: float) -> floa
     try:
         value = default if raw is None else float(raw.strip())
     except ValueError:
-        raise ConfigurationError(f"{name} must be a finite number between {minimum} and {maximum}") from None
+        raise ConfigurationError(
+            f"{name} must be a finite number between {minimum} and {maximum}"
+        ) from None
     if not math.isfinite(value) or not minimum <= value <= maximum:
         raise ConfigurationError(f"{name} must be a finite number between {minimum} and {maximum}")
     return value
@@ -50,14 +56,18 @@ def env_bool(name: str, default: bool) -> bool:
 
 
 def env_csv(name: str, default: str = "") -> tuple[str, ...]:
-    return tuple(dict.fromkeys(part.strip() for part in os.getenv(name, default).split(",") if part.strip()))
+    return tuple(
+        dict.fromkeys(part.strip() for part in os.getenv(name, default).split(",") if part.strip())
+    )
 
 
-def env_timezone(name: str = "TZ", default: str = "Asia/Taipei") -> ZoneInfo:
+def env_timezone(name: str = "TZ", default: str = DEFAULT_TIMEZONE) -> ZoneInfo:
     try:
         return ZoneInfo(os.getenv(name, default).strip())
     except (ZoneInfoNotFoundError, ValueError):
-        raise ConfigurationError(f"{name} must name an installed IANA timezone (for example UTC or Asia/Taipei)") from None
+        raise ConfigurationError(
+            f"{name} must name an installed IANA timezone (for example UTC or Asia/Taipei)"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -71,5 +81,5 @@ class RuntimeConfig:
         return cls(
             env_float("HUB_QUEUE_TTL_SECONDS", 1800, 5, 86400),
             env_float("HUB_CALL_WAIT_SECONDS", 10, 0, OPERATION_WAIT_SECONDS),
-            env_float("HUB_DELIVERY_RETRY_SECONDS", 5, .2, 30),
+            env_float("HUB_DELIVERY_RETRY_SECONDS", 5, 0.2, 30),
         )

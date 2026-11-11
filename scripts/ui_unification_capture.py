@@ -1,4 +1,5 @@
 """Capture the CodePier UI unification matrix with isolated, non-billable data."""
+
 from __future__ import annotations
 
 import argparse

@@ -3,12 +3,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 import subprocess
+import threading
 from types import SimpleNamespace
 import uuid
 
 import pytest
 
 from agent.git_freshness import freshness
+from agent.runner import Agent as RuntimeAgent
 from agent.workspaces import Workspaces
 from shared.integration_contracts import WorktreeCreate
 from shared.util import DevError
@@ -47,8 +49,8 @@ class Records:
     def save(self, kind, identifier, project, row, **kwargs):
         self.rows[identifier] = dict(row)
 
-    def list(self, kind, project, limit=100):
-        return list(self.rows.values())[:limit]
+    def list_page(self, kind, project, limit=100):
+        return {'records': list(self.rows.values())[:limit], 'record_errors': []}
 
     def load(self, kind, identifier, project):
         return dict(self.rows[identifier])
@@ -63,6 +65,8 @@ class Engine:
 
 
 class Agent:
+    disk_call = staticmethod(RuntimeAgent.disk_call)
+
     def __init__(self, tmp_path):
         self.state_dir = tmp_path / 'state'
         self.config = {}
@@ -194,3 +198,151 @@ def test_public_open_keeps_freshness_but_drops_unknown_git_fields():
 def test_non_repository_freshness_is_explicit(tmp_path):
     assert freshness(tmp_path) == {
         'available': False, 'reason': 'not_a_git_root', 'network_checked': False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action', ['create', 'list', 'remove'])
+async def test_worktree_storage_operations_do_not_block_the_event_loop(tmp_path, repos, monkeypatch, action):
+    root, _, _, _ = repos
+    manager, project = service(tmp_path, root)
+    identifier = uuid.uuid4().hex
+    args = WorktreeCreate(project='synthetic', idempotency_key=identifier, fetch=False).model_dump()
+    if action != 'create':
+        await manager.create(identifier, project, args)
+    loop_thread = threading.get_ident()
+    observed = []
+
+    def off_loop(name, function):
+        def call(*values, **keywords):
+            observed.append(name)
+            assert threading.get_ident() != loop_thread, f'{name} blocked the event loop'
+            return function(*values, **keywords)
+        return call
+
+    for obj, names in [(manager.agent.engine, ['root', 'check_local_write']),
+                       (manager.records, ['load', 'list_page', 'save']),
+                       (manager.agent.native, ['live'])]:
+        for name in names:
+            monkeypatch.setattr(obj, name, off_loop(name, getattr(obj, name)))
+    if action == 'create':
+        assert (await manager.create(identifier, project, args))['state'] == 'ready'
+    elif action == 'list':
+        assert (await manager.list('list', project))['workspaces'][0]['state'] == 'ready'
+    else:
+        assert (await manager.remove('remove', project, {
+            'target_workspace_id': identifier, 'confirm': identifier}))['removed'] is True
+    assert 'root' in observed and ('save' in observed if action != 'list' else 'load' in observed)
+
+
+@pytest.mark.asyncio
+async def test_worktree_list_resolves_one_shared_upstream_per_listing(tmp_path, repos, monkeypatch):
+    root, _, _, _ = repos
+    manager, project = service(tmp_path, root)
+    for _ in range(2):
+        identifier = uuid.uuid4().hex
+        args = WorktreeCreate(project='synthetic', idempotency_key=identifier, fetch=False).model_dump()
+        await manager.create(identifier, project, args)
+    original = manager.resolve_base
+    calls = []
+
+    async def resolve(*values, **keywords):
+        calls.append((values, keywords))
+        return await original(*values, **keywords)
+
+    monkeypatch.setattr(manager, 'resolve_base', resolve)
+    rows = (await manager.list('list', project))['workspaces']
+    assert len(rows) == 2 and all(row['cleanup_candidate'] for row in rows)
+    assert len(calls) == 1 and calls[0][1] == {'fetch': False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stage', ['initial_save', 'ready_save', 'removed_save'])
+async def test_worktree_cancellation_waits_for_receipt_storage(tmp_path, repos, monkeypatch, stage):
+    root, _, _, _ = repos
+    manager, project = service(tmp_path, root)
+    identifier = uuid.uuid4().hex
+    args = WorktreeCreate(project='synthetic', idempotency_key=identifier, fetch=False).model_dump()
+    if stage == 'removed_save':
+        await manager.create(identifier, project, args)
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    io_threads = []
+    original = manager.records.save
+
+    def save(kind, saved_id, bound, row, **keywords):
+        block = (stage == 'initial_save' and not keywords.get('replace')
+                 or stage == 'ready_save' and row['state'] == 'ready'
+                 or stage == 'removed_save' and row['state'] == 'removed')
+        if block:
+            io_threads.append(threading.get_ident())
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError('event loop did not release receipt storage')
+        return original(kind, saved_id, bound, row, **keywords)
+
+    monkeypatch.setattr(manager.records, 'save', save)
+    operation = (manager.remove('remove', project, {'target_workspace_id': identifier, 'confirm': identifier})
+                 if stage == 'removed_save' else manager.create(identifier, project, args))
+    work = asyncio.create_task(operation)
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        heartbeat = asyncio.Event()
+        asyncio.get_running_loop().call_soon(heartbeat.set)
+        await asyncio.wait_for(heartbeat.wait(), .5)
+        assert len(io_threads) == 1 and io_threads[0] != loop_thread
+        work.cancel()
+        await asyncio.sleep(0)
+        work.cancel()
+        await asyncio.sleep(0)
+        assert not work.done(), 'receipt storage must settle before cancellation escapes'
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await work
+    finally:
+        release.set()
+        await asyncio.gather(work, return_exceptions=True)
+    record = manager.records.rows[identifier]
+    assert record['state'] == ('removed' if stage == 'removed_save' else 'needs_review')
+    assert Path(record['path']).exists() is (stage == 'ready_save')
+
+
+@pytest.mark.asyncio
+async def test_worktree_final_save_failure_leaves_reviewable_receipt(tmp_path, repos, monkeypatch):
+    root, _, _, _ = repos
+    manager, project = service(tmp_path, root)
+    identifier = uuid.uuid4().hex
+    args = WorktreeCreate(project='synthetic', idempotency_key=identifier, fetch=False).model_dump()
+    original = manager.records.save
+
+    def save(kind, saved_id, bound, row, **keywords):
+        if row['state'] == 'ready':
+            raise OSError('synthetic final save failure')
+        return original(kind, saved_id, bound, row, **keywords)
+
+    monkeypatch.setattr(manager.records, 'save', save)
+    with pytest.raises(OSError, match='synthetic final save'):
+        await manager.create(identifier, project, args)
+    record = manager.records.rows[identifier]
+    assert record['state'] == 'needs_review' and Path(record['path']).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_worktree_create_preserves_original_receipt(tmp_path, repos, monkeypatch):
+    root, _, _, _ = repos
+    manager, project = service(tmp_path, root)
+    identifier = uuid.uuid4().hex
+    previous = {'state': 'ready', 'sentinel': 'keep existing evidence'}
+    manager.records.rows[identifier] = previous.copy()
+    original = manager.records.save
+
+    def save(kind, saved_id, bound, row, **keywords):
+        if not keywords.get('replace'):
+            raise DevError('RECORD_EXISTS', 'existing receipt', 409)
+        return original(kind, saved_id, bound, row, **keywords)
+
+    monkeypatch.setattr(manager.records, 'save', save)
+    args = WorktreeCreate(project='synthetic', idempotency_key=identifier, fetch=False).model_dump()
+    with pytest.raises(DevError) as caught:
+        await manager.create(identifier, project, args)
+    assert caught.value.code == 'RECORD_EXISTS'
+    assert manager.records.rows[identifier] == previous

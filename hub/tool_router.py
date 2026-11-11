@@ -3,6 +3,7 @@
 Unknown/internal names are never used as a gateway fallback. Catalog visibility
 is not authorization: both backends revalidate at execution boundaries.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass
 from hub import iam
@@ -13,10 +14,12 @@ from shared.core_contracts import REPLACED_MCP_TOOLS
 from shared.integration_contracts import ADMIN_TOOLS, INCOMING_UPLOAD_TOOLS
 from shared.util import DevError
 
+
 @dataclass(frozen=True)
 class ToolRoute:
     backend: str
     name: str
+
 
 class ToolRouter:
     def __init__(self, store, gateway):
@@ -29,73 +32,102 @@ class ToolRouter:
         collaboration = getattr(self.store, "collaboration", None)
         if collaboration is not None and collaboration.config.enabled:
             from shared.collaboration_contracts import tool_definitions as collaboration_tools
+
             native += collaboration_tools(authorization=principal.authorization_mode)
         external = self.gateway.tools(principal)
         from shared.public_collaboration import LEGACY_TOOLS
-        if collaboration is not None and collaboration.config.enabled and any(
-                item['name'] in LEGACY_TOOLS for item in external):
-            raise DevError('TOOL_NAME_COLLISION', '远端工具不能覆盖兼容协作调用', 409)
-        names = [item['name'] for item in native + external]
+
+        if (
+            collaboration is not None
+            and collaboration.config.enabled
+            and any(item["name"] in LEGACY_TOOLS for item in external)
+        ):
+            raise DevError("TOOL_NAME_COLLISION", "远端工具不能覆盖兼容协作调用", 409)
+        names = [item["name"] for item in native + external]
         if len(names) != len(set(names)):
-            raise DevError('TOOL_NAME_COLLISION', '工具发布名称冲突；未选择任意后端', 409)
+            raise DevError("TOOL_NAME_COLLISION", "工具发布名称冲突；未选择任意后端", 409)
         # Resolve against the full reserved namespace, before discovery projection.
         # Hiding a name is neither authorization nor permission for a gateway to claim it.
         if discovery:
-            if profile == 'unified':
+            if profile == "unified":
                 from hub.unified_tools import tool_definitions as unified_definitions
                 from shared.unified_contracts import UNIFIED_TOOLS
-                if any(item['name'] in UNIFIED_TOOLS for item in external):
-                    raise DevError('TOOL_NAME_COLLISION', '远端工具不能覆盖统一工具 query/act', 409)
+
+                if any(item["name"] in UNIFIED_TOOLS for item in external):
+                    raise DevError("TOOL_NAME_COLLISION", "远端工具不能覆盖统一工具 query/act", 409)
                 enabled = collaboration is not None and collaboration.config.enabled
                 # get_profile stays published: hosts use its openai/profile marker
                 # as the identity protocol, which a merged tool cannot carry.
-                identity = project_output_schemas(visible_definitions(
-                    [item for item in native if item['name'] == 'get_profile'], principal.scopes), schemas)
-                native = unified_definitions(principal.scopes, collaboration=enabled,
-                                             authorization=principal.authorization_mode) + identity
+                identity = project_output_schemas(
+                    visible_definitions(
+                        [item for item in native if item["name"] == "get_profile"], principal.scopes
+                    ),
+                    schemas,
+                )
+                native = (
+                    unified_definitions(
+                        principal.scopes,
+                        collaboration=enabled,
+                        authorization=principal.authorization_mode,
+                    )
+                    + identity
+                )
                 return principal, native, external
-            if profile == 'coding':
-                native = [item for item in native if item['name'] in CODING_TOOLS]
-            elif profile not in {'core', 'full'}:
-                raise ValueError('Unknown MCP tool profile')
+            if profile == "coding":
+                native = [item for item in native if item["name"] in CODING_TOOLS]
+            elif profile not in {"core", "full"}:
+                raise ValueError("Unknown MCP tool profile")
             native = project_output_schemas(visible_definitions(native, principal.scopes), schemas)
-            if schemas == 'lean':
+            if schemas == "lean":
                 from shared.public_collaboration import PUBLIC_TOOLS, lean_input_schema
+
                 for item in native:
-                    if item['name'] in PUBLIC_TOOLS:
-                        item['inputSchema'] = lean_input_schema(item['inputSchema'])
+                    if item["name"] in PUBLIC_TOOLS:
+                        item["inputSchema"] = lean_input_schema(item["inputSchema"])
         return principal, native, external
 
     def list_tools(self, principal, cursor=None, profile="unified", schemas="full"):
         principal, native, external = self.definitions(principal, profile=profile, schemas=schemas)
         from hub.gateway.catalog import page, fingerprint
-        result = page(native + external, cursor,
-                    [principal.space_id, principal.user_id, principal.grant_id, principal.profile_id],
-                    self.gateway.secret)
-        result['_meta'] = {'com.codepier/catalogSha256': fingerprint(sorted(native + external, key=lambda item: item['name']))}
+
+        result = page(
+            native + external,
+            cursor,
+            [principal.space_id, principal.user_id, principal.grant_id, principal.profile_id],
+            self.gateway.secret,
+        )
+        result["_meta"] = {
+            "com.codepier/catalogSha256": fingerprint(
+                sorted(native + external, key=lambda item: item["name"])
+            )
+        }
         return result
 
     def resolve(self, principal, name):
         if name in INCOMING_UPLOAD_TOOLS:
-            raise DevError('UNKNOWN_TOOL', '文件字节通道仅接受认证上传入口，不能作为模型工具调用', 404)
+            raise DevError(
+                "UNKNOWN_TOOL", "文件字节通道仅接受认证上传入口，不能作为模型工具调用", 404
+            )
         if name in REPLACED_MCP_TOOLS:
-            raise DevError('TOOL_REMOVED', '旧工具已移除，请使用 ' + REPLACED_MCP_TOOLS[name], 404)
+            raise DevError("TOOL_REMOVED", "旧工具已移除，请使用 " + REPLACED_MCP_TOOLS[name], 404)
         if name in ADMIN_TOOLS:
-            raise DevError('OWNER_REQUIRED', '此操作只接受已授权的管理入口', 403)
+            raise DevError("OWNER_REQUIRED", "此操作只接受已授权的管理入口", 403)
         principal, native, external = self.definitions(principal, discovery=False)
         from shared.unified_contracts import UNIFIED_TOOLS
+
         if name in UNIFIED_TOOLS:
             # A call-shape adapter over the native facades; each translated call
             # is re-resolved and re-authorized by the same native handlers.
-            return ToolRoute('native', name)
+            return ToolRoute("native", name)
         from shared.public_collaboration import LEGACY_TOOLS
+
         collaboration = getattr(self.store, "collaboration", None)
         if name in LEGACY_TOOLS and collaboration is not None and collaboration.config.enabled:
             # Compatibility is a route, not an advertised tool. The same business
             # handler still rechecks current scope, feature flags, grant and lease.
-            return ToolRoute('native', name)
-        if any(item['name'] == name for item in native):
-            return ToolRoute('native', name)
-        if any(item['name'] == name for item in external):
-            return ToolRoute('remote', name)
-        raise DevError('UNKNOWN_TOOL', '工具不存在或不在当前授权目录', 404)
+            return ToolRoute("native", name)
+        if any(item["name"] == name for item in native):
+            return ToolRoute("native", name)
+        if any(item["name"] == name for item in external):
+            return ToolRoute("remote", name)
+        raise DevError("UNKNOWN_TOOL", "工具不存在或不在当前授权目录", 404)

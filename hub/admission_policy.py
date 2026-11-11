@@ -4,6 +4,7 @@ Only authenticated connection heartbeats may feed AdmissionWindow. Telemetry is
 advisory, not authority: Hub count/byte ceilings apply even to dishonest peers.
 No request priorities, shell inspection, stored device info, or remote clocks.
 """
+
 from __future__ import annotations
 
 import math
@@ -13,7 +14,9 @@ from hub.scheduler_settings import public_snapshot
 from shared.scheduler_config import is_metadata_observation
 from shared.util import DevError
 
-READ_TOOLS = frozenset({"read", "fs_read", "fs_read_many", "fs_tree", "tasks_list", "project_knowledge_query"})
+READ_TOOLS = frozenset(
+    {"read", "fs_read", "fs_read_many", "fs_tree", "tasks_list", "project_knowledge_query"}
+)
 ACTIVE_SQL = "state IN ('queued','running','reconnecting','cancelling')"
 MAX_NODE = 512
 MAX_PROJECT = 256
@@ -53,7 +56,11 @@ class Budget:
 
 def resource_report(value):
     """Strict, versioned OS sample; age is measured on the Agent, receipt on Hub."""
-    if not isinstance(value, dict) or type(value.get("version")) is not int or value["version"] != 1:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("version")) is not int
+        or value["version"] != 1
+    ):
         return None
     source = value.get("source")
     if not isinstance(source, str) or source not in SOURCES:
@@ -64,8 +71,11 @@ def resource_report(value):
         if key in {"cpu_busy", "io_stall"} and number is None:
             result[key] = None
             continue
-        if (type(number) not in (int, float) or not -2**53 <= number <= 2**53
-                or not math.isfinite(number)):
+        if (
+            type(number) not in (int, float)
+            or not -(2**53) <= number <= 2**53
+            or not math.isfinite(number)
+        ):
             return None
         if key in {"cpu_busy", "io_stall"} and not 0 <= number <= 1:
             return None
@@ -73,7 +83,12 @@ def resource_report(value):
             return None
         result[key] = number
     available, total = value.get("memory_available"), value.get("memory_total")
-    if type(available) is not int or type(total) is not int or not 0 <= available <= total <= 2**60 or total == 0:
+    if (
+        type(available) is not int
+        or type(total) is not int
+        or not 0 <= available <= total <= 2**60
+        or total == 0
+    ):
         return None
     result.update(memory_available=available, memory_total=total)
     return result
@@ -81,6 +96,7 @@ def resource_report(value):
 
 class AdmissionWindow:
     """Shrink immediately; grow after three distinct healthy samples and 15s."""
+
     def __init__(self):
         self.received = None
         self.revision = None
@@ -94,19 +110,34 @@ class AdmissionWindow:
 
     def observe(self, snapshot, telemetry, revision, expected_revision, now):
         sample = resource_report(telemetry)
-        snapshot = public_snapshot(snapshot) if isinstance(snapshot, dict) and snapshot.get("scope") == "node" else None
-        valid = (sample is not None and snapshot is not None and revision == expected_revision
-                 and isinstance(revision, str) and len(revision) == 64
-                 and all(snapshot[key] == sum(lane[key] for lane in snapshot["lanes"].values())
-                         for key in ("running", "queued")))
+        snapshot = (
+            public_snapshot(snapshot)
+            if isinstance(snapshot, dict) and snapshot.get("scope") == "node"
+            else None
+        )
+        valid = (
+            sample is not None
+            and snapshot is not None
+            and revision == expected_revision
+            and isinstance(revision, str)
+            and len(revision) == 64
+            and all(
+                snapshot[key] == sum(lane[key] for lane in snapshot["lanes"].values())
+                for key in ("running", "queued")
+            )
+        )
         if not valid:
             self.received = None
             self.healthy = 0
             self.budget = Budget(paused=self.paused, reason="unavailable")
             return
-        if (self.received is None or not 0 <= now - self.received
-                or now - self.received + self.sample_age > REPORT_TTL
-                or self.revision != revision or self.last_source != sample["source"]):
+        if (
+            self.received is None
+            or not 0 <= now - self.received
+            or now - self.received + self.sample_age > REPORT_TTL
+            or self.revision != revision
+            or self.last_source != sample["source"]
+        ):
             self.healthy = 0
             self.changed = now
             self.budget = Budget(paused=self.paused)
@@ -122,12 +153,24 @@ class AdmissionWindow:
         self.received, self.revision = now, revision
         self.sample_age = sample["age_seconds"]
         available, total = sample["memory_available"], sample["memory_total"]
-        critical = (available < min(256 * 1024**2, total * .10)
-                    or available / total < .025 or snapshot["reason"] in {"memory_critical", "memory_recovery"})
-        high = (available / total < .10 or (sample["cpu_busy"] is not None and sample["cpu_busy"] >= .90)
-                or (sample["io_stall"] or 0) >= .25 or snapshot["reason"] == "resource_pressure")
-        healthy = (available >= 1024**3 and available / total >= .20
-                   and sample["cpu_busy"] is not None and sample["cpu_busy"] <= .65 and (sample["io_stall"] or 0) < .10)
+        critical = (
+            available < min(256 * 1024**2, total * 0.10)
+            or available / total < 0.025
+            or snapshot["reason"] in {"memory_critical", "memory_recovery"}
+        )
+        high = (
+            available / total < 0.10
+            or (sample["cpu_busy"] is not None and sample["cpu_busy"] >= 0.90)
+            or (sample["io_stall"] or 0) >= 0.25
+            or snapshot["reason"] == "resource_pressure"
+        )
+        healthy = (
+            available >= 1024**3
+            and available / total >= 0.20
+            and sample["cpu_busy"] is not None
+            and sample["cpu_busy"] <= 0.65
+            and (sample["io_stall"] or 0) < 0.10
+        )
         if critical:
             self.paused = True
         if critical or high:
@@ -144,8 +187,9 @@ class AdmissionWindow:
             # Clearing an emergency is not permission to enlarge the queue.
             # Match Agent recovery reserves, reachable on small real cgroups;
             # the >=1GiB expansion threshold must never permanently latch them.
-            safe = (sample["cpu_busy"] < .90 and
-                    available >= max(min(512 * 1024**2, total * .20), total * .10))
+            safe = sample["cpu_busy"] < 0.90 and available >= max(
+                min(512 * 1024**2, total * 0.20), total * 0.10
+            )
             self.healthy = self.healthy + 1 if safe else 0
             if self.healthy >= 3 and now - self.changed >= 15:
                 self.paused = False
@@ -170,8 +214,12 @@ class AdmissionWindow:
         return Budget(node, min(MAX_PROJECT, node - reserve), reserve, 8, "adaptive")
 
     def current(self, now, expected_revision):
-        if (self.received is None or not 0 <= now - self.received or now - self.received + self.sample_age > REPORT_TTL
-                or self.revision != expected_revision):
+        if (
+            self.received is None
+            or not 0 <= now - self.received
+            or now - self.received + self.sample_age > REPORT_TTL
+            or self.revision != expected_revision
+        ):
             return Budget(reason="unavailable", paused=self.paused)
         return self.budget
 
@@ -187,7 +235,8 @@ def usage(store, device_id, project_id):
         coalesce(json_extract(args_summary,'$.capture_baseline'),0)=0 AND
         coalesce(json_extract(args_summary,'$.context_detail'),'minimal')='minimal'
         ELSE 0 END)"""
-    return store.one(f"""SELECT count(*) AS global_count,
+    return store.one(
+        f"""SELECT count(*) AS global_count,
         coalesce(sum(length(CAST(payload AS BLOB))),0) AS global_bytes,
         coalesce(sum(device_id=?),0) AS node_count,
         coalesce(sum(CASE WHEN device_id=? THEN length(CAST(payload AS BLOB)) ELSE 0 END),0) AS node_bytes,
@@ -197,8 +246,19 @@ def usage(store, device_id, project_id):
         coalesce(sum(device_id=? AND project_id IS ? AND {read_sql}),0) AS project_reads,
         coalesce(sum(device_id=? AND tool='integration_control'),0) AS controls
         FROM operations WHERE {ACTIVE_SQL}""",
-        (device_id, device_id, device_id, project_id, device_id, project_id,
-         device_id, device_id, project_id, device_id))
+        (
+            device_id,
+            device_id,
+            device_id,
+            project_id,
+            device_id,
+            project_id,
+            device_id,
+            device_id,
+            project_id,
+            device_id,
+        ),
+    )
 
 
 def check_admission(budget, counts, tool, payload_bytes, *, args=None):
@@ -208,10 +268,23 @@ def check_admission(budget, counts, tool, payload_bytes, *, args=None):
     protected = read or control
 
     def busy(scope, reason):
-        code = "PROJECT_BUSY" if scope == "project" else "HUB_BUSY" if scope == "hub" else "DEVICE_BUSY"
-        raise DevError(code, "待完成操作准入队列已满或资源压力过高；请查询原回执，稍后重试新操作",
-                       429, retryable=True, admitted=False, retry_after_seconds=budget.retry_after,
-                       queue_scope=scope, queue_reason=reason)
+        code = (
+            "PROJECT_BUSY"
+            if scope == "project"
+            else "HUB_BUSY"
+            if scope == "hub"
+            else "DEVICE_BUSY"
+        )
+        raise DevError(
+            code,
+            "待完成操作准入队列已满或资源压力过高；请查询原回执，稍后重试新操作",
+            429,
+            retryable=True,
+            admitted=False,
+            retry_after_seconds=budget.retry_after,
+            queue_scope=scope,
+            queue_reason=reason,
+        )
 
     # Absolute caps include control operations; existing receipts/cancel/status
     # never call this function. Keep a small read/control reserve at Hub scale.
@@ -232,13 +305,19 @@ def check_admission(budget, counts, tool, payload_bytes, *, args=None):
             busy("node", "control_reserve")
         return
     if budget.paused and not read:
-        light = (tool in LIGHT_MUTATIONS and payload_bytes <= LIGHT_MUTATION_BYTES
-                 and counts["node_count"] < LIGHT_MUTATION_SLOTS)
+        light = (
+            tool in LIGHT_MUTATIONS
+            and payload_bytes <= LIGHT_MUTATION_BYTES
+            and counts["node_count"] < LIGHT_MUTATION_SLOTS
+        )
         if not light:
             busy("node", "resource_pressure")
-    if (read and budget.overload_read_reserve
-            and counts["node_reads"] < budget.overload_read_reserve
-            and counts["project_reads"] < OVERLOAD_PROJECT_READS):
+    if (
+        read
+        and budget.overload_read_reserve
+        and counts["node_reads"] < budget.overload_read_reserve
+        and counts["project_reads"] < OVERLOAD_PROJECT_READS
+    ):
         # A pre-existing heavy backlog may exceed a shrunken ordinary budget.
         # Permit at most eight node-wide reads, seven per project, still behind all
         # hard count/byte ceilings. Never grant this exception to old Agents or
@@ -253,6 +332,10 @@ def check_admission(budget, counts, tool, payload_bytes, *, args=None):
     if counts["project_count"] and counts["node_count"] >= budget.node - budget.reserve:
         # A project may use only its reserved read tranche after ordinary
         # capacity fills, never consume the rest of the new-project reserve.
-        if not (read and budget.read_reserve and counts["project_reads"] < budget.read_reserve
-                and counts["node_reads"] < budget.read_reserve):
+        if not (
+            read
+            and budget.read_reserve
+            and counts["project_reads"] < budget.read_reserve
+            and counts["node_reads"] < budget.read_reserve
+        ):
             busy("node", "project_fairness")

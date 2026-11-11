@@ -4,7 +4,7 @@ from typing import Literal
 
 from hub.collaboration.channel_consent import OwnerPreapproval
 from pydantic import Field, SecretStr
-from hub.collaboration.weixin_schema import Scope, Mutation
+from hub.collaboration.weixin_schema import Scope as Scope, Mutation
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_accounts(
@@ -61,9 +61,7 @@ def migrate(db):
         )
     accounts = {r[1] for r in db.execute("PRAGMA table_info(telegram_accounts)")}
     if "next_send" not in accounts:
-        db.execute(
-            "ALTER TABLE telegram_accounts ADD COLUMN next_send REAL NOT NULL DEFAULT 0"
-        )
+        db.execute("ALTER TABLE telegram_accounts ADD COLUMN next_send REAL NOT NULL DEFAULT 0")
     columns = {r[1] for r in db.execute("PRAGMA table_info(channel_attachments)")}
     if "channel" not in columns:
         db.execute(
@@ -81,7 +79,9 @@ class AccountImport(Mutation):
 
 
 class Bind(Mutation):
-    owner_preapproval: OwnerPreapproval | None = Field(default=None, exclude_if=lambda value: value is None)
+    owner_preapproval: OwnerPreapproval | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     account_id: str = Field(min_length=1, max_length=100)
     dot_id: str = Field(min_length=1, max_length=100)
     confirm_external_data_ingress: Literal[True]

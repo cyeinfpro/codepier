@@ -68,7 +68,7 @@ def principal(admin=False):
                      {"read", "write", "execute", "computer"}, ["*"], admin=admin)
 
 
-@pytest.mark.parametrize("legacy,native", product([False, True], [None, False, True]))
+@pytest.mark.parametrize("legacy,native", list(product([False, True], [None, False, True])))
 def test_default_migration_separates_native_and_preserves_explicit_floors(monkeypatch, legacy, native):
     monkeypatch.setenv("MCP_BLOCK_LOCAL_CODEX", str(int(legacy)))
     monkeypatch.delenv("MCP_BLOCK_NATIVE_COMPUTER", raising=False)
@@ -87,7 +87,7 @@ def test_default_migration_separates_native_and_preserves_explicit_floors(monkey
     assert ("block_native_computer" in config["mcp_policy"]) is (native is not None)
 
 
-@pytest.mark.parametrize("local_model,local_native,hub_model,hub_native", product([False, True], repeat=4))
+@pytest.mark.parametrize("local_model,local_native,hub_model,hub_native", list(product([False, True], repeat=4)))
 def test_independent_hub_and_agent_floors_use_or(local_model, local_native, hub_model, hub_native):
     config = {"mcp_policy": {"block_local_codex": local_model, "block_native_computer": local_native}}
     project = {"_execution_policy": metadata(hub_model, hub_native)}
@@ -141,7 +141,7 @@ def test_tool_arguments_cannot_supply_split_capability(extra):
         ComputerOpen(project="fixture", app="Preview", idempotency_key="split-policy-spoof", **extra)
 
 
-@pytest.mark.parametrize("model,native", product([False, True], repeat=2))
+@pytest.mark.parametrize("model,native", list(product([False, True], repeat=2)))
 def test_hub_errors_identify_independent_capability(monkeypatch, model, native):
     monkeypatch.setenv("MCP_BLOCK_LOCAL_CODEX", str(int(model)))
     monkeypatch.setenv("MCP_BLOCK_NATIVE_COMPUTER", str(int(native)))
@@ -188,7 +188,7 @@ def test_isolated_provider_is_not_a_generic_cli_exemption(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("local_native,hub_native", product([False, True], repeat=2))
+@pytest.mark.parametrize("local_native,hub_native", list(product([False, True], repeat=2)))
 async def test_agent_native_probe_uses_independent_gate_before_provider(shell_agent, monkeypatch, local_native, hub_native):
     agent, root = shell_agent
     agent.config["mcp_policy"] = {"block_local_codex": True, "block_native_computer": local_native}

@@ -8,7 +8,12 @@ import time
 import unicodedata
 import uuid
 import weakref
-from hub.access_profiles import effective_grant, refresh_profile_principal, current_profile, access_context
+from hub.access_profiles import (
+    effective_grant,
+    refresh_profile_principal,
+    current_profile,
+    access_context,
+)
 from hub.roles import require_role, role_project_scopes
 from hub import iam
 from hub.principal import Principal, refresh_principal
@@ -29,16 +34,38 @@ from hub.native_cli import NativeService
 from shared.agent_lifecycle import DEVICE_ACTIONS, public_management
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
 from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
-from shared.contracts import TOOLS, PROCESS_TOOLS, MUTATING, OPERATION_WAIT_SECONDS, OPERATION_OUTPUT_LIMIT, required_scope
+from shared.contracts import (
+    TOOLS,
+    PROCESS_TOOLS,
+    MUTATING,
+    OPERATION_WAIT_SECONDS,
+    OPERATION_OUTPUT_LIMIT,
+    required_scope,
+)
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
 from shared.crypto import SecureChannel, digest, token
 from shared.util import DevError, safe_summary
 from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
-from shared.tool_protocol import advertisement, catalog_digest, negotiate, require_compatible, validate_call_epoch, wire_version
-from shared.execution_policy import (DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE,
-    InvocationInspector, hub_blocks_codex, hub_blocks_computer, hub_execution_policy,
-    computer_denial, codex_computer_target)
+from shared.tool_protocol import (
+    advertisement,
+    catalog_digest,
+    negotiate,
+    require_compatible,
+    validate_call_epoch,
+    wire_version,
+)
+from shared.execution_policy import (
+    DENIAL_MESSAGE,
+    COMPUTER_DENIAL_MESSAGE,
+    COMPUTER_DENIAL_CODE,
+    InvocationInspector,
+    hub_blocks_codex,
+    hub_blocks_computer,
+    hub_execution_policy,
+    computer_denial,
+    codex_computer_target,
+)
 
 ACTIVE = {"queued", "running", "reconnecting", "cancelling"}
 TERMINAL = {"succeeded", "failed", "cancelled", "needs_review", "interrupted"}
@@ -49,24 +76,19 @@ def alias_key(value: str):
     return unicodedata.normalize("NFKC", value).casefold()
 
 
-
-
 def remote_execution_denial(name: str, args: dict, principal: Principal) -> tuple[str, str] | None:
     """Independent invocation/desktop floors; authentication decides exemption."""
     if principal.admin:
         return None
-    if hub_blocks_codex() and (codex_computer_target(name, args) or
-            name in {"shell_exec", "exec"} and InvocationInspector(env=args.get("env")).shell(args.get("command", ""))):
+    if hub_blocks_codex() and (
+        codex_computer_target(name, args)
+        or name in {"shell_exec", "exec"}
+        and InvocationInspector(env=args.get("env")).shell(args.get("command", ""))
+    ):
         return "CODEX_REMOTE_DISABLED", DENIAL_MESSAGE
     if hub_blocks_computer() and computer_denial(name, args):
         return COMPUTER_DENIAL_CODE, COMPUTER_DENIAL_MESSAGE
     return None
-
-
-def remote_codex_denial(name: str, args: dict, principal: Principal) -> str | None:
-    """Compatibility accessor for callers that only need the denial message."""
-    denial = remote_execution_denial(name, args, principal)
-    return denial[1] if denial else None
 
 
 class Connection:
@@ -88,6 +110,7 @@ class Connection:
         self.project_runtime_protocol = 0
         self.project_runtime_profiles = []
         from hub.admission_policy import AdmissionWindow
+
         self.admission = AdmissionWindow()
 
     async def send(self, body, *, before_send=None):
@@ -119,8 +142,10 @@ class Runtime:
     def __init__(self, store: Store, *, collaboration_config=None):
         self.store = store
         from hub.operation_output import OperationOutput
+
         self.outputs = OperationOutput(store)
         from hub.collaboration.lifecycle import install as install_collaboration
+
         install_collaboration(self, config=collaboration_config)
         self._loop = None
         try:
@@ -129,8 +154,10 @@ class Runtime:
             pass
         self.workflows = Workflows(self)
         from hub.integrations import HubIntegrations
+
         self.integrations = HubIntegrations(self)
         from hub.vps import VPSService
+
         self.vps = VPSService(self)
         self.diagnostics = Diagnostics(self)
         self.artifacts = ArtifactService(self)
@@ -152,19 +179,27 @@ class Runtime:
         self.wait_seconds = config.wait_seconds
         self.retry_seconds = config.retry_seconds
         from hub.knowledge_maintenance import KnowledgeMaintenance
+
         self.knowledge_maintenance = KnowledgeMaintenance(self)
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
         self.stopping = False
         # Requests and their IDs are durable; restarting the Hub is not a task failure.
-        await self.store.run(self.store.execute, "UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL")
-        await self.store.run(self.store.execute, "UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL")
+        await self.store.run(
+            self.store.execute,
+            "UPDATE operations SET state='reconnecting',next_attempt=0,transport_error='Hub restarted; reconciling with Agent' WHERE state IN ('running','reconnecting','cancelling') AND payload IS NOT NULL",
+        )
+        await self.store.run(
+            self.store.execute,
+            "UPDATE operations SET state='needs_review',error='Legacy operation has no durable request; inspect its outcome' WHERE state IN ('queued','running','reconnecting','cancelling','unknown','interrupted') AND payload IS NULL AND result IS NULL",
+        )
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
         await self.knowledge_maintenance.start()
 
     def operation_result(self, row):
         from hub.operation_history import result
+
         return result(self.store, row)
 
     def on_loop(self, callback, *args):
@@ -212,18 +247,30 @@ class Runtime:
     def _publish(self, kind: str, data=None, audience=None):
         message = {"type": kind, "at": time.time(), "data": data or {}}
         if audience is not None:
-            message['_audience'] = audience  # Server-only routing; stripped by SSE.
+            message["_audience"] = audience  # Server-only routing; stripped by SSE.
         for q in list(self.watchers):
             self._signal_owner(q, self._enqueue, q, message)
 
     def online(self, device_id: str):
         connection = self.connections.get(device_id)
-        return bool(connection and not connection.unusable and time.time() - connection.last_seen < 45 and self.connection_authorized(device_id, connection))
+        return bool(
+            connection
+            and not connection.unusable
+            and time.time() - connection.last_seen < 45
+            and self.connection_authorized(device_id, connection)
+        )
 
     def connection_authorized(self, device_id, connection):
-        device = self.store.one("SELECT id,enabled,secret,space_id,owner_user_id FROM devices WHERE id=?", (device_id,))
-        return bool(iam.device_identity_active(self.store, device) and
-                    (getattr(connection, "device_secret", None) is None or connection.device_secret == device["secret"]))
+        device = self.store.one(
+            "SELECT id,enabled,secret,space_id,owner_user_id FROM devices WHERE id=?", (device_id,)
+        )
+        return bool(
+            iam.device_identity_active(self.store, device)
+            and (
+                getattr(connection, "device_secret", None) is None
+                or connection.device_secret == device["secret"]
+            )
+        )
 
     def _detach_fence(self, device_id, connection):
         self.native.detach(connection)
@@ -239,14 +286,11 @@ class Runtime:
     def _record_disconnect(self, device_id, connection):
         self.computer_approvals.drop(connection)
         with contextlib.suppress(Exception):
-            self.store.execute("UPDATE operations SET state='reconnecting',transport_error='Agent disconnected; durable recovery pending',next_attempt=0 WHERE device_id=? AND state IN ('running','cancelling')", (device_id,))
+            self.store.execute(
+                "UPDATE operations SET state='reconnecting',transport_error='Agent disconnected; durable recovery pending',next_attempt=0 WHERE device_id=? AND state IN ('running','cancelling')",
+                (device_id,),
+            )
         self.publish("device", {"id": device_id, "online": False})
-
-    def detach_connection(self, device_id, connection):
-        if not self._detach_fence(device_id, connection):
-            return False
-        self._record_disconnect(device_id, connection)
-        return True
 
     async def detach(self, device_id, connection):
         if not self._detach_fence(device_id, connection):
@@ -264,58 +308,101 @@ class Runtime:
 
     def grant_principal(self, grant):
         scopes, projects, _ = effective_grant(self.store, grant)
-        return Principal('mcp:' + grant['id'] + ':' + grant['label'], grant['user_id'], scopes, projects,
-                         grant_id=grant['id'], profile_id=grant.get('profile_id'),
-                         authorization_mode=grant.get('authorization_mode', 'fixed'), role_id=grant.get('role_id'),
-                         space_id=grant.get('space_id','legacy'), identity_id=grant.get('identity_id'), user_epoch=grant.get('user_epoch',1))
+        return Principal(
+            "mcp:" + grant["id"] + ":" + grant["label"],
+            grant["user_id"],
+            scopes,
+            projects,
+            grant_id=grant["id"],
+            profile_id=grant.get("profile_id"),
+            authorization_mode=grant.get("authorization_mode", "fixed"),
+            role_id=grant.get("role_id"),
+            space_id=grant.get("space_id", "legacy"),
+            identity_id=grant.get("identity_id"),
+            user_epoch=grant.get("user_epoch", 1),
+        )
 
     def authorize(self, principal, action, *, project_id=None, device_id=None, creation=None):
         try:
-            return require_role(self.store, principal, action, project_id=project_id, device_id=device_id, creation=creation)
+            return require_role(
+                self.store,
+                principal,
+                action,
+                project_id=project_id,
+                device_id=device_id,
+                creation=creation,
+            )
         except DevError as exc:
             # Readers collect denial audits for the original writer after the
             # snapshot ends. Never commit a caller's mutation transaction here.
-            target, detail = project_id or device_id or '', {'action': action, 'code': exc.code}
+            target, detail = project_id or device_id or "", {"action": action, "code": exc.code}
             if not self.store.defer_read_denial(principal.actor, target, detail):
                 with self.store.lock:
                     if not self.store.db.in_transaction:
-                        self.store.audit(principal.actor, 'role.denied', target, 'denied', detail)
+                        self.store.audit(principal.actor, "role.denied", target, "denied", detail)
             raise
 
     def visible_project(self, p: dict, principal: Principal):
-        return p.get("space_id", "legacy") == principal.space_id and (principal.admin or "*" in principal.projects or p["id"] in principal.projects)
+        return p.get("space_id", "legacy") == principal.space_id and (
+            principal.admin or "*" in principal.projects or p["id"] in principal.projects
+        )
 
     @iam.read_decision
     def project(self, value: str, principal: Principal):
         principal = refresh_profile_principal(self.store, principal)
-        row = self.store.one("SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE (p.id=? OR p.alias_key=?) AND p.space_id=?", (value, alias_key(value), principal.space_id))
+        row = self.store.one(
+            "SELECT p.*,d.name AS device_name,d.enabled AS device_enabled FROM projects p JOIN devices d ON d.id=p.device_id WHERE (p.id=? OR p.alias_key=?) AND p.space_id=?",
+            (value, alias_key(value), principal.space_id),
+        )
         if not row or not self.visible_project(row, principal):
-            raise DevError("PROJECT_NOT_FOUND", "未找到此已授权项目；请核对明确的项目别名或 ID", 404)
-        self.authorize(principal, 'read', project_id=row['id'])
+            raise DevError(
+                "PROJECT_NOT_FOUND", "未找到此已授权项目；请核对明确的项目别名或 ID", 404
+            )
+        self.authorize(principal, "read", project_id=row["id"])
         return row
 
     def project_public(self, p, *, online=None):
-        return {k: p[k] for k in ("id", "alias", "device_id", "root", "description", "mode", "allow_tasks", "device_name") if k in p} | {"online": self.online(p["device_id"]) if online is None else online, "allow_tasks": bool(p.get("allow_tasks"))}
+        return {
+            k: p[k]
+            for k in (
+                "id",
+                "alias",
+                "device_id",
+                "root",
+                "description",
+                "mode",
+                "allow_tasks",
+                "device_name",
+            )
+            if k in p
+        } | {
+            "online": self.online(p["device_id"]) if online is None else online,
+            "allow_tasks": bool(p.get("allow_tasks")),
+        }
 
     @iam.read_decision
     def _project_rows_page(self, principal, after):
         principal = refresh_profile_principal(self.store, principal)
-        self.authorize(principal, 'read')
-        where, parameters = 'p.space_id=?', [principal.space_id]
-        if not principal.admin and '*' not in principal.projects:
+        self.authorize(principal, "read")
+        where, parameters = "p.space_id=?", [principal.space_id]
+        if not principal.admin and "*" not in principal.projects:
             if not principal.projects:
                 return []
             # JSON membership avoids both interpolated IDs and SQLite's bound
             # variable limit when a credential contains many project IDs.
-            where += ' AND p.id IN (SELECT value FROM json_each(?))'
+            where += " AND p.id IN (SELECT value FROM json_each(?))"
             parameters.append(json.dumps(principal.projects))
         if after is not None:
-            where += ' AND (p.alias_key>? OR (p.alias_key=? AND p.id>?))'
+            where += " AND (p.alias_key>? OR (p.alias_key=? AND p.id>?))"
             parameters.extend((after[0], after[0], after[1]))
         parameters.append(PROJECT_DISCOVERY_PAGE_SIZE)
-        return self.store.all('SELECT p.*,d.name AS device_name FROM projects p '
-            'JOIN devices d ON d.id=p.device_id WHERE ' + where +
-            ' ORDER BY p.alias_key,p.id LIMIT ?', tuple(parameters))
+        return self.store.all(
+            "SELECT p.*,d.name AS device_name FROM projects p "
+            "JOIN devices d ON d.id=p.device_id WHERE "
+            + where
+            + " ORDER BY p.alias_key,p.id LIMIT ?",
+            tuple(parameters),
+        )
 
     def iter_project_rows(self, principal):
         """Bounded, ordered candidates; callers still apply per-project roles."""
@@ -327,7 +414,7 @@ class Runtime:
             yield from rows
             if len(rows) < PROJECT_DISCOVERY_PAGE_SIZE:
                 return
-            after = rows[-1]['alias_key'], rows[-1]['id']
+            after = rows[-1]["alias_key"], rows[-1]["id"]
 
     @iam.read_decision
     def list_projects(self, principal):
@@ -335,68 +422,107 @@ class Runtime:
         # Connection state is a request-local observation, never a grant cache.
         result, online = [], {}
         for row in self.iter_project_rows(principal):
-            device_id = row['device_id']
+            device_id = row["device_id"]
             if device_id not in online:
                 online[device_id] = self.online(device_id)
             result.append(self.project_public(row, online=online[device_id]))
         return result
 
     @iam.read_decision
-    def operation_row(self, id: str, principal: Principal, *, status_only=False, include_output=True):
+    def operation_row(
+        self, id: str, principal: Principal, *, status_only=False, include_output=True
+    ):
         principal = refresh_profile_principal(self.store, principal)
         # These two projections are code-defined; operation IDs remain bound
         # parameters and both projections pass the same live record/IAM checks.
-        columns = "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary" if status_only else "*"
+        columns = (
+            "id,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,visibility,args_summary"
+            if status_only
+            else "*"
+        )
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         principal = iam.require_record(self.store, principal, row)
-        if row['tool'] in PANEL_ROOTS_TOOLS:
+        if row["tool"] in PANEL_ROOTS_TOOLS:
             from hub.agent_roots import authorize
-            principal, _ = authorize(self, principal, row['device_id'])
-        if row['tool'] in PANEL_RUNTIME_TOOLS:
+
+            principal, _ = authorize(self, principal, row["device_id"])
+        if row["tool"] in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
-            principal = authorize(self, principal, {'id': row['project_id'], 'device_id': row['device_id']})
+
+            principal = authorize(
+                self, principal, {"id": row["project_id"], "device_id": row["device_id"]}
+            )
         try:
-            summary = json.loads(row['args_summary'])
+            summary = json.loads(row["args_summary"])
         except (TypeError, ValueError):
             summary = None
-        scope = required_scope(row['tool'], summary) if row['tool'] in TOOLS else 'read'
-        if row['project_id']:
-            self.authorize(principal, scope, project_id=row['project_id'])
+        scope = required_scope(row["tool"], summary) if row["tool"] in TOOLS else "read"
+        if row["project_id"]:
+            self.authorize(principal, scope, project_id=row["project_id"])
         from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
-        if row['tool'] in INCOMING_UPLOAD_TOOLS:
-            service = getattr(self, 'incoming_files', None)
+
+        if row["tool"] in INCOMING_UPLOAD_TOOLS:
+            service = getattr(self, "incoming_files", None)
             if service is None:
-                raise DevError('FILE_IMPORT_GATEWAY_REQUIRED', '上传回执绑定不可用', 403)
+                raise DevError("FILE_IMPORT_GATEWAY_REQUIRED", "上传回执绑定不可用", 403)
             service.authorize_operation(row, principal)
-        if not row['project_id'] and row['tool'] == 'system_validate':
-            self.authorize(principal, 'projects.create', device_id=row['device_id'])
-        if (scope == 'computer' or row['tool'] in {'browser_open', 'browser_snapshot', 'browser_action', 'browser_close'}) and 'computer' not in principal.scopes:
-            raise DevError('INSUFFICIENT_SCOPE', '读取桌面操作结果仍需 computer 权限', 403)
+        if not row["project_id"] and row["tool"] == "system_validate":
+            self.authorize(principal, "projects.create", device_id=row["device_id"])
+        if (
+            scope == "computer"
+            or row["tool"]
+            in {"browser_open", "browser_snapshot", "browser_action", "browser_close"}
+        ) and "computer" not in principal.scopes:
+            raise DevError("INSUFFICIENT_SCOPE", "读取桌面操作结果仍需 computer 权限", 403)
         if not status_only and include_output:
-            row['output'], _ = self.outputs.read(row)
+            row["output"], _ = self.outputs.read(row)
         return row
 
     def _visible_operations(self, identifiers, principal, device_id):
         visible, restricted = [], False
         for value in identifiers[:64] if isinstance(identifiers, list) else []:
-            identifier = value.get('operation_id') if isinstance(value, dict) else value
+            identifier = value.get("operation_id") if isinstance(value, dict) else value
             if not isinstance(identifier, str) or not 1 <= len(identifier) <= 100:
                 continue
             try:
                 row = self.operation_row(identifier, principal, status_only=True)
-                if row['device_id'] != device_id:
-                    raise DevError('NOT_FOUND', 'Operation unavailable', 404)
-                timing = self.store.one('SELECT created,updated FROM operations WHERE id=?', (identifier,))
-                start = self.store.one("SELECT at FROM operation_events WHERE operation_id=? AND stage='executing' ORDER BY id DESC LIMIT 1", (identifier,))
+                if row["device_id"] != device_id:
+                    raise DevError("NOT_FOUND", "Operation unavailable", 404)
+                timing = self.store.one(
+                    "SELECT created,updated FROM operations WHERE id=?", (identifier,)
+                )
+                start = self.store.one(
+                    "SELECT at FROM operation_events WHERE operation_id=? AND stage='executing' ORDER BY id DESC LIMIT 1",
+                    (identifier,),
+                )
                 from hub.call_log import argument_summary
                 from shared.audit_redaction import display_value
-                summary, _, _ = display_value(json.loads(row.get('args_summary') or '{}'), text_limit=300, budget=2000)
+
+                summary, _, _ = display_value(
+                    json.loads(row.get("args_summary") or "{}"), text_limit=300, budget=2000
+                )
                 if not isinstance(summary, dict):
                     summary = {}
-                visible.append({'operation_id': identifier, 'tool': row['tool'], 'state': row['state'],
-                    'elapsed_s': round(max(0, (time.time() if row['state'] in ACTIVE | {'unknown'} else timing['updated']) -
-                        (start['at'] if start else timing['created'])), 1),
-                    'summary': argument_summary(summary)[:300]})
+                visible.append(
+                    {
+                        "operation_id": identifier,
+                        "tool": row["tool"],
+                        "state": row["state"],
+                        "elapsed_s": round(
+                            max(
+                                0,
+                                (
+                                    time.time()
+                                    if row["state"] in ACTIVE | {"unknown"}
+                                    else timing["updated"]
+                                )
+                                - (start["at"] if start else timing["created"]),
+                            ),
+                            1,
+                        ),
+                        "summary": argument_summary(summary)[:300],
+                    }
+                )
             except (DevError, ValueError, TypeError):
                 restricted = True
         return visible, restricted
@@ -404,65 +530,91 @@ class Runtime:
     @iam.read_decision
     def queue_annotations(self, row, principal):
         """Skinny authorized-row annotation shared by receipts and panel lists."""
-        if row['state'] not in ACTIVE | {'unknown'}:
-            return {'queue_stage': 'terminal'}
-        latest = self.store.one("SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1", (row['id'],))
-        if row['state'] == 'running' or latest and latest['stage'] in {'executing', 'persisting', 'result_ready'}:
-            return {'queue_stage': 'running'}
-        if latest and latest['stage'] in {'waiting_resource', 'waiting_project', 'waiting_worker'}:
+        if row["state"] not in ACTIVE | {"unknown"}:
+            return {"queue_stage": "terminal"}
+        latest = self.store.one(
+            "SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",
+            (row["id"],),
+        )
+        if (
+            row["state"] == "running"
+            or latest
+            and latest["stage"] in {"executing", "persisting", "result_ready"}
+        ):
+            return {"queue_stage": "running"}
+        if latest and latest["stage"] in {"waiting_resource", "waiting_project", "waiting_worker"}:
             try:
-                detail = json.loads(latest['detail'])
+                detail = json.loads(latest["detail"])
                 if not isinstance(detail, dict):
                     detail = {}
             except (ValueError, TypeError):
                 detail = {}
             from shared.scheduler_config import safe_queue_detail
+
             safe = safe_queue_detail(detail)
-            blockers, restricted = self._visible_operations(detail.get('blocked_by', []), principal, row['device_id'])
+            blockers, restricted = self._visible_operations(
+                detail.get("blocked_by", []), principal, row["device_id"]
+            )
             # A blocker/stage change emits another event. Preserve the Agent's
             # elapsed wait rather than restarting the clock at that event.
-            queue_age_ms = safe.get('queue_age_ms', 0) + max(0, round((time.time() - latest['at']) * 1000))
-            waiting = {'reason': safe.get('queue_reason', latest['stage']),
-                       'lane': safe.get('lane'), 'queue_age_ms': queue_age_ms,
-                       'blocked_by': blockers}
+            queue_age_ms = safe.get("queue_age_ms", 0) + max(
+                0, round((time.time() - latest["at"]) * 1000)
+            )
+            waiting = {
+                "reason": safe.get("queue_reason", latest["stage"]),
+                "lane": safe.get("lane"),
+                "queue_age_ms": queue_age_ms,
+                "blocked_by": blockers,
+            }
             if restricted:
-                waiting['blocker_visibility'] = 'restricted_or_unavailable'
-            return {'queue_stage': 'agent_waiting', 'waiting': waiting}
-        accepted = row.get('accepted_at')
-        if 'accepted_at' not in row:
-            current = self.store.one('SELECT accepted_at FROM operations WHERE id=?', (row['id'],))
-            accepted = current['accepted_at'] if current else None
-        return {'queue_stage': 'agent_waiting' if accepted else 'hub_queue',
-                'waiting': {'reason': 'agent_pending' if accepted else 'hub_delivery',
-                            'lane': None, 'queue_age_ms': max(0, round((time.time() - (accepted or row.get('created') or time.time())) * 1000)),
-                            'blocked_by': []}}
+                waiting["blocker_visibility"] = "restricted_or_unavailable"
+            return {"queue_stage": "agent_waiting", "waiting": waiting}
+        accepted = row.get("accepted_at")
+        if "accepted_at" not in row:
+            current = self.store.one("SELECT accepted_at FROM operations WHERE id=?", (row["id"],))
+            accepted = current["accepted_at"] if current else None
+        return {
+            "queue_stage": "agent_waiting" if accepted else "hub_queue",
+            "waiting": {
+                "reason": "agent_pending" if accepted else "hub_delivery",
+                "lane": None,
+                "queue_age_ms": max(
+                    0, round((time.time() - (accepted or row.get("created") or time.time())) * 1000)
+                ),
+                "blocked_by": [],
+            },
+        }
 
     def _filter_concurrency(self, result, principal, device_id):
         """Never disclose Agent-supplied operation IDs without current IAM."""
         result = copy.deepcopy(result)
+
         def clean(data):
             if not isinstance(data, dict):
                 return
-            concurrency = data.get('concurrency')
+            concurrency = data.get("concurrency")
             if isinstance(concurrency, dict):
-                writers, hidden = self._visible_operations(concurrency.get('overlapping_writers', []), principal, device_id)
-                data['concurrency'] = {'mode': 'live', 'overlapping_writers': writers}
+                writers, hidden = self._visible_operations(
+                    concurrency.get("overlapping_writers", []), principal, device_id
+                )
+                data["concurrency"] = {"mode": "live", "overlapping_writers": writers}
                 if hidden:
-                    data['concurrency']['writer_visibility'] = 'restricted_or_unavailable'
+                    data["concurrency"]["writer_visibility"] = "restricted_or_unavailable"
             # Only defined result containers, not source content or arbitrary JSON.
-            for key in ('files', 'results'):
+            for key in ("files", "results"):
                 if isinstance(data.get(key), list):
                     for item in data[key][:64]:
                         clean(item)
+
         clean(result)
         if isinstance(result, dict):
-            clean(result.get('data'))
-            error = result.get('error')
-            if isinstance(error, dict) and 'blocked_by' in error:
-                blocks, hidden = self._visible_operations(error['blocked_by'], principal, device_id)
-                error['blocked_by'] = blocks
+            clean(result.get("data"))
+            error = result.get("error")
+            if isinstance(error, dict) and "blocked_by" in error:
+                blocks, hidden = self._visible_operations(error["blocked_by"], principal, device_id)
+                error["blocked_by"] = blocks
                 if hidden:
-                    error['blocker_visibility'] = 'restricted_or_unavailable'
+                    error["blocker_visibility"] = "restricted_or_unavailable"
         return result
 
     async def wait_operation(self, id: str, principal: Principal, seconds: int):
@@ -495,6 +647,7 @@ class Runtime:
         try:
             while True:
                 event.clear()
+
                 def states():
                     rows = []
                     for identifier in ids:
@@ -505,8 +658,9 @@ class Runtime:
                             # Hidden operations never influence the wake decision.
                             pass
                     return rows
+
                 rows = await self.store.run_read(states)
-                if not rows or any(row['state'] not in ACTIVE | {'unknown'} for row in rows):
+                if not rows or any(row["state"] not in ACTIVE | {"unknown"} for row in rows):
                     return
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0 or self.stopping:
@@ -534,8 +688,12 @@ class Runtime:
     def operation_next_call(id: str, *, pending: bool, after_output_seq=None, fetch_result=False):
         if not pending and not fetch_result:
             return None
-        args = {"operation_id": id, "include_output": True, "include_result": True,
-                "output_limit": OPERATION_OUTPUT_LIMIT}
+        args = {
+            "operation_id": id,
+            "include_output": True,
+            "include_result": True,
+            "output_limit": OPERATION_OUTPUT_LIMIT,
+        }
         if pending:
             args["wait_seconds"] = OPERATION_WAIT_SECONDS
             if after_output_seq is not None:
@@ -549,24 +707,53 @@ class Runtime:
         options = view or {}
         include_result = options.get("include_result", True)
         include_output = options.get("include_output", True)
-        unchanged = options.get("after_output_seq") is not None and options["after_output_seq"] == row["output_seq"]
+        unchanged = (
+            options.get("after_output_seq") is not None
+            and options["after_output_seq"] == row["output_seq"]
+        )
         include_output = include_output and not unchanged
         limit = options.get("output_limit", 131072)
         result["args_summary"] = json.loads(row["args_summary"]) if row["args_summary"] else None
         if include_result:
-            result["result"] = self._filter_concurrency(self.operation_result(row), principal, row["device_id"])
+            result["result"] = self._filter_concurrency(
+                self.operation_result(row), principal, row["device_id"]
+            )
             if isinstance(result["result"], dict):
                 result["result"].pop("trace", None)
-                if (row["tool"] in COMPUTER_TOOLS or row["tool"] in {"browser_open", "browser_snapshot", "browser_action", "browser_close"}):
+                if row["tool"] in COMPUTER_TOOLS or row["tool"] in {
+                    "browser_open",
+                    "browser_snapshot",
+                    "browser_action",
+                    "browser_close",
+                }:
                     scrub_expired(result["result"])
             # Current MCP context reuse is distinct from the authorized panel's
             # immutable historical audit. operation_row above still enforces IAM.
-            if principal.grant_id and row['tool'] == 'open_workspace' and (result['result'] or {}).get('ok'):
+            if (
+                principal.grant_id
+                and row["tool"] == "open_workspace"
+                and (result["result"] or {}).get("ok")
+            ):
                 from hub.project_views import validate_context
-                validate_context(self, result['args_summary'], result['result'].get('data') or {}, principal, operation=id)
-            if principal.grant_id and row['tool'] == 'readiness_get' and (result['args_summary'] or {}).get('operation_kind') and (result['result'] or {}).get('ok'):
+
+                validate_context(
+                    self,
+                    result["args_summary"],
+                    result["result"].get("data") or {},
+                    principal,
+                    operation=id,
+                )
+            if (
+                principal.grant_id
+                and row["tool"] == "readiness_get"
+                and (result["args_summary"] or {}).get("operation_kind")
+                and (result["result"] or {}).get("ok")
+            ):
                 from hub.project_views import enrich_readiness
-                result['result']['data'] = enrich_readiness(self, result['args_summary'], result['result'].get('data') or {}, principal)
+
+                result["result"]["data"] = enrich_readiness(
+                    self, result["args_summary"], result["result"].get("data") or {}, principal
+                )
             data = (result["result"] or {}).get("data")
             if isinstance(data, dict) and "output" in data:
                 original = data["output"]
@@ -575,7 +762,9 @@ class Runtime:
                     data["output_omitted"] = True
                 elif isinstance(original, str):
                     data["output"] = original[-limit:] if limit else ""
-                    data["output_truncated"] = bool(data.get("output_truncated") or len(original) > limit)
+                    data["output_truncated"] = bool(
+                        data.get("output_truncated") or len(original) > limit
+                    )
         else:
             result.pop("result", None)
             result["result_omitted"] = True
@@ -595,25 +784,44 @@ class Runtime:
         result["pending"] = row["state"] in ACTIVE or row["state"] == "unknown"
         result["next"] = "operations_wait" if result["pending"] else None
         result["retry_after_seconds"] = 2 if result["pending"] else None
-        result["elapsed_seconds"] = round(max(0, (time.time() if result["pending"] else row["updated"]) - row["created"]), 1)
+        result["elapsed_seconds"] = round(
+            max(0, (time.time() if result["pending"] else row["updated"]) - row["created"]), 1
+        )
         # Only advance the log cursor after delivering output (or confirming a
         # cursor the caller already has); compact status reads must not skip it.
-        cursor = row["output_seq"] if include_output and limit > 0 or unchanged else options.get("after_output_seq")
-        result["next_call"] = self.operation_next_call(id, pending=result["pending"], after_output_seq=cursor,
-                                                       fetch_result=not include_result and bool(row["result"]))
+        cursor = (
+            row["output_seq"]
+            if include_output and limit > 0 or unchanged
+            else options.get("after_output_seq")
+        )
+        result["next_call"] = self.operation_next_call(
+            id,
+            pending=result["pending"],
+            after_output_seq=cursor,
+            fetch_result=not include_result and bool(row["result"]),
+        )
         from shared.operation_recovery import operation_recovery
-        result['recovery'] = operation_recovery(result, online=bool(row['device_id'] and self.online(row['device_id'])),
-                                                after_output_seq=cursor)
+
+        result["recovery"] = operation_recovery(
+            result,
+            online=bool(row["device_id"] and self.online(row["device_id"])),
+            after_output_seq=cursor,
+        )
         return result
 
     def list_operations(self, args, principal):
         principal = refresh_profile_principal(self.store, principal)
         clause, values = iam.private_sql(principal)
         clauses = [clause]
-        if not principal.admin and '*' not in principal.projects:
+        if not principal.admin and "*" not in principal.projects:
             from hub.room_scope import current
-            nullable = '' if current(self.store, principal.grant_id) else 'project_id IS NULL OR '
-            clauses.append('(' + nullable + 'project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
+
+            nullable = "" if current(self.store, principal.grant_id) else "project_id IS NULL OR "
+            clauses.append(
+                "("
+                + nullable
+                + "project_id IN (%s))" % (",".join("?" for _ in principal.projects) or "NULL")
+            )
             values.extend(principal.projects)
         if args["project"]:
             clauses.append("project_id=?")
@@ -626,11 +834,23 @@ class Runtime:
             clauses.append("created<?")
             values.append(args["before_created"])
         sql = "SELECT id,project_id,tool,state,created,updated,attempts,accepted_at,cancel_requested,error FROM operations"
-        rows = self.store.all(sql + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY created DESC LIMIT ?", (*values, args["limit"] + 1))
-        return {"operations": rows[:args["limit"]], "next_before_created": rows[args["limit"]-1]["created"] if len(rows) > args["limit"] else None}
+        rows = self.store.all(
+            sql
+            + (" WHERE " + " AND ".join(clauses) if clauses else "")
+            + " ORDER BY created DESC LIMIT ?",
+            (*values, args["limit"] + 1),
+        )
+        return {
+            "operations": rows[: args["limit"]],
+            "next_before_created": rows[args["limit"] - 1]["created"]
+            if len(rows) > args["limit"]
+            else None,
+        }
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
-        context = iam.audit_context.set((self.store, principal.actor, principal.space_id, principal.user_id))
+        context = iam.audit_context.set(
+            (self.store, principal.actor, principal.space_id, principal.user_id)
+        )
         try:
             return await self._invoke_async(name, raw, principal)
         finally:
@@ -641,13 +861,21 @@ class Runtime:
             self._loop = asyncio.get_running_loop()
         from shared.collaboration_contracts import TOOL_MODELS as COLLABORATION_TOOLS
         from shared.public_collaboration import resolve as resolve_collaboration
+
         name, raw = resolve_collaboration(name, raw)
-        if name == 'collaboration_work_execute':
+        if name == "collaboration_work_execute":
             return await self.collaboration.coordination.execute(raw, principal)
-        if name == 'collaboration_room_channel_action':
+        if name == "collaboration_room_channel_action":
             return await self.collaboration.room_channels.action(raw, principal)
         if name in COLLABORATION_TOOLS:
-            from hub.collaboration.telemetry import Action, Channel, Stage, TOOL_ACTIONS, collaboration_telemetry
+            from hub.collaboration.telemetry import (
+                Action,
+                Channel,
+                Stage,
+                TOOL_ACTIONS,
+                collaboration_telemetry,
+            )
+
             action = TOOL_ACTIONS.get(name)
             if action is None:
                 return await self.store.run(self.collaboration.invoke, name, raw, principal)
@@ -657,43 +885,64 @@ class Runtime:
             except Exception:
                 collaboration_telemetry.record(action, Stage.ERROR, channel=Channel.ROOM)
                 raise
-            stage = Stage.ERROR if value.get('error') else Stage.SUCCEEDED
-            if stage is Stage.SUCCEEDED and value.get('replayed') is True:
+            stage = Stage.ERROR if value.get("error") else Stage.SUCCEEDED
+            if stage is Stage.SUCCEEDED and value.get("replayed") is True:
                 stage = Stage.REPLAYED
             elif stage is Stage.SUCCEEDED and (
-                    (action is Action.BEGIN and value.get('replayed') is False)
-                    or (action is Action.REPLY and value.get('effects_created') is True)):
+                (action is Action.BEGIN and value.get("replayed") is False)
+                or (action is Action.REPLY and value.get("effects_created") is True)
+            ):
                 stage = Stage.COMMITTED
             collaboration_telemetry.record(action, stage, channel=Channel.ROOM)
             return value
         from shared.query_contracts import QUERY_TOOLS
+
         if name in QUERY_TOOLS:
             from hub.core_tools import invoke_query
+
             return await invoke_query(self, name, raw, principal)
         from shared.core_contracts import CORE_FACADES, CORE_ACTIONS
-        if name in CORE_FACADES or (name in CORE_ACTIONS and raw.get('operation', 'file') != 'file'
-                and not (name == 'read' and raw.get('operation') == 'batch')):
+
+        if name in CORE_FACADES or (
+            name in CORE_ACTIONS
+            and raw.get("operation", "file") != "file"
+            and not (name == "read" and raw.get("operation") == "batch")
+        ):
             from hub.core_tools import invoke as invoke_core
+
             return await invoke_core(self, name, raw, principal)
-        if name in {'download_artifact', 'inspect_file_source'}:
+        if name in {"download_artifact", "inspect_file_source"}:
+
             def authorize_ingress():
                 caller = refresh_principal(self.store, principal)
                 from hub.room_scope import require_tool
+
                 require_tool(self.store, caller, name, raw)
                 return caller
+
             principal = await self.store.run(authorize_ingress)
-            from hub.native_file_ingress import native_ingress_enabled, import_native_file, inspect_native_file
+            from hub.native_file_ingress import (
+                native_ingress_enabled,
+                import_native_file,
+                inspect_native_file,
+            )
+
             if not await self.store.run(native_ingress_enabled, self.store):
                 # Disabling this entry never falls back to a different node policy.
                 raise DevError("FILE_IMPORT_DISABLED", "Hub native-file relay is disabled", 403)
-            adapter = import_native_file if name == 'download_artifact' else inspect_native_file
+            adapter = import_native_file if name == "download_artifact" else inspect_native_file
             return await adapter(self, raw, principal)
         prepared = await self.store.run(self._invoke, name, raw, principal)
         if not isinstance(prepared, DeferredCall):
             return prepared
         if prepared.action == "read_operation":
             args = prepared.arguments
-            await self.store.run(self.store.audit, principal.actor, name, args.get('operation_id', args.get('project', '')))
+            await self.store.run(
+                self.store.audit,
+                principal.actor,
+                name,
+                args.get("operation_id", args.get("project", "")),
+            )
             return await self.store.run_read(self._read_operation, name, args, principal)
         if prepared.action == "project_create":
             return await self.project_creator(prepared.arguments, principal)
@@ -702,36 +951,56 @@ class Runtime:
         if prepared.action == "wait":
             args = prepared.arguments
             await self.wait_operation(args["operation_id"], principal, args["wait_seconds"])
-            await self.store.run(self.store.audit, principal.actor, 'operations_wait', args['operation_id'])
+            await self.store.run(
+                self.store.audit, principal.actor, "operations_wait", args["operation_id"]
+            )
             return await self.store.run_read(self._read_after_wait, args, principal)
-        receipt = await self.dispatch(name, prepared.arguments, prepared.project, principal, background=name in PROCESS_TOOLS)
-        if name in {'project_knowledge_build', 'project_knowledge_query'}:
-            receipt['auto_refresh'] = await self.store.run_read(
-                self.knowledge_maintenance.status, prepared.project, prepared.arguments)
-            if (name == 'project_knowledge_build' and prepared.arguments.get('auto_refresh')
-                    and not principal.grant_id):
-                receipt['auto_refresh_request'] = {
-                    'state': 'unsupported_subject',
-                    'reason': 'Background registration requires a grant-bound identity; manual build remains supported.'}
-        yield_seconds = prepared.arguments.get('yield_seconds', 0)
+        receipt = await self.dispatch(
+            name, prepared.arguments, prepared.project, principal, background=name in PROCESS_TOOLS
+        )
+        if name in {"project_knowledge_build", "project_knowledge_query"}:
+            receipt["auto_refresh"] = await self.store.run_read(
+                self.knowledge_maintenance.status, prepared.project, prepared.arguments
+            )
+            if (
+                name == "project_knowledge_build"
+                and prepared.arguments.get("auto_refresh")
+                and not principal.grant_id
+            ):
+                receipt["auto_refresh_request"] = {
+                    "state": "unsupported_subject",
+                    "reason": "Background registration requires a grant-bound identity; manual build remains supported.",
+                }
+        yield_seconds = prepared.arguments.get("yield_seconds", 0)
         # This is response waiting, not execution intent. Keep the normalized
         # arguments/fingerprint unchanged so pre-upgrade idempotency keys still
         # recover their original operation. Explicit async waits remain honored.
-        if name == 'exec' and 'yield_seconds' not in raw and prepared.arguments['target'].startswith('vps:'):
+        if (
+            name == "exec"
+            and "yield_seconds" not in raw
+            and prepared.arguments["target"].startswith("vps:")
+        ):
             yield_seconds = 10
-        if name == 'exec' and receipt.get('pending') and yield_seconds:
-            await self.wait_operation(receipt['operation_id'], principal, yield_seconds)
-            await self.store.run(self.store.audit, principal.actor, 'operations_wait', receipt['operation_id'])
-            return await self.store.run_read(self._read_after_wait, {'operation_id': receipt['operation_id'], 'output_limit': 8000}, principal)
+        if name == "exec" and receipt.get("pending") and yield_seconds:
+            await self.wait_operation(receipt["operation_id"], principal, yield_seconds)
+            await self.store.run(
+                self.store.audit, principal.actor, "operations_wait", receipt["operation_id"]
+            )
+            return await self.store.run_read(
+                self._read_after_wait,
+                {"operation_id": receipt["operation_id"], "output_limit": 8000},
+                principal,
+            )
         return receipt
 
     def _read_operation(self, name, args, principal):
         principal = refresh_principal(self.store, principal)
         from hub.room_scope import require_tool
+
         require_tool(self.store, principal, name, args)
-        if name == 'operations_get':
-            return self.operation(args['operation_id'], principal, args)
-        if name == 'operations_trace':
+        if name == "operations_get":
+            return self.operation(args["operation_id"], principal, args)
+        if name == "operations_trace":
             return self.diagnostics.trace(args, principal)
         return self.list_operations(args, principal)
 
@@ -743,59 +1012,88 @@ class Runtime:
     def _invoke(self, name: str, raw: dict, principal: Principal):
         principal = refresh_principal(self.store, principal)
         if name in PANEL_ROOTS_TOOLS:
-            raise DevError('OWNER_REQUIRED', '目录授权必须使用已登录面板的专用设备管理入口', 403)
+            raise DevError("OWNER_REQUIRED", "目录授权必须使用已登录面板的专用设备管理入口", 403)
         tool = TOOLS.get(name)
         if not tool:
             raise DevError("UNKNOWN_TOOL", "不存在此工具", 404)
         try:
             args = tool.model.model_validate(raw).model_dump()
-            if args.get('workspace_id') == '': args.pop('workspace_id', None)
+            if args.get("workspace_id") == "":
+                args.pop("workspace_id", None)
         except ValidationError as exc:
-            issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
-            raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
+            issues = [
+                {"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()
+            ]
+            raise DevError(
+                "INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]
+            ) from exc
         from hub.room_scope import require_tool
+
         if name in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
-            principal = authorize(self, principal, self.project(args['project'], principal))
+
+            principal = authorize(self, principal, self.project(args["project"], principal))
         require_tool(self.store, principal, name, args)
         scope = required_scope(name, args)
         if scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
-            code = 'ROLE_POLICY_DENIED' if principal.authorization_mode == 'role' else 'INSUFFICIENT_SCOPE'
+            code = (
+                "ROLE_POLICY_DENIED"
+                if principal.authorization_mode == "role"
+                else "INSUFFICIENT_SCOPE"
+            )
             raise DevError(code, f"当前凭据/角色缺少 {scope} 权限", 403, required_scope=scope)
         policy_denial = remote_execution_denial(name, args, principal)
         if policy_denial:
-            self.store.audit(principal.actor, name, args.get("project", ""), status="denied",
-                             detail={"reason": "remote_execution_policy", "code": policy_denial[0]})
+            self.store.audit(
+                principal.actor,
+                name,
+                args.get("project", ""),
+                status="denied",
+                detail={"reason": "remote_execution_policy", "code": policy_denial[0]},
+            )
             raise DevError(policy_denial[0], policy_denial[1], 403)
-        if name in {'get_profile', 'get_access_context'}:
+        if name in {"get_profile", "get_access_context"}:
             self.authorize(principal, name)
-        elif name == 'projects_create':
-            self.authorize(principal, 'projects.create', device_id=args['device_id'], creation=args)
+        elif name == "projects_create":
+            self.authorize(principal, "projects.create", device_id=args["device_id"], creation=args)
             return DeferredCall("project_create", args, None)
-        elif name == 'devices_list':
-            self.authorize(principal, 'read')
+        elif name == "devices_list":
+            self.authorize(principal, "read")
             devices = []
-            for device in self.store.all('SELECT id,name,enabled FROM devices WHERE space_id=? ORDER BY name,id',(principal.space_id,)):
+            for device in self.store.all(
+                "SELECT id,name,enabled FROM devices WHERE space_id=? ORDER BY name,id",
+                (principal.space_id,),
+            ):
                 try:
-                    require_role(self.store, principal, 'devices.read', device_id=device['id'])
+                    require_role(self.store, principal, "devices.read", device_id=device["id"])
                 except DevError as exc:
-                    if exc.code == 'ROLE_POLICY_DENIED':
+                    if exc.code == "ROLE_POLICY_DENIED":
                         continue
                     raise
-                devices.append({**device, 'enabled': bool(device['enabled']), 'online': self.online(device['id'])})
-            return {'devices': devices}
+                devices.append(
+                    {
+                        **device,
+                        "enabled": bool(device["enabled"]),
+                        "online": self.online(device["id"]),
+                    }
+                )
+            return {"devices": devices}
         else:
-            self.authorize(principal, 'read')
-            if args.get('project'):
-                scoped_project = self.project(args['project'], principal)
-                self.authorize(principal, scope, project_id=scoped_project['id'])
-        from shared.integration_contracts import ADMIN_TOOLS, REMOTE_TOOLS as INTEGRATION_REMOTE_TOOLS
+            self.authorize(principal, "read")
+            if args.get("project"):
+                scoped_project = self.project(args["project"], principal)
+                self.authorize(principal, scope, project_id=scoped_project["id"])
+        from shared.integration_contracts import (
+            ADMIN_TOOLS,
+            REMOTE_TOOLS as INTEGRATION_REMOTE_TOOLS,
+        )
+
         if name in ADMIN_TOOLS and not principal.admin:
-            raise DevError('OWNER_REQUIRED', '此操作只允许面板主理人执行', 403)
-        if name == 'workflows_handoff':
+            raise DevError("OWNER_REQUIRED", "此操作只允许面板主理人执行", 403)
+        if name == "workflows_handoff":
             return self.integrations.handoff(args, principal)
-        if name == 'activity_list':
+        if name == "activity_list":
             return self.integrations.activity(args, principal)
         if name == "get_profile":
             result = current_profile(self.store, principal)[0]
@@ -803,19 +1101,34 @@ class Runtime:
             result = access_context(self.store, principal)
         elif name == "projects_list":
             from hub.project_views import list_projects
+
             result = list_projects(self, args, principal)
-        elif name == 'readiness_get' and args.get('operation_kind') and (
-                not self.online(scoped_project['device_id']) or
-                getattr(self.connections.get(scoped_project['device_id']), 'project_view_protocol', 0) != 1):
+        elif (
+            name == "readiness_get"
+            and args.get("operation_kind")
+            and (
+                not self.online(scoped_project["device_id"])
+                or getattr(
+                    self.connections.get(scoped_project["device_id"]), "project_view_protocol", 0
+                )
+                != 1
+            )
+        ):
             from hub.project_views import enrich_readiness
-            reason = 'AGENT_OFFLINE' if not self.online(scoped_project['device_id']) else 'AGENT_VIEW_UPGRADE_REQUIRED'
-            result = enrich_readiness(self, args, {'compatibility': reason}, principal)
+
+            reason = (
+                "AGENT_OFFLINE"
+                if not self.online(scoped_project["device_id"])
+                else "AGENT_VIEW_UPGRADE_REQUIRED"
+            )
+            result = enrich_readiness(self, args, {"compatibility": reason}, principal)
         elif name == "vps":
             result = self.vps.list(args, principal)
         elif name == "projects_resolve":
             result = self.project_public(self.project(args["project"], principal))
-        elif name == 'workspace_status':
+        elif name == "workspace_status":
             from hub.workspace_status import workspace_status
+
             result = workspace_status(self, args, principal)
         elif name == "diagnostics_get":
             result = self.diagnostics.get(args, principal)
@@ -830,7 +1143,14 @@ class Runtime:
         elif name in {"workflows_create", "workflows_update"}:
             method = self.workflows.create if name == "workflows_create" else self.workflows.update
             result = method(args, principal)
-            self.publish("workflow", {"id": result["workflow_id"], "state": result["state"], "version": result["version"]})
+            self.publish(
+                "workflow",
+                {
+                    "id": result["workflow_id"],
+                    "state": result["state"],
+                    "version": result["version"],
+                },
+            )
             return result
         elif name == "workflows_get":
             result = self.workflows.get(args, principal)
@@ -844,33 +1164,87 @@ class Runtime:
             return DeferredCall("cancel", args)
         else:
             project = self.project(args["project"], principal)
-            if name in MUTATING and name not in PANEL_RUNTIME_TOOLS | {"computer_session_close"} and project["mode"] != "write":
+            if (
+                name in MUTATING
+                and name not in PANEL_RUNTIME_TOOLS | {"computer_session_close"}
+                and project["mode"] != "write"
+            ):
                 raise DevError("READ_ONLY", "面板中的这个项目设为只读", 403)
             if name in PROCESS_TOOLS and not project["allow_tasks"]:
                 raise DevError("TASKS_DISABLED", "面板中的这个项目没有允许执行任务", 403)
-            if name in (COMPUTER_TOOLS | INTEGRATION_REMOTE_TOOLS | {"review_snapshots", "review_snapshots_manage", "open_workspace", "show_changes", "apply_patch", "skills_list", "skills_read", "agent_diagnostics", "artifacts_register", "searches_start", "searches_get", "searches_cancel", "code_symbols"}) and self.online(project["device_id"]):
-                device=self.store.one("SELECT info FROM devices WHERE id=?",(project["device_id"],))
-                capabilities=json.loads(device["info"]).get("capabilities") if device else None
-                if isinstance(capabilities,list) and name not in capabilities:
-                    raise DevError("AGENT_UPGRADE_REQUIRED","在线 Agent 未报告此工具能力；先用 diagnostics_get 核对版本，不要重复提交命令",409)
+            if name in (
+                COMPUTER_TOOLS
+                | INTEGRATION_REMOTE_TOOLS
+                | {
+                    "review_snapshots",
+                    "review_snapshots_manage",
+                    "open_workspace",
+                    "show_changes",
+                    "apply_patch",
+                    "skills_list",
+                    "skills_read",
+                    "agent_diagnostics",
+                    "artifacts_register",
+                    "searches_start",
+                    "searches_get",
+                    "searches_cancel",
+                    "code_symbols",
+                }
+            ) and self.online(project["device_id"]):
+                device = self.store.one(
+                    "SELECT info FROM devices WHERE id=?", (project["device_id"],)
+                )
+                capabilities = json.loads(device["info"]).get("capabilities") if device else None
+                if isinstance(capabilities, list) and name not in capabilities:
+                    raise DevError(
+                        "AGENT_UPGRADE_REQUIRED",
+                        "在线 Agent 未报告此工具能力；先用 diagnostics_get 核对版本，不要重复提交命令",
+                        409,
+                    )
             if name in {"searches_get", "searches_cancel"}:
-                source=self.operation(args["search_id"],principal,{"include_output":False})
-                data=(source.get("result") or {}).get("data") or {}
-                if source["tool"]!="searches_start" or source["project_id"]!=project["id"] or source["device_id"]!=project["device_id"]:
-                    raise DevError("SEARCH_NOT_FOUND","搜索不属于当前项目和授权",404)
-                source_workspace=(source.get('args_summary') or {}).get('workspace_id','')
-                if source_workspace != args.get('workspace_id',''):
-                    raise DevError('SEARCH_MAPPING_CHANGED','搜索属于另一工作目录，请使用原 workspace_id',409)
-                if not source_workspace and data.get("project_root")!=project["root"]:
-                    raise DevError("SEARCH_MAPPING_CHANGED","搜索尚未就绪或项目路径已变化，先核对原操作",409)
+                source = self.operation(args["search_id"], principal, {"include_output": False})
+                data = (source.get("result") or {}).get("data") or {}
+                if (
+                    source["tool"] != "searches_start"
+                    or source["project_id"] != project["id"]
+                    or source["device_id"] != project["device_id"]
+                ):
+                    raise DevError("SEARCH_NOT_FOUND", "搜索不属于当前项目和授权", 404)
+                source_workspace = (source.get("args_summary") or {}).get("workspace_id", "")
+                if source_workspace != args.get("workspace_id", ""):
+                    raise DevError(
+                        "SEARCH_MAPPING_CHANGED", "搜索属于另一工作目录，请使用原 workspace_id", 409
+                    )
+                if not source_workspace and data.get("project_root") != project["root"]:
+                    raise DevError(
+                        "SEARCH_MAPPING_CHANGED", "搜索尚未就绪或项目路径已变化，先核对原操作", 409
+                    )
             if name == "artifacts_register" and args["source_operation_id"]:
-                source=self.operation(args["source_operation_id"],principal,{"include_output":False,"include_result":False})
-                if source["project_id"]!=project["id"] or source["device_id"]!=project["device_id"] or source["state"]!="succeeded":
-                    raise DevError("ARTIFACT_SOURCE_INVALID","来源操作必须是同项目、同设备的真实成功操作",409)
-            if name == "computer_session_close" and args.get("force") and not principal.instance_admin:
+                source = self.operation(
+                    args["source_operation_id"],
+                    principal,
+                    {"include_output": False, "include_result": False},
+                )
+                if (
+                    source["project_id"] != project["id"]
+                    or source["device_id"] != project["device_id"]
+                    or source["state"] != "succeeded"
+                ):
+                    raise DevError(
+                        "ARTIFACT_SOURCE_INVALID", "来源操作必须是同项目、同设备的真实成功操作", 409
+                    )
+            if (
+                name == "computer_session_close"
+                and args.get("force")
+                and not principal.instance_admin
+            ):
                 raise DevError("COMPUTER_FORCE_DENIED", "只有面板管理员可以强制停止其他会话", 403)
             return DeferredCall("dispatch", args, project)
-        self.store.audit(principal.actor, name, args.get("project", args.get("operation_id", args.get("workflow_id", ""))))
+        self.store.audit(
+            principal.actor,
+            name,
+            args.get("project", args.get("operation_id", args.get("workflow_id", ""))),
+        )
         return result
 
     def device_dispatch_lock(self, device_id):
@@ -883,35 +1257,68 @@ class Runtime:
 
     async def cancel(self, id, principal):
         row = await self.store.run_read(self.operation_row, id, principal, status_only=True)
-        async with self.device_dispatch_lock(row['device_id']):
+        async with self.device_dispatch_lock(row["device_id"]):
             return await self.store.run(self._cancel, id, principal)
 
     def _cancel(self, id, principal):
         principal = refresh_principal(self.store, principal)
         op = self.operation(id, principal)
-        if op['project_id']:
-            self.authorize(principal, 'execute', project_id=op['project_id'])
+        if op["project_id"]:
+            self.authorize(principal, "execute", project_id=op["project_id"])
         if not op["pending"]:
             return {"operation_id": id, "state": op["state"], "cancel_requested": False}
         if op["tool"] in DEVICE_ACTIONS:
-            raise DevError("NOT_CANCELLABLE", "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理", 409)
-        cancellable_reads = {'read', 'fs_tree', 'fs_read', 'fs_read_many', 'fs_search', 'project_context'}
+            raise DevError(
+                "NOT_CANCELLABLE",
+                "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理",
+                409,
+            )
+        cancellable_reads = {
+            "read",
+            "fs_tree",
+            "fs_read",
+            "fs_read_many",
+            "fs_search",
+            "project_context",
+        }
         if op["tool"] not in PROCESS_TOOLS | cancellable_reads and op["attempts"]:
-            raise DevError("NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复")
+            raise DevError(
+                "NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复"
+            )
         # The Agent atomically cancels accepted jobs still waiting for resources.
         # A read already executing may instead finish; never claim it was stopped
         # until the durable Agent result confirms cancellation.
-        self.store.execute("UPDATE operations SET cancel_requested=1,next_attempt=0 WHERE id=?", (id,))
+        self.store.execute(
+            "UPDATE operations SET cancel_requested=1,next_attempt=0 WHERE id=?", (id,)
+        )
         if not op["attempts"]:
-            self.complete(op, {"ok": False, "error": {"code": "CANCELLED", "message": "操作尚未投递，已取消"}})
+            self.complete(
+                op, {"ok": False, "error": {"code": "CANCELLED", "message": "操作尚未投递，已取消"}}
+            )
         else:
-            self.store.execute("UPDATE operations SET state='cancelling',updated=? WHERE id=?", (time.time(), id))
-        self.store.audit(principal.actor, "operations_cancel", id, detail={"cancel_requested": True, "durable": True})
+            self.store.execute(
+                "UPDATE operations SET state='cancelling',updated=? WHERE id=?", (time.time(), id)
+            )
+        self.store.audit(
+            principal.actor,
+            "operations_cancel",
+            id,
+            detail={"cancel_requested": True, "durable": True},
+        )
         self.wake_delivery()
-        return {"operation_id": id, "cancel_requested": True, "state": self.store.one("SELECT state FROM operations WHERE id=?", (id,))["state"], "next": "operations_wait"}
+        return {
+            "operation_id": id,
+            "cancel_requested": True,
+            "state": self.store.one("SELECT state FROM operations WHERE id=?", (id,))["state"],
+            "next": "operations_wait",
+        }
 
-    async def dispatch_device_action(self, name: str, args: dict, device_id: str, principal: Principal):
-        project = await self.store.run(self._device_action_project, name, args, device_id, principal)
+    async def dispatch_device_action(
+        self, name: str, args: dict, device_id: str, principal: Principal
+    ):
+        project = await self.store.run(
+            self._device_action_project, name, args, device_id, principal
+        )
         return await self.dispatch(name, args, project, principal, background=True)
 
     def _device_action_project(self, name: str, args: dict, device_id: str, principal: Principal):
@@ -919,7 +1326,9 @@ class Runtime:
             self.panel_maintenance.guard()
         principal = refresh_profile_principal(self.store, principal)
         if name not in DEVICE_ACTIONS or principal.grant_id:
-            raise DevError("INSUFFICIENT_SCOPE", "Agent 生命周期只能由有设备管理权限的面板用户操作", 403)
+            raise DevError(
+                "INSUFFICIENT_SCOPE", "Agent 生命周期只能由有设备管理权限的面板用户操作", 403
+            )
         iam.require_device(self.store, principal, device_id, manage=True)
         device = self.store.one("SELECT id,name,enabled,info FROM devices WHERE id=?", (device_id,))
         if not device:
@@ -927,7 +1336,11 @@ class Runtime:
         if not device["enabled"]:
             raise DevError("DEVICE_DISABLED", "设备已停用；启用并重新上线后再管理 Agent", 409)
         if not self.online(device_id):
-            raise DevError("DEVICE_OFFLINE", "设备当前离线；生命周期操作不会排队等待未知时间，请上线后重试", 409)
+            raise DevError(
+                "DEVICE_OFFLINE",
+                "设备当前离线；生命周期操作不会排队等待未知时间，请上线后重试",
+                409,
+            )
         try:
             info = json.loads(device["info"] or "{}")
         except (TypeError, ValueError):
@@ -939,13 +1352,29 @@ class Runtime:
             if not isinstance(reason, str) or not reason:
                 reason = "当前在线 Agent 版本尚未声明安全生命周期能力；请先重新执行一次安装命令升级基础组件"
             raise DevError("AGENT_UPGRADE_REQUIRED", reason, 409)
-        project = {"id": None, "alias": "", "root": "", "mode": "write", "allow_tasks": False,
-                   "device_id": device_id}
+        project = {
+            "id": None,
+            "alias": "",
+            "root": "",
+            "mode": "write",
+            "allow_tasks": False,
+            "device_id": device_id,
+        }
         return project
 
-    async def dispatch(self, name: str, args: dict, project: dict, principal: Principal, background=False, maintenance=None):
-        async with self.device_dispatch_lock(project['device_id']):
-            id, completed = await self.store.run(self._admit_operation, name, args, project, principal, background, maintenance)
+    async def dispatch(
+        self,
+        name: str,
+        args: dict,
+        project: dict,
+        principal: Principal,
+        background=False,
+        maintenance=None,
+    ):
+        async with self.device_dispatch_lock(project["device_id"]):
+            id, completed = await self.store.run(
+                self._admit_operation, name, args, project, principal, background, maintenance
+            )
             if completed is not None:
                 return await self.store.run_read(self.authorized_result, id, completed, principal)
             future = self.futures.get(id)
@@ -973,51 +1402,94 @@ class Runtime:
                 self.operation_row(id, principal, status_only=True)
             except DevError as exc:
                 raise DevError(exc.code, exc.message, exc.status, operation_id=id) from exc
-            op = self.store.one("SELECT state,deadline,result,created,updated,device_id,cancel_requested,accepted_at,args_summary FROM operations WHERE id=?", (id,))
+            op = self.store.one(
+                "SELECT state,deadline,result,created,updated,device_id,cancel_requested,accepted_at,args_summary FROM operations WHERE id=?",
+                (id,),
+            )
             if op["result"]:
                 return self.authorized_result(id, self.operation_result(op), principal)
         pending = op["state"] in ACTIVE or op["state"] == "unknown"
         try:
-            args = json.loads(op.get('args_summary') or '{}')
+            args = json.loads(op.get("args_summary") or "{}")
         except (ValueError, TypeError):
             args = {}
         if not isinstance(args, dict):
             args = {}
-        root_write = args.get('cwd', '.') == '.' and any(
-            item.get('kind', 'path') == 'path' and item.get('name') == '.' and item.get('mode', 'write') == 'write'
-            for item in args.get('resources', []) if isinstance(item, dict))
-        warning = {'resource_warning': 'Project-root write claims serialize overlapping writes and processes; in strict mode they also block file reads. Put temporary outputs in CODEPIER_RUN_DIR.'} if root_write else {}
+        root_write = args.get("cwd", ".") == "." and any(
+            item.get("kind", "path") == "path"
+            and item.get("name") == "."
+            and item.get("mode", "write") == "write"
+            for item in args.get("resources", [])
+            if isinstance(item, dict)
+        )
+        warning = (
+            {
+                "resource_warning": "Project-root write claims serialize overlapping writes and processes; in strict mode they also block file reads. Put temporary outputs in CODEPIER_RUN_DIR."
+            }
+            if root_write
+            else {}
+        )
         from shared.operation_recovery import operation_recovery
-        recovery = operation_recovery({**op, "operation_id": id, "pending": pending, "result": None},
-                                      online=self.online(op["device_id"]))
-        return {**warning, **self.queue_annotations({"id": id, **op}, principal), "recovery": recovery, "operation_id": id, "pending": pending, "state": op["state"], "next": "operations_wait" if pending else None, "retry_after_seconds": 2 if pending else None,
-                "next_call": self.operation_next_call(id, pending=pending),
-                "elapsed_seconds": round(max(0, (time.time() if pending else op["updated"]) - op["created"]), 1),
-                "deadline": op["deadline"], "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。"}
 
-    def _admit_operation(self, name: str, args: dict, project: dict, principal: Principal, background=False, maintenance=None):
-        if name == 'exec':
+        recovery = operation_recovery(
+            {**op, "operation_id": id, "pending": pending, "result": None},
+            online=self.online(op["device_id"]),
+        )
+        return {
+            **warning,
+            **self.queue_annotations({"id": id, **op}, principal),
+            "recovery": recovery,
+            "operation_id": id,
+            "pending": pending,
+            "state": op["state"],
+            "next": "operations_wait" if pending else None,
+            "retry_after_seconds": 2 if pending else None,
+            "next_call": self.operation_next_call(id, pending=pending),
+            "elapsed_seconds": round(
+                max(0, (time.time() if pending else op["updated"]) - op["created"]), 1
+            ),
+            "deadline": op["deadline"],
+            "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。",
+        }
+
+    def _admit_operation(
+        self,
+        name: str,
+        args: dict,
+        project: dict,
+        principal: Principal,
+        background=False,
+        maintenance=None,
+    ):
+        if name == "exec":
             # Additive defaults must neither change pre-upgrade idempotency
             # fingerprints nor reach older extra=forbid Agent models.
             args = dict(args)
-            if args.get('isolation') == 'none':
-                args.pop('isolation')
-            if not args.get('snapshot_artifacts'):
-                args.pop('snapshot_artifacts', None)
-            options = {key: value for key, value in (args.get('options') or {}).items()
-                       if (key, value) not in (('order', 'default'), ('wait_policy', 'queue'))}
+            if args.get("isolation") == "none":
+                args.pop("isolation")
+            if not args.get("snapshot_artifacts"):
+                args.pop("snapshot_artifacts", None)
+            options = {
+                key: value
+                for key, value in (args.get("options") or {}).items()
+                if (key, value) not in (("order", "default"), ("wait_policy", "queue"))
+            }
             if options:
-                args['options'] = options
+                args["options"] = options
             else:
-                args.pop('options', None)
+                args.pop("options", None)
         principal = refresh_principal(self.store, principal)
         if name in PANEL_ROOTS_TOOLS:
             from hub.agent_roots import authorize
-            principal, _ = authorize(self, principal, project['device_id'])
-            if project.get('id') is not None or args.get('device_id') != project['device_id']:
-                raise DevError('ROOTS_DEVICE_MISMATCH', '目录授权必须绑定原设备，不能借用项目或工作树', 409)
+
+            principal, _ = authorize(self, principal, project["device_id"])
+            if project.get("id") is not None or args.get("device_id") != project["device_id"]:
+                raise DevError(
+                    "ROOTS_DEVICE_MISMATCH", "目录授权必须绑定原设备，不能借用项目或工作树", 409
+                )
         if name in PANEL_RUNTIME_TOOLS:
             from hub.runtime_panel import authorize
+
             principal = authorize(self, principal, project)
         if getattr(self, "panel_maintenance", None):
             self.panel_maintenance.guard()
@@ -1026,114 +1498,252 @@ class Runtime:
             # Resolve alias casing before identifying an unkeyed metadata query.
             args = {**args, "project": project["alias"]}
         principal = refresh_profile_principal(self.store, principal)
-        if project.get('id'):
+        if project.get("id"):
             scope = required_scope(name, args)
             if scope not in principal.scopes:
-                raise DevError('INSUFFICIENT_SCOPE', f'当前凭据缺少 {scope} 权限', 403, required_scope=scope)
-            if name == 'computer_session_close' and args.get('force') and not principal.instance_admin:
-                raise DevError('COMPUTER_FORCE_DENIED', '强制关闭需要当前面板管理员权限', 403)
-            self.authorize(principal, scope, project_id=project['id'])
-        elif name == 'system_validate' and not principal.admin:
-            self.authorize(principal, 'projects.create', device_id=project['device_id'], creation=project)
+                raise DevError(
+                    "INSUFFICIENT_SCOPE", f"当前凭据缺少 {scope} 权限", 403, required_scope=scope
+                )
+            if (
+                name == "computer_session_close"
+                and args.get("force")
+                and not principal.instance_admin
+            ):
+                raise DevError("COMPUTER_FORCE_DENIED", "强制关闭需要当前面板管理员权限", 403)
+            self.authorize(principal, scope, project_id=project["id"])
+        elif name == "system_validate" and not principal.admin:
+            self.authorize(
+                principal, "projects.create", device_id=project["device_id"], creation=project
+            )
         elif name in DEVICE_ACTIONS:
             if principal.grant_id:
-                raise DevError('INSUFFICIENT_SCOPE', 'MCP 不允许设备生命周期操作', 403)
-            iam.require_device(self.store, principal, project['device_id'], manage=True)
-        snapshot = {k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project}
-        if name in {"review_snapshots", "review_snapshots_manage", "open_workspace", "show_changes", "apply_patch", "edit"}:
-            snapshot["_coding_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
+                raise DevError("INSUFFICIENT_SCOPE", "MCP 不允许设备生命周期操作", 403)
+            iam.require_device(self.store, principal, project["device_id"], manage=True)
+        snapshot = {
+            k: project[k] for k in ("id", "alias", "root", "mode", "allow_tasks") if k in project
+        }
+        if name in {
+            "review_snapshots",
+            "review_snapshots_manage",
+            "open_workspace",
+            "show_changes",
+            "apply_patch",
+            "edit",
+        }:
+            snapshot["_coding_owner"] = (
+                "grant:" + principal.grant_id if principal.grant_id else principal.actor
+            )
             snapshot["_coding_device"] = project["device_id"]
-            snapshot["_coding_scopes"] = sorted(role_project_scopes(self.store, principal, project['id']))
+            snapshot["_coding_scopes"] = sorted(
+                role_project_scopes(self.store, principal, project["id"])
+            )
         if name in COMPUTER_TOOLS:
-            snapshot["_computer_owner"] = "grant:" + principal.grant_id if principal.grant_id else principal.actor
+            snapshot["_computer_owner"] = (
+                "grant:" + principal.grant_id if principal.grant_id else principal.actor
+            )
             snapshot["_computer_admin"] = principal.instance_admin
         fingerprint_args = args
-        if name == 'project_knowledge_build':
+        if name == "project_knowledge_build":
             # Additive defaults must recover the original pre-maintenance key,
             # never execute or enable maintenance again for that old operation.
             fingerprint_args = dict(args)
-            if fingerprint_args.get('auto_refresh') is True:
-                fingerprint_args.pop('auto_refresh')
-            if fingerprint_args.get('incremental') is False:
-                fingerprint_args.pop('incremental')
-            for field, default in (('batch_size', 2000), ('time_budget_seconds', 30),
-                                   ('cursor', ''), ('paths', []), ('exclude_paths', [])):
+            if fingerprint_args.get("auto_refresh") is True:
+                fingerprint_args.pop("auto_refresh")
+            if fingerprint_args.get("incremental") is False:
+                fingerprint_args.pop("incremental")
+            for field, default in (
+                ("batch_size", 2000),
+                ("time_budget_seconds", 30),
+                ("cursor", ""),
+                ("paths", []),
+                ("exclude_paths", []),
+            ):
                 if fingerprint_args.get(field) == default:
                     fingerprint_args.pop(field, None)
-        fingerprint = digest(json.dumps({"tool": name, "args": fingerprint_args, "project": snapshot, "device": project["device_id"]}, sort_keys=True, ensure_ascii=False))
+        fingerprint = digest(
+            json.dumps(
+                {
+                    "tool": name,
+                    "args": fingerprint_args,
+                    "project": snapshot,
+                    "device": project["device_id"],
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        )
         # Count, same-key recovery and durable insertion share one SQLite write
         # transaction, including direct/multi-connection admission callers.
         with self.store.transaction():
             self.knowledge_maintenance.guard(maintenance)
             from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+
             if name in INCOMING_UPLOAD_TOOLS:
-                service = getattr(self, 'incoming_files', None)
+                service = getattr(self, "incoming_files", None)
                 if service is None:
-                    raise DevError('FILE_IMPORT_GATEWAY_REQUIRED', '文件导入必须通过已认证的上传入口', 403)
+                    raise DevError(
+                        "FILE_IMPORT_GATEWAY_REQUIRED", "文件导入必须通过已认证的上传入口", 403
+                    )
                 service.validate_admission(name, args, project, principal)
-            old = self.store.one("SELECT * FROM operations WHERE space_id=? AND actor=? AND idem=?", (principal.space_id, principal.actor, idem)) if idem else None
+            old = (
+                self.store.one(
+                    "SELECT * FROM operations WHERE space_id=? AND actor=? AND idem=?",
+                    (principal.space_id, principal.actor, idem),
+                )
+                if idem
+                else None
+            )
             if name == "tasks_list" and not idem:
                 # Reuse only an outstanding metadata query from this exact grant.
                 # Explicit keys retain their own receipts; completed results are
                 # never cached and file reads retain their submission ordering.
-                old = self.store.one("""SELECT * FROM operations WHERE actor=? AND grant_id IS ?
+                old = self.store.one(
+                    """SELECT * FROM operations WHERE actor=? AND grant_id IS ?
                     AND device_id=? AND project_id=? AND tool='tasks_list' AND fingerprint=?
                     AND idem IS NULL AND state IN ('queued','running') AND result IS NULL
                     AND payload IS NOT NULL AND cancel_requested=0 AND deadline>?
                     ORDER BY created LIMIT 1""",
-                    (principal.actor, principal.grant_id, project["device_id"], project["id"], fingerprint, time.time()))
+                    (
+                        principal.actor,
+                        principal.grant_id,
+                        project["device_id"],
+                        project["id"],
+                        fingerprint,
+                        time.time(),
+                    ),
+                )
             if old:
                 # Replay is not an exception to current visibility, even when
                 # a caller already knows its own formerly permitted request key.
-                self.operation_row(old['id'], principal, status_only=True)
+                self.operation_row(old["id"], principal, status_only=True)
                 if old["fingerprint"] != fingerprint:
-                    raise DevError("IDEMPOTENCY_CONFLICT", "幂等键已经用于不同请求；未执行新操作", 409, operation_id=old["id"])
+                    raise DevError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "幂等键已经用于不同请求；未执行新操作",
+                        409,
+                        operation_id=old["id"],
+                    )
                 id = old["id"]
                 if old["result"]:
                     return id, self.operation_result(old)
                 # A retry wakes the durable worker; it does not allocate another operation.
                 self.store.execute("UPDATE operations SET next_attempt=0 WHERE id=?", (id,))
             else:
-                if self.online(project['device_id']):
-                    require_compatible(getattr(self.connections.get(project['device_id']), 'tool_protocol', None), name)
+                if self.online(project["device_id"]):
+                    require_compatible(
+                        getattr(self.connections.get(project["device_id"]), "tool_protocol", None),
+                        name,
+                    )
                 if name in TOOLS:
                     self.integrations.guard(name, args, project, principal)
-                if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {"browser_open", "browser_snapshot", "browser_action"} and not self.online(project["device_id"]):
-                    raise DevError("COMPUTER_OFFLINE", "设备不在线，不排队保存延迟桌面操作；恢复后重新观察", 409, admitted=False)
-                if name in DEVICE_ACTIONS | PANEL_ROOTS_TOOLS and not self.online(project["device_id"]):
+                if name in (COMPUTER_TOOLS - {"computer_session_close"}) | {
+                    "browser_open",
+                    "browser_snapshot",
+                    "browser_action",
+                } and not self.online(project["device_id"]):
+                    raise DevError(
+                        "COMPUTER_OFFLINE",
+                        "设备不在线，不排队保存延迟桌面操作；恢复后重新观察",
+                        409,
+                        admitted=False,
+                    )
+                if name in DEVICE_ACTIONS | PANEL_ROOTS_TOOLS and not self.online(
+                    project["device_id"]
+                ):
                     raise DevError("DEVICE_OFFLINE", "设备当前离线；生命周期操作未排队", 409)
-                device = self.store.one("SELECT enabled FROM devices WHERE id=?", (project["device_id"],))
+                device = self.store.one(
+                    "SELECT enabled FROM devices WHERE id=?", (project["device_id"],)
+                )
                 if not device or not device["enabled"]:
                     raise DevError("DEVICE_DISABLED", "设备已停用；请先在面板启用", 409)
-                active = self.store.one("SELECT count(*) AS n FROM operations WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (project["device_id"],))["n"]
+                active = self.store.one(
+                    "SELECT count(*) AS n FROM operations WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')",
+                    (project["device_id"],),
+                )["n"]
                 if name in DEVICE_ACTIONS and active:
-                    raise DevError("DEVICE_BUSY", "该设备还有操作未完成；为避免更新或卸载中断任务，请先等待现有操作结束", 409)
+                    raise DevError(
+                        "DEVICE_BUSY",
+                        "该设备还有操作未完成；为避免更新或卸载中断任务，请先等待现有操作结束",
+                        409,
+                    )
                 id, now = uuid.uuid4().hex, time.time()
                 self.integrations.prepare(id, name, args, project, principal)
-                request = {"tool": name, "args": args, "project": snapshot, "tool_contract_version": wire_version(name),
-                           "principal_context": {"user_id": principal.user_id, "space_id": principal.space_id,
-                           "user_epoch": principal.user_epoch, "identity_id": principal.identity_id}}
+                request = {
+                    "tool": name,
+                    "args": args,
+                    "project": snapshot,
+                    "tool_contract_version": wire_version(name),
+                    "principal_context": {
+                        "user_id": principal.user_id,
+                        "space_id": principal.space_id,
+                        "user_epoch": principal.user_epoch,
+                        "identity_id": principal.identity_id,
+                    },
+                }
                 if maintenance is not None:
-                    request['knowledge_maintenance'] = list(maintenance)
+                    request["knowledge_maintenance"] = list(maintenance)
                 if name == "exec" and args["target"].startswith("vps:"):
                     vps_args = {**args, "vps": args["target"][4:]}
                     request["vps_ref"] = self.vps.reference(vps_args, project)
-                if project.get('id'):
+                if project.get("id"):
                     from hub.project_runtimes import attach_requirement
+
                     attach_requirement(self, request, principal, project, admission=True)
                 payload = self.store.encrypt(json.dumps(request, ensure_ascii=False))
                 from hub.admission_policy import check_admission, usage
-                check_admission(self._admission_budget(project["device_id"]),
-                    usage(self.store, project["device_id"], project.get("id")), name, len(payload), args=args)
+
+                check_admission(
+                    self._admission_budget(project["device_id"]),
+                    usage(self.store, project["device_id"], project.get("id")),
+                    name,
+                    len(payload),
+                    args=args,
+                )
                 lifecycle_ttl = 900 if name == "agent_update" else 120
-                deadline_seconds = (min(self.queue_seconds, 15) if name in {"computer_action", "browser_action"} else
-                                    min(self.queue_seconds, 60) if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"} else
-                                    min(self.queue_seconds, 60) if name in PANEL_ROOTS_TOOLS else
-                                    min(self.queue_seconds, lifecycle_ttl) if name in DEVICE_ACTIONS else self.queue_seconds)
-                self.store.execute("INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
-                    (id, project["device_id"], project.get("id"), principal.actor, principal.grant_id, name,
-                     json.dumps(operation_summary(args, maintenance=maintenance is not None), ensure_ascii=False), fingerprint, idem, now, now, payload, now + deadline_seconds, principal.space_id, principal.user_id))
-                self.store.audit(principal.actor, name, project.get("alias", ""), "queued", {"operation_id": id, "args": operation_summary(args, maintenance=maintenance is not None)})
+                deadline_seconds = (
+                    min(self.queue_seconds, 15)
+                    if name in {"computer_action", "browser_action"}
+                    else min(self.queue_seconds, 60)
+                    if name in COMPUTER_TOOLS | {"browser_open", "browser_snapshot"}
+                    else min(self.queue_seconds, 60)
+                    if name in PANEL_ROOTS_TOOLS
+                    else min(self.queue_seconds, lifecycle_ttl)
+                    if name in DEVICE_ACTIONS
+                    else self.queue_seconds
+                )
+                self.store.execute(
+                    "INSERT INTO operations(id,device_id,project_id,actor,grant_id,tool,args_summary,fingerprint,idem,state,created,updated,payload,deadline,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
+                    (
+                        id,
+                        project["device_id"],
+                        project.get("id"),
+                        principal.actor,
+                        principal.grant_id,
+                        name,
+                        json.dumps(
+                            operation_summary(args, maintenance=maintenance is not None),
+                            ensure_ascii=False,
+                        ),
+                        fingerprint,
+                        idem,
+                        now,
+                        now,
+                        payload,
+                        now + deadline_seconds,
+                        principal.space_id,
+                        principal.user_id,
+                    ),
+                )
+                self.store.audit(
+                    principal.actor,
+                    name,
+                    project.get("alias", ""),
+                    "queued",
+                    {
+                        "operation_id": id,
+                        "args": operation_summary(args, maintenance=maintenance is not None),
+                    },
+                )
                 self.diagnostics.record(id, "hub_received")
                 self.knowledge_maintenance.admitted(name, args, project, principal, id, maintenance)
                 if maintenance is None:
@@ -1144,9 +1754,15 @@ class Runtime:
     def _admission_budget(self, device_id):
         from hub.admission_policy import Budget
         from hub.scheduler_settings import stored_config
+
         con = self.connections.get(device_id)
-        if (con is None or not self.online(device_id) or not self.connection_authorized(device_id, con)
-                or getattr(con, "scheduler_protocol", 0) != 1 or not hasattr(con, "admission")):
+        if (
+            con is None
+            or not self.online(device_id)
+            or not self.connection_authorized(device_id, con)
+            or getattr(con, "scheduler_protocol", 0) != 1
+            or not hasattr(con, "admission")
+        ):
             return Budget()
         try:
             expected = stored_config(self.store, device_id)["revision"]
@@ -1163,16 +1779,21 @@ class Runtime:
             # a failed execution and replayed with a fresh idempotency key.
             raise DevError(exc.code, exc.message, exc.status, operation_id=identifier) from exc
         result = self._filter_concurrency(result, principal, row["device_id"])
-        value = self.unwrap(identifier, result, tool=row['tool'])
-        if row['tool'] == 'open_workspace':
+        value = self.unwrap(identifier, result, tool=row["tool"])
+        if row["tool"] == "open_workspace":
             from hub.project_views import validate_context
-            args = json.loads(row['args_summary']) if row.get('args_summary') else {}
+
+            args = json.loads(row["args_summary"]) if row.get("args_summary") else {}
             validate_context(self, args, value, principal, operation=identifier)
-        if row['tool'] == 'readiness_get':
-            args = json.loads(row['args_summary']) if row.get('args_summary') else {}
-            if args.get('operation_kind'):
+        if row["tool"] == "readiness_get":
+            args = json.loads(row["args_summary"]) if row.get("args_summary") else {}
+            if args.get("operation_kind"):
                 from hub.project_views import enrich_readiness
-                value = {**enrich_readiness(self, args, value, principal), 'operation_id': identifier}
+
+                value = {
+                    **enrich_readiness(self, args, value, principal),
+                    "operation_id": identifier,
+                }
         return value
 
     def expire_waiter(self, id, future):
@@ -1184,82 +1805,131 @@ class Runtime:
         if not result.get("ok"):
             error = result.get("error") or {}
             details = safe_detail(error)
-            details.update(safe_filesystem_error_detail(tool, error.get('code'), error))
-            details.update(safe_review_error_detail(error.get('code'), error))
+            details.update(safe_filesystem_error_detail(tool, error.get("code"), error))
+            details.update(safe_review_error_detail(error.get("code"), error))
             # The synchronous error already carries retryable=False below;
             # keep one explicit value, independent from remote details.
-            details.pop('retryable', None)
-            if error.get('code') == 'RESOURCE_BUSY':
-                details['blocked_by'] = error.get('blocked_by', [])
-                if error.get('blocker_visibility'):
-                    details['blocker_visibility'] = error['blocker_visibility']
-            if error.get('next') == 'computer_observe':
-                details['next'] = 'computer_observe'
-            if error.get('input_sent') is False:
-                details['input_sent'] = False
-            raise DevError(error.get("code", "REMOTE_ERROR"), error.get("message", "远端操作失败") + f" [operation_id={id}]", 409, operation_id=id, retryable=False, **details)
+            details.pop("retryable", None)
+            if error.get("code") == "RESOURCE_BUSY":
+                details["blocked_by"] = error.get("blocked_by", [])
+                if error.get("blocker_visibility"):
+                    details["blocker_visibility"] = error["blocker_visibility"]
+            if error.get("next") == "computer_observe":
+                details["next"] = "computer_observe"
+            if error.get("input_sent") is False:
+                details["input_sent"] = False
+            raise DevError(
+                error.get("code", "REMOTE_ERROR"),
+                error.get("message", "远端操作失败") + f" [operation_id={id}]",
+                409,
+                operation_id=id,
+                retryable=False,
+                **details,
+            )
         scrub_expired(result)
         return {"operation_id": id, **(result.get("data") or {})}
 
     def operation_principal(self, op, request=None):
-        if op.get('grant_id'):
-            grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],))
+        if op.get("grant_id"):
+            grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
             return self.grant_principal(grant)
-        context = (request or {}).get('principal_context') or {}
-        owner = op.get('owner_user_id')
+        context = (request or {}).get("principal_context") or {}
+        owner = op.get("owner_user_id")
         if not owner:
-            raise DevError('ACCOUNT_DISABLED', '原操作缺少可信用户归属', 401)
-        principal = Principal(op['actor'], owner, {'read'}, [], space_id=op.get('space_id','legacy'),
-                              user_epoch=context.get('user_epoch'), identity_id=context.get('identity_id'))
+            raise DevError("ACCOUNT_DISABLED", "原操作缺少可信用户归属", 401)
+        principal = Principal(
+            op["actor"],
+            owner,
+            {"read"},
+            [],
+            space_id=op.get("space_id", "legacy"),
+            user_epoch=context.get("user_epoch"),
+            identity_id=context.get("identity_id"),
+        )
         return iam.live_principal(self.store, principal)
 
     def permission_error(self, op, request):
         try:
-            self.knowledge_maintenance.guard(request.get('knowledge_maintenance'))
+            self.knowledge_maintenance.guard(request.get("knowledge_maintenance"))
             caller = self.operation_principal(op, request)
-            if op['tool'] in PANEL_ROOTS_TOOLS:
+            if op["tool"] in PANEL_ROOTS_TOOLS:
                 from hub.agent_roots import authorize
-                caller, _ = authorize(self, caller, op['device_id'])
-            if op['tool'] in PANEL_RUNTIME_TOOLS:
+
+                caller, _ = authorize(self, caller, op["device_id"])
+            if op["tool"] in PANEL_RUNTIME_TOOLS:
                 from hub.runtime_panel import authorize
-                caller = authorize(self, caller, {'id': op['project_id'], 'device_id': op['device_id']})
+
+                caller = authorize(
+                    self, caller, {"id": op["project_id"], "device_id": op["device_id"]}
+                )
             from hub.room_scope import require_tool
-            require_tool(self.store, caller, op['tool'], request['args'])
-            if op['tool'] == 'computer_session_close' and request['args'].get('force') and not caller.instance_admin:
-                return '强制关闭的面板管理员权限已撤销'
-            if op['project_id']:
-                self.authorize(caller, required_scope(op['tool'], request['args']), project_id=op['project_id'])
+
+            require_tool(self.store, caller, op["tool"], request["args"])
+            if (
+                op["tool"] == "computer_session_close"
+                and request["args"].get("force")
+                and not caller.instance_admin
+            ):
+                return "强制关闭的面板管理员权限已撤销"
+            if op["project_id"]:
+                self.authorize(
+                    caller, required_scope(op["tool"], request["args"]), project_id=op["project_id"]
+                )
             else:
-                iam.require_device(self.store, caller, op['device_id'], manage=op['tool'] != 'system_validate',
-                                   creation=request['project'] if op['tool'] == 'system_validate' else None)
+                iam.require_device(
+                    self.store,
+                    caller,
+                    op["device_id"],
+                    manage=op["tool"] != "system_validate",
+                    creation=request["project"] if op["tool"] == "system_validate" else None,
+                )
         except DevError as exc:
             return exc.message
         if not op["project_id"]:
-            if op['grant_id']:
+            if op["grant_id"]:
                 try:
-                    grant = self.store.one('SELECT * FROM grants WHERE id=?', (op['grant_id'],))
+                    grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
                     caller = self.grant_principal(grant)
-                    if op['tool'] != 'system_validate':
-                        return 'MCP 不允许设备生命周期操作'
-                    require_role(self.store, caller, 'projects.create', device_id=op['device_id'], creation=request['project'])
+                    if op["tool"] != "system_validate":
+                        return "MCP 不允许设备生命周期操作"
+                    require_role(
+                        self.store,
+                        caller,
+                        "projects.create",
+                        device_id=op["device_id"],
+                        creation=request["project"],
+                    )
                 except DevError as exc:
                     return exc.message
             return None
         project = self.store.one("SELECT * FROM projects WHERE id=?", (op["project_id"],))
-        if not project or project["root"] != request["project"]["root"] or project["device_id"] != op["device_id"] or project["alias"] != request["project"].get("alias"):
+        if (
+            not project
+            or project["root"] != request["project"]["root"]
+            or project["device_id"] != op["device_id"]
+            or project["alias"] != request["project"].get("alias")
+        ):
             return "项目映射在排队期间被删除或修改，未在新的路径执行"
         if "vps_ref" in request:
             denied = self.vps.permission_error(request, op["project_id"])
             if denied:
                 return denied
         scope = required_scope(op["tool"], request["args"])
-        if op["tool"] in MUTATING and op["tool"] not in PANEL_RUNTIME_TOOLS | {"computer_session_close"} and project["mode"] != "write" or op["tool"] in PROCESS_TOOLS and not project["allow_tasks"]:
+        if (
+            op["tool"] in MUTATING
+            and op["tool"] not in PANEL_RUNTIME_TOOLS | {"computer_session_close"}
+            and project["mode"] != "write"
+            or op["tool"] in PROCESS_TOOLS
+            and not project["allow_tasks"]
+        ):
             return "排队操作的项目写入/任务权限已撤销"
         if op["grant_id"]:
             grant = self.store.one("SELECT * FROM grants WHERE id=?", (op["grant_id"],))
             try:
                 scopes, projects, _ = effective_grant(self.store, grant)
-                require_role(self.store, self.grant_principal(grant), scope, project_id=op['project_id'])
+                require_role(
+                    self.store, self.grant_principal(grant), scope, project_id=op["project_id"]
+                )
             except DevError:
                 return "排队操作的 MCP 授权或访问 Profile 已撤销/停用"
             if scope not in scopes or not ("*" in projects or op["project_id"] in projects):
@@ -1272,27 +1942,38 @@ class Runtime:
             # Preserve the existing screenshot TTL for the new encrypted form.
             # This is the same media-only expiry policy, not history retention.
             from hub.operation_history import seal
+
             now = time.time()
-            for row in self.store.all('SELECT id,result FROM operations WHERE media_expires_at IS NOT NULL AND media_expires_at<=? ORDER BY media_expires_at LIMIT 64', (now,)):
+            for row in self.store.all(
+                "SELECT id,result FROM operations WHERE media_expires_at IS NOT NULL AND media_expires_at<=? ORDER BY media_expires_at LIMIT 64",
+                (now,),
+            ):
                 value = self.operation_result(row)
                 scrub_expired(value, now)
-                self.store.execute('UPDATE operations SET result=?,media_expires_at=NULL WHERE id=?',
-                                   (seal(self.store, json.dumps(value, ensure_ascii=False)), row['id']))
+                self.store.execute(
+                    "UPDATE operations SET result=?,media_expires_at=NULL WHERE id=?",
+                    (seal(self.store, json.dumps(value, ensure_ascii=False)), row["id"]),
+                )
 
     def _delivery_candidates(self, busy_devices):
         # Round-robin rank prevents one busy device's old backlog from hiding
         # all other devices behind the global 128-row dispatch window.
-        excluded = ''
+        excluded = ""
         parameters = [time.time()]
         if busy_devices:
-            excluded = ' AND device_id NOT IN (' + ','.join('?' for _ in busy_devices) + ')'
+            excluded = " AND device_id NOT IN (" + ",".join("?" for _ in busy_devices) + ")"
             parameters.extend(busy_devices)
-        return self.store.all("""SELECT id,device_id FROM (
+        return self.store.all(
+            """SELECT id,device_id FROM (
             SELECT id,device_id,created,rowid AS row_order,
                    ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY created,rowid) AS turn
             FROM operations WHERE state IN ('queued','running','reconnecting','cancelling')
-            AND next_attempt<=?""" + excluded + """)
-            ORDER BY turn,created,row_order LIMIT 128""", tuple(parameters))
+            AND next_attempt<=?"""
+            + excluded
+            + """)
+            ORDER BY turn,created,row_order LIMIT 128""",
+            tuple(parameters),
+        )
 
     async def delivery_loop(self):
         active_devices = {}
@@ -1312,15 +1993,21 @@ class Runtime:
                             raise
                         except Exception as exc:
                             with contextlib.suppress(Exception):
-                                await self.store.run(self.store.audit, "hub", "maintenance.error",
-                                    status="error", detail={"type": type(exc).__name__})
+                                await self.store.run(
+                                    self.store.audit,
+                                    "hub",
+                                    "maintenance.error",
+                                    status="error",
+                                    detail={"type": type(exc).__name__},
+                                )
                     rows = await self.store.run(self._delivery_candidates, tuple(active_devices))
                     devices = {}
                     for row in rows:
                         devices.setdefault(row["device_id"], []).append(row["id"])
                     for device, identifiers in devices.items():
-                        task = asyncio.create_task(self.deliver_device(identifiers),
-                                                   name="device-delivery")
+                        task = asyncio.create_task(
+                            self.deliver_device(identifiers), name="device-delivery"
+                        )
                         active_devices[device] = task
                         task.add_done_callback(lambda _: self.wake.set())
                 except asyncio.CancelledError:
@@ -1328,8 +2015,13 @@ class Runtime:
                 except Exception as exc:
                     # A failed audit must not kill the durable dispatcher.
                     with contextlib.suppress(Exception):
-                        await self.store.run(self.store.audit, "hub", "delivery.error",
-                            status="error", detail={"type": type(exc).__name__})
+                        await self.store.run(
+                            self.store.audit,
+                            "hub",
+                            "delivery.error",
+                            status="error",
+                            detail={"type": type(exc).__name__},
+                        )
                 try:
                     await asyncio.wait_for(self.wake.wait(), 1)
                 except asyncio.TimeoutError:
@@ -1342,25 +2034,38 @@ class Runtime:
 
     async def _delivery_failed(self, identifier, exc):
         with contextlib.suppress(Exception):
-            await self.store.run(self.store.execute,
+            await self.store.run(
+                self.store.execute,
                 "UPDATE operations SET transport_error=?,next_attempt=? WHERE id=?",
-                ("Delivery interrupted: " + type(exc).__name__,
-                 time.time() + self.retry_seconds, identifier))
+                (
+                    "Delivery interrupted: " + type(exc).__name__,
+                    time.time() + self.retry_seconds,
+                    identifier,
+                ),
+            )
         # Keep the original durable request and receipt when send outcome is unknown.
 
     async def _prepare_for_send(self, identifier):
-        row = await self.store.run_read(self.store.one,
-            "SELECT device_id FROM operations WHERE id=?", (identifier,))
+        row = await self.store.run_read(
+            self.store.one, "SELECT device_id FROM operations WHERE id=?", (identifier,)
+        )
         if row is None:
             return None
-        async with self.device_dispatch_lock(row['device_id']):
+        async with self.device_dispatch_lock(row["device_id"]):
             return await self.store.run(self._prepare_delivery, identifier)
 
     async def deliver_device(self, ids):
         from hub.delivery_pipeline import ordered_delivery
-        await ordered_delivery(ids, prepare=self._prepare_for_send, send=self._send_prepared,
-            failed=self._delivery_failed, slots=self.delivery_slots,
-            stopping=lambda: self.stopping, prefetch=2)
+
+        await ordered_delivery(
+            ids,
+            prepare=self._prepare_for_send,
+            send=self._send_prepared,
+            failed=self._delivery_failed,
+            slots=self.delivery_slots,
+            stopping=lambda: self.stopping,
+            prefetch=2,
+        )
 
     async def deliver(self, id):
         prepared = await self._prepare_for_send(id)
@@ -1369,86 +2074,130 @@ class Runtime:
 
     @staticmethod
     def require_resource_semantics(connection, args):
-        options = args.get('options') or {}
-        advanced = (args.get('isolation', 'none') == 'snapshot' or
-                    any(resource.get('mode') == 'read_stable' for resource in args.get('resources', []) if isinstance(resource, dict)) or
-                    options.get('order', 'default') != 'default' or
-                    options.get('wait_policy', 'queue') != 'queue')
-        if advanced and getattr(connection, 'resource_semantics_protocol', 0) != 2:
-            raise DevError('AGENT_RESOURCE_SEMANTICS_REQUIRED',
-                           'This operation requires Agent resource semantics protocol 2', 409)
+        options = args.get("options") or {}
+        advanced = (
+            args.get("isolation", "none") == "snapshot"
+            or any(
+                resource.get("mode") == "read_stable"
+                for resource in args.get("resources", [])
+                if isinstance(resource, dict)
+            )
+            or options.get("order", "default") != "default"
+            or options.get("wait_policy", "queue") != "queue"
+        )
+        if advanced and getattr(connection, "resource_semantics_protocol", 0) != 2:
+            raise DevError(
+                "AGENT_RESOURCE_SEMANTICS_REQUIRED",
+                "This operation requires Agent resource semantics protocol 2",
+                409,
+            )
 
     @iam.read_decision
     def _delivery_packet_current(self, identifier, device_id, con, packet):
         # Preparation can overlap an earlier send. Recheck current authority
         # immediately before this packet, without caching an authorization result.
         with self.store.transaction():
-            if (self.connections.get(device_id) is not con or con.unusable
-                    or not self.connection_authorized(device_id, con)):
+            if (
+                self.connections.get(device_id) is not con
+                or con.unusable
+                or not self.connection_authorized(device_id, con)
+            ):
                 return False
-            op = self.store.one('SELECT id,device_id,project_id,actor,grant_id,tool,state,payload,deadline,cancel_requested,accepted_at,attempts,journal_id,space_id,owner_user_id,visibility,created,updated FROM operations WHERE id=?', (identifier,))
-            if not op or op['state'] not in ACTIVE:
+            op = self.store.one(
+                "SELECT id,device_id,project_id,actor,grant_id,tool,state,payload,deadline,cancel_requested,accepted_at,attempts,journal_id,space_id,owner_user_id,visibility,created,updated FROM operations WHERE id=?",
+                (identifier,),
+            )
+            if not op or op["state"] not in ACTIVE:
                 return False
-            if packet['type'] != 'call':
+            if packet["type"] != "call":
                 return True
             # The wire packet intentionally omits vps_ref. Use the original
             # encrypted request for the final VPS version/binding check too.
-            request = json.loads(self.store.decrypt(op['payload']))
+            request = json.loads(self.store.decrypt(op["payload"]))
             denied = self.permission_error(op, request)
             denied = denied or self.collaboration.coordination.operation_denial(op)
-            panel = not op['grant_id'] and op['actor'].startswith('panel:')
+            panel = not op["grant_id"] and op["actor"].startswith("panel:")
             principal = None
             try:
                 principal = self.operation_principal(op, request)
-                if op['project_id']:
-                    project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
+                if op["project_id"]:
+                    project = self.store.one(
+                        "SELECT * FROM projects WHERE id=?", (op["project_id"],)
+                    )
                     if project:
-                        self.integrations.guard(op['tool'], request['args'], project, principal)
-                policy = remote_execution_denial(op['tool'], request['args'],
-                    Principal(op['actor'], '', set(), [], grant_id=op['grant_id'], admin=panel))
+                        self.integrations.guard(op["tool"], request["args"], project, principal)
+                policy = remote_execution_denial(
+                    op["tool"],
+                    request["args"],
+                    Principal(op["actor"], "", set(), [], grant_id=op["grant_id"], admin=panel),
+                )
                 denied = denied or (policy[1] if policy else None)
-                require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
-                self.require_resource_semantics(con, request['args'])
+                require_compatible(getattr(con, "tool_protocol", None), op["tool"])
+                self.require_resource_semantics(con, request["args"])
                 runtime_requirement = None
-                if op['project_id']:
+                if op["project_id"]:
                     from hub.project_runtimes import attach_requirement
-                    runtime_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
-                    runtime_requirement = attach_requirement(self, packet, principal, runtime_project, con)
-                if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
-                    raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
+
+                    runtime_project = self.store.one(
+                        "SELECT * FROM projects WHERE id=?", (op["project_id"],)
+                    )
+                    runtime_requirement = attach_requirement(
+                        self, packet, principal, runtime_project, con
+                    )
+                if (
+                    request.get("bounded_execution") is not None
+                    and getattr(con, "bounded_execution_protocol", 0) != 1
+                ):
+                    raise DevError(
+                        "AGENT_BOUNDED_EXECUTION_REQUIRED",
+                        "当前连接不能确认原有界命令预算，禁止重投执行",
+                        409,
+                    )
             except DevError as exc:
                 denied = denied or exc.message
-            expired = bool(op['deadline'] and time.time() > op['deadline'])
-            if denied or expired or op['cancel_requested'] or op['accepted_at']:
+            expired = bool(op["deadline"] and time.time() > op["deadline"])
+            if denied or expired or op["cancel_requested"] or op["accepted_at"]:
                 # The preparation decision is durable; never reinterpret an
                 # earlier ambiguous attempt as definitely not sent. Next tick
                 # reconciles this same ID through the existing probe/cancel path.
-                self.store.execute('UPDATE operations SET next_attempt=? WHERE id=?',
-                                   (time.time(), identifier))
+                self.store.execute(
+                    "UPDATE operations SET next_attempt=? WHERE id=?", (time.time(), identifier)
+                )
                 return False
-            scopes = sorted(role_project_scopes(self.store, principal, op['project_id'])) if op['project_id'] else []
-            if '_coding_scopes' in packet['project']:
-                packet['project']['_coding_scopes'] = scopes
-            if op['tool'] in COMPUTER_TOOLS:
-                packet['project']['_computer_admin'] = principal.instance_admin
-            packet['integration_context'] = {
-                'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
-                'admin': principal.admin, 'device_id': op['device_id'], 'scopes': scopes,
-                'runtime_requirement': runtime_requirement}
+            scopes = (
+                sorted(role_project_scopes(self.store, principal, op["project_id"]))
+                if op["project_id"]
+                else []
+            )
+            if "_coding_scopes" in packet["project"]:
+                packet["project"]["_coding_scopes"] = scopes
+            if op["tool"] in COMPUTER_TOOLS:
+                packet["project"]["_computer_admin"] = principal.instance_admin
+            packet["integration_context"] = {
+                "owner": "grant:" + op["grant_id"] if op["grant_id"] else op["actor"],
+                "admin": principal.admin,
+                "device_id": op["device_id"],
+                "scopes": scopes,
+                "runtime_requirement": runtime_requirement,
+            }
             from hub.project_views import prepare_view_packet
+
             prepare_view_packet(self, packet, principal, con)
-            packet['execution_policy'] = hub_execution_policy(panel=panel)
-            self.diagnostics.record(identifier, 'dispatched')
+            packet["execution_policy"] = hub_execution_policy(panel=panel)
+            self.diagnostics.record(identifier, "dispatched")
             return True
 
     async def _send_prepared(self, identifier, prepared):
         device_id, con, packets = prepared
         for packet in packets:
+
             async def current(packet=packet):
                 # This final current-authority fence holds the socket send
                 # lock. It must not strand receipt ACKs behind normal DB work.
-                return await self.store.run_control(self._delivery_packet_current,
-                                                    identifier, device_id, con, packet)
+                return await self.store.run_control(
+                    self._delivery_packet_current, identifier, device_id, con, packet
+                )
+
             if not await con.send(packet, before_send=current):
                 return
 
@@ -1458,7 +2207,10 @@ class Runtime:
         # phase. Every write invalidates it; no decision survives the next await.
         packets = []
         with self.store.lock:
-            op = self.store.one("SELECT id,device_id,project_id,actor,grant_id,tool,state,payload,deadline,cancel_requested,accepted_at,attempts,journal_id,space_id,owner_user_id,visibility,created,updated FROM operations WHERE id=?", (id,))
+            op = self.store.one(
+                "SELECT id,device_id,project_id,actor,grant_id,tool,state,payload,deadline,cancel_requested,accepted_at,attempts,journal_id,space_id,owner_user_id,visibility,created,updated FROM operations WHERE id=?",
+                (id,),
+            )
             if not op or op["state"] not in ACTIVE:
                 return
             now = time.time()
@@ -1466,43 +2218,74 @@ class Runtime:
                 return
             try:
                 request = json.loads(self.store.decrypt(op["payload"]))
-                if (not isinstance(request, dict) or request.get("tool") != op["tool"] or
-                        not isinstance(request.get("args"), dict) or
-                        not isinstance(request.get("project"), dict) or
-                        not isinstance(request["project"].get("root"), str) or
-                        op["tool"] not in TOOLS and op["tool"] != "system_validate" and op["tool"] not in DEVICE_ACTIONS):
+                if (
+                    not isinstance(request, dict)
+                    or request.get("tool") != op["tool"]
+                    or not isinstance(request.get("args"), dict)
+                    or not isinstance(request.get("project"), dict)
+                    or not isinstance(request["project"].get("root"), str)
+                    or op["tool"] not in TOOLS
+                    and op["tool"] != "system_validate"
+                    and op["tool"] not in DEVICE_ACTIONS
+                ):
                     raise ValueError("Invalid durable request")
             except Exception:
-                self.complete(op, {"ok": False, "error": {"code": "RECOVERY_DATA_INVALID", "message": "持久请求无法解密，请检查 Hub 数据库与 master.key 是否配套"}})
+                self.complete(
+                    op,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RECOVERY_DATA_INVALID",
+                            "message": "持久请求无法解密，请检查 Hub 数据库与 master.key 是否配套",
+                        },
+                    },
+                )
                 return
             denied = self.permission_error(op, request)
             denied = denied or self.collaboration.coordination.operation_denial(op)
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
-            panel = not op['grant_id'] and op['actor'].startswith('panel:')
+            panel = not op["grant_id"] and op["actor"].startswith("panel:")
             try:
                 delivery_principal = self.operation_principal(op, request)
-                delivery_scopes = sorted(role_project_scopes(self.store, delivery_principal, op['project_id'])) if op['project_id'] else []
+                delivery_scopes = (
+                    sorted(role_project_scopes(self.store, delivery_principal, op["project_id"]))
+                    if op["project_id"]
+                    else []
+                )
                 delivery_admin = delivery_principal.admin
             except DevError:
                 delivery_scopes, delivery_admin = [], False
                 delivery_principal = Principal(op["actor"], "", set(), [], grant_id=op["grant_id"])
-            if '_coding_scopes' in request['project']:
-                request['project']['_coding_scopes'] = delivery_scopes
-            request['integration_context'] = {'owner': 'grant:'+op['grant_id'] if op['grant_id'] else op['actor'],
-                'admin': delivery_admin, 'device_id': op['device_id'], 'scopes': delivery_scopes}
-            if not op['accepted_at'] and op['project_id'] and op['tool'] in TOOLS:
-                current_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
+            if "_coding_scopes" in request["project"]:
+                request["project"]["_coding_scopes"] = delivery_scopes
+            request["integration_context"] = {
+                "owner": "grant:" + op["grant_id"] if op["grant_id"] else op["actor"],
+                "admin": delivery_admin,
+                "device_id": op["device_id"],
+                "scopes": delivery_scopes,
+            }
+            if not op["accepted_at"] and op["project_id"] and op["tool"] in TOOLS:
+                current_project = self.store.one(
+                    "SELECT * FROM projects WHERE id=?", (op["project_id"],)
+                )
                 if current_project:
-                    try:self.integrations.guard(op['tool'], request['args'], current_project, delivery_principal)
-                    except DevError as exc:denied = denied or exc.message
+                    try:
+                        self.integrations.guard(
+                            op["tool"], request["args"], current_project, delivery_principal
+                        )
+                    except DevError as exc:
+                        denied = denied or exc.message
             request["execution_policy"] = hub_execution_policy(panel=panel)
             policy_denied = None
             if not op["accepted_at"]:
                 policy_code = "CODEX_REMOTE_DISABLED"
                 try:
-                    policy_denial = remote_execution_denial(op["tool"], request["args"],
-                        Principal(op["actor"], "", set(), [], grant_id=op["grant_id"], admin=panel))
+                    policy_denial = remote_execution_denial(
+                        op["tool"],
+                        request["args"],
+                        Principal(op["actor"], "", set(), [], grant_id=op["grant_id"], admin=panel),
+                    )
                     if policy_denial:
                         policy_code, policy_denied = policy_denial
                 except DevError as exc:
@@ -1510,47 +2293,93 @@ class Runtime:
                     # not a transport fault that should remain queued forever.
                     policy_code, policy_denied = exc.code, exc.message
                 if policy_denied and not op["attempts"]:
-                    self.complete(op, {"ok": False, "error": {"code": policy_code, "message": policy_denied}})
+                    self.complete(
+                        op, {"ok": False, "error": {"code": policy_code, "message": policy_denied}}
+                    )
                     return
                 denied = denied or policy_denied
             # Already accepted/ambiguous work is probed, never silently replayed or killed.
             expired = bool(op["deadline"] and now > op["deadline"])
             if not op["attempts"] and (expired or denied or op["cancel_requested"]):
-                code = "AUTHORIZATION_CHANGED" if denied else "CANCELLED" if op["cancel_requested"] else "QUEUE_EXPIRED"
-                self.complete(op, {"ok": False, "error": {"code": code, "message": denied or "排队操作已取消或超过首次执行期限；没有执行"}})
+                code = (
+                    "AUTHORIZATION_CHANGED"
+                    if denied
+                    else "CANCELLED"
+                    if op["cancel_requested"]
+                    else "QUEUE_EXPIRED"
+                )
+                self.complete(
+                    op,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": code,
+                            "message": denied or "排队操作已取消或超过首次执行期限；没有执行",
+                        },
+                    },
+                )
                 return
             con = self.connections.get(op["device_id"])
             if not con or not self.online(op["device_id"]):
-                self.store.execute("UPDATE operations SET next_attempt=? WHERE id=?", (now + self.retry_seconds, id))
+                self.store.execute(
+                    "UPDATE operations SET next_attempt=? WHERE id=?",
+                    (now + self.retry_seconds, id),
+                )
                 return
             try:
-                validate_call_epoch(op['tool'], request.get('tool_contract_version'))
-                require_compatible(getattr(con, 'tool_protocol', None), op['tool'])
-                self.require_resource_semantics(con, request['args'])
-                if not op['accepted_at'] and op['project_id']:
+                validate_call_epoch(op["tool"], request.get("tool_contract_version"))
+                require_compatible(getattr(con, "tool_protocol", None), op["tool"])
+                self.require_resource_semantics(con, request["args"])
+                if not op["accepted_at"] and op["project_id"]:
                     from hub.project_runtimes import attach_requirement
-                    runtime_project = self.store.one('SELECT * FROM projects WHERE id=?', (op['project_id'],))
-                    request['integration_context']['runtime_requirement'] = attach_requirement(self, request, delivery_principal, runtime_project, con)
-                if request.get('bounded_execution') is not None and getattr(con, 'bounded_execution_protocol', 0) != 1:
-                    raise DevError('AGENT_BOUNDED_EXECUTION_REQUIRED', '当前连接不能确认原有界命令预算，禁止重投执行', 409)
+
+                    runtime_project = self.store.one(
+                        "SELECT * FROM projects WHERE id=?", (op["project_id"],)
+                    )
+                    request["integration_context"]["runtime_requirement"] = attach_requirement(
+                        self, request, delivery_principal, runtime_project, con
+                    )
+                if (
+                    request.get("bounded_execution") is not None
+                    and getattr(con, "bounded_execution_protocol", 0) != 1
+                ):
+                    raise DevError(
+                        "AGENT_BOUNDED_EXECUTION_REQUIRED",
+                        "当前连接不能确认原有界命令预算，禁止重投执行",
+                        409,
+                    )
             except DevError as exc:
-                if not op['attempts']:
-                    self.complete(op, {'ok': False, 'error': {'code': exc.code, 'message': exc.message}})
+                if not op["attempts"]:
+                    self.complete(
+                        op, {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+                    )
                     return
                 # An older send may have executed: recover its receipt, not a
                 # newly interpreted call under changed tool semantics.
                 denied = denied or exc.message
             if op.get("journal_id") and op["journal_id"] != con.journal_id:
-                self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 操作账本已变化，不能证明旧操作是否执行；停止重放，请检查本机结果"}})
+                self.complete(
+                    op,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "JOURNAL_CHANGED",
+                            "message": "Agent 操作账本已变化，不能证明旧操作是否执行；停止重放，请检查本机结果",
+                        },
+                    },
+                )
                 return
-            self.store.execute("UPDATE operations SET next_attempt=? WHERE id=?", (now + (15 if op["accepted_at"] else self.retry_seconds), id))
+            self.store.execute(
+                "UPDATE operations SET next_attempt=? WHERE id=?",
+                (now + (15 if op["accepted_at"] else self.retry_seconds), id),
+            )
             # Commit the send decision without holding the global admission lock
             # across network I/O. Another device/HTTP caller must not wait for a
             # half-open home connection. A concurrent cancel is durable and follows
             # the same operation; it cannot be mistaken for an unsent cancellation.
             if op["cancel_requested"]:
                 packets.append({"type": "cancel", "id": id})
-            elif denied and op["attempts"] and getattr(con, 'cancel_pending_protocol', 0) == 1:
+            elif denied and op["attempts"] and getattr(con, "cancel_pending_protocol", 0) == 1:
                 # A capability-gated conditional fence is safe even if the
                 # accepted/started ACK was lost. The Agent ignores it once
                 # running; never turn revocation into an unconditional kill.
@@ -1567,18 +2396,38 @@ class Runtime:
                             # that journal result instead of claiming no execution.
                             packets.append({"type": "probe", "id": id})
                         else:
-                            self.complete(op, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+                            self.complete(
+                                op,
+                                {"ok": False, "error": {"code": exc.code, "message": exc.message}},
+                            )
                         request = None
                 if request is not None:
-                    if op['tool'] == 'exec' and getattr(con, 'resource_semantics_protocol', 0) != 2:
-                        request = {**request, 'args': dict(request['args'])}
-                        for field in ('isolation', 'snapshot_artifacts', 'options'):
-                            request['args'].pop(field, None)
-                    if op['tool'] == 'fs_tree' and getattr(con, 'tree_options_protocol', 0) != 1:
-                        request = {**request, 'args': {key: value for key, value in request['args'].items()
-                                                       if key not in {'scope', 'per_dir'}}}
-                    self.store.execute("UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?", (con.journal_id, now, id))
-                    packets.append({"type": "call", "id": id, **request, "not_after": op["deadline"], "tool_contract_version": request.get("tool_contract_version", 1)})
+                    if op["tool"] == "exec" and getattr(con, "resource_semantics_protocol", 0) != 2:
+                        request = {**request, "args": dict(request["args"])}
+                        for field in ("isolation", "snapshot_artifacts", "options"):
+                            request["args"].pop(field, None)
+                    if op["tool"] == "fs_tree" and getattr(con, "tree_options_protocol", 0) != 1:
+                        request = {
+                            **request,
+                            "args": {
+                                key: value
+                                for key, value in request["args"].items()
+                                if key not in {"scope", "per_dir"}
+                            },
+                        }
+                    self.store.execute(
+                        "UPDATE operations SET attempts=attempts+1,journal_id=COALESCE(journal_id,?),updated=? WHERE id=?",
+                        (con.journal_id, now, id),
+                    )
+                    packets.append(
+                        {
+                            "type": "call",
+                            "id": id,
+                            **request,
+                            "not_after": op["deadline"],
+                            "tool_contract_version": request.get("tool_contract_version", 1),
+                        }
+                    )
         return op["device_id"], con, packets
 
     def complete(self, op, result):
@@ -1588,77 +2437,182 @@ class Runtime:
             return
         if op["state"] in {"succeeded", "failed", "cancelled"}:
             return
-        if (not isinstance(result, dict) or type(result.get("ok")) is not bool or
-                result.get("data") is not None and not isinstance(result["data"], dict) or
-                result.get("error") is not None and not isinstance(result["error"], dict) or
-                isinstance(result.get("error"), dict) and any(
-                    k in result["error"] and not isinstance(result["error"][k], str) for k in ("code", "message"))):
-            result = {"ok": False, "error": {"code": "INVALID_AGENT_RESULT", "message": "Agent 返回的结果格式无效，请检查本机执行结果"}}
+        if (
+            not isinstance(result, dict)
+            or type(result.get("ok")) is not bool
+            or result.get("data") is not None
+            and not isinstance(result["data"], dict)
+            or result.get("error") is not None
+            and not isinstance(result["error"], dict)
+            or isinstance(result.get("error"), dict)
+            and any(
+                k in result["error"] and not isinstance(result["error"][k], str)
+                for k in ("code", "message")
+            )
+        ):
+            result = {
+                "ok": False,
+                "error": {
+                    "code": "INVALID_AGENT_RESULT",
+                    "message": "Agent 返回的结果格式无效，请检查本机执行结果",
+                },
+            }
         if result["ok"] and isinstance(result.get("data"), dict) and "exit_code" in result["data"]:
             data = dict(result["data"])
-            for key in ('runtime_cleanup', 'runtime_outcome'):
+            for key in ("runtime_cleanup", "runtime_outcome"):
                 if key in data and not isinstance(data[key], dict):
-                    data[key] = {'state': 'unconfirmed', 'pending': True, 'code': 'INVALID_RUNTIME_RESULT'}
-            data["command_ok"] = type(data["exit_code"]) is int and data["exit_code"] == 0 and not data.get("timed_out") and not data.get("cancelled") and not (data.get('runtime_cleanup') or {}).get('pending') and (data.get('runtime_outcome') or {}).get('state', 'confirmed') == 'confirmed'
+                    data[key] = {
+                        "state": "unconfirmed",
+                        "pending": True,
+                        "code": "INVALID_RUNTIME_RESULT",
+                    }
+            data["command_ok"] = (
+                type(data["exit_code"]) is int
+                and data["exit_code"] == 0
+                and not data.get("timed_out")
+                and not data.get("cancelled")
+                and not (data.get("runtime_cleanup") or {}).get("pending")
+                and (data.get("runtime_outcome") or {}).get("state", "confirmed") == "confirmed"
+            )
             from shared.runtime_results import failure_context
-            data['failure_context'] = failure_context(data=data, operation_id=op['id'], source='hub_operation_receipt')
+
+            data["failure_context"] = failure_context(
+                data=data, operation_id=op["id"], source="hub_operation_receipt"
+            )
             result = {**result, "data": data}
-        elif not result['ok'] and op['tool'] in {'read', 'write', 'edit', 'exec', 'fs_read', 'fs_write', 'fs_edit', 'shell_exec', 'tasks_run', 'validation_run'}:
+        elif not result["ok"] and op["tool"] in {
+            "read",
+            "write",
+            "edit",
+            "exec",
+            "fs_read",
+            "fs_write",
+            "fs_edit",
+            "shell_exec",
+            "tasks_run",
+            "validation_run",
+        }:
             from shared.runtime_results import failure_context
-            result = {**result, 'error': {**(result.get('error') or {}),
-                'failure_context': failure_context(error=result.get('error'), operation_id=op['id'], source='codepier_operation_error')}}
+
+            result = {
+                **result,
+                "error": {
+                    **(result.get("error") or {}),
+                    "failure_context": failure_context(
+                        error=result.get("error"),
+                        operation_id=op["id"],
+                        source="codepier_operation_error",
+                    ),
+                },
+            }
         self.integrations.complete(op, result)
         if op["tool"] == "artifacts_register" and result["ok"]:
-            try:self.artifacts.register_result(op,result.get("data") or {})
+            try:
+                self.artifacts.register_result(op, result.get("data") or {})
             except DevError as exc:
-                result={"ok":False,"error":{"code":exc.code,"message":exc.message}}
+                result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
         self.diagnostics.ingest(op["id"], result.get("trace"))
         encoded = json.dumps(result, ensure_ascii=False)
         from hub.operation_history import seal, unseal
+
         if unseal(self.store, op["result"]) == encoded:
             return
         data = result.get("data") or {}
         media_expiry = data.get("computer_expires_at")
-        if (type(media_expiry) not in (int, float)
-                or not (op['tool'].startswith('computer_') or op['tool'] in {'browser_snapshot', 'read'})):
+        if type(media_expiry) not in (int, float) or not (
+            op["tool"].startswith("computer_") or op["tool"] in {"browser_snapshot", "read"}
+        ):
             media_expiry = None
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
-        if error.get("code") in {"INTERRUPTED", "JOURNAL_CHANGED", "RECOVERY_DATA_INVALID", "INVALID_AGENT_RESULT", "DURABILITY_UNCONFIRMED", "WRITE_OUTCOME_UNCONFIRMED", "STAGING_CLEANUP_UNCONFIRMED", "COMPUTER_ACTION_UNCERTAIN", "BROWSER_ACTION_UNCERTAIN", "RUNTIME_CONTROL_UNCERTAIN", "RUNTIME_CREATION_UNCERTAIN", "RUNTIME_CLEANUP_PENDING", "RUNTIME_OPERATION_REQUIRES_RECOVERY"}:
+        if error.get("code") in {
+            "INTERRUPTED",
+            "JOURNAL_CHANGED",
+            "RECOVERY_DATA_INVALID",
+            "INVALID_AGENT_RESULT",
+            "DURABILITY_UNCONFIRMED",
+            "WRITE_OUTCOME_UNCONFIRMED",
+            "STAGING_CLEANUP_UNCONFIRMED",
+            "COMPUTER_ACTION_UNCERTAIN",
+            "BROWSER_ACTION_UNCERTAIN",
+            "RUNTIME_CONTROL_UNCERTAIN",
+            "RUNTIME_CREATION_UNCERTAIN",
+            "RUNTIME_CLEANUP_PENDING",
+            "RUNTIME_OPERATION_REQUIRES_RECOVERY",
+        }:
             state = "needs_review"
         elif error.get("code") == "CANCELLED" or data.get("cancelled"):
             state = "cancelled"
-        elif op["tool"] in {"tasks_run", "shell_exec", "ssh_exec", "vps_exec", "exec", "validation_run", "git_status", "git_diff", "git_log"} and result["ok"]:
+        elif (
+            op["tool"]
+            in {
+                "tasks_run",
+                "shell_exec",
+                "ssh_exec",
+                "vps_exec",
+                "exec",
+                "validation_run",
+                "git_status",
+                "git_diff",
+                "git_log",
+            }
+            and result["ok"]
+        ):
             if not data.get("command_ok", False):
                 state = "failed"
-                error = {"message": "运行时清理结果尚未确认；请查询原操作" if data.get('runtime_cleanup', {}).get('pending') else
-                    "项目命令执行超时" if data.get("timed_out") else f"项目命令退出码 {data.get('exit_code')}；请查看原操作输出"}
-        if (isinstance(data.get('runtime_cleanup'), dict) and data['runtime_cleanup'].get('pending')
-                or isinstance(data.get('runtime_outcome'), dict) and data['runtime_outcome'].get('state') == 'unconfirmed'):
-            state = 'needs_review'
-        if op['tool'] == 'agent_roots_set' and result['ok'] and (
-                data.get('state') == 'needs_review' or data.get('outcome_confirmed') is False):
-            state = 'needs_review'
-        if op['tool'] in COMPUTER_TOOLS and data.get('native_is_error'):
-            state = 'needs_review' if data.get('action_outcome') == 'uncertain' else 'failed'
-            error = {'message': '原生桌面工具报错；检查本机权限与界面，勿盲目重放输入'}
-        if op['tool'] in {'apply_patch', 'edit'} and data.get('success') is False:
-            state = 'needs_review' if data.get('outcome') == 'partial' else 'failed'
-            error = data.get('error') or {'message': '批量补丁未完成，请核查备份与回滚结果'}
+                error = {
+                    "message": "运行时清理结果尚未确认；请查询原操作"
+                    if data.get("runtime_cleanup", {}).get("pending")
+                    else "项目命令执行超时"
+                    if data.get("timed_out")
+                    else f"项目命令退出码 {data.get('exit_code')}；请查看原操作输出"
+                }
+        if (
+            isinstance(data.get("runtime_cleanup"), dict)
+            and data["runtime_cleanup"].get("pending")
+            or isinstance(data.get("runtime_outcome"), dict)
+            and data["runtime_outcome"].get("state") == "unconfirmed"
+        ):
+            state = "needs_review"
+        if (
+            op["tool"] == "agent_roots_set"
+            and result["ok"]
+            and (data.get("state") == "needs_review" or data.get("outcome_confirmed") is False)
+        ):
+            state = "needs_review"
+        if op["tool"] in COMPUTER_TOOLS and data.get("native_is_error"):
+            state = "needs_review" if data.get("action_outcome") == "uncertain" else "failed"
+            error = {"message": "原生桌面工具报错；检查本机权限与界面，勿盲目重放输入"}
+        if op["tool"] in {"apply_patch", "edit"} and data.get("success") is False:
+            state = "needs_review" if data.get("outcome") == "partial" else "failed"
+            error = data.get("error") or {"message": "批量补丁未完成，请核查备份与回滚结果"}
         # Persist the terminal result and exact-subscription completion hint
         # atomically. A failed outbox write must leave the original operation
         # recoverable; unrelated evidence/audit failures stay outside this unit.
         with self.store.transaction():
-            current = self.store.one('SELECT id,state,output,output_seq FROM operations WHERE id=?', (op['id'],))
-            if not current or current['state'] in {'succeeded', 'failed', 'cancelled'}:
+            current = self.store.one(
+                "SELECT id,state,output,output_seq FROM operations WHERE id=?", (op["id"],)
+            )
+            if not current or current["state"] in {"succeeded", "failed", "cancelled"}:
                 return
             previous, _ = self.outputs.read(current)
-            output = str(data.get('output', previous))[-131072:]
-            changed = self.store.execute("UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
-                (state, seal(self.store, encoded), error.get("message"), seal(self.store, output), time.time(), int(output != previous), media_expiry, op["id"]))
+            output = str(data.get("output", previous))[-131072:]
+            changed = self.store.execute(
+                "UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
+                (
+                    state,
+                    seal(self.store, encoded),
+                    error.get("message"),
+                    seal(self.store, output),
+                    time.time(),
+                    int(output != previous),
+                    media_expiry,
+                    op["id"],
+                ),
+            )
             if not changed.rowcount:
                 return
-            self.outputs.discard(op['id'])
+            self.outputs.discard(op["id"])
             # Passive/offline collaboration services may have no event adapter.
             # Completion must still commit; configured adapters retain the atomic outbox.
             if self.collaboration.events is not None:
@@ -1671,11 +2625,26 @@ class Runtime:
             self.diagnostics.connection.write_errors += 1
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
-        self.store.after_commit(lambda: self.knowledge_maintenance.nudge(
-            op.get("project_id"), op["device_id"], op["tool"]))
-        self.store.audit(op["actor"], op["tool"], op["id"], state,
-            {"operation_id": op["id"], "duration_ms": round((time.time() - op["created"]) * 1000),
-             "error": error.get("message"), "path": data.get("path"), "backup_id": data.get("backup_id"), "exit_code": data.get("exit_code")}, target_kind="operation")
+        self.store.after_commit(
+            lambda: self.knowledge_maintenance.nudge(
+                op.get("project_id"), op["device_id"], op["tool"]
+            )
+        )
+        self.store.audit(
+            op["actor"],
+            op["tool"],
+            op["id"],
+            state,
+            {
+                "operation_id": op["id"],
+                "duration_ms": round((time.time() - op["created"]) * 1000),
+                "error": error.get("message"),
+                "path": data.get("path"),
+                "backup_id": data.get("backup_id"),
+                "exit_code": data.get("exit_code"),
+            },
+            target_kind="operation",
+        )
         self.diagnostics.record(op["id"], "hub_completed")
         self.publish("operation", {"id": op["id"], "state": state, "tool": op["tool"]})
         self.store.after_commit(lambda: self.on_loop(self._resolve_result, op["id"], result))
@@ -1691,11 +2660,16 @@ class Runtime:
             future.set_result(result)
 
     def _receive_operation_event(self, device_id, connection, data, *, authenticated=False):
-        if self.connections.get(device_id) is not connection or (not authenticated and not self.connection_authorized(device_id, connection)):
+        if self.connections.get(device_id) is not connection or (
+            not authenticated and not self.connection_authorized(device_id, connection)
+        ):
             return None
         kind, id = data.get("type"), data.get("id")
-        op = self.store.one('''SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
-            FROM operations WHERE id=? AND device_id=?''', (id, device_id))
+        op = self.store.one(
+            """SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
+            FROM operations WHERE id=? AND device_id=?""",
+            (id, device_id),
+        )
         if not op:
             if kind == "result" and isinstance(id, str):
                 return {"type": "ack", "id": id}
@@ -1703,7 +2677,16 @@ class Runtime:
         if op["journal_id"] and op["journal_id"] != connection.journal_id:
             # Outbox replay races with the delivery worker after hello.
             # Apply the same epoch fence to inbound events as to calls.
-            self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 操作账本已变化，不能证明旧操作结果；请检查本机"}})
+            self.complete(
+                op,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "JOURNAL_CHANGED",
+                        "message": "Agent 操作账本已变化，不能证明旧操作结果；请检查本机",
+                    },
+                },
+            )
             if kind == "result":
                 return {"type": "ack", "id": id}
             return None
@@ -1712,41 +2695,98 @@ class Runtime:
             self.publish("trace", {"id": id})
             return None
         if kind in {"accepted", "started"} and op["state"] in ACTIVE:
-            self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
-            state = "cancelling" if op["cancel_requested"] else "running" if kind == "started" else "queued"
-            self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?", (time.time(), state, time.time(), id))
+            self.store.execute(
+                "UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id)
+            )
+            state = (
+                "cancelling"
+                if op["cancel_requested"]
+                else "running"
+                if kind == "started"
+                else "queued"
+            )
+            self.store.execute(
+                "UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?",
+                (time.time(), state, time.time(), id),
+            )
             self.publish("operation", {"id": id, "state": state})
         elif kind == "status" and op["state"] in ACTIVE:
             if data.get("status") in {"running", "accepted"}:
-                self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
-                state = "cancelling" if op["cancel_requested"] else "running" if data["status"] == "running" else "queued"
-                self.store.execute("UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL WHERE id=?", (time.time(), state, id))
+                self.store.execute(
+                    "UPDATE operations SET last_operation_verified_at=? WHERE id=?",
+                    (time.time(), id),
+                )
+                state = (
+                    "cancelling"
+                    if op["cancel_requested"]
+                    else "running"
+                    if data["status"] == "running"
+                    else "queued"
+                )
+                self.store.execute(
+                    "UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL WHERE id=?",
+                    (time.time(), state, id),
+                )
             elif data.get("status") in {"missing", "retryable"}:
                 # retryable is issued only for a read or a command that had
                 # not started before an Agent restart. Never rerun side effects.
                 if data["status"] == "missing" and op["accepted_at"]:
-                    self.complete(op, {"ok": False, "error": {"code": "JOURNAL_CHANGED", "message": "Agent 找不到已确认接收的操作记录；请检查本机，不自动重跑"}})
+                    self.complete(
+                        op,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "JOURNAL_CHANGED",
+                                "message": "Agent 找不到已确认接收的操作记录；请检查本机，不自动重跑",
+                            },
+                        },
+                    )
                 elif op["cancel_requested"] or op["deadline"] and time.time() > op["deadline"]:
-                    self.complete(op, {"ok": False, "error": {"code": "CANCELLED" if op["cancel_requested"] else "QUEUE_EXPIRED", "message": "Agent 确认没有开始执行，该排队操作已取消或过期"}})
+                    self.complete(
+                        op,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "CANCELLED" if op["cancel_requested"] else "QUEUE_EXPIRED",
+                                "message": "Agent 确认没有开始执行，该排队操作已取消或过期",
+                            },
+                        },
+                    )
                 else:
                     # Revalidate current permissions in deliver() before replay.
-                    self.store.execute("UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?", (id,))
+                    self.store.execute(
+                        "UPDATE operations SET accepted_at=NULL,next_attempt=0,state='queued',attempts=0 WHERE id=?",
+                        (id,),
+                    )
                     self.wake_delivery()
-        elif kind == "output" and op["tool"] in PROCESS_TOOLS and op["state"] in ACTIVE | {"unknown", "needs_review"}:
+        elif (
+            kind == "output"
+            and op["tool"] in PROCESS_TOOLS
+            and op["state"] in ACTIVE | {"unknown", "needs_review"}
+        ):
             if self.outputs.receive(id, data):
                 self.publish("output", {"id": id})
         elif kind == "result":
             result = data.get("result")
             self.complete(op, result)
             current = self.store.one("SELECT state FROM operations WHERE id=?", (id,))
-            if (op["state"] not in {"succeeded", "failed", "cancelled"} and current
-                    and current["state"] in {"succeeded", "failed", "cancelled"}
-                    and isinstance(result, dict) and type(result.get("ok")) is bool):
-                self.store.execute("UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id))
+            if (
+                op["state"] not in {"succeeded", "failed", "cancelled"}
+                and current
+                and current["state"] in {"succeeded", "failed", "cancelled"}
+                and isinstance(result, dict)
+                and type(result.get("ok")) is bool
+            ):
+                self.store.execute(
+                    "UPDATE operations SET last_operation_verified_at=? WHERE id=?",
+                    (time.time(), id),
+                )
             return {"type": "ack", "id": id}
 
     def _heartbeat(self, device_id, connection, info, data, *, authenticated=False):
-        if self.connections.get(device_id) is not connection or (not authenticated and not self.connection_authorized(device_id, connection)):
+        if self.connections.get(device_id) is not connection or (
+            not authenticated and not self.connection_authorized(device_id, connection)
+        ):
             return
         changed = False
         build = data.get("build")
@@ -1754,7 +2794,11 @@ class Runtime:
             info["build"] = build
             changed = True
         actions = data.get("device_actions")
-        if isinstance(actions, list) and len(actions) <= 16 and all(isinstance(x, str) and len(x) <= 100 for x in actions):
+        if (
+            isinstance(actions, list)
+            and len(actions) <= 16
+            and all(isinstance(x, str) and len(x) <= 100 for x in actions)
+        ):
             info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
             changed = True
         management = public_management(data.get("management"))
@@ -1764,6 +2808,7 @@ class Runtime:
         desired = None
         if getattr(connection, "scheduler_protocol", 0) == 1:
             from hub.scheduler_settings import packet, public_snapshot
+
             snapshot = public_snapshot(data.get("scheduler"))
             if snapshot is not None:
                 info["scheduler"] = snapshot
@@ -1773,7 +2818,11 @@ class Runtime:
                 info["scheduler_error"] = scheduler_error
                 changed = True
             reported_revision = data.get("scheduler_revision")
-            if isinstance(reported_revision, str) and len(reported_revision) == 64 and all(char in "0123456789abcdef" for char in reported_revision):
+            if (
+                isinstance(reported_revision, str)
+                and len(reported_revision) == 64
+                and all(char in "0123456789abcdef" for char in reported_revision)
+            ):
                 info["scheduler_revision"] = reported_revision
                 changed = True
             try:
@@ -1781,27 +2830,38 @@ class Runtime:
                 if candidate["revision"] != info.get("scheduler_revision"):
                     desired = candidate
                 from hub.admission_policy import AdmissionWindow
+
                 if not hasattr(connection, "admission"):
                     connection.admission = AdmissionWindow()
                 # Never reuse info["scheduler"] or an old revision when this
                 # heartbeat omits data. Only this current authenticated sample
                 # can refresh the in-memory receipt timestamp.
-                connection.admission.observe(data.get("scheduler"),
+                connection.admission.observe(
+                    data.get("scheduler"),
                     data.get("admission") if data.get("scheduler_error", "") == "" else None,
-                    data.get("scheduler_revision"), candidate["revision"], time.monotonic())
+                    data.get("scheduler_revision"),
+                    candidate["revision"],
+                    time.monotonic(),
+                )
             except DevError:
                 pass
         if changed:
-            self.store.execute("UPDATE devices SET info=? WHERE id=?", (json.dumps(info, ensure_ascii=False), device_id))
+            self.store.execute(
+                "UPDATE devices SET info=? WHERE id=?",
+                (json.dumps(info, ensure_ascii=False), device_id),
+            )
         return desired
 
-
     def _touch_agent(self, device_id, connection):
-        if self.connections.get(device_id) is not connection or not self.connection_authorized(device_id, connection):
+        if self.connections.get(device_id) is not connection or not self.connection_authorized(
+            device_id, connection
+        ):
             return False
         connection.last_seen = time.time()
         if connection.last_seen - getattr(connection, "_persisted_last_seen", 0) >= 12:
-            self.store.execute("UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id))
+            self.store.execute(
+                "UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id)
+            )
             connection._persisted_last_seen = connection.last_seen
         return True
 
@@ -1809,9 +2869,17 @@ class Runtime:
         if not self._touch_agent(device_id, connection):
             return False
         with self.store.lock, self.store.db:
-            self.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id=?", (json.dumps(info, ensure_ascii=False), time.time(), device_id))
-            self.store.execute("UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')", (device_id,))
-            self.store.audit("device:" + device["name"], "device.connected", device_id, target_kind="device")
+            self.store.execute(
+                "UPDATE devices SET info=?,last_seen=? WHERE id=?",
+                (json.dumps(info, ensure_ascii=False), time.time(), device_id),
+            )
+            self.store.execute(
+                "UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')",
+                (device_id,),
+            )
+            self.store.audit(
+                "device:" + device["name"], "device.connected", device_id, target_kind="device"
+            )
             self.publish("device", {"id": device_id, "online": True})
             self.wake_delivery()
         return True
@@ -1826,18 +2894,20 @@ class Runtime:
         """
         if not self._touch_agent(device_id, connection):
             return False, None
-        kind = data.get('type')
-        if kind == 'heartbeat':
+        kind = data.get("type")
+        if kind == "heartbeat":
             return True, self._heartbeat(device_id, connection, info, data, authenticated=True)
-        if kind in {'computer_approval', 'computer_approval_closed'}:
+        if kind in {"computer_approval", "computer_approval_closed"}:
             self.computer_approvals.receive(device_id, connection, data)
             return True, None
-        if kind in {'native_reply', 'native_sync', 'artifact_chunk'}:
+        if kind in {"native_reply", "native_sync", "artifact_chunk"}:
             return True, None
         return True, self._receive_operation_event(device_id, connection, data, authenticated=True)
 
     async def agent_socket(self, websocket: WebSocket, device_id: str):
-        device = await self.store.run(self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,))
+        device = await self.store.run(
+            self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,)
+        )
         if not device or not device["enabled"]:
             await websocket.close(code=4404)
             return
@@ -1846,45 +2916,114 @@ class Runtime:
         connection = None
         authenticated = False
         try:
-            await asyncio.wait_for(websocket.send_json({"type": "challenge", "challenge": challenge}), 4)
-            channel = SecureChannel(self.store.decrypt(device["secret"]), challenge, device_id, "hub")
+            await asyncio.wait_for(
+                websocket.send_json({"type": "challenge", "challenge": challenge}), 4
+            )
+            channel = SecureChannel(
+                self.store.decrypt(device["secret"]), challenge, device_id, "hub"
+            )
             connection = Connection(websocket, channel)
             connection.device_secret = device["secret"]
             hello = channel.unpack(await asyncio.wait_for(websocket.receive_text(), 10))
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
             connection.tool_protocol = negotiate(hello)
-            connection.tree_options_protocol = hello.get('tree_options_protocol') if type(hello.get('tree_options_protocol')) is int else 0
-            connection.resource_semantics_protocol = 2 if type(hello.get('resource_semantics_protocol')) is int and hello['resource_semantics_protocol'] == 2 else 0
+            connection.tree_options_protocol = (
+                hello.get("tree_options_protocol")
+                if type(hello.get("tree_options_protocol")) is int
+                else 0
+            )
+            connection.resource_semantics_protocol = (
+                2
+                if type(hello.get("resource_semantics_protocol")) is int
+                and hello["resource_semantics_protocol"] == 2
+                else 0
+            )
             from hub.project_runtimes import parse_advertisement
-            connection.project_runtime_protocol, connection.project_runtime_profiles = parse_advertisement(hello)
-            connection.project_view_protocol = 1 if type(hello.get('project_view_protocol')) is int and hello['project_view_protocol'] == 1 else 0
+
+            connection.project_runtime_protocol, connection.project_runtime_profiles = (
+                parse_advertisement(hello)
+            )
+            connection.project_view_protocol = (
+                1
+                if type(hello.get("project_view_protocol")) is int
+                and hello["project_view_protocol"] == 1
+                else 0
+            )
             connection.journal_id = hello.get("journal_id")
             connection.protocol = hello.get("delivery_protocol", 1)
-            connection.cancel_pending_protocol = 1 if type(hello.get("cancel_pending_protocol")) is int and hello["cancel_pending_protocol"] == 1 else 0
+            connection.cancel_pending_protocol = (
+                1
+                if type(hello.get("cancel_pending_protocol")) is int
+                and hello["cancel_pending_protocol"] == 1
+                else 0
+            )
             connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
-            connection.bounded_execution_protocol = 1 if type(hello.get('bounded_execution_protocol')) is int and hello['bounded_execution_protocol'] == 1 else 0
-            connection.scheduler_protocol = 1 if type(hello.get("scheduler_protocol")) is int and hello["scheduler_protocol"] == 1 else 0
-            connection.native_chat_protocol = hello.get("native_chat_protocol") if type(hello.get("native_chat_protocol")) is int and hello["native_chat_protocol"] in (1, 2, 3) else 0
-            if (type(connection.protocol) is not int or connection.protocol != 2 or
-                    not isinstance(connection.journal_id, str) or not 1 <= len(connection.journal_id) <= 128):
+            connection.bounded_execution_protocol = (
+                1
+                if type(hello.get("bounded_execution_protocol")) is int
+                and hello["bounded_execution_protocol"] == 1
+                else 0
+            )
+            connection.scheduler_protocol = (
+                1
+                if type(hello.get("scheduler_protocol")) is int and hello["scheduler_protocol"] == 1
+                else 0
+            )
+            connection.native_chat_protocol = (
+                hello.get("native_chat_protocol")
+                if type(hello.get("native_chat_protocol")) is int
+                and hello["native_chat_protocol"] in (1, 2, 3)
+                else 0
+            )
+            if (
+                type(connection.protocol) is not int
+                or connection.protocol != 2
+                or not isinstance(connection.journal_id, str)
+                or not 1 <= len(connection.journal_id) <= 128
+            ):
                 raise ValueError("Agent must support durable delivery protocol 2 with a journal ID")
-            if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
+            if self.stopping or not await self.store.run(
+                self.connection_authorized, device_id, connection
+            ):
                 return
             authenticated = True
-            info = {k: safe_summary(hello[k], 1024) for k in ("name", "version", "platform", "hostname", "python", "roots", "journal_id", "delivery_protocol") if k in hello}
+            info = {
+                k: safe_summary(hello[k], 1024)
+                for k in (
+                    "name",
+                    "version",
+                    "platform",
+                    "hostname",
+                    "python",
+                    "roots",
+                    "journal_id",
+                    "delivery_protocol",
+                )
+                if k in hello
+            }
             if type(hello.get("computer_enabled")) is bool:
                 info["computer_enabled"] = hello["computer_enabled"]
             capabilities = hello.get("capabilities")
-            if isinstance(capabilities, list) and len(capabilities) <= 256 and all(isinstance(x, str) and len(x) <= 100 for x in capabilities):
+            if (
+                isinstance(capabilities, list)
+                and len(capabilities) <= 256
+                and all(isinstance(x, str) and len(x) <= 100 for x in capabilities)
+            ):
                 info["capabilities"] = capabilities
             actions = hello.get("device_actions")
-            if isinstance(actions, list) and len(actions) <= 16 and all(isinstance(x, str) and len(x) <= 100 for x in actions):
+            if (
+                isinstance(actions, list)
+                and len(actions) <= 16
+                and all(isinstance(x, str) and len(x) <= 100 for x in actions)
+            ):
                 info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
             info["management"] = public_management(hello.get("management"))
             info["cancel_pending_protocol"] = connection.cancel_pending_protocol
-            info['bounded_execution_protocol'] = connection.bounded_execution_protocol
-            connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
+            info["bounded_execution_protocol"] = connection.bounded_execution_protocol
+            connection.native_security_protocol = (
+                1 if hello.get("native_security_protocol") == 1 else 0
+            )
             info["native_security_protocol"] = connection.native_security_protocol
             info["native_protocol"] = connection.native_protocol
             info["scheduler_protocol"] = connection.scheduler_protocol
@@ -1901,22 +3040,41 @@ class Runtime:
             scheduler = {}
             if connection.scheduler_protocol == 1:
                 from hub.scheduler_settings import packet
+
                 try:
-                    scheduler = {"scheduler_config": await self.store.run(packet, self.store, device_id)}
+                    scheduler = {
+                        "scheduler_config": await self.store.run(packet, self.store, device_id)
+                    }
                 except DevError:
                     pass
             binding = hello.get("channel_binding")
             channel_binding = {}
             if binding is not None:
-                if (not isinstance(binding, dict) or type(binding.get("version")) is not int
-                        or binding["version"] != 1 or not isinstance(binding.get("agent_nonce"), str)
-                        or not 32 <= len(binding["agent_nonce"]) <= 128
-                        or not binding["agent_nonce"].isascii()):
+                if (
+                    not isinstance(binding, dict)
+                    or type(binding.get("version")) is not int
+                    or binding["version"] != 1
+                    or not isinstance(binding.get("agent_nonce"), str)
+                    or not 32 <= len(binding["agent_nonce"]) <= 128
+                    or not binding["agent_nonce"].isascii()
+                ):
                     raise ValueError("Invalid Agent channel binding")
-                channel_binding = {"channel_binding": {"version": 1, "agent_nonce": binding["agent_nonce"]}}
-            await connection.send({"type": "ready", "heartbeat_seconds": 12, "delivery_protocol": 2,
-                                   **channel_binding, **scheduler, **advertisement(catalog_digest())})
-            if self.stopping or not await self.store.run(self.connection_authorized, device_id, connection):
+                channel_binding = {
+                    "channel_binding": {"version": 1, "agent_nonce": binding["agent_nonce"]}
+                }
+            await connection.send(
+                {
+                    "type": "ready",
+                    "heartbeat_seconds": 12,
+                    "delivery_protocol": 2,
+                    **channel_binding,
+                    **scheduler,
+                    **advertisement(catalog_digest()),
+                }
+            )
+            if self.stopping or not await self.store.run(
+                self.connection_authorized, device_id, connection
+            ):
                 return
             old = self.connections.get(device_id)
             connection.last_seen = time.time()
@@ -1924,8 +3082,15 @@ class Runtime:
             if old:
                 old.unusable = True
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(old.socket.close(code=4001, reason="Replaced by new authenticated connection"), 2)
-            if self.connections.get(device_id) is not connection or not await self.store.run(self.connection_authorized, device_id, connection):
+                    await asyncio.wait_for(
+                        old.socket.close(
+                            code=4001, reason="Replaced by new authenticated connection"
+                        ),
+                        2,
+                    )
+            if self.connections.get(device_id) is not connection or not await self.store.run(
+                self.connection_authorized, device_id, connection
+            ):
                 return
             if not await self.store.run(self._register_agent, device_id, connection, info, device):
                 return
@@ -1933,7 +3098,8 @@ class Runtime:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
                 data = channel.unpack(packet)
                 current, reply = await self.store.run_control(
-                    self._receive_agent_frame, device_id, connection, info, data)
+                    self._receive_agent_frame, device_id, connection, info, data
+                )
                 if not current:
                     break  # Fence a replaced socket before accepting its late events.
                 kind = data.get("type")
@@ -1950,7 +3116,7 @@ class Runtime:
                     self.native.submit(device_id, connection, data)
                     continue
                 if kind == "artifact_chunk":
-                    self.artifacts.receive(connection,data)
+                    self.artifacts.receive(connection, data)
                     continue
                 if reply is not None:
                     await connection.send(reply)
@@ -1959,12 +3125,27 @@ class Runtime:
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
-                await self.store.run(self.store.audit, "device:" + device["name"], "device.protocol_error", device_id, "error", {"type": type(exc).__name__}, target_kind="device")
+                await self.store.run(
+                    self.store.audit,
+                    "device:" + device["name"],
+                    "device.protocol_error",
+                    device_id,
+                    "error",
+                    {"type": type(exc).__name__},
+                    target_kind="device",
+                )
         finally:
             if connection is not None and await self.detach(device_id, connection):
                 if authenticated:
                     with contextlib.suppress(Exception):
-                        await self.store.run(self.store.audit, "device:" + device["name"], "device.disconnected", device_id, "offline", target_kind="device")
+                        await self.store.run(
+                            self.store.audit,
+                            "device:" + device["name"],
+                            "device.disconnected",
+                            device_id,
+                            "offline",
+                            target_kind="device",
+                        )
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(websocket.close(), 2)
 
@@ -1973,6 +3154,7 @@ class Runtime:
             await self._stop_runtime()
         finally:
             from hub.token_dashboard import aclose_token_dashboard
+
             await aclose_token_dashboard(self)
 
     async def _stop_runtime(self):
@@ -1987,10 +3169,12 @@ class Runtime:
             self.worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.worker
+
         async def close_connection(c):
             c.unusable = True
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(c.socket.close(code=1001), 2)
+
         await asyncio.gather(*(close_connection(c) for c in list(self.connections.values())))
         for future in self.futures.values():
             if not future.done():

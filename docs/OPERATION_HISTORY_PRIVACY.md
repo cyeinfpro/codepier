@@ -19,3 +19,16 @@ hub.operation_history.encrypt_legacy_history(store, batch=100) 是显式、可�
 旧记录保持可读；旧备份、数据库空闲页和 WAL 不会因为逻辑列加密或清理而自动物理擦除。必须保护备份和匹配密钥，并在另行授权的维护流程处理备份保留及物理介质。日志、审计元数据、错误摘要不在正文加密范围内。
 
 冻结快照的持久触发器只依赖 SQLite 内置表达式，普通离线 SQLite 状态维护不依赖连接私有 UDF。显式无损重加密先验证认证明文相同，再在已有写事务和 savepoint 内暂设仅匹配该 task_id、原值与新值的精确例外，完成前恢复严格触发器；失败和进程崩溃一起回滚数据与触发器。
+
+## 运维命令
+
+在 Hub 的 Python 3.13 环境中运行，数据目录必须是现有部署。以下命令默认只读，不启动 Store 迁移或创建密钥：
+
+```bash
+python scripts/maintain_history.py --data-dir /实际数据目录 --batch 100
+python scripts/maintain_history.py --data-dir /实际数据目录 --encrypt-legacy --batch 100
+```
+
+核对候选计数和备份后，在相同命令末尾加 `--apply` 执行一批。加密模式只加密，不运行保留清理；各正文列最多处理 batch 条。可重复执行，直到预览的 fields 计数全为 0。每批事务失败会回滚；操作 ID、状态、时间、幂等键与明文含义保留。此入口不会自动调度，也不会清理真实附件。
+
+`collaboration_consumptions` 已停止新建和写入：ack 的规范 mutation 回执保存确认与重放身份。`dot_message_handling_history` 也已停止新建和重复快照写入；当前处理状态、修订号与独立的回复覆盖证据仍保留。旧部署中已有的两张表和数据不自动删除；它们不参与当前授权、重放或恢复判断。

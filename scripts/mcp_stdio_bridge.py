@@ -3,6 +3,7 @@
 One input call gets one stable key across all HTTP attempts. stdout contains only
 JSON-RPC; credentials are read from a private local file and never logged.
 """
+
 from __future__ import annotations
 
 import copy
@@ -21,7 +22,7 @@ import httpx
 
 from shared.util import normalize_url, valid_json_value
 from shared.contracts import TOOLS
-from shared.mcp_protocol import MODERN, is_modern, request_headers
+from shared.mcp_protocol import is_modern, request_headers
 
 MAX_LINE = 6 * 1024 * 1024
 VERSIONS = {"2025-03-26", "2025-06-18", "2025-11-25"}
@@ -29,8 +30,9 @@ RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 # Derive capabilities from the same registry as Hub validation and MCP schemas.
 # Some Hub-local tools mutate progress, so local does NOT imply keyless/read-only.
 REMOTE_TOOLS = {name for name, tool in TOOLS.items() if not tool.local}
-IDEMPOTENT_TOOLS = {name for name, tool in TOOLS.items() if "idempotency_key" in tool.model.model_fields}
-
+IDEMPOTENT_TOOLS = {
+    name for name, tool in TOOLS.items() if "idempotency_key" in tool.model.model_fields
+}
 
 
 def token_from_file(path: Path) -> str:
@@ -74,15 +76,24 @@ def emit_error(id, code, message, data=None):
 
 def validate_response(payload, request):
     """Reject corrupt envelopes before they can strand an RPC or poison a session."""
-    if (not isinstance(payload, dict) or not valid_json_value(payload) or payload.get("jsonrpc") != "2.0"
-            or "id" not in payload or type(payload["id"]) is not type(request.get("id"))
-            or payload["id"] != request.get("id")
-            or ("result" in payload) == ("error" in payload)):
+    if (
+        not isinstance(payload, dict)
+        or not valid_json_value(payload)
+        or payload.get("jsonrpc") != "2.0"
+        or "id" not in payload
+        or type(payload["id"]) is not type(request.get("id"))
+        or payload["id"] != request.get("id")
+        or ("result" in payload) == ("error" in payload)
+    ):
         raise ValueError("Invalid/corrupted MCP response")
     if "error" in payload:
         error = payload["error"]
-        if (not isinstance(error, dict) or not isinstance(error.get("code"), int)
-                or isinstance(error["code"], bool) or not isinstance(error.get("message"), str)):
+        if (
+            not isinstance(error, dict)
+            or not isinstance(error.get("code"), int)
+            or isinstance(error["code"], bool)
+            or not isinstance(error.get("message"), str)
+        ):
             raise ValueError("Invalid MCP error response")
         return
     result = payload["result"]
@@ -96,30 +107,58 @@ def validate_response(payload, request):
         raise ValueError("Invalid modern MCP CompleteResult")
     if request.get("method") == "server/discover":
         versions = result.get("supportedVersions")
-        if not isinstance(versions, list) or not all(isinstance(v, str) for v in versions) or not isinstance(result.get("capabilities"), dict):
+        if (
+            not isinstance(versions, list)
+            or not all(isinstance(v, str) for v in versions)
+            or not isinstance(result.get("capabilities"), dict)
+        ):
             raise ValueError("Invalid MCP discovery response")
     if request.get("method") == "tools/list":
         catalog = result.get("tools")
         if not isinstance(catalog, list) or any(
-                not isinstance(tool, dict) or not isinstance(tool.get("_meta", {}), dict)
-                for tool in catalog):
+            not isinstance(tool, dict) or not isinstance(tool.get("_meta", {}), dict)
+            for tool in catalog
+        ):
             raise ValueError("Invalid MCP tool catalog")
 
 
 def prepare_request(request):
     prepared = copy.deepcopy(request)
     params = prepared.get("params", {})
-    if (prepared.get("method") == "tools/call" and isinstance(params, dict)
-            and isinstance(params.get("name"), str) and params["name"] in IDEMPOTENT_TOOLS):
+    if (
+        prepared.get("method") == "tools/call"
+        and isinstance(params, dict)
+        and isinstance(params.get("name"), str)
+        and params["name"] in IDEMPOTENT_TOOLS
+    ):
         args = params.setdefault("arguments", {})
-        if params['name'] == 'process' and isinstance(args, dict) and args.get('operation', 'list') not in {'search_start', 'search_cancel', 'validate'} or params['name'] == 'workspace' and isinstance(args, dict) and args.get('operation', 'list') in {'list', 'help'}:
+        if (
+            params["name"] == "process"
+            and isinstance(args, dict)
+            and args.get("operation", "list") not in {"search_start", "search_cancel", "validate"}
+            or params["name"] == "workspace"
+            and isinstance(args, dict)
+            and args.get("operation", "list") in {"list", "help"}
+        ):
             return prepared
-        if isinstance(args, dict) and (args.get("idempotency_key") is None or args.get("idempotency_key") == ""):
+        if isinstance(args, dict) and (
+            args.get("idempotency_key") is None or args.get("idempotency_key") == ""
+        ):
             args["idempotency_key"] = "bridge-" + uuid.uuid4().hex
     return prepared
 
 
-def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.sleep, clock=time.monotonic, profile="core"):
+def forward(
+    client,
+    base,
+    request,
+    headers,
+    *,
+    retry_seconds=30,
+    sleep=time.sleep,
+    clock=time.monotonic,
+    profile="core",
+):
     """Retry only transport failures, never a tool's SHA/permission/test error.
 
     request must already be prepared; generating keys inside this loop would
@@ -139,12 +178,17 @@ def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.slee
         wire_headers = dict(headers)
         if is_modern(request):
             # Fresh transport ID per HTTP attempt; the prepared tool key stays fixed.
-            if "id" in wire: wire["id"] = "codepier-http-" + uuid.uuid4().hex
+            if "id" in wire:
+                wire["id"] = "codepier-http-" + uuid.uuid4().hex
             wire_headers.update(request_headers(wire))
         try:
-            left = max(.1, deadline - clock())
-            response = client.post(endpoint, headers=wire_headers, json=wire,
-                                   timeout=httpx.Timeout(min(12, left), connect=min(4, left)))
+            left = max(0.1, deadline - clock())
+            response = client.post(
+                endpoint,
+                headers=wire_headers,
+                json=wire,
+                timeout=httpx.Timeout(min(12, left), connect=min(4, left)),
+            )
             if response.status_code in (202, 204) and "id" not in request:
                 return None
             if response.status_code in {400, 404} and "id" in request:
@@ -170,7 +214,7 @@ def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.slee
             remaining = deadline - clock()
             if remaining <= 0 or attempt >= 6:
                 raise
-            delay = min(4, .5 * (2 ** (attempt - 1))) + random.uniform(0, .2)
+            delay = min(4, 0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
             if response is not None:
                 try:
                     retry_after = float(response.headers.get("retry-after", "0"))
@@ -178,11 +222,14 @@ def forward(client, base, request, headers, *, retry_seconds=30, sleep=time.slee
                         delay = max(delay, min(5, retry_after))
                 except ValueError:
                     pass
-            print(f"Hub temporarily unavailable; retry {attempt}/6 with the SAME operation key.", file=sys.stderr, flush=True)
+            print(
+                f"Hub temporarily unavailable; retry {attempt}/6 with the SAME operation key.",
+                file=sys.stderr,
+                flush=True,
+            )
             sleep(min(delay, remaining))
             if clock() >= deadline:
                 raise
-
 
 
 LOCAL_UPLOAD_TOOL = "codepier_upload_local_file"
@@ -193,9 +240,16 @@ def local_upload_roots(raw):
     if not raw:
         return []
     value = json.loads(raw)
-    if (not isinstance(value, list) or len(value) > 32
-            or any(not isinstance(item, str) or not item or not Path(item).is_absolute() for item in value)):
-        raise ValueError("CODEPIER_FILE_IMPORT_ROOTS must be a bounded JSON array of absolute roots")
+    if (
+        not isinstance(value, list)
+        or len(value) > 32
+        or any(
+            not isinstance(item, str) or not item or not Path(item).is_absolute() for item in value
+        )
+    ):
+        raise ValueError(
+            "CODEPIER_FILE_IMPORT_ROOTS must be a bounded JSON array of absolute roots"
+        )
     return [Path(item) for item in value]
 
 
@@ -203,16 +257,32 @@ def local_upload_definition():
     return {
         "name": LOCAL_UPLOAD_TOOL,
         "description": "Upload a real local file through this explicitly configured CodePier bridge. Only configured local read roots are allowed. Raw bytes stay outside model context. Uses current project write permissions; no execution, extraction, overwrite or new credentials. Query the same receipt after interruption.",
-        "inputSchema": {"type": "object", "additionalProperties": False,
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
             "properties": {
-                "source": {"type": "string", "minLength": 1, "description": "Absolute local regular-file path within configured allowed roots."},
+                "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute local regular-file path within configured allowed roots.",
+                },
                 "project": {"type": "string", "minLength": 1},
-                "destination": {"type": "string", "minLength": 1, "description": "Unused project-relative destination path."},
+                "destination": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unused project-relative destination path.",
+                },
                 "workspace_id": {"type": "string", "default": "", "pattern": r"^(|[a-f0-9]{32})$"},
                 "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 128},
-            }, "required": ["source", "project", "destination", "idempotency_key"]},
-        "annotations": {"readOnlyHint": False, "destructiveHint": False,
-                        "idempotentHint": True, "openWorldHint": True},
+            },
+            "required": ["source", "project", "destination", "idempotency_key"],
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
     }
 
 
@@ -233,41 +303,67 @@ def handle_local_upload(client, base, request, headers, roots, retry_seconds):
     args = request["params"].get("arguments", {})
     required = {"source", "project", "destination", "idempotency_key"}
     allowed = required | {"workspace_id"}
-    if (not roots or not isinstance(args, dict) or set(args) - allowed or required - set(args)
-            or any(not isinstance(args[key], str) or not args[key] for key in required)
-            or not 8 <= len(args["idempotency_key"]) <= 128
-            or not isinstance(args.get("workspace_id", ""), str)
-            or not re.fullmatch(r"(|[a-f0-9]{32})", args.get("workspace_id", ""))):
-        error = {"code": "LOCAL_UPLOAD_DISABLED_OR_INVALID",
-                 "message": "Local upload needs explicit read roots and valid source/project/destination/idempotency fields",
-                 "retryable": False}
-        result = {"isError": True, "structuredContent": {"error": error},
-                  "content": [{"type": "text", "text": json.dumps(error)}]}
+    if (
+        not roots
+        or not isinstance(args, dict)
+        or set(args) - allowed
+        or required - set(args)
+        or any(not isinstance(args[key], str) or not args[key] for key in required)
+        or not 8 <= len(args["idempotency_key"]) <= 128
+        or not isinstance(args.get("workspace_id", ""), str)
+        or not re.fullmatch(r"(|[a-f0-9]{32})", args.get("workspace_id", ""))
+    ):
+        error = {
+            "code": "LOCAL_UPLOAD_DISABLED_OR_INVALID",
+            "message": "Local upload needs explicit read roots and valid source/project/destination/idempotency fields",
+            "retryable": False,
+        }
+        result = {
+            "isError": True,
+            "structuredContent": {"error": error},
+            "content": [{"type": "text", "text": json.dumps(error)}],
+        }
     else:
         from scripts.file_import_client import upload_local_file, FileImportError
+
         try:
-            data = upload_local_file(client, base, headers, source=Path(args["source"]),
-                project=args["project"], destination=args["destination"],
-                idempotency_key=args["idempotency_key"], workspace_id=args.get("workspace_id", ""),
-                allowed_roots=roots, retry_seconds=retry_seconds)
-            result = {"isError": False, "structuredContent": data,
-                      "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}]}
+            data = upload_local_file(
+                client,
+                base,
+                headers,
+                source=Path(args["source"]),
+                project=args["project"],
+                destination=args["destination"],
+                idempotency_key=args["idempotency_key"],
+                workspace_id=args.get("workspace_id", ""),
+                allowed_roots=roots,
+                retry_seconds=retry_seconds,
+            )
+            result = {
+                "isError": False,
+                "structuredContent": data,
+                "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}],
+            }
         except FileImportError as exc:
             error = {"code": exc.code, "message": str(exc), "retryable": exc.retryable}
             for key in ("operation_id", "upload_id"):
                 if getattr(exc, key, None):
                     error[key] = getattr(exc, key)
-            result = {"isError": True, "structuredContent": {"error": error},
-                      "content": [{"type": "text", "text": json.dumps(error)}]}
+            result = {
+                "isError": True,
+                "structuredContent": {"error": error},
+                "content": [{"type": "text", "text": json.dumps(error)}],
+            }
     if is_modern(request):
         result["resultType"] = "complete"
     return {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
 
 
 def main():
-    for suffix in ('HUB_URL','TOKEN_FILE','MCP_PROFILE','RETRY_SECONDS'):
-        new, old = 'CODEPIER_'+suffix, 'REMOTE_DEV_'+suffix
-        if new not in os.environ and old in os.environ: os.environ[new] = os.environ[old]
+    for suffix in ("HUB_URL", "TOKEN_FILE", "MCP_PROFILE", "RETRY_SECONDS"):
+        new, old = "CODEPIER_" + suffix, "REMOTE_DEV_" + suffix
+        if new not in os.environ and old in os.environ:
+            os.environ[new] = os.environ[old]
     try:
         base = normalize_url(os.environ.get("CODEPIER_HUB_URL", "http://127.0.0.1:8765"))
         profile = os.environ.get("CODEPIER_MCP_PROFILE", "core")
@@ -281,7 +377,10 @@ def main():
             raise ValueError("Retry duration must be finite")
         retry_seconds = max(1, min(retry_seconds, 120))
     except (KeyError, ValueError, OSError):
-        print("Bridge requires CODEPIER_TOKEN_FILE with a valid private PAT; check CODEPIER_HUB_URL.", file=sys.stderr)
+        print(
+            "Bridge requires CODEPIER_TOKEN_FILE with a valid private PAT; check CODEPIER_HUB_URL.",
+            file=sys.stderr,
+        )
         return 2
     version = "2025-11-25"
     with httpx.Client(timeout=12, trust_env=False, follow_redirects=False) as client:
@@ -299,16 +398,23 @@ def main():
             except (ValueError, UnicodeError, RecursionError):
                 emit_error(None, -32700, "Parse error")
                 continue
-            if (not isinstance(request, dict) or request.get("jsonrpc") != "2.0"
-                    or not isinstance(request.get("method"), str)
-                    or ("id" in request and not valid_id(request["id"]))
-                    or not valid_json_value(request)):
+            if (
+                not isinstance(request, dict)
+                or request.get("jsonrpc") != "2.0"
+                or not isinstance(request.get("method"), str)
+                or ("id" in request and not valid_id(request["id"]))
+                or not valid_json_value(request)
+            ):
                 emit_error(None, -32600, "Invalid JSON-RPC request")
                 continue
             params = request.get("params", {})
-            if (not isinstance(params, dict) or (request["method"] == "tools/call" and (
+            if not isinstance(params, dict) or (
+                request["method"] == "tools/call"
+                and (
                     not isinstance(params.get("name"), str)
-                    or not isinstance(params.get("arguments", {}), dict)))):
+                    or not isinstance(params.get("arguments", {}), dict)
+                )
+            ):
                 if "id" in request:
                     emit_error(request["id"], -32602, "Expected params and tool arguments objects")
                 continue
@@ -317,17 +423,32 @@ def main():
             except (ValueError, OSError):
                 print("Bridge token unavailable; check the private PAT file.", file=sys.stderr)
                 if "id" in request:
-                    emit_error(request["id"], -32001, "Bridge token unavailable; check the private PAT file",
-                               {"retryable": False, "forwarded": False})
+                    emit_error(
+                        request["id"],
+                        -32001,
+                        "Bridge token unavailable; check the private PAT file",
+                        {"retryable": False, "forwarded": False},
+                    )
                 continue
             try:
                 request = prepare_request(request)
-                headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
-                           "Authorization": "Bearer " + token, "MCP-Protocol-Version": version}
-                if request["method"] == "tools/call" and request["params"].get("name") == LOCAL_UPLOAD_TOOL:
-                    payload = handle_local_upload(client, base, request, headers, upload_roots, retry_seconds)
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": "Bearer " + token,
+                    "MCP-Protocol-Version": version,
+                }
+                if (
+                    request["method"] == "tools/call"
+                    and request["params"].get("name") == LOCAL_UPLOAD_TOOL
+                ):
+                    payload = handle_local_upload(
+                        client, base, request, headers, upload_roots, retry_seconds
+                    )
                 else:
-                    payload = forward(client, base, request, headers, retry_seconds=retry_seconds, profile=profile)
+                    payload = forward(
+                        client, base, request, headers, retry_seconds=retry_seconds, profile=profile
+                    )
                 if payload is None:
                     continue
                 if request["method"] == "initialize" and "result" in payload:
@@ -343,19 +464,43 @@ def main():
                 if "id" in request:
                     print(json.dumps(payload, ensure_ascii=True), flush=True)
             except Exception as exc:
-                status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                status = (
+                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                )
                 params = request.get("params", {}) if isinstance(request, dict) else {}
                 arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
                 key = arguments.get("idempotency_key") if isinstance(arguments, dict) else None
                 workflow_id = arguments.get("workflow_id") if isinstance(arguments, dict) else None
-                workflow_call = isinstance(params.get("name"), str) and params["name"].startswith("workflows_")
-                recovery_tool = ("workflows_get" if workflow_id else "workflows_list") if workflow_call else "operations_list"
-                message = "Hub authorization rejected; renew the bridge PAT" if status in (401, 403) else f"Transport retries exhausted. The request may already be saved. Recover via {recovery_tool} or resend the identical arguments with the SAME idempotency_key; never start another mutation/task with a new key."
+                workflow_call = isinstance(params.get("name"), str) and params["name"].startswith(
+                    "workflows_"
+                )
+                recovery_tool = (
+                    ("workflows_get" if workflow_id else "workflows_list")
+                    if workflow_call
+                    else "operations_list"
+                )
+                message = (
+                    "Hub authorization rejected; renew the bridge PAT"
+                    if status in (401, 403)
+                    else f"Transport retries exhausted. The request may already be saved. Recover via {recovery_tool} or resend the identical arguments with the SAME idempotency_key; never start another mutation/task with a new key."
+                )
                 print(f"Bridge failure: {type(exc).__name__}; HTTP={status}", file=sys.stderr)
                 if isinstance(request, dict) and "id" in request:
-                    emit_error(request["id"], -32000, message,
-                               {"retryable": status is None or status in RETRY_STATUSES,
-                                "idempotency_key": key, "next": recovery_tool, **({"workflow_id": workflow_id} if workflow_call and workflow_id else {})})
+                    emit_error(
+                        request["id"],
+                        -32000,
+                        message,
+                        {
+                            "retryable": status is None or status in RETRY_STATUSES,
+                            "idempotency_key": key,
+                            "next": recovery_tool,
+                            **(
+                                {"workflow_id": workflow_id}
+                                if workflow_call and workflow_id
+                                else {}
+                            ),
+                        },
+                    )
     return 0
 
 

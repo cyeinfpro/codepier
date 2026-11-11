@@ -305,6 +305,44 @@ async def test_config_change_during_handshake_cannot_publish_stale_connection(lo
 
 
 @pytest.mark.asyncio
+async def test_workspace_resolution_stays_off_loop_at_all_runner_rechecks(local_agent, monkeypatch):
+    agent, root = local_agent
+    loop_thread = threading.get_ident()
+    observed = []
+
+    def resolve(project, args):
+        observed.append(threading.get_ident())
+        assert threading.get_ident() != loop_thread, 'workspace resolution blocked the event loop'
+        return project
+
+    monkeypatch.setattr(agent.integrations, 'project', resolve)
+    frame = request(root)
+    frame['args']['workspace_id'] = 'a' * 32
+    await asyncio.wait_for(agent.handle(frame), 3)
+    assert agent.journal.status('operation')['result']['ok']
+    assert len(observed) == 3
+    assert (root / 'created.txt').read_text() == 'once'
+
+
+@pytest.mark.asyncio
+async def test_mutation_root_preparation_stays_off_loop(local_agent, monkeypatch):
+    agent, root = local_agent
+    original = agent.engine.root
+    loop_thread = threading.get_ident()
+    observed = []
+
+    def resolve(*args):
+        observed.append(threading.get_ident())
+        assert threading.get_ident() != loop_thread, 'root preparation blocked the event loop'
+        return original(*args)
+
+    monkeypatch.setattr(agent.engine, 'root', resolve)
+    actual, _ = await agent._operation_root('worktrees_create',
+        {'root': str(root), 'mode': 'write'}, {})
+    assert actual == root and observed
+
+
+@pytest.mark.asyncio
 async def test_malformed_request_gets_durable_failure(local_agent):
     agent, _ = local_agent
     await agent.handle({"id": "malformed", "tool": "fs_read"})

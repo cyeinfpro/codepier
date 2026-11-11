@@ -1,4 +1,5 @@
 """Current-authority MCP text summaries plus bounded context scenarios."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +22,13 @@ from hub.token_cache_schema import revision
 from shared.context_estimate import VERSION as CONTEXT_VERSION
 from shared.call_estimate import VERSION as CALL_VERSION
 from shared.token_estimate import summarize, NUMBERS, VERSION as TEXT_VERSION, unavailable
-from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, DEFAULT_REFERENCE_MODEL, MODELS, VERSION as PRICE_VERSION, pricing
+from shared.token_cost import (
+    DEFAULT_CACHE_READ_PERCENT,
+    DEFAULT_REFERENCE_MODEL,
+    MODELS,
+    VERSION as PRICE_VERSION,
+    pricing,
+)
 from shared.util import DevError
 
 Period = Literal["today", "7d", "30d"]
@@ -32,21 +39,37 @@ MAX_INFLIGHT = 8
 
 
 def _safe_usage(value):
-    if not isinstance(value, dict) or value.get("version") != TEXT_VERSION or value.get("kind") != "estimate" or value.get("scope") != "project_tool_payload":
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != TEXT_VERSION
+        or value.get("kind") != "estimate"
+        or value.get("scope") != "project_tool_payload"
+    ):
         raise ValueError("Invalid usage metadata")
-    result = {"version": TEXT_VERSION, "kind": "estimate", "scope": "project_tool_payload", "actual_usage": None}
+    result = {
+        "version": TEXT_VERSION,
+        "kind": "estimate",
+        "scope": "project_tool_payload",
+        "actual_usage": None,
+    }
     for direction in ("input", "output"):
         side = value.get(direction) or unavailable()
         if side.get("state") == "unavailable":
             result[direction] = unavailable()
             continue
-        if side.get("state") not in {"available", "partial"} or any(type(side.get(key)) is not int or side[key] < 0 for key in NUMBERS):
+        if side.get("state") not in {"available", "partial"} or any(
+            type(side.get(key)) is not int or side[key] < 0 for key in NUMBERS
+        ):
             raise ValueError("Invalid usage counters")
         if not side["low"] <= side["estimated_tokens"] <= side["high"]:
             raise ValueError("Invalid usage interval")
         result[direction] = {key: side[key] for key in NUMBERS}
-        result[direction].update(state=side["state"], source_truncated=bool(side.get("source_truncated")),
-                                 truncated=bool(side.get("truncated")), excluded_fields=side.get("excluded_fields", 0))
+        result[direction].update(
+            state=side["state"],
+            source_truncated=bool(side.get("source_truncated")),
+            truncated=bool(side.get("truncated")),
+            excluded_fields=side.get("excluded_fields", 0),
+        )
     return result
 
 
@@ -69,7 +92,9 @@ class _Options:
         try:
             pricing(self.cache_read_percent, self.reference_model)
         except ValueError as error:
-            raise DevError("INVALID_CACHE_ASSUMPTION", "缓存读取假设须为 0–100 的整数百分比", 400) from error
+            raise DevError(
+                "INVALID_CACHE_ASSUMPTION", "缓存读取假设须为 0–100 的整数百分比", 400
+            ) from error
 
 
 @dataclass(frozen=True)
@@ -141,16 +166,36 @@ def _authority(runtime, principal, visibility_revision):
         grant_args.append(principal.user_id)
     elif not iam.installed(store) and not principal.admin:
         grant_filter += " AND id IS NULL"
-    grants = store.all("SELECT id,user_id,space_id,label FROM grants WHERE " + grant_filter + " ORDER BY id", grant_args)
-    key = hashlib.sha256(json.dumps([
-        principal.user_id, principal.space_id, principal.grant_id, principal.actor,
-        principal.admin, principal.instance_admin, sorted(principal.scopes),
-        principal.user_epoch, principal.identity_id, principal.profile_id,
-        principal.role_id, principal.authorization_mode, sorted(principal.projects),
-        sorted((item["id"], item["root"], item["device_id"], item["alias"]) for item in projects),
-        [(item["id"], item["user_id"], item["space_id"], item["label"]) for item in grants],
-        visibility_revision,
-    ], separators=(",", ":")).encode()).hexdigest()
+    grants = store.all(
+        "SELECT id,user_id,space_id,label FROM grants WHERE " + grant_filter + " ORDER BY id",
+        grant_args,
+    )
+    key = hashlib.sha256(
+        json.dumps(
+            [
+                principal.user_id,
+                principal.space_id,
+                principal.grant_id,
+                principal.actor,
+                principal.admin,
+                principal.instance_admin,
+                sorted(principal.scopes),
+                principal.user_epoch,
+                principal.identity_id,
+                principal.profile_id,
+                principal.role_id,
+                principal.authorization_mode,
+                sorted(principal.projects),
+                sorted(
+                    (item["id"], item["root"], item["device_id"], item["alias"])
+                    for item in projects
+                ),
+                [(item["id"], item["user_id"], item["space_id"], item["label"]) for item in grants],
+                visibility_revision,
+            ],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
     return _Authority(principal, projects, key, actor_clause, actor_args)
 
 
@@ -160,16 +205,42 @@ def _prepare_locked(runtime, principal, options, mode):
     if options.project and options.project not in {item["id"] for item in authority.projects}:
         raise DevError("PROJECT_NOT_FOUND", "未找到已授权项目", 404)
     observed_at = time.time()
-    finish = datetime.fromtimestamp(options.now if options.now is not None else observed_at, options.timezone)
+    finish = datetime.fromtimestamp(
+        options.now if options.now is not None else observed_at, options.timezone
+    )
     midnight = finish.replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - timedelta(days={"today": 0, "7d": 6, "30d": 29}[options.period])
     lower, upper = start.timestamp(), finish.timestamp()
-    key = (mode, TEXT_VERSION, CALL_VERSION, CONTEXT_VERSION, PRICE_VERSION,
-           authority.key, id(runtime.integrations.usage_metrics), str(options.timezone),
-           options.period, options.project, options.connection, options.session,
-           options.cache_read_percent, options.reference_model, lower, options.now)
-    return _Prepared(options, authority, key, mode, lower, upper, midnight,
-                     data_revision, observed_at, time.monotonic())
+    key = (
+        mode,
+        TEXT_VERSION,
+        CALL_VERSION,
+        CONTEXT_VERSION,
+        PRICE_VERSION,
+        authority.key,
+        id(runtime.integrations.usage_metrics),
+        str(options.timezone),
+        options.period,
+        options.project,
+        options.connection,
+        options.session,
+        options.cache_read_percent,
+        options.reference_model,
+        lower,
+        options.now,
+    )
+    return _Prepared(
+        options,
+        authority,
+        key,
+        mode,
+        lower,
+        upper,
+        midnight,
+        data_revision,
+        observed_at,
+        time.monotonic(),
+    )
 
 
 def _cache(runtime):
@@ -190,7 +261,11 @@ def _prepare(runtime, principal, options, mode):
         prepared = _prepare_locked(runtime, principal, options, mode)
         cache = _cache(runtime)
         entry = cache.get(prepared.key)
-        if entry and _alive(entry) and (mode == "bounded" or entry.prepared.data_revision == prepared.data_revision):
+        if (
+            entry
+            and _alive(entry)
+            and (mode == "bounded" or entry.prepared.data_revision == prepared.data_revision)
+        ):
             cache.move_to_end(prepared.key)
             return prepared, entry
         return prepared, None
@@ -202,38 +277,66 @@ def _read_snapshot(runtime, principal, expected):
     with store.transaction(immediate=False), iam.read_scope(store):
         prepared = _prepare_locked(runtime, principal, options, expected.mode)
         if prepared.authority.key != expected.authority.key:
-            raise DevError("STATISTICS_AUTHORITY_CHANGED", "统计期间授权或项目映射已变化，请重新读取", 409)
+            raise DevError(
+                "STATISTICS_AUTHORITY_CHANGED", "统计期间授权或项目映射已变化，请重新读取", 409
+            )
         if prepared.key != expected.key:
             raise DevError("STATISTICS_CHANGED", "统计快照已变化或过期，请重新读取", 409)
         authority = prepared.authority
-        visible_projects = [item for item in authority.projects if not options.project or item["id"] == options.project]
+        visible_projects = [
+            item
+            for item in authority.projects
+            if not options.project or item["id"] == options.project
+        ]
         rows = []
         collector = runtime.integrations.usage_metrics
         collection_unavailable = collector is None
         usage_floor = prepared.observed_at - RETENTION_SECONDS
         history_floor = prepared.upper - RETENTION_SECONDS
         for offset in range(0, len(visible_projects), 100):
-            batch = visible_projects[offset:offset + 100]
+            batch = visible_projects[offset : offset + 100]
             mappings = " OR ".join("(a.project=? AND a.root=? AND a.device=?)" for _ in batch)
-            values = [value for item in batch for value in (item["id"], item["root"], item["device_id"])]
+            values = [
+                value for item in batch for value in (item["id"], item["root"], item["device_id"])
+            ]
             where = f"({mappings}) AND a.started>=? AND a.started<=? AND ({authority.actor_clause})"
             where += " AND (a.grant_id IS NULL OR EXISTS (SELECT 1 FROM grants sg WHERE sg.id=a.grant_id AND sg.space_id=?))"
-            values.extend((history_floor, prepared.upper, *authority.actor_args, authority.principal.space_id))
-            columns = ("a.id,a.project,a.root,a.device,a.grant_id,a.actor,a.window_key,a.started,"
-                       "a.tool,a.service_ms,a.operation_id,g.label AS connection_label")
+            values.extend(
+                (history_floor, prepared.upper, *authority.actor_args, authority.principal.space_id)
+            )
+            columns = (
+                "a.id,a.project,a.root,a.device,a.grant_id,a.actor,a.window_key,a.started,"
+                "a.tool,a.service_ms,a.operation_id,g.label AS connection_label"
+            )
             source = " FROM mcp_activity a LEFT JOIN grants g ON g.id=a.grant_id "
             if collector is not None:
                 try:
-                    items = store.all("SELECT " + columns + ",u.created AS usage_created,u.metrics AS usage_json" +
-                                      source + "LEFT JOIN mcp_usage u ON u.activity_id=a.id AND u.created>=? WHERE " +
-                                      where + " ORDER BY a.id DESC LIMIT ?", (usage_floor, *values, MAX_ROWS))
+                    items = store.all(
+                        "SELECT "
+                        + columns
+                        + ",u.created AS usage_created,u.metrics AS usage_json"
+                        + source
+                        + "LEFT JOIN mcp_usage u ON u.activity_id=a.id AND u.created>=? WHERE "
+                        + where
+                        + " ORDER BY a.id DESC LIMIT ?",
+                        (usage_floor, *values, MAX_ROWS),
+                    )
                 except sqlite3.Error:
                     collection_unavailable = True
-                    items = store.all("SELECT " + columns + source + "WHERE " + where +
-                                      " ORDER BY a.id DESC LIMIT ?", (*values, MAX_ROWS))
+                    items = store.all(
+                        "SELECT "
+                        + columns
+                        + source
+                        + "WHERE "
+                        + where
+                        + " ORDER BY a.id DESC LIMIT ?",
+                        (*values, MAX_ROWS),
+                    )
             else:
-                items = store.all("SELECT " + columns + source + "WHERE " + where +
-                                  " ORDER BY a.id DESC LIMIT ?", (*values, MAX_ROWS))
+                items = store.all(
+                    "SELECT " + columns + source + "WHERE " + where + " ORDER BY a.id DESC LIMIT ?",
+                    (*values, MAX_ROWS),
+                )
             rows.extend(items)
             # Bound memory across arbitrarily many project batches too.
             rows = sorted(rows, key=lambda row: row["id"], reverse=True)[:MAX_ROWS]
@@ -245,7 +348,9 @@ def _aggregate(snapshot):
     prepared = snapshot.prepared
     options, authority = prepared.options, prepared.authority
     lower, upper = prepared.lower, prepared.upper
-    rows = sorted({row["id"]: row for row in snapshot.rows}.values(), key=lambda row: row["id"], reverse=True)[:MAX_ROWS]
+    rows = sorted(
+        {row["id"]: row for row in snapshot.rows}.values(), key=lambda row: row["id"], reverse=True
+    )[:MAX_ROWS]
     collection_unavailable = snapshot.collection_unavailable
     expiry_seconds = min(CACHE_SECONDS, (prepared.midnight + timedelta(days=1)).timestamp() - upper)
     if options.now is None:
@@ -254,10 +359,14 @@ def _aggregate(snapshot):
     # Prior rows warm the context replay, but cannot add labels outside the
     # selected period. Retention also bounds the lifetime of these options.
     period_rows = [row for row in rows if row["started"] >= lower]
-    connections = {row["grant_id"] or "panel": row.get("connection_label") or "管理面板" for row in period_rows}
+    connections = {
+        row["grant_id"] or "panel": row.get("connection_label") or "管理面板" for row in period_rows
+    }
     if options.connection:
         rows = [row for row in rows if (row["grant_id"] or "panel") == options.connection]
-        period_rows = [row for row in period_rows if (row["grant_id"] or "panel") == options.connection]
+        period_rows = [
+            row for row in period_rows if (row["grant_id"] or "panel") == options.connection
+        ]
     windows = sorted({row["window_key"] for row in period_rows if row.get("window_key")})
     if options.session:
         rows = [row for row in rows if (row.get("window_key") or "uncorrelated") == options.session]
@@ -270,9 +379,16 @@ def _aggregate(snapshot):
             except (AttributeError, TypeError, ValueError):
                 collection_unavailable = True
         if row.get("usage_created") is not None:
-            expiry_seconds = min(expiry_seconds, max(0, row["usage_created"] + RETENTION_SECONDS - prepared.observed_at))
+            expiry_seconds = min(
+                expiry_seconds,
+                max(0, row["usage_created"] + RETENTION_SECONDS - prepared.observed_at),
+            )
     period_rows = [row for row in rows if row["started"] >= lower]
-    total = summarize(period_rows, cache_read_percent=options.cache_read_percent, reference_model=options.reference_model)
+    total = summarize(
+        period_rows,
+        cache_read_percent=options.cache_read_percent,
+        reference_model=options.reference_model,
+    )
     total["scope"] = "retained_authorized_project_activity"
 
     def bucket_for(timestamp):
@@ -281,11 +397,16 @@ def _aggregate(snapshot):
             return lower + int((timestamp - lower) // 3600) * 3600
         return local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
-    context, context_buckets, calls, call_buckets = context_usage(rows, lower, upper, bucket_for,
-                                            cache_read_percent=options.cache_read_percent,
-                                            reference_model=options.reference_model,
-                                            collection_unavailable=collection_unavailable,
-                                            include_call_estimate=True)
+    context, context_buckets, calls, call_buckets = context_usage(
+        rows,
+        lower,
+        upper,
+        bucket_for,
+        cache_read_percent=options.cache_read_percent,
+        reference_model=options.reference_model,
+        collection_unavailable=collection_unavailable,
+        include_call_estimate=True,
+    )
     total["context_estimate"] = context
     total["call_estimate"] = calls
     buckets = defaultdict(list)
@@ -293,34 +414,65 @@ def _aggregate(snapshot):
         buckets[bucket_for(row["started"])].append(row)
     trend = []
     for bucket in sorted(set(buckets) | set(context_buckets) | set(call_buckets)):
-        point = summarize(buckets[bucket], cache_read_percent=options.cache_read_percent, reference_model=options.reference_model)
+        point = summarize(
+            buckets[bucket],
+            cache_read_percent=options.cache_read_percent,
+            reference_model=options.reference_model,
+        )
         point["scope"] = total["scope"]
         point["context_estimate"] = context_buckets.get(bucket)
         point["call_estimate"] = call_buckets.get(bucket)
         trend.append({"started": bucket, **point})
     result = {
-        "schema_version": 4, "authority_key": authority.key,
-        "period": {"key": options.period, "start": lower, "end": upper,
-                   "timezone": str(options.timezone), "bucket": "hour" if options.period == "today" else "day"},
-        "filters": {"project": options.project, "connection": options.connection, "session": options.session},
+        "schema_version": 4,
+        "authority_key": authority.key,
+        "period": {
+            "key": options.period,
+            "start": lower,
+            "end": upper,
+            "timezone": str(options.timezone),
+            "bucket": "hour" if options.period == "today" else "day",
+        },
+        "filters": {
+            "project": options.project,
+            "connection": options.connection,
+            "session": options.session,
+        },
         "options": {
             "projects": [{"id": item["id"], "label": item["alias"]} for item in authority.projects],
-            "connections": [{"id": key, "label": label} for key, label in sorted(connections.items())],
-            "sessions": [{"id": key, "label": f"匿名窗口 {index + 1}"} for index, key in enumerate(windows)] +
-                [{"id": "uncorrelated", "label": "未关联窗口"}],
+            "connections": [
+                {"id": key, "label": label} for key, label in sorted(connections.items())
+            ],
+            "sessions": [
+                {"id": key, "label": f"匿名窗口 {index + 1}"} for index, key in enumerate(windows)
+            ]
+            + [{"id": "uncorrelated", "label": "未关联窗口"}],
         },
-        "summary": total, "trend": trend,
-        "freshness": {"as_of": prepared.observed_at, "max_cache_age_seconds": CACHE_SECONDS,
-                      "policy": "bounded_snapshot" if prepared.mode == "bounded" else "revision_checked"},
-        "coverage": {"scope": total["scope"], "complete_history": False,
-            "activity_row_limit": MAX_ROWS, "estimate_retention_days": RETENTION_SECONDS // 86400,
+        "summary": total,
+        "trend": trend,
+        "freshness": {
+            "as_of": prepared.observed_at,
+            "max_cache_age_seconds": CACHE_SECONDS,
+            "policy": "bounded_snapshot" if prepared.mode == "bounded" else "revision_checked",
+        },
+        "coverage": {
+            "scope": total["scope"],
+            "complete_history": False,
+            "activity_row_limit": MAX_ROWS,
+            "estimate_retention_days": RETENTION_SECONDS // 86400,
             "collection_unavailable": collection_unavailable,
             "oldest_visible_activity": min((row["started"] for row in period_rows), default=None),
             "context_warmup_attempts": len(rows) - len(period_rows),
-            "context_version": CONTEXT_VERSION, "call_estimate_version": CALL_VERSION},
+            "context_version": CONTEXT_VERSION,
+            "call_estimate_version": CALL_VERSION,
+        },
     }
-    cached = _CacheContext(options, prepared.key, prepared.mode, prepared.data_revision, prepared.observed_at)
-    return _CacheEntry(cached, result, prepared.monotonic + expiry_seconds, prepared.observed_at + expiry_seconds)
+    cached = _CacheContext(
+        options, prepared.key, prepared.mode, prepared.data_revision, prepared.observed_at
+    )
+    return _CacheEntry(
+        cached, result, prepared.monotonic + expiry_seconds, prepared.observed_at + expiry_seconds
+    )
 
 
 def _remember(runtime, entry):
@@ -342,10 +494,17 @@ def _check(runtime, principal, entry):
     with runtime.store.transaction(immediate=False), iam.read_scope(runtime.store):
         current = _prepare_locked(runtime, principal, entry.prepared.options, entry.prepared.mode)
         if current.authority.key != entry.value["authority_key"]:
-            raise DevError("STATISTICS_AUTHORITY_CHANGED", "统计期间授权或项目映射已变化，请重新读取", 409)
-        if (current.key != entry.prepared.key or
-                (entry.prepared.mode == "revision" and current.data_revision != entry.prepared.data_revision) or
-                not _alive(entry)):
+            raise DevError(
+                "STATISTICS_AUTHORITY_CHANGED", "统计期间授权或项目映射已变化，请重新读取", 409
+            )
+        if (
+            current.key != entry.prepared.key
+            or (
+                entry.prepared.mode == "revision"
+                and current.data_revision != entry.prepared.data_revision
+            )
+            or not _alive(entry)
+        ):
             raise DevError("STATISTICS_CHANGED", "统计快照已变化或过期，请重新读取", 409)
 
 
@@ -360,18 +519,28 @@ def _public(entry):
     return value
 
 
-def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
-                    project: str = "", connection: str = "", session: str = "",
-                    cache_read_percent: int = DEFAULT_CACHE_READ_PERCENT,
-                    reference_model: str = DEFAULT_REFERENCE_MODEL,
-                    now: float | None = None):
+def token_dashboard(
+    runtime,
+    principal,
+    timezone,
+    *,
+    period: Period = "today",
+    project: str = "",
+    connection: str = "",
+    session: str = "",
+    cache_read_percent: int = DEFAULT_CACHE_READ_PERCENT,
+    reference_model: str = DEFAULT_REFERENCE_MODEL,
+    now: float | None = None,
+):
     """Synchronous exact-revision helper; HTTP uses token_dashboard_async.
 
     Parsing, replay and deep copies are outside this helper's database scope.
     Trusted synchronous callers must not hold an outer Store.lock if they need
     other database work to proceed while they compute.
     """
-    options = _Options(timezone, period, project, connection, session, cache_read_percent, reference_model, now)
+    options = _Options(
+        timezone, period, project, connection, session, cache_read_percent, reference_model, now
+    )
     options.validate()
     prepared, entry = _prepare(runtime, principal, options, "revision")
     if entry is None:
@@ -385,10 +554,13 @@ def token_dashboard(runtime, principal, timezone, *, period: Period = "today",
 
 class _DashboardService:
     """Loop-owned bounded singleflight; the executor never receives DB access."""
+
     def __init__(self, runtime):
         self.runtime = runtime
         self.loop = asyncio.get_running_loop()
-        self.executor = ThreadPoolExecutor(max_workers=COMPUTE_WORKERS, thread_name_prefix="hub-token")
+        self.executor = ThreadPoolExecutor(
+            max_workers=COMPUTE_WORKERS, thread_name_prefix="hub-token"
+        )
         self.slots = asyncio.Semaphore(COMPUTE_WORKERS)
         self.inflight = {}
         self.closed = False
@@ -399,7 +571,9 @@ class _DashboardService:
         # Waiting keys retain only their filter/authority, never a 10,000-row
         # snapshot. Thus at most COMPUTE_WORKERS large snapshots exist at once.
         async with self.slots:
-            snapshot = await self.runtime.store.run(_read_snapshot, self.runtime, principal, prepared)
+            snapshot = await self.runtime.store.run(
+                _read_snapshot, self.runtime, principal, prepared
+            )
             entry = await self.loop.run_in_executor(self.executor, _aggregate, snapshot)
             self.computed += 1
             await self.runtime.store.run(_remember, self.runtime, entry)
@@ -438,11 +612,19 @@ class _DashboardService:
         await asyncio.to_thread(self.executor.shutdown, wait=True, cancel_futures=False)
 
 
-async def token_dashboard_async(runtime, principal, timezone, *, period: Period = "today",
-                                project: str = "", connection: str = "", session: str = "",
-                                cache_read_percent: int = DEFAULT_CACHE_READ_PERCENT,
-                                reference_model: str = DEFAULT_REFERENCE_MODEL,
-                                now: float | None = None):
+async def token_dashboard_async(
+    runtime,
+    principal,
+    timezone,
+    *,
+    period: Period = "today",
+    project: str = "",
+    connection: str = "",
+    session: str = "",
+    cache_read_percent: int = DEFAULT_CACHE_READ_PERCENT,
+    reference_model: str = DEFAULT_REFERENCE_MODEL,
+    now: float | None = None,
+):
     """Current-authority HTTP statistics with an explicit bounded data age.
 
     Frequent activity writes do not invalidate this 30-second snapshot. Every
@@ -450,7 +632,9 @@ async def token_dashboard_async(runtime, principal, timezone, *, period: Period 
     visibility changes bypass the refresh interval. Late metrics and deletions
     are observed on the next refresh even with continuous background writes.
     """
-    options = _Options(timezone, period, project, connection, session, cache_read_percent, reference_model, now)
+    options = _Options(
+        timezone, period, project, connection, session, cache_read_percent, reference_model, now
+    )
     return _public(await _dashboard_entry_async(runtime, principal, options))
 
 

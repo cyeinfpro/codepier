@@ -6,32 +6,35 @@ commit materializes its final tail in the historical operation row and removes
 the live row in the same transaction as the completion outbox. Existing
 databases therefore need no history rewrite and old receipts stay readable.
 """
+
 from __future__ import annotations
 
 import time
 from hub.operation_history import seal, unseal
 
 OUTPUT_LIMIT = 131072
-OUTPUT_STATES = frozenset({'queued', 'running', 'reconnecting', 'cancelling', 'unknown', 'needs_review'})
+OUTPUT_STATES = frozenset(
+    {"queued", "running", "reconnecting", "cancelling", "unknown", "needs_review"}
+)
 
 
 def migrate(db):
-    db.execute('''CREATE TABLE IF NOT EXISTS operation_output_tails (
+    db.execute("""CREATE TABLE IF NOT EXISTS operation_output_tails (
         operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
         output_seq INTEGER NOT NULL CHECK(output_seq >= 0),
-        output TEXT NOT NULL CHECK(length(output) <= 131072))''')
-    columns = {row[1] for row in db.execute('PRAGMA table_info(operation_output_tails)')}
-    if 'sealed_output' not in columns:
-        db.execute('ALTER TABLE operation_output_tails ADD COLUMN sealed_output TEXT')
-        db.execute('ALTER TABLE operation_output_tails ADD COLUMN output_chars INTEGER')
+        output TEXT NOT NULL CHECK(length(output) <= 131072))""")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(operation_output_tails)")}
+    if "sealed_output" not in columns:
+        db.execute("ALTER TABLE operation_output_tails ADD COLUMN sealed_output TEXT")
+        db.execute("ALTER TABLE operation_output_tails ADD COLUMN output_chars INTEGER")
     # These predicates are used by authorized project history reads and active
     # admission checks; no owner/grant/privacy predicate is removed or cached.
-    db.execute('''CREATE INDEX IF NOT EXISTS operations_project_recent
-        ON operations(space_id,project_id,created DESC,state,owner_user_id,visibility,grant_id)''')
-    db.execute('''CREATE INDEX IF NOT EXISTS operations_project_active
-        ON operations(space_id,project_id,state,owner_user_id,visibility,grant_id)''')
-    db.execute('''CREATE INDEX IF NOT EXISTS operations_device_active
-        ON operations(device_id,state)''')
+    db.execute("""CREATE INDEX IF NOT EXISTS operations_project_recent
+        ON operations(space_id,project_id,created DESC,state,owner_user_id,visibility,grant_id)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS operations_project_active
+        ON operations(space_id,project_id,state,owner_user_id,visibility,grant_id)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS operations_device_active
+        ON operations(device_id,state)""")
 
 
 class OperationOutput:
@@ -45,23 +48,35 @@ class OperationOutput:
         operation row cannot accidentally expose a stale side-table snapshot.
         Compact status reads select only a character count from the live row.
         """
-        columns = 'COALESCE(output_chars,length(output)) AS chars'
-        args = [row['id'], row['output_seq']]
+        columns = "COALESCE(output_chars,length(output)) AS chars"
+        args = [row["id"], row["output_seq"]]
         if include_body and limit:
-            columns += ',output,sealed_output'
-        live = self.store.one('SELECT ' + columns +
-                              ' FROM operation_output_tails WHERE operation_id=? AND output_seq=?', args)
+            columns += ",output,sealed_output"
+        live = self.store.one(
+            "SELECT "
+            + columns
+            + " FROM operation_output_tails WHERE operation_id=? AND output_seq=?",
+            args,
+        )
         if live is not None:
-            text = unseal(self.store, live.get('sealed_output') or live.get('output') or '') if include_body and limit else ''
-            return (text[-limit:] if limit else '') if include_body else None, live['chars']
+            text = (
+                unseal(self.store, live.get("sealed_output") or live.get("output") or "")
+                if include_body and limit
+                else ""
+            )
+            return (text[-limit:] if limit else "") if include_body else None, live["chars"]
         from hub.operation_archive import POINTER
-        if not include_body and str(row.get('output') or '').startswith(POINTER):
-            archived = self.store.one('SELECT output_chars FROM operation_payload_archives WHERE operation_id=?', (row['id'],))
+
+        if not include_body and str(row.get("output") or "").startswith(POINTER):
+            archived = self.store.one(
+                "SELECT output_chars FROM operation_payload_archives WHERE operation_id=?",
+                (row["id"],),
+            )
             if archived is None:
-                raise RuntimeError('Archived output is missing')
-            return None, archived['output_chars']
-        legacy = unseal(self.store, row.get('output') or '')
-        return (legacy[-limit:] if limit else '') if include_body else None, len(legacy)
+                raise RuntimeError("Archived output is missing")
+            return None, archived["output_chars"]
+        legacy = unseal(self.store, row.get("output") or "")
+        return (legacy[-limit:] if limit else "") if include_body else None, len(legacy)
 
     def receive(self, identifier, data):
         """Commit each accepted output before publishing its availability.
@@ -70,30 +85,37 @@ class OperationOutput:
         Hub crash. The state and sequence checks share the tail transaction.
         """
         with self.store.transaction():
-            row = self.store.one('SELECT id,state,output_seq FROM operations WHERE id=?', (identifier,))
-            if row is None or row['state'] not in OUTPUT_STATES:
+            row = self.store.one(
+                "SELECT id,state,output_seq FROM operations WHERE id=?", (identifier,)
+            )
+            if row is None or row["state"] not in OUTPUT_STATES:
                 return False
-            if data.get('snapshot'):
-                sequence = data.get('seq')
-                if type(sequence) is not int or sequence <= row['output_seq']:
+            if data.get("snapshot"):
+                sequence = data.get("seq")
+                if type(sequence) is not int or sequence <= row["output_seq"]:
                     return False
-                output = str(data.get('text', ''))[-OUTPUT_LIMIT:]
+                output = str(data.get("text", ""))[-OUTPUT_LIMIT:]
             else:
-                sequence = row['output_seq'] + 1
+                sequence = row["output_seq"] + 1
                 # Only legacy append messages need to read the previous body.
-                legacy = self.store.one('SELECT output FROM operations WHERE id=?', (identifier,))
+                legacy = self.store.one("SELECT output FROM operations WHERE id=?", (identifier,))
                 previous, _ = self.read({**row, **legacy})
-                output = (previous + str(data.get('text', ''))[:8192])[-OUTPUT_LIMIT:]
+                output = (previous + str(data.get("text", ""))[:8192])[-OUTPUT_LIMIT:]
             now = time.time()
-            self.store.execute('''INSERT INTO operation_output_tails(operation_id,output_seq,output,sealed_output,output_chars)
+            self.store.execute(
+                """INSERT INTO operation_output_tails(operation_id,output_seq,output,sealed_output,output_chars)
                 VALUES(?,?,'',?,?) ON CONFLICT(operation_id) DO UPDATE
-                SET output_seq=excluded.output_seq,output='',sealed_output=excluded.sealed_output,output_chars=excluded.output_chars''', (identifier, sequence, seal(self.store, output), len(output)))
+                SET output_seq=excluded.output_seq,output='',sealed_output=excluded.sealed_output,output_chars=excluded.output_chars""",
+                (identifier, sequence, seal(self.store, output), len(output)),
+            )
             # Keep the hot parent row small. A legacy active tail is moved only
             # when that operation receives output, never by a bulk migration.
-            self.store.execute("UPDATE operations SET output='',output_seq=?,updated=?,last_output_at=? WHERE id=?",
-                               (sequence, now, now, identifier))
+            self.store.execute(
+                "UPDATE operations SET output='',output_seq=?,updated=?,last_output_at=? WHERE id=?",
+                (sequence, now, now, identifier),
+            )
         return True
 
     def discard(self, identifier):
         self.store.require_transaction()
-        self.store.execute('DELETE FROM operation_output_tails WHERE operation_id=?', (identifier,))
+        self.store.execute("DELETE FROM operation_output_tails WHERE operation_id=?", (identifier,))

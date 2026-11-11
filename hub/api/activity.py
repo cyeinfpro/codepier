@@ -13,11 +13,15 @@ from fastapi.responses import Response, StreamingResponse
 from shared.util import DevError
 from hub import iam
 
-def operation_rows(store, principal,limit=40, offset=0, status="", project="", source=""):
-    clause,args=iam.private_sql(principal,'o.')
-    where=[clause]
+
+def operation_rows(store, principal, limit=40, offset=0, status="", project="", source=""):
+    clause, args = iam.private_sql(principal, "o.")
+    where = [clause]
     if not principal.admin:
-        where.append('(o.project_id IS NULL OR o.project_id IN (%s))' % (','.join('?' for _ in principal.projects) or 'NULL'))
+        where.append(
+            "(o.project_id IS NULL OR o.project_id IN (%s))"
+            % (",".join("?" for _ in principal.projects) or "NULL")
+        )
         args.extend(principal.projects)
     if status:
         where.append("o.state=?")
@@ -34,11 +38,11 @@ def operation_rows(store, principal,limit=40, offset=0, status="", project="", s
     return store.all(sql + " ORDER BY o.created DESC LIMIT ? OFFSET ?", (*args, limit, offset))
 
 
-
-def audit_rows(store, principal,limit=40, offset=0, query="", status="", source=""):
-    where,args=['space_id=?'],[principal.space_id]
+def audit_rows(store, principal, limit=40, offset=0, query="", status="", source=""):
+    where, args = ["space_id=?"], [principal.space_id]
     if not principal.admin:
-        where.append('owner_user_id=?');args.append(principal.user_id)
+        where.append("owner_user_id=?")
+        args.append(principal.user_id)
     if query:
         where.append("(actor LIKE ? OR action LIKE ? OR target LIKE ?)")
         args += ["%" + query[:100] + "%"] * 3
@@ -55,22 +59,31 @@ def audit_rows(store, principal,limit=40, offset=0, query="", status="", source=
     return rows
 
 
-
-
 def make_activity_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
 
     @router.get("/api/operations")
     @database_endpoint(store)
-    def operations(request: Request, limit: int = 40, offset: int = Query(default=0, le=2**63 - 1), status: str = "", project: str = "", source: str = ""):
+    def operations(
+        request: Request,
+        limit: int = 40,
+        offset: int = Query(default=0, le=2**63 - 1),
+        status: str = "",
+        project: str = "",
+        source: str = "",
+    ):
         principal = auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
         rows = operation_rows(store, principal, limit + 1, offset, status, project, source)
-        return {"operations": rows[:limit], "next_offset": offset + limit if len(rows) > limit else None}
+        return {
+            "operations": rows[:limit],
+            "next_offset": offset + limit if len(rows) > limit else None,
+        }
 
     # Exact queue route must precede the operation-id route.
     from hub.queue_panel import register_queue_routes
+
     register_queue_routes(router, store, runtime, auth)
 
     @router.get("/api/operations/{id}")
@@ -80,27 +93,63 @@ def make_activity_router(context: HubContext):
 
     @router.get("/api/audit")
     @database_endpoint(store)
-    def audit(request: Request, limit: int = 40, offset: int = Query(default=0, le=2**63 - 1), q: str = "", status: str = "", source: str = ""):
+    def audit(
+        request: Request,
+        limit: int = 40,
+        offset: int = Query(default=0, le=2**63 - 1),
+        q: str = "",
+        status: str = "",
+        source: str = "",
+    ):
         principal = auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
         rows = audit_rows(store, principal, limit + 1, offset, q, status, source)
-        return {"events": rows[:limit], "next_offset": offset + limit if len(rows) > limit else None}
+        return {
+            "events": rows[:limit],
+            "next_offset": offset + limit if len(rows) > limit else None,
+        }
 
     @router.get("/api/audit-export")
     @database_endpoint(store)
-    def audit_export(request: Request, q: str = "", status: str = "", source: str = "", offset: int = Query(default=0, le=2**63 - 1)):
+    def audit_export(
+        request: Request,
+        q: str = "",
+        status: str = "",
+        source: str = "",
+        offset: int = Query(default=0, le=2**63 - 1),
+    ):
         principal = auth.panel(request)
         rows = audit_rows(store, principal, 10000, max(0, offset), q, status, source)
         out = io.StringIO()
         writer = csv.writer(out)
         writer.writerow(["id", "utc_time", "actor", "action", "target", "status", "detail"])
+
         def cell(value):
             value = str(value)
             return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
+
         for r in rows:
-            writer.writerow([r["id"], datetime.fromtimestamp(r["at"], ZoneInfo("UTC")).isoformat(), *[cell(r[k]) for k in ("actor", "action", "target", "status")], cell(json.dumps(r["detail"], ensure_ascii=False))])
-        store.audit(principal.actor, "audit.exported", detail={"rows": len(rows), "offset": offset, "limit": 10000})
-        return Response("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="codepier-audit.csv"', "X-Export-Limit": "10000"})
+            writer.writerow(
+                [
+                    r["id"],
+                    datetime.fromtimestamp(r["at"], ZoneInfo("UTC")).isoformat(),
+                    *[cell(r[k]) for k in ("actor", "action", "target", "status")],
+                    cell(json.dumps(r["detail"], ensure_ascii=False)),
+                ]
+            )
+        store.audit(
+            principal.actor,
+            "audit.exported",
+            detail={"rows": len(rows), "offset": offset, "limit": 10000},
+        )
+        return Response(
+            "\ufeff" + out.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="codepier-audit.csv"',
+                "X-Export-Limit": "10000",
+            },
+        )
 
     @router.get("/api/events")
     async def events(request: Request):
@@ -111,17 +160,32 @@ def make_activity_router(context: HubContext):
             with iam.read_scope(store):
                 principal = auth.panel(request)
                 permissions = iam.project_permissions(store, principal)
-                access = frozenset((project, action) for project, actions in permissions.items() for action in actions)
-                access |= frozenset(('@', flag) for flag, allowed in [
-                    ('space_admin', principal.admin), ('instance_admin', principal.instance_admin)] if allowed)
+                access = frozenset(
+                    (project, action)
+                    for project, actions in permissions.items()
+                    for action in actions
+                )
+                access |= frozenset(
+                    ("@", flag)
+                    for flag, allowed in [
+                        ("space_admin", principal.admin),
+                        ("instance_admin", principal.instance_admin),
+                    ]
+                    if allowed
+                )
                 visible = item is not None and iam.event_visible(runtime, principal, item)
                 return access, visible, (principal.space_id, principal.user_id)
+
         access, _, owner = await store.run_read(snapshot)
-        if len(runtime.watchers) >= 100 or sum(getattr(q, "_stream_owner", None) == owner for q in runtime.watchers) >= 4:
+        if (
+            len(runtime.watchers) >= 100
+            or sum(getattr(q, "_stream_owner", None) == owner for q in runtime.watchers) >= 4
+        ):
             raise DevError("TOO_MANY_STREAMS", "实时连接过多", 429)
         q = asyncio.Queue(maxsize=100)
         q._stream_owner = owner
         runtime.watchers.add(q)
+
         async def stream():
             nonlocal access
             try:
@@ -134,7 +198,9 @@ def make_activity_router(context: HubContext):
                     except asyncio.TimeoutError:
                         item = None
                     try:
-                        current_access, visible, current_owner = await store.run_read(snapshot, item)
+                        current_access, visible, current_owner = await store.run_read(
+                            snapshot, item
+                        )
                     except DevError:
                         yield "event: access_revoked\ndata: {}\n\n"
                         break
@@ -147,15 +213,28 @@ def make_activity_router(context: HubContext):
                     elif item.get("type") == "resync":
                         yield "event: resync\ndata: {}\n\n"
                     elif visible:
-                        yield "data: " + json.dumps({k:v for k,v in item.items() if k != '_audience'}, ensure_ascii=False) + "\n\n"
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {k: v for k, v in item.items() if k != "_audience"},
+                                ensure_ascii=False,
+                            )
+                            + "\n\n"
+                        )
             finally:
                 runtime.watchers.discard(q)
+
         class EventStream(StreamingResponse):
             async def __call__(self, scope, receive, send):
                 try:
                     await super().__call__(scope, receive, send)
                 finally:
                     runtime.watchers.discard(q)
-        return EventStream(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+        return EventStream(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return router

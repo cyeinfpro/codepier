@@ -97,7 +97,7 @@ def test_enrollment_readiness_restores_exact_pending_and_detects_digest_change(c
     assert not c.s.channel_owner.current(binding["binding_id"])
 
 
-@pytest.mark.parametrize("host,account,approval", product([True, False, None], repeat=3))
+@pytest.mark.parametrize("host,account,approval", list(product([True, False, None], repeat=3)))
 def test_long_lived_proposal_stays_read_only_and_finite(host, account, approval):
     result = subscription_proposal(requested_ttl_ms=None, host_verified=host,
                                    account_verified=account, independent_approval=approval)

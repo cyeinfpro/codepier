@@ -43,7 +43,6 @@ class FilePublication:
     identity: tuple[int, int] | None = None
 
 
-
 class ExclusiveCreateUnconfirmed(OSError):
     """The exclusive target may contain partial data; never replay or unlink."""
 
@@ -78,19 +77,31 @@ def _exclusive_create_copy(source, destination, *, src_dir_fd=None, dst_dir_fd=N
     with ExitStack() as stack:
         source_parent, source_name = _pin_parent(stack, source, src_dir_fd)
         dest_parent, dest_name = _pin_parent(stack, destination, dst_dir_fd)
-        source_fd = os.open(source_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                            dir_fd=source_parent)
+        source_fd = os.open(
+            source_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_parent
+        )
         stack.callback(os.close, source_fd)
         original = os.fstat(source_fd)
         if not stat.S_ISREG(original.st_mode):
             raise OSError(errno.EINVAL, "Staging file must be regular")
         try:
-            dest_fd = os.open(dest_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                              stat.S_IMODE(original.st_mode), dir_fd=dest_parent)
+            dest_fd = os.open(
+                dest_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                stat.S_IMODE(original.st_mode),
+                dir_fd=dest_parent,
+            )
         except OSError as exc:
-            if exc.errno in {errno.EIO, errno.ETIMEDOUT, errno.EINTR,
-                             getattr(errno, "ENOTCONN", -1), getattr(errno, "ESTALE", -1)}:
-                raise ExclusiveCreateUnconfirmed(exc.errno, "Exclusive creation outcome is unknown") from exc
+            if exc.errno in {
+                errno.EIO,
+                errno.ETIMEDOUT,
+                errno.EINTR,
+                getattr(errno, "ENOTCONN", -1),
+                getattr(errno, "ESTALE", -1),
+            }:
+                raise ExclusiveCreateUnconfirmed(
+                    exc.errno, "Exclusive creation outcome is unknown"
+                ) from exc
             raise
         try:
             with os.fdopen(dest_fd, "w+b", buffering=0) as output:
@@ -113,35 +124,46 @@ def _exclusive_create_copy(source, destination, *, src_dir_fd=None, dst_dir_fd=N
                 os.fsync(output.fileno())
                 latest = os.fstat(source_fd)
                 if (original.st_size, original.st_mtime_ns, original.st_ctime_ns) != (
-                        latest.st_size, latest.st_mtime_ns, latest.st_ctime_ns):
+                    latest.st_size,
+                    latest.st_mtime_ns,
+                    latest.st_ctime_ns,
+                ):
                     raise OSError(errno.EIO, "Staging content changed")
                 before_verify = os.fstat(output.fileno())
                 output.seek(0)
                 actual = hashlib.sha256()
                 verify_remaining = original.st_size + 1
-                while verify_remaining and (chunk := output.read(min(1024 * 1024, verify_remaining))):
+                while verify_remaining and (
+                    chunk := output.read(min(1024 * 1024, verify_remaining))
+                ):
                     verify_remaining -= len(chunk)
                     actual.update(chunk)
                 verified = os.fstat(output.fileno())
                 current = os.stat(dest_name, dir_fd=dest_parent, follow_symlinks=False)
-                if (not stat.S_ISREG(current.st_mode) or
-                        (created.st_dev, created.st_ino) != (current.st_dev, current.st_ino) or
-                        actual.digest() != expected.digest() or
-                        verified.st_size != original.st_size or
-                        (before_verify.st_size, before_verify.st_mtime_ns, before_verify.st_ctime_ns) !=
-                        (verified.st_size, verified.st_mtime_ns, verified.st_ctime_ns) or
-                        (current.st_size, current.st_mtime_ns, current.st_ctime_ns) !=
-                        (verified.st_size, verified.st_mtime_ns, verified.st_ctime_ns)):
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (created.st_dev, created.st_ino) != (current.st_dev, current.st_ino)
+                    or actual.digest() != expected.digest()
+                    or verified.st_size != original.st_size
+                    or (before_verify.st_size, before_verify.st_mtime_ns, before_verify.st_ctime_ns)
+                    != (verified.st_size, verified.st_mtime_ns, verified.st_ctime_ns)
+                    or (current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+                    != (verified.st_size, verified.st_mtime_ns, verified.st_ctime_ns)
+                ):
                     raise OSError(errno.EIO, "Exclusive destination changed")
                 if dst_dir_fd is None:
                     repinned, _ = _pin_parent(stack, destination, None)
                     before_parent, after_parent = os.fstat(dest_parent), os.fstat(repinned)
                     if (before_parent.st_dev, before_parent.st_ino) != (
-                            after_parent.st_dev, after_parent.st_ino):
+                        after_parent.st_dev,
+                        after_parent.st_ino,
+                    ):
                         raise OSError(errno.EIO, "Destination parent changed")
         except OSError as exc:
-            raise ExclusiveCreateUnconfirmed(exc.errno or errno.EIO,
-                "Exclusive destination may contain partial data; inspect before retrying") from exc
+            raise ExclusiveCreateUnconfirmed(
+                exc.errno or errno.EIO,
+                "Exclusive destination may contain partial data; inspect before retrying",
+            ) from exc
         return FilePublication("exclusive_create", True, False, (created.st_dev, created.st_ino))
 
 
@@ -234,8 +256,9 @@ def publish_new_file(
         if exc.errno not in _RENAME_UNSUPPORTED:
             raise
         if allow_exclusive_copy:
-            return _exclusive_create_copy(source, destination,
-                src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+            return _exclusive_create_copy(
+                source, destination, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd
+            )
         raise AtomicCreateUnsupported(
             errno.ENOTSUP,
             "This filesystem supports neither hard links nor exclusive rename; "

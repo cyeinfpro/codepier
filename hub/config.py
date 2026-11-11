@@ -1,11 +1,21 @@
 """Validate Hub process settings before acquiring or migrating persistent state."""
+
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
 
-from shared.config import DEFAULT_HUB_PORT, DEFAULT_PUBLIC_URL, ConfigurationError, RuntimeConfig, env_bool, env_csv, env_int, env_timezone
+from shared.config import (
+    DEFAULT_HUB_PORT,
+    DEFAULT_PUBLIC_URL,
+    ConfigurationError,
+    RuntimeConfig,
+    env_bool,
+    env_csv,
+    env_int,
+    env_timezone,
+)
 from shared.util import normalize_url
 from shared.process_logging import process_log_level
 
@@ -20,6 +30,7 @@ class OIDCSeed:
     The environment stays authoritative for this provider: the panel cannot edit it,
     and changing a setting takes effect on the next Hub start.
     """
+
     label: str
     issuer: str
     client_id: str
@@ -40,7 +51,9 @@ class OIDCSeed:
         client_id = os.getenv("CODEPIER_OIDC_CLIENT_ID", "").strip()
         client_secret = os.getenv("CODEPIER_OIDC_CLIENT_SECRET", "")
         if not client_id or not client_secret:
-            raise ConfigurationError("CODEPIER_OIDC_CLIENT_ID and CODEPIER_OIDC_CLIENT_SECRET are required with CODEPIER_OIDC_ISSUER")
+            raise ConfigurationError(
+                "CODEPIER_OIDC_CLIENT_ID and CODEPIER_OIDC_CLIENT_SECRET are required with CODEPIER_OIDC_ISSUER"
+            )
         seed = cls(
             label=os.getenv("CODEPIER_OIDC_LABEL", "").strip() or "SSO",
             issuer=issuer,
@@ -68,18 +81,30 @@ class OIDCSeed:
 
         # The model validates every URL through one code path; check the optional
         # ones first so a failure names the setting that actually needs fixing.
-        for setting, values in (("CODEPIER_OIDC_DISCOVERY_URL", [self.discovery_url] if self.discovery_url else []),
-                                ("CODEPIER_OIDC_ENDPOINT_ORIGINS", list(self.endpoint_origins))):
+        for setting, values in (
+            ("CODEPIER_OIDC_DISCOVERY_URL", [self.discovery_url] if self.discovery_url else []),
+            ("CODEPIER_OIDC_ENDPOINT_ORIGINS", list(self.endpoint_origins)),
+        ):
             for value in values:
                 try:
                     endpoint(value)
                 except ValueError as exc:
                     raise invalid(setting, str(exc)) from None
         try:
-            return ProviderInput(label=self.label, issuer=self.issuer, client_id=self.client_id, client_secret=self.client_secret,
-                                 discovery_url=self.discovery_url, enabled=self.enabled, admission="jit", group_claim=self.group_claim,
-                                 required_group=self.required_group, scopes=self.scopes, endpoint_origins=list(self.endpoint_origins),
-                                 freshness_seconds=self.freshness_seconds)
+            return ProviderInput(
+                label=self.label,
+                issuer=self.issuer,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                discovery_url=self.discovery_url,
+                enabled=self.enabled,
+                admission="jit",
+                group_claim=self.group_claim,
+                required_group=self.required_group,
+                scopes=self.scopes,
+                endpoint_origins=list(self.endpoint_origins),
+                freshness_seconds=self.freshness_seconds,
+            )
         except ValidationError as exc:
             issues = []
             for error in exc.errors():
@@ -95,7 +120,9 @@ class OIDCSeed:
                 else:
                     setting = "CODEPIER_OIDC_ISSUER"
                 issues.append(f"{setting}: {message}")
-            raise ConfigurationError("Invalid OIDC seed setting: " + "; ".join(sorted(set(issues)))) from None
+            raise ConfigurationError(
+                "Invalid OIDC seed setting: " + "; ".join(sorted(set(issues)))
+            ) from None
 
 
 @dataclass(frozen=True)
@@ -121,15 +148,26 @@ class HubConfig:
         try:
             oidc_public_url = normalize_url(os.getenv("HUB_PUBLIC_URL") or DEFAULT_PUBLIC_URL)
         except ValueError:
-            raise ConfigurationError("HUB_PUBLIC_URL must be an HTTP(S) base URL without credentials, a query or a fragment") from None
+            raise ConfigurationError(
+                "HUB_PUBLIC_URL must be an HTTP(S) base URL without credentials, a query or a fragment"
+            ) from None
         setting = "MCP_PUBLIC_URL" if os.getenv("MCP_PUBLIC_URL") else "HUB_PUBLIC_URL"
         try:
             public_url = normalize_url(os.getenv(setting) or oidc_public_url)
         except ValueError:
-            raise ConfigurationError(f"{setting} must be an HTTP(S) base URL without credentials, a query or a fragment") from None
+            raise ConfigurationError(
+                f"{setting} must be an HTTP(S) base URL without credentials, a query or a fragment"
+            ) from None
         bootstrap = os.getenv("CODEPIER_OIDC_BOOTSTRAP_ADMIN", "off").strip().lower()
         if bootstrap not in {"off", "first-login"}:
             raise ConfigurationError("CODEPIER_OIDC_BOOTSTRAP_ADMIN must be off or first-login")
-        return cls(port=port, timezone=timezone, public_url=public_url, runtime=RuntimeConfig.from_env(),
-                   oidc_seed=OIDCSeed.from_env(), oidc_public_url=oidc_public_url,
-                   oidc_bootstrap_admin=bootstrap == "first-login", log_level=process_log_level())
+        return cls(
+            port=port,
+            timezone=timezone,
+            public_url=public_url,
+            runtime=RuntimeConfig.from_env(),
+            oidc_seed=OIDCSeed.from_env(),
+            oidc_public_url=oidc_public_url,
+            oidc_bootstrap_admin=bootstrap == "first-login",
+            log_level=process_log_level(),
+        )

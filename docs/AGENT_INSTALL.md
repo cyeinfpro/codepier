@@ -210,3 +210,11 @@ Windows 原生验收可在管理员终端运行 `python scripts/check_windows_se
 ## 审阅快照容量
 
 审阅池使用 Agent 本机状态目录。配额诊断、任务收尾、按文件捕获、无损压缩、容量配置与旧格式回滚见 [审阅快照存储](REVIEW_STORAGE.md)。
+
+## 从源码安装与开发启动
+
+`deploy/install-agent.sh` 与 `deploy/install-agent.ps1` 都使用 `scripts/install_agent.py --source` 安装到受管目录（默认 `~/.codepier-agent`），复用既有配置并注册当前平台的后台服务。首次需要配对文件和已经存在的授权目录；源码安装解释器要求 Python 3.13+，既有服务忙碌时保留配置并报告原因。macOS 使用当前用户 launchd、Linux 使用用户 systemd、Windows 使用受管计划任务；启动时机遵循各平台服务会话规则。
+
+`deploy/start-agent.sh` / `start-agent.cmd` 是源码开发时的前台入口，不承担受管安装。配置字段示例见 [config.example.json](../agent/config.example.json)，它只说明字段；不要用示例覆盖正在运行的凭据、设备身份或授权目录。
+
+Hub 宿主安装及更新辅助程序的最低版本仍是 Python 3.9，容器和实际 Agent 运行时统一使用 Python 3.13。CI 分别检查这两条契约。

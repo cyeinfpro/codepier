@@ -2,17 +2,17 @@
 
 CodePier 的附件导入把当前宿主提供的文件保存到已授权项目中。图片、ZIP 和普通二进制文件使用同一条传输路径；ZIP 不会因为扩展名而被来源校验拒绝，也不会自动解压或执行。
 
-本页主要说明原有 Agent 直取原生附件路径。可选的新 Hub 认证分块、原生中转和本地 MCP 文件适配器见[统一文件入站](FILE_IMPORT_INGRESS.md)；这些新能力默认关闭。
+本页聚焦 Agent 直取、目标路径与来源故障排查。当前统一流程、默认开关和协议以[统一文件入站](FILE_IMPORT_INGRESS.md)为准；Hub 分块与原生中转默认开启，已保存的显式关闭保持关闭。
 
 原生导入需要项目写权限和支持原生文件参数的宿主。宿主没有提供文件引用时，不能把聊天中的下载链接、`sandbox:` 地址或编造的 `file_id` 当成原生附件。
 
 ## 正确的调用位置
 
-先通过 `workspace(operation="open", project="项目名")` 确认目标，再读取 `workspace(operation="help", tool="write", action="import")`。调用时：
+先通过 `query(action="project", project="项目名")` 确认目标，再读取 `query(action="help", args={"action":"import"})`。调用时：
 
-- 顶层填写 `project`、`operation="import"`、`idempotency_key` 和宿主提供的 `file`；隔离工作目录还需要原 `workspace_id`。
-- `options.path` 是项目内未使用的相对路径；已知源文件 SHA-256 时，可填写 `options.expected_sha256`。
-- 不要把 `file` 放进 `options`。宿主的 `openai/fileParams` 处理顶层字段；嵌套输入仅为已持有完整原生文件对象的旧调用方保留兼容，新的调用和帮助不应生成这种形式。
+- 通过 `act(action="import", ...)`，顶层填写 `project`、`idempotency_key` 和宿主提供的 `file`；隔离工作目录还需要原 `workspace_id`。
+- `path` 是项目内未使用的相对路径；已知源文件 SHA-256 时，可填写 `expected_sha256`。
+- 不要把 `file` 放进 `args`。宿主的 `openai/fileParams` 处理顶层字段；嵌套输入仅为已持有完整原生文件对象的旧调用方保留兼容，新的调用和帮助不应生成这种形式。
 
 接收端的原生文件对象包含 `download_url`、`file_id`，以及可选的名称、媒体类型和大小。这些值应由宿主提供，不需要用户复制签名链接、浏览器 cookie 或访问令牌。`file_id` 本身不是服务器可验证的来源证明，不能据此放行任意 URL。
 
@@ -52,9 +52,9 @@ CodePier 的附件导入把当前宿主提供的文件保存到已授权项目�
 
 ## 失败后如何处理
 
-可先调用 `write(operation="source_check")`，保持顶层原生 `file`，获得只读来源预检和精确审批目标。它不下载，不验证 DNS/TLS/内容，也不会自动改策略；实际导入仍会重新校验。预检遇到名单拒绝会返回 `approval_required=true` 和可操作提示；真正导入的明确来源拒绝不可自动重试或自动扩充策略。
+可先调用 `query(action="source_check")`，保持顶层原生 `file`，获得只读来源预检和精确审批目标。它不下载，不验证 DNS/TLS/内容，也不会自动改策略；实际导入仍会重新校验。预检遇到名单拒绝会返回 `approval_required=true` 和可操作提示；真正导入的明确来源拒绝不可自动重试或自动扩充策略。
 
-先保存原操作号，使用 `process(operation="get", operation_ids=[原操作号])` 查看最终结果。新的错误信息区分了失败阶段：
+先保存原操作号，使用 `query(action="job", ids=[原操作号])` 查看最终结果。新的错误信息区分了失败阶段：
 
 | 结果 | 处理方式 |
 | --- | --- |

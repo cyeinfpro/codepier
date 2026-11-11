@@ -74,7 +74,7 @@ window.CodePierProjectRuntime = (() => {
       .filter(Boolean);
   function markup() {
     return `<form id="project-runtime-form">
-      <p class="runtime-intro">按项目选择执行环境。未单独配置的项目默认使用清洁模式；切换不会修改文件权限，也不会重启正在运行的命令。</p>
+      <p class="runtime-intro">按项目选择执行环境。未单独配置的项目默认使用清洁模式；新环境用于后续命令，当前命令和文件权限保持原状。</p>
       <div class="runtime-state" role="status" aria-live="polite"><span class="badge neutral" data-runtime-state>正在读取</span><span data-runtime-current>核对节点当前配置…</span></div>
       <fieldset class="runtime-controls" disabled><legend class="runtime-legend">执行方式</legend>
         <div class="runtime-options">${Object.entries(names)
@@ -355,7 +355,7 @@ window.CodePierProjectRuntime = (() => {
       // A recovered save is a historical receipt, even when it said applied.
       // Always read the current Agent before displaying a current-state claim.
       status('已保存 · 核对生效中', '原保存已完成，正在读取节点当前实际配置');
-      feedback.textContent = '不会重新提交，也不会用历史保存结果覆盖后续配置变化。';
+      feedback.textContent = '已保留当前配置，请刷新查看最新保存结果。';
       lock();
       later(() => load());
     }
@@ -526,7 +526,7 @@ window.CodePierProjectRuntime = (() => {
           !error.status ||
           error.status >= 500
         ) {
-          status('保存结果未确认', '请核对原保存，不要重新提交');
+          status('保存结果未确认', '请查看原请求的保存结果');
           feedback.textContent =
             '连接中断，保存可能已经完成。点击“核对原保存”读取原回执，不会重复写入。';
         } else {

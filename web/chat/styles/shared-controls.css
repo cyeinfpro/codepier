@@ -1,0 +1,110 @@
+/* Shared controls and touch targets; keep the standalone conversation usable. */
+.chat-text-button,
+.chat-primary-button,
+.chat-secondary-button,
+.chat-danger-button {
+  font-size: var(--ui-text-sm, 13px);
+  font-weight: var(--ui-weight-semibold, 600);
+}
+.chat-primary-button {
+  font-weight: var(--ui-weight-bold, 700);
+}
+@media (max-width: 760px), (pointer: coarse) {
+  #chat-catalog-retry,
+  .chat-text-button {
+    min-height: var(--ui-touch-target, 44px);
+  }
+}
+
+#chat-options-toggle {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(50vw, 420px);
+}
+.chat-history-chips,
+.chat-segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chat-history-chips {
+  padding: 0 12px 8px;
+}
+.chat-history-chips details {
+  position: relative;
+}
+.chat-history-chips select {
+  position: absolute;
+  z-index: 1;
+  inset: calc(100% + 4px) auto auto 0;
+  min-width: 96px;
+  max-width: min(150px, 40vw);
+  box-shadow: var(--chat-shadow);
+}
+.chat-history-chips summary,
+.chat-segmented label {
+  cursor: pointer;
+  font-size: var(--ui-text-sm);
+}
+.chat-segmented {
+  padding: 6px 0;
+  border: 0;
+}
+.chat-segmented label {
+  padding: 6px 10px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-md);
+}
+.chat-history-filter {
+  grid-template-columns: minmax(0, 1fr);
+}
+#chat-resume {
+  margin: 12px auto;
+}
+@media (min-width: 761px) {
+  .chat-compose-frame {
+    position: relative;
+  }
+  .chat-options {
+    display: none;
+    position: absolute;
+    inset: auto 16px 100% auto;
+    z-index: var(--chat-z-menu);
+    width: min(520px, calc(100% - 32px));
+    max-height: min(70dvh, 460px);
+    overflow: auto;
+    padding: 16px;
+    border: 1px solid var(--chat-line);
+    border-radius: var(--ui-radius-xl);
+    background: var(--chat-raised);
+    box-shadow: var(--chat-shadow);
+  }
+  .chat-options.is-open,
+  .chat-options-head {
+    display: grid;
+    gap: 10px;
+  }
+  .chat-options-head {
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+  .chat-options .chat-config-bar {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .chat-options .chat-config-bar > * {
+    min-width: 0;
+  }
+}
+@media (max-width: 760px) {
+  .chat-header-right > :is(#chat-find-toggle, #chat-inspector-toggle) {
+    display: inline-grid;
+  }
+  /* iOS keeps the layout viewport full-height while its keyboard is open. */
+  body.ui-keyboard-open .chat-workspace {
+    height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px)));
+    min-height: 0;
+  }
+}

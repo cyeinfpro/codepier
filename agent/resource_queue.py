@@ -1,4 +1,5 @@
 """Atomic resource sets with FIFO conflict fairness and cancellation cleanup."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,21 +28,27 @@ class Claim:
     kind: str
     name: str
     write: bool
-    holder: str = 'file'
+    holder: str = "file"
     stable: bool = False
 
     def conflicts(self, other, *, relaxed=True):
-        if self.namespace != other.namespace or self.kind != other.kind or not (self.write or other.write):
+        if (
+            self.namespace != other.namespace
+            or self.kind != other.kind
+            or not (self.write or other.write)
+        ):
             return False
-        if self.kind == 'service':
+        if self.kind == "service":
             return self.name == other.name
         if relaxed and self.holder != other.holder:
-            file_claim, process_claim = (self, other) if self.holder == 'file' else (other, self)
+            file_claim, process_claim = (self, other) if self.holder == "file" else (other, self)
             if not file_claim.write or (not process_claim.write and not process_claim.stable):
                 return False
         left_anchor, left = _path_scope(self.name)
         right_anchor, right = _path_scope(other.name)
-        return left_anchor == right_anchor and (left[:len(right)] == right or right[:len(left)] == left)
+        return left_anchor == right_anchor and (
+            left[: len(right)] == right or right[: len(left)] == left
+        )
 
 
 def overlaps(left, right, *, relaxed=True):
@@ -63,8 +70,8 @@ async def finish_cleanup(awaitable):
 
 
 class ResourceQueue:
-    def __init__(self, *, semantics='strict', clock=time.monotonic, bypass_seconds=5):
-        self.relaxed = semantics == 'relaxed'
+    def __init__(self, *, semantics="strict", clock=time.monotonic, bypass_seconds=5):
+        self.relaxed = semantics == "relaxed"
         self.clock = clock
         self.bypass_seconds = bypass_seconds
         self._started = {}
@@ -95,8 +102,11 @@ class ResourceQueue:
 
     def enqueue(self, token, operation_id, claims, *, bounded=False, strict=False, on_bypass=None):
         claims = tuple(claims)
-        dependencies = dict.fromkeys(held_token for held_token, (_, held) in self._entries.items()
-                                     if overlaps(claims, held, relaxed=self.relaxed))
+        dependencies = dict.fromkeys(
+            held_token
+            for held_token, (_, held) in self._entries.items()
+            if overlaps(claims, held, relaxed=self.relaxed)
+        )
         self._bounded[token] = bounded and not strict
         self._bypass_callbacks[token] = on_bypass
         self._entries[token] = (operation_id, claims)
@@ -106,7 +116,7 @@ class ResourceQueue:
         self.waiting.append((token, operation_id, claims))
 
     def reconfigure(self, semantics):
-        self.relaxed = semantics == 'relaxed'
+        self.relaxed = semantics == "relaxed"
         self._bypass_roots.clear()
         self._dependents.clear()
         for token, (_, claims) in self._entries.items():
@@ -125,10 +135,16 @@ class ResourceQueue:
     def blockers(self, token):
         claims = self._entries.get(token, (None, ()))[1]
         tokens = list(self._dependencies.get(token, {}))
-        tokens += [held_token for held_token, (_, held) in self.active.items()
-                   if held_token is not token and overlaps(claims, held, relaxed=self.relaxed)]
-        return list(dict.fromkeys(self._entries[blocker][0]
-                    for blocker in tokens if blocker in self._entries))[:64]
+        tokens += [
+            held_token
+            for held_token, (_, held) in self.active.items()
+            if held_token is not token and overlaps(claims, held, relaxed=self.relaxed)
+        ]
+        return list(
+            dict.fromkeys(
+                self._entries[blocker][0] for blocker in tokens if blocker in self._entries
+            )
+        )[:64]
 
     def _active_roots(self, token, seen=None):
         # The admitted queue permits 1024 waiters. A valid sparse dependency
@@ -159,12 +175,14 @@ class ResourceQueue:
         the long-running-root and writer-turn gates below apply unchanged.
         """
         claims = self._entries.get(token, (None, ()))[1]
-        if not claims or any(claim.write or claim.holder != 'file' for claim in claims):
+        if not claims or any(claim.write or claim.holder != "file" for claim in claims):
             return False
         for blocker in dependencies:
             held = self._entries.get(blocker, (None, ()))[1]
             for other in held:
-                if other.holder != 'process' and any(mine.conflicts(other, relaxed=False) for mine in claims):
+                if other.holder != "process" and any(
+                    mine.conflicts(other, relaxed=False) for mine in claims
+                ):
                     return False
         return True
 
@@ -192,8 +210,10 @@ class ResourceQueue:
         claims = self._entries.get(token, (None, ()))[1]
         # A bypassed younger file operation becomes a real owner. An older
         # waiter must not be granted until that owner has released its claim.
-        if any(held_token is not token and overlaps(claims, held, relaxed=self.relaxed)
-               for held_token, (_, held) in self.active.items()):
+        if any(
+            held_token is not token and overlaps(claims, held, relaxed=self.relaxed)
+            for held_token, (_, held) in self.active.items()
+        ):
             return True
         return bool(self._dependencies.get(token)) and not self._bypassable(token)
 
@@ -203,11 +223,15 @@ class ResourceQueue:
         if self._timer is not None or not self.waiting or not self.active:
             return
         now = self.clock()
-        deadlines = [at + self.bypass_seconds for at in self._started.values()
-                     if at + self.bypass_seconds > now]
+        deadlines = [
+            at + self.bypass_seconds
+            for at in self._started.values()
+            if at + self.bypass_seconds > now
+        ]
         if deadlines:
             self._timer = asyncio.get_running_loop().call_later(
-                max(.001, min(deadlines) - now), self._wake_bypass)
+                max(0.001, min(deadlines) - now), self._wake_bypass
+            )
 
     def _wake_bypass(self):
         self._timer = None
@@ -215,20 +239,12 @@ class ResourceQueue:
         # Event-loop callbacks cannot interrupt one of those transitions.
         self.drain()
 
-    def live_writers(self, claims, operation_id=None):
-        if not self.relaxed:
-            return []
-        return list(dict.fromkeys(identifier for identifier, held in self.active.values()
-            if identifier != operation_id and any(
-                a.holder == 'file' and not a.write and b.holder == 'process' and b.write
-                and a.conflicts(b, relaxed=False) for a in claims for b in held)))[:64]
-
     def concurrency_for(self, operation_id):
         writers = set()
         for token, (identifier, _) in self.active.items():
             if identifier == operation_id:
                 writers.update(self._live.get(token, ()))
-        return {'mode': 'live', 'overlapping_writers': sorted(writers)[:64]} if writers else None
+        return {"mode": "live", "overlapping_writers": sorted(writers)[:64]} if writers else None
 
     def grant(self, token):
         """Move a prechecked waiter to active without yielding or notifying."""
@@ -245,8 +261,14 @@ class ResourceQueue:
             for reader_token, (reader_id, reader_claims) in self.active.items():
                 for writer_id, writer_claims in self.active.values():
                     if reader_id != writer_id and any(
-                        a.holder == 'file' and not a.write and b.holder == 'process' and b.write
-                        and a.conflicts(b, relaxed=False) for a in reader_claims for b in writer_claims):
+                        a.holder == "file"
+                        and not a.write
+                        and b.holder == "process"
+                        and b.write
+                        and a.conflicts(b, relaxed=False)
+                        for a in reader_claims
+                        for b in writer_claims
+                    ):
                         self._live.setdefault(reader_token, set()).add(writer_id)
         self._dependencies.pop(token, None)
         for blocker in dependencies:
@@ -311,7 +333,9 @@ class ResourceQueue:
         if any(identifier == operation_id for identifier, _ in self._entries.values()):
             return None
         token = object()
-        self.enqueue(token, operation_id, claims, bounded=bounded, strict=strict, on_bypass=on_bypass)
+        self.enqueue(
+            token, operation_id, claims, bounded=bounded, strict=strict, on_bypass=on_bypass
+        )
         if self.blocked(token):
             self.discard(token)
             return None
@@ -327,13 +351,17 @@ class ResourceQueue:
             self.drain()
 
     @asynccontextmanager
-    async def slot(self, operation_id, claims, on_wait, *, bounded=False, strict=False, on_bypass=None):
+    async def slot(
+        self, operation_id, claims, on_wait, *, bounded=False, strict=False, on_bypass=None
+    ):
         token = object()
         event = asyncio.Event()
         added = False
         try:
             async with self.condition:
-                self.enqueue(token, operation_id, claims, bounded=bounded, strict=strict, on_bypass=on_bypass)
+                self.enqueue(
+                    token, operation_id, claims, bounded=bounded, strict=strict, on_bypass=on_bypass
+                )
                 self._events[token] = event
                 self._callbacks[token] = on_wait
                 added = True
@@ -345,9 +373,11 @@ class ResourceQueue:
                 await self.release(token)
 
 
-PATH_READ_TOOLS = frozenset({'fs_tree', 'fs_read', 'fs_read_many', 'fs_search'})
-SCOPED_READ_TOOLS = frozenset({'searches_start', 'code_symbols', 'history_list'})
-BOUNDED_FILE_TOOLS = PATH_READ_TOOLS | SCOPED_READ_TOOLS | {'read', 'write', 'edit', 'project_knowledge_query'}
+PATH_READ_TOOLS = frozenset({"fs_tree", "fs_read", "fs_read_many", "fs_search"})
+SCOPED_READ_TOOLS = frozenset({"searches_start", "code_symbols", "history_list"})
+BOUNDED_FILE_TOOLS = (
+    PATH_READ_TOOLS | SCOPED_READ_TOOLS | {"read", "write", "edit", "project_knowledge_query"}
+)
 
 
 def canonical_path(path):
@@ -355,7 +385,7 @@ def canonical_path(path):
     # macOS commonly uses case-insensitive APFS. Conservatively alias case even
     # on case-sensitive volumes: extra serialization is safer than missing a
     # conflict, including paths whose final component does not yet exist.
-    return name.casefold() if os.name == 'nt' or sys.platform == 'darwin' else name
+    return name.casefold() if os.name == "nt" or sys.platform == "darwin" else name
 
 
 def _worktree_creation_claims(engine, root, operation_id=None):
@@ -369,104 +399,152 @@ def _worktree_creation_claims(engine, root, operation_id=None):
     from agent.run_directories import operation_name
 
     root = Path(root)
-    metadata = root / '.git'
+    metadata = root / ".git"
     paths = [metadata]
     if metadata.is_file():
         try:
-            with metadata.open('r', encoding='utf-8') as stream:
+            with metadata.open("r", encoding="utf-8") as stream:
                 pointer = stream.read(4097)
-            if len(pointer) > 4096 or not pointer.startswith('gitdir: ') or '\n' in pointer.rstrip('\r\n'):
-                raise ValueError('invalid gitdir pointer')
-            destination = pointer[len('gitdir: '):].strip()
+            if (
+                len(pointer) > 4096
+                or not pointer.startswith("gitdir: ")
+                or "\n" in pointer.rstrip("\r\n")
+            ):
+                raise ValueError("invalid gitdir pointer")
+            destination = pointer[len("gitdir: ") :].strip()
             if not destination:
-                raise ValueError('empty gitdir pointer')
+                raise ValueError("empty gitdir pointer")
             git_dir = Path(destination)
             metadata = git_dir if git_dir.is_absolute() else root / git_dir
             paths.append(metadata)
         except (OSError, UnicodeError, ValueError) as exc:
-            raise DevError('WORKTREE_METADATA_UNAVAILABLE', 'Cannot safely identify Git metadata before worktree creation', 409) from exc
-    common = metadata / 'commondir'
+            raise DevError(
+                "WORKTREE_METADATA_UNAVAILABLE",
+                "Cannot safely identify Git metadata before worktree creation",
+                409,
+            ) from exc
+    common = metadata / "commondir"
     if common.is_file():
         try:
-            with common.open('r', encoding='utf-8') as stream:
+            with common.open("r", encoding="utf-8") as stream:
                 pointer = stream.read(4097)
-            if len(pointer) > 4096 or not pointer.strip() or '\n' in pointer.rstrip('\r\n'):
-                raise ValueError('invalid common directory pointer')
+            if len(pointer) > 4096 or not pointer.strip() or "\n" in pointer.rstrip("\r\n"):
+                raise ValueError("invalid common directory pointer")
             common_dir = Path(pointer.strip())
             paths.append(common_dir if common_dir.is_absolute() else metadata / common_dir)
         except (OSError, UnicodeError, ValueError) as exc:
-            raise DevError('WORKTREE_METADATA_UNAVAILABLE', 'Cannot safely identify shared Git metadata', 409) from exc
-    configured = engine.config.get('integrations', {}).get('worktree_directory', '')
-    base = Path(configured).expanduser() if configured else root.parent / 'CodePier-Worktrees'
+            raise DevError(
+                "WORKTREE_METADATA_UNAVAILABLE", "Cannot safely identify shared Git metadata", 409
+            ) from exc
+    configured = engine.config.get("integrations", {}).get("worktree_directory", "")
+    base = Path(configured).expanduser() if configured else root.parent / "CodePier-Worktrees"
     if not base.is_absolute():
-        raise DevError('WORKTREE_DIRECTORY', 'Worktree directory must be absolute')
+        raise DevError("WORKTREE_DIRECTORY", "Worktree directory must be absolute")
     parent = base / hashlib.sha256(str(root).encode()).hexdigest()[:16]
     # Legacy callers without an operation identity conservatively coordinate
     # the project-specific parent. The runner supplies the exact operation ID.
     target = parent / operation_name(operation_id) if operation_id is not None else parent
     paths.append(target)
-    return [Claim('agent', 'path', canonical_path(root), False, 'process', True),
-            *[Claim('agent', 'path', path, True, 'process')
-              for path in dict.fromkeys(canonical_path(path) for path in paths)]]
+    return [
+        Claim("agent", "path", canonical_path(root), False, "process", True),
+        *[
+            Claim("agent", "path", path, True, "process")
+            for path in dict.fromkeys(canonical_path(path) for path in paths)
+        ],
+    ]
 
 
 def claims_for(engine, tool, project, args, root, operation_id=None):
     if tool in SCOPED_READ_TOOLS:
-        return [Claim('agent', 'path', canonical_path(engine.path(root, args.get('path') or '.')), False)]
-    if tool == 'worktrees_create':
+        return [
+            Claim(
+                "agent", "path", canonical_path(engine.path(root, args.get("path") or ".")), False
+            )
+        ]
+    if tool == "worktrees_create":
         return _worktree_creation_claims(engine, root, operation_id)
-    if tool == 'project_checkpoint':
+    if tool == "project_checkpoint":
         # Checkpoint writes only operation-private journal storage. Its stable
         # source read freezes file writes without a source-root writer.
-        return [Claim('agent', 'path', canonical_path(root), False, 'process', True)]
+        return [Claim("agent", "path", canonical_path(root), False, "process", True)]
     if tool in PATH_READ_TOOLS:
-        paths = args['paths'] if tool == 'fs_read_many' else [args['path']]
+        paths = args["paths"] if tool == "fs_read_many" else [args["path"]]
         try:
-            return [Claim('agent', 'path', canonical_path(engine.path(root, path)), False) for path in paths]
+            return [
+                Claim("agent", "path", canonical_path(engine.path(root, path)), False)
+                for path in paths
+            ]
         except (DevError, OSError):
-            if tool != 'fs_read_many':
+            if tool != "fs_read_many":
                 raise
             # Batch reads report path failures per item. Keep a conservative
             # claim if a rejected path becomes readable while this job waits.
-            return [Claim('agent', 'path', canonical_path(root), False)]
-    if tool == 'read' and args.get('operation') == 'batch':
+            return [Claim("agent", "path", canonical_path(root), False)]
+    if tool == "read" and args.get("operation") == "batch":
         try:
-            return [Claim('agent', 'path', canonical_path(engine.path(root, item['path'], False)), False)
-                    for item in args['options']['items']]
+            return [
+                Claim(
+                    "agent", "path", canonical_path(engine.path(root, item["path"], False)), False
+                )
+                for item in args["options"]["items"]
+            ]
         except (DevError, OSError):
             # Per-item errors belong to the durable read result, not admission.
             # Revalidate every path at execution, under a conservative root claim.
-            return [Claim('agent', 'path', canonical_path(root), False)]
-    if tool == 'edit' and args.get('changes'):
-        paths = [change['path'] for change in args['changes']] + [change['destination'] for change in args['changes'] if change.get('destination')]
-        return [Claim('agent', 'path', canonical_path(engine.path(root, path, False)), True) for path in paths]
-    if tool in {'read', 'write', 'edit', 'download_artifact'}:
-        path = engine.path(root, args['path'], False).resolve()
-        return [Claim('agent', 'path', canonical_path(path), tool != 'read')]
-    if tool != 'exec':
+            return [Claim("agent", "path", canonical_path(root), False)]
+    if tool == "edit" and args.get("changes"):
+        paths = [change["path"] for change in args["changes"]] + [
+            change["destination"] for change in args["changes"] if change.get("destination")
+        ]
+        return [
+            Claim("agent", "path", canonical_path(engine.path(root, path, False)), True)
+            for path in paths
+        ]
+    if tool in {"read", "write", "edit", "download_artifact"}:
+        path = engine.path(root, args["path"], False).resolve()
+        return [Claim("agent", "path", canonical_path(path), tool != "read")]
+    if tool != "exec":
         return []
-    if args.get('task'):
-        task = engine.config.get('tasks', {}).get(args['task'], {})
+    if args.get("task"):
+        task = engine.config.get("tasks", {}).get(args["task"], {})
         # This is local task policy, never caller-declared resource policy.
         # Public exec(task=...) must preserve legacy tasks_run's exclusion.
-        return [Claim('agent', 'path', canonical_path(root), not task.get('allow_read_concurrency', False), 'process', True)]
-    remote = project.get('_core_ssh')
-    namespace = f"ssh:{remote['host']}:{remote['port']}" if remote else 'agent'
-    cwd = Path(args['cwd']).expanduser()
+        return [
+            Claim(
+                "agent",
+                "path",
+                canonical_path(root),
+                not task.get("allow_read_concurrency", False),
+                "process",
+                True,
+            )
+        ]
+    remote = project.get("_core_ssh")
+    namespace = f"ssh:{remote['host']}:{remote['port']}" if remote else "agent"
+    cwd = Path(args["cwd"]).expanduser()
     if not cwd.is_absolute():
         cwd = root / cwd
     claims = []
-    for resource in args['resources']:
-        name = resource['name']
-        if resource['kind'] == 'path':
+    for resource in args["resources"]:
+        name = resource["name"]
+        if resource["kind"] == "path":
             if remote:
                 # Relative remote paths are scoped conservatively under '/', as
                 # the login shell's real cwd is not available before execution.
-                if '..' in PurePosixPath(name).parts:
-                    raise DevError('INVALID_RESOURCE', '远程资源路径不接受 ..，请使用绝对路径')
-                name = '/' if not PurePosixPath(name).is_absolute() else str(PurePosixPath(name))
+                if ".." in PurePosixPath(name).parts:
+                    raise DevError("INVALID_RESOURCE", "远程资源路径不接受 ..，请使用绝对路径")
+                name = "/" if not PurePosixPath(name).is_absolute() else str(PurePosixPath(name))
             else:
                 path = Path(name).expanduser()
                 name = canonical_path(path if path.is_absolute() else cwd / path)
-        claims.append(Claim(namespace, resource['kind'], name, resource['mode'] == 'write', 'process', resource['mode'] == 'read_stable'))
+        claims.append(
+            Claim(
+                namespace,
+                resource["kind"],
+                name,
+                resource["mode"] == "write",
+                "process",
+                resource["mode"] == "read_stable",
+            )
+        )
     return claims

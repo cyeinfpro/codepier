@@ -1,8 +1,22 @@
 target-version = "py313"
+line-length = 100
 exclude = [".venv*", ".work", "dist", "node_modules", "web/vendor"]
 
+[per-file-target-version]
+"scripts/migrate_hub*.py" = "py39"
+"scripts/rename_checkout.py" = "py39"
+"scripts/panel_update*.py" = "py39"
+"scripts/install_agent.py" = "py39"
+"scripts/agent_lifecycle.py" = "py39"
+"scripts/check_host_python.py" = "py39"
+"shared/release_source.py" = "py39"
+
 [lint]
-# Correctness gate. The broader audit also reviews B/ASYNC findings manually.
+extend-select = ["F401", "B007", "B023", "B904", "B905", "ASYNC"]
+# Correctness gate, including reviewed closure, zip and asynchronous lifecycle rules.
 # Imported pytest fixtures and compatibility wildcard re-exports are deliberate;
 # do not delete them just to silence unused-import warnings.
 select = ["E9", "F601", "F602", "F821", "F822", "F823", "B012", "B006", "B008", "B016", "B019", "B020", "B021", "B024", "B025", "B032"]
+
+[lint.extend-per-file-ignores]
+"tests/**" = ["F401", "B007", "B023", "B904", "B905", "ASYNC"]

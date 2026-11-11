@@ -1,4 +1,5 @@
 """Explicit connection lifetimes; absent policies preserve legacy behavior."""
+
 import math
 import time
 from shared.util import DevError
@@ -32,7 +33,9 @@ def check(store, grant_id):
 
 
 def save_new(store, grant_id, expires):
-    store.db.execute("INSERT INTO grant_expirations(grant_id,expires) VALUES (?,?)", (grant_id, expires))
+    store.db.execute(
+        "INSERT INTO grant_expirations(grant_id,expires) VALUES (?,?)", (grant_id, expires)
+    )
 
 
 def public_expiry(store, row):
@@ -45,12 +48,18 @@ def public_expiry(store, row):
 
 
 def update(store, principal, grant_id, expires, expected_revision, confirm_reactivate=False):
-    if expires is not None and (isinstance(expires, bool) or not isinstance(expires, (float, int))
-            or not math.isfinite(expires) or not time.time() < expires < UNLIMITED_TOKEN_EXPIRY):
+    if expires is not None and (
+        isinstance(expires, bool)
+        or not isinstance(expires, (float, int))
+        or not math.isfinite(expires)
+        or not time.time() < expires < UNLIMITED_TOKEN_EXPIRY
+    ):
         raise DevError("INVALID_EXPIRATION", "请选择未来的有效到期日期")
     with store.transaction():
-        row = store.one("SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?",
-                        (grant_id, principal.user_id, principal.space_id))
+        row = store.one(
+            "SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=?",
+            (grant_id, principal.user_id, principal.space_id),
+        )
         if not row:
             raise DevError("GRANT_NOT_FOUND", "授权不存在", 404)
         if row["revoked"]:
@@ -60,19 +69,53 @@ def update(store, principal, grant_id, expires, expected_revision, confirm_react
         if expected_revision != revision:
             raise DevError("EXPIRATION_CONFLICT", "期限已被修改，请刷新后重试", 409)
         now = time.time()
-        token_row = store.one("SELECT max(expires) AS expires FROM tokens WHERE grant_id=? AND kind IN ('pat','refresh')", (grant_id,))
+        token_row = store.one(
+            "SELECT max(expires) AS expires FROM tokens WHERE grant_id=? AND kind IN ('pat','refresh')",
+            (grant_id,),
+        )
         old_expires = previous["expires"] if previous else token_row["expires"]
-        expired = (old_expires is not None and old_expires <= now) or not token_row["expires"] or token_row["expires"] <= now
+        expired = (
+            (old_expires is not None and old_expires <= now)
+            or not token_row["expires"]
+            or token_row["expires"] <= now
+        )
         if expired and not confirm_reactivate:
-            raise DevError("REACTIVATION_CONFIRMATION_REQUIRED", "授权已过期或尚无凭据；修改期限可能恢复现存凭据，请明确确认", 409)
+            raise DevError(
+                "REACTIVATION_CONFIRMATION_REQUIRED",
+                "授权已过期或尚无凭据；修改期限可能恢复现存凭据，请明确确认",
+                409,
+            )
         value = UNLIMITED_TOKEN_EXPIRY if expires is None else expires
         # Never revive consumed refresh tokens, revoked grants, or deleted credentials.
-        store.db.execute("UPDATE tokens SET expires=? WHERE grant_id=? AND kind IN ('pat','refresh')", (value, grant_id))
-        store.db.execute("UPDATE tokens SET expires=min(expires,?) WHERE grant_id=? AND kind='access'", (value, grant_id))
-        store.db.execute("""INSERT INTO grant_expirations(grant_id,expires,revision) VALUES (?,?,1)
-            ON CONFLICT(grant_id) DO UPDATE SET expires=excluded.expires,revision=revision+1""", (grant_id, expires))
-        store.audit(principal.actor, "grant.expiration.updated", grant_id, detail={
-            "previous_expires": old_expires, "expires": expires, "unlimited": expires is None,
-            "confirmed_reactivation": confirm_reactivate, "revision": revision + 1})
-        return {"ok": True, "expires": expires, "unlimited": expires is None,
-                "expiry_revision": revision + 1, "reconnect_required": not bool(token_row["expires"])}
+        store.db.execute(
+            "UPDATE tokens SET expires=? WHERE grant_id=? AND kind IN ('pat','refresh')",
+            (value, grant_id),
+        )
+        store.db.execute(
+            "UPDATE tokens SET expires=min(expires,?) WHERE grant_id=? AND kind='access'",
+            (value, grant_id),
+        )
+        store.db.execute(
+            """INSERT INTO grant_expirations(grant_id,expires,revision) VALUES (?,?,1)
+            ON CONFLICT(grant_id) DO UPDATE SET expires=excluded.expires,revision=revision+1""",
+            (grant_id, expires),
+        )
+        store.audit(
+            principal.actor,
+            "grant.expiration.updated",
+            grant_id,
+            detail={
+                "previous_expires": old_expires,
+                "expires": expires,
+                "unlimited": expires is None,
+                "confirmed_reactivation": confirm_reactivate,
+                "revision": revision + 1,
+            },
+        )
+        return {
+            "ok": True,
+            "expires": expires,
+            "unlimited": expires is None,
+            "expiry_revision": revision + 1,
+            "reconnect_required": not bool(token_row["expires"]),
+        }

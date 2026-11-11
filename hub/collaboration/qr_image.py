@@ -6,6 +6,7 @@ small implementation never fetches a URL or puts the payload into SVG markup.
 Tables and placement follow ISO/IEC 18004 QR Model 2; the correction-level and
 version capacities are cross-checkable at https://www.qrcode.com/en/about/version.html.
 """
+
 from __future__ import annotations
 
 from itertools import groupby
@@ -62,7 +63,7 @@ def _data_words(payload: bytes, version: int) -> bytes:
     bits += "".join(format(value, "08b") for value in payload)
     bits += "0" * min(4, capacity * 8 - len(bits))
     bits += "0" * (-len(bits) % 8)
-    words = bytearray(int(bits[index:index + 8], 2) for index in range(0, len(bits), 8))
+    words = bytearray(int(bits[index : index + 8], 2) for index in range(0, len(bits), 8))
     while len(words) < capacity:
         words.append(0xEC if (len(words) - len(bits) // 8) % 2 == 0 else 0x11)
     return bytes(words)
@@ -76,7 +77,7 @@ def _codewords(payload: bytes, version: int) -> bytes:
     cursor = 0
     for index in range(block_count):
         length = short_size + (index >= block_count - long_count)
-        blocks.append(words[cursor:cursor + length])
+        blocks.append(words[cursor : cursor + length])
         cursor += length
     parity = [_parity(block, parity_count) for block in blocks]
     result = bytearray()
@@ -154,7 +155,7 @@ def _mask(mask: int, x: int, y: int) -> bool:
 def _penalty(matrix: list[list[bool]]) -> int:
     size = len(matrix)
     score = 0
-    lines = list(matrix) + [list(column) for column in zip(*matrix)]
+    lines = list(matrix) + [list(column) for column in zip(*matrix, strict=True)]
     for line in lines:
         for _, group in groupby(line):
             run = len(list(group))
@@ -163,7 +164,7 @@ def _penalty(matrix: list[list[bool]]) -> int:
         # Include the quiet zone when checking finder-like patterns.
         text = "0000" + "".join("1" if value else "0" for value in line) + "0000"
         for index in range(len(text) - 10):
-            if text[index:index + 11] in ("00001011101", "10111010000"):
+            if text[index : index + 11] in ("00001011101", "10111010000"):
                 score += 40
     for y in range(size - 1):
         for x in range(size - 1):
@@ -185,7 +186,8 @@ def qr_matrix(payload: str) -> list[list[bool]]:
     if len(data) > MAX_PAYLOAD_BYTES:
         raise ValueError("QR payload exceeds local capacity")
     version = next(
-        version for version, profile in _PROFILES.items()
+        version
+        for version, profile in _PROFILES.items()
         if 12 + 4 + (8 if version < 10 else 16) + len(data) * 8 <= profile[0] * 8
     )
     functions = _functions(version)
@@ -210,8 +212,10 @@ def qr_matrix(payload: str) -> list[list[bool]]:
     candidates = []
     for mask in range(8):
         candidate = [
-            [bool(value) ^ (functions[y][x] is None and _mask(mask, x, y))
-             for x, value in enumerate(row)]
+            [
+                bool(value) ^ (functions[y][x] is None and _mask(mask, x, y))
+                for x, value in enumerate(row)
+            ]
             for y, row in enumerate(matrix)
         ]
         _format(candidate, mask)
@@ -226,7 +230,8 @@ def qr_svg(payload: str) -> str:
     path = "".join(
         f"M{x + 4},{y + 4}h1v1h-1z"
         for y, row in enumerate(matrix)
-        for x, dark in enumerate(row) if dark
+        for x, dark in enumerate(row)
+        if dark
     )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" '

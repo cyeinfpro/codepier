@@ -66,6 +66,13 @@ def test_selected_symlink_file_is_not_certified(source_tree):
         bundle.build(source_tree / 'dist/source.zip', public=True)
 
 
+def test_public_inventory_drift_cannot_silently_omit_source(source_tree):
+    (source_tree / 'agent/new_module.py').write_text('VALUE = 1\n')
+    with pytest.raises(RuntimeError, match='inventory is outdated'):
+        bundle.build(source_tree / 'dist/source.zip', public=True)
+    assert not (source_tree / 'dist/source.zip').exists()
+
+
 def test_public_profile_ignores_local_evidence_symlinks(source_tree):
     evidence = source_tree / 'docs/evidence'
     evidence.mkdir()

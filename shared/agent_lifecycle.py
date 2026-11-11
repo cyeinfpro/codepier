@@ -3,6 +3,7 @@
 These actions are deliberately not MCP tools. Only an authenticated panel admin
 can queue them for a concrete device, and the Agent accepts only this fixed set.
 """
+
 from __future__ import annotations
 
 DEVICE_ACTIONS = frozenset({"agent_update", "agent_restart", "agent_uninstall"})
@@ -33,7 +34,9 @@ def public_management(value: object) -> dict:
         "reason": str(value.get("reason", ""))[:300],
         "last_error": str(value.get("last_error", ""))[:500],
     }
-    states={'pending','migrating','completed','rollback','error','recovery_required'}
-    result['product']='CodePier' if value.get('product')=='CodePier' else ''
-    result['brand_migration']=value.get('brand_migration') if value.get('brand_migration') in states else ''
+    states = {"pending", "migrating", "completed", "rollback", "error", "recovery_required"}
+    result["product"] = "CodePier" if value.get("product") == "CodePier" else ""
+    result["brand_migration"] = (
+        value.get("brand_migration") if value.get("brand_migration") in states else ""
+    )
     return result

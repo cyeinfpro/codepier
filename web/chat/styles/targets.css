@@ -1,0 +1,48 @@
+/* The execution target belongs to the draft, never to the history filter. */
+.chat-new-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 12px;
+  align-items: center;
+  width: 100%;
+  margin: 0 0 9px;
+  padding: 8px 12px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-side);
+}
+.chat-new-context label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  white-space: nowrap;
+  color: var(--chat-muted);
+  font-size: var(--ui-text-xs, 12px);
+}
+.chat-new-context select {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-width: 300px;
+  padding: 5px 9px;
+  min-height: 32px;
+  font-size: var(--ui-text-xs, 12px);
+  font-weight: var(--ui-weight-semibold, 600);
+}
+#chat-target-info {
+  grid-column: 1/-1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-text-xs, 12px);
+  color: var(--chat-soft);
+}
+.chat-new-context[data-unavailable='true'] #chat-target-info {
+  white-space: normal;
+  color: var(--chat-warning);
+}
+#chat-change-project {
+  white-space: nowrap;
+  font-size: var(--ui-text-xs, 12px);
+}

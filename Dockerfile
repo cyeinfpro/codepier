@@ -21,8 +21,8 @@ COPY --chown=root:root hub ./hub
 COPY --chown=root:root shared ./shared
 COPY --chown=root:root web ./web
 COPY --chown=root:root agent ./agent
-COPY --chown=root:root scripts ./scripts
-COPY --chown=root:root deploy ./deploy
+COPY --chown=root:root scripts/install_agent.py scripts/agent_lifecycle.py scripts/mcp_stdio_bridge.py ./scripts/
+COPY --chown=root:root deploy/install-from-hub.sh deploy/install-from-hub.ps1 deploy/install-agent.sh deploy/install-agent.ps1 deploy/start-agent.sh deploy/start-agent.cmd deploy/agent.service deploy/mcp-stdio.sh ./deploy/
 COPY --chown=root:root requirements-agent.txt ./
 COPY --chown=root:root LICENSE ./
 # Host updater extraction uses umask 077. COPY preserves those private modes.

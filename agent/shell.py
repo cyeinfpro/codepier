@@ -1,4 +1,5 @@
 """Locally opted-in shell execution; this is intentionally not an OS sandbox."""
+
 from __future__ import annotations
 
 import getpass
@@ -8,7 +9,12 @@ import shutil
 from pathlib import Path
 
 from shared.util import DevError
-from shared.execution_policy import POLICY_VERSION, agent_blocks_codex, agent_blocks_computer, local_blocks_computer
+from shared.execution_policy import (
+    POLICY_VERSION,
+    agent_blocks_codex,
+    agent_blocks_computer,
+    local_blocks_computer,
+)
 
 
 def default_command():
@@ -22,23 +28,46 @@ def validate_shell(value):
         raise ValueError("shell 必须是本机执行配置对象")
     if set(value) - {"enabled", "projects", "command", "inherit_env", "env", "max_timeout_seconds"}:
         raise ValueError("shell 包含未知配置字段")
-    result = {"enabled": False, "projects": [], "command": default_command(),
-              "inherit_env": True, "env": {}, "max_timeout_seconds": 86400, **value}
+    result = {
+        "enabled": False,
+        "projects": [],
+        "command": default_command(),
+        "inherit_env": True,
+        "env": {},
+        "max_timeout_seconds": 86400,
+        **value,
+    }
     for field in ("enabled", "inherit_env"):
         if type(result[field]) is not bool:
             raise ValueError(f"shell.{field} 必须是 true/false")
     projects = result["projects"]
-    if not isinstance(projects, list) or any(not isinstance(p, str) or not p.strip() for p in projects):
-        raise ValueError("shell.projects 必须是项目别名/ID 数组；所有项目使用 [\"*\"]")
+    if not isinstance(projects, list) or any(
+        not isinstance(p, str) or not p.strip() for p in projects
+    ):
+        raise ValueError('shell.projects 必须是项目别名/ID 数组；所有项目使用 ["*"]')
     command = result["command"]
-    if (not isinstance(command, list) or not command or
-            any(not isinstance(x, str) or "\x00" in x for x in command) or not command[0].strip()):
-        raise ValueError("shell.command 必须是 Shell 程序及选项的非空数组，远程命令作为最后一个参数传入")
+    if (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(x, str) or "\x00" in x for x in command)
+        or not command[0].strip()
+    ):
+        raise ValueError(
+            "shell.command 必须是 Shell 程序及选项的非空数组，远程命令作为最后一个参数传入"
+        )
     timeout = result["max_timeout_seconds"]
     if type(timeout) is not int or not 1 <= timeout <= 86400:
         raise ValueError("shell.max_timeout_seconds 必须是 1–86400 秒的整数")
     env = result["env"]
-    if not isinstance(env, dict) or any(not isinstance(k, str) or not k or "=" in k or "\x00" in k or not isinstance(v, str) or "\x00" in v for k, v in env.items()):
+    if not isinstance(env, dict) or any(
+        not isinstance(k, str)
+        or not k
+        or "=" in k
+        or "\x00" in k
+        or not isinstance(v, str)
+        or "\x00" in v
+        for k, v in env.items()
+    ):
         raise ValueError("shell.env 必须是有效的环境变量文字键值对象")
     return result
 
@@ -63,7 +92,9 @@ def prepare_shell(config, project, spec, root, args):
         raise DevError(*denial, 403)
     shell = config["shell"]
     if args["timeout_seconds"] > shell["max_timeout_seconds"]:
-        raise DevError("SHELL_TIMEOUT_LIMIT", f"请求超时超过本机上限 {shell['max_timeout_seconds']} 秒")
+        raise DevError(
+            "SHELL_TIMEOUT_LIMIT", f"请求超时超过本机上限 {shell['max_timeout_seconds']} 秒"
+        )
     try:
         cwd = Path(args["cwd"]).expanduser()
         cwd = (cwd if cwd.is_absolute() else root / cwd).resolve(strict=True)
@@ -72,7 +103,8 @@ def prepare_shell(config, project, spec, root, args):
     except (OSError, RuntimeError, ValueError) as exc:
         raise DevError("INVALID_CWD", "无法访问 Shell 工作目录，请核对本机路径") from exc
     from agent.project_runtime import shell_command, selected
-    inherited = shell['env'] if selected(config, project)['mode'] == 'native_compat' else {}
+
+    inherited = shell["env"] if selected(config, project)["mode"] == "native_compat" else {}
     return shell_command(config, project) + [args["command"]], cwd, {**inherited, **args["env"]}
 
 
@@ -80,46 +112,80 @@ def execution_info(config, project, spec, root):
     shell = config.get("shell") or validate_shell({})
     from agent.project_runtime import build_environment, runtime_readiness, shell_command
     from agent.ssh import ssh_transport_tools
-    environment = build_environment({**config, 'shell': shell}, project, root)
-    runtime = runtime_readiness({**config, 'shell': shell}, project, root)
+
+    environment = build_environment({**config, "shell": shell}, project, root)
+    runtime = runtime_readiness({**config, "shell": shell}, project, root)
     denial = shell_denial(config, project, spec)
     command = shell_command({**config, "shell": shell}, project)
     try:
         username = getpass.getuser()
         if hasattr(os, "geteuid"):
             import pwd
+
             username = pwd.getpwuid(os.geteuid()).pw_name
     except (OSError, KeyError):
         username = "unknown"
     return {
         "runtime": runtime,
-        "platform": platform.system(), "user": username,
+        "platform": platform.system(),
+        "user": username,
         "uid": os.geteuid() if hasattr(os, "geteuid") else None,
         "project_root": str(root),
-        "execution_policy": {"version": POLICY_VERSION,
-                             "local_block_codex": config.get("mcp_policy", {}).get("block_local_codex", False),
-                             "effective_block_codex": agent_blocks_codex(config, project),
-                             "local_block_native_computer": local_blocks_computer(config),
-                             "effective_block_native_computer": agent_blocks_computer(config, project),
-                             "split_capabilities": ["codex_model_cli", "native_computer"],
-                             "enforcement": "static_invocation_guard",
-                             "os_sandbox": False},
-        "shell": {"enabled": denial is None, "configured_enabled": shell["enabled"],
-                  "denial": {"code": denial[0], "message": denial[1]} if denial else None,
-                  "command": command, "executable_available": None if runtime["state"] == "unknown" else runtime["state"] == "ready",
-                  "inherit_env": shell["inherit_env"] if runtime["mode"] == "native_compat" else False, "environment_keys": sorted(shell["env"]),
-                  "max_timeout_seconds": shell["max_timeout_seconds"], "interactive": False,
-                  "filesystem_scope": "Agent OS user; absolute cwd and paths outside project allowed",
-                  "next": "shell_exec" if denial is None else None},
-        "tools": {} if runtime["mode"] == "container_v1" else {name: shutil.which(name, path=environment.get("PATH")) for name in
-                  ("git", "ssh", "sshpass", "gh", "docker", "python3", "uv", "node", "npm", "pnpm")},
-        "ssh": {"tool": "ssh_exec", "password_auth_available": denial is None
-                    and runtime['mode'] != 'container_v1' and not project.get('_runtime_requirement')
-                    and all(ssh_transport_tools(shell).values()),
-                "host_key_policy": "strict by default; explicit accept-new for a first connection",
-                "local_script_password": "For existing deployment scripts use shell_exec env.SSHPASS; chat text alone does not supply an environment variable."},
+        "execution_policy": {
+            "version": POLICY_VERSION,
+            "local_block_codex": config.get("mcp_policy", {}).get("block_local_codex", False),
+            "effective_block_codex": agent_blocks_codex(config, project),
+            "local_block_native_computer": local_blocks_computer(config),
+            "effective_block_native_computer": agent_blocks_computer(config, project),
+            "split_capabilities": ["codex_model_cli", "native_computer"],
+            "enforcement": "static_invocation_guard",
+            "os_sandbox": False,
+        },
+        "shell": {
+            "enabled": denial is None,
+            "configured_enabled": shell["enabled"],
+            "denial": {"code": denial[0], "message": denial[1]} if denial else None,
+            "command": command,
+            "executable_available": None
+            if runtime["state"] == "unknown"
+            else runtime["state"] == "ready",
+            "inherit_env": shell["inherit_env"] if runtime["mode"] == "native_compat" else False,
+            "environment_keys": sorted(shell["env"]),
+            "max_timeout_seconds": shell["max_timeout_seconds"],
+            "interactive": False,
+            "filesystem_scope": "Agent OS user; absolute cwd and paths outside project allowed",
+            "next": "shell_exec" if denial is None else None,
+        },
+        "tools": {}
+        if runtime["mode"] == "container_v1"
+        else {
+            name: shutil.which(name, path=environment.get("PATH"))
+            for name in (
+                "git",
+                "ssh",
+                "sshpass",
+                "gh",
+                "docker",
+                "python3",
+                "uv",
+                "node",
+                "npm",
+                "pnpm",
+            )
+        },
+        "ssh": {
+            "tool": "ssh_exec",
+            "password_auth_available": denial is None
+            and runtime["mode"] != "container_v1"
+            and not project.get("_runtime_requirement")
+            and all(ssh_transport_tools(shell).values()),
+            "host_key_policy": "strict by default; explicit accept-new for a first connection",
+            "local_script_password": "For existing deployment scripts use shell_exec env.SSHPASS; chat text alone does not supply an environment variable.",
+        },
         "tool_lookup": "Configured project runtime PATH; native SSH transport uses Agent PATH overridden by shell.env.PATH",
-        "credential_environment_present": {name: bool(environment.get(name)) for name in
-                                           ("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "DOCKER_HOST")},
+        "credential_environment_present": {
+            name: bool(environment.get(name))
+            for name in ("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "DOCKER_HOST")
+        },
         "note": "Shell commands use the Agent user's OS permissions and existing local credentials. No automatic backup/rollback or interactive input. Project file tools retain their own path rules.",
     }

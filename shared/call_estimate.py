@@ -4,6 +4,7 @@ The prior is a population average from Astra API calls, not observed host usage.
 A large visible context/output can raise it; never add the whole prior twice.
 Only numeric aggregates leave this module. All monetary arithmetic is pico-USD.
 """
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -17,8 +18,10 @@ VERSION = "codepier-call-prior-v1"
 PRIORS = ((63_861, 200), (135_431, 487), (211_018, 2_000))
 # Visible retained history can grow past the population prior. These are
 # scenario compression triggers, not the model's actual context capacity.
-CALL_SCENARIOS = tuple(replace(s, context_trigger=trigger, retention=1)
-                       for s, trigger in zip(SCENARIOS, (128_000, 240_000, 272_000)))
+CALL_SCENARIOS = tuple(
+    replace(s, context_trigger=trigger, retention=1)
+    for s, trigger in zip(SCENARIOS, (128_000, 240_000, 272_000), strict=True)
+)
 CALIBRATION = {
     "version": "astra-codex-calls-2026-10-25-v1",
     "source_model": "gpt-6-astra",
@@ -36,8 +39,13 @@ CALIBRATION = {
 }
 
 
-def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT,
-                    reference_model=DEFAULT_REFERENCE_MODEL):
+def summarize_calls(
+    groups,
+    coverage,
+    *,
+    cache_read_percent=DEFAULT_CACHE_READ_PERCENT,
+    reference_model=DEFAULT_REFERENCE_MODEL,
+):
     """Reprice each evaluation once; fresh returned text caps cache allocation.
 
     A population prior is also usable when payload counters are absent. That
@@ -45,13 +53,21 @@ def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_P
     Groups must already be permission-filtered, warmed and cut to the period.
     """
     rates = pricing(cache_read_percent, reference_model)
-    rate = {key: int(Decimal(str(value)) * 10_000)
-            for key, value in rates["usd_per_million"].items()}
+    rate = {
+        key: int(Decimal(str(value)) * 10_000) for key, value in rates["usd_per_million"].items()
+    }
     results = []
-    for items, (prior_input, prior_output) in zip(groups, PRIORS):
-        value = dict(inputs=0, outputs=0, cached_hundredths=0,
-                     fresh=0, input_adjustments=0, output_adjustments=0,
-                     count_only_rounds=0, cost_pico=0)
+    for items, (prior_input, prior_output) in zip(groups, PRIORS, strict=True):
+        value = dict(
+            inputs=0,
+            outputs=0,
+            cached_hundredths=0,
+            fresh=0,
+            input_adjustments=0,
+            output_adjustments=0,
+            count_only_rounds=0,
+            cost_pico=0,
+        )
         for row in items:
             inputs = max(prior_input, row["input_tokens"])
             outputs = max(prior_output, row["output_tokens"])
@@ -68,21 +84,30 @@ def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_P
             value["input_adjustments"] += inputs > prior_input
             value["output_adjustments"] += outputs > prior_output
             value["count_only_rounds"] += row["observed_payload_sides"] == 0
-            value["cost_pico"] += (ordinary * rate["input"] + cached * rate["cached_input"]
-                                   + outputs * 100 * rate["output"])
+            value["cost_pico"] += (
+                ordinary * rate["input"]
+                + cached * rate["cached_input"]
+                + outputs * 100 * rate["output"]
+            )
         results.append(value)
     mid = results[1]
     available = bool(groups[1])
 
     def metric(key):
         values = [r["inputs"] + r["outputs"] if key == "total" else r[key] for r in results]
-        return {"estimated_tokens": values[1] if available else None,
-                "low": min(values) if available else None,
-                "high": max(values) if available else None, "partial": True}
+        return {
+            "estimated_tokens": values[1] if available else None,
+            "low": min(values) if available else None,
+            "high": max(values) if available else None,
+            "partial": True,
+        }
 
     def amount(pico):
-        return {"amount_pico_usd": pico, "amount_pico_usd_exact": None if pico is None else str(pico),
-                "amount_nano_usd": None if pico is None else pico // 1000}
+        return {
+            "amount_pico_usd": pico,
+            "amount_pico_usd_exact": None if pico is None else str(pico),
+            "amount_nano_usd": None if pico is None else pico // 1000,
+        }
 
     input_hundredths = mid["inputs"] * 100 - mid["cached_hundredths"]
     breakdown = {}
@@ -97,29 +122,44 @@ def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_P
         }
     pico = mid["cost_pico"] if available else None
     cost = {
-        "kind": "reference_estimate", "scope": "call_round_equivalent",
-        "version": rates["version"], "calibration_version": CALIBRATION["version"],
+        "kind": "reference_estimate",
+        "scope": "call_round_equivalent",
+        "version": rates["version"],
+        "calibration_version": CALIBRATION["version"],
         "currency": "USD",
-        "pricing": {**rates, "cache_read_is_upper_bound": True,
-                    "fresh_tool_text_uncached_is_assumption": True},
-        **amount(pico), "estimated_usd": None if pico is None else pico / PICO_USD,
-        "partial": True, "breakdown": breakdown,
+        "pricing": {
+            **rates,
+            "cache_read_is_upper_bound": True,
+            "fresh_tool_text_uncached_is_assumption": True,
+        },
+        **amount(pico),
+        "estimated_usd": None if pico is None else pico / PICO_USD,
+        "partial": True,
+        "breakdown": breakdown,
         "model_input_tokens": mid["inputs"] if available else None,
         "model_output_tokens": mid["outputs"] if available else None,
         "estimated_cached_read_tokens": mid["cached_hundredths"] / 100 if available else None,
-        "actual_usage": None, "actual_cache_hit_rate": None,
-        "cache_write_tokens": None, "reasoning_tokens": None, "billing_total": None,
+        "actual_usage": None,
+        "actual_cache_hit_rate": None,
+        "cache_write_tokens": None,
+        "reasoning_tokens": None,
+        "billing_total": None,
     }
-    for prefix, p in (("low", min(r["cost_pico"] for r in results)),
-                      ("high", max(r["cost_pico"] for r in results))):
+    for prefix, p in (
+        ("low", min(r["cost_pico"] for r in results)),
+        ("high", max(r["cost_pico"] for r in results)),
+    ):
         for suffix, value in amount(p if available else None).items():
             cost[prefix + suffix.removeprefix("amount")] = value
     rounds = [len(items) for items in groups]
     return {
-        "kind": "call_calibration", "version": VERSION,
+        "kind": "call_calibration",
+        "version": VERSION,
         "scope": "retained_authorized_call_estimate",
         "state": "partial" if available else "unavailable",
-        "input": metric("inputs"), "output": metric("outputs"), "total": metric("total"),
+        "input": metric("inputs"),
+        "output": metric("outputs"),
+        "total": metric("total"),
         "reference_cost": cost,
         "estimated_model_rounds": rounds[1] if available else None,
         "round_range": {"low": min(rounds), "high": max(rounds)} if available else None,
@@ -131,12 +171,19 @@ def summarize_calls(groups, coverage, *, cache_read_percent=DEFAULT_CACHE_READ_P
             "large_output_rounds": mid["output_adjustments"],
             "fresh_tool_input_tokens": mid["fresh"],
         },
-        "coverage": {**coverage, "count_only_rounds": mid["count_only_rounds"],
-                     "range_is_error_bound": False, "complete_history": False},
-        "assumptions": {"range_kind": "scenario_envelope",
-                        "context_trigger": CALL_SCENARIOS[1].context_trigger,
-                        "older_retention_percent": 100,
-                        "cache_read_percent_is_ceiling": True,
-                        "scope_is_inferred_model_rounds": True},
-        "actual_usage": None, "billing_total": None,
+        "coverage": {
+            **coverage,
+            "count_only_rounds": mid["count_only_rounds"],
+            "range_is_error_bound": False,
+            "complete_history": False,
+        },
+        "assumptions": {
+            "range_kind": "scenario_envelope",
+            "context_trigger": CALL_SCENARIOS[1].context_trigger,
+            "older_retention_percent": 100,
+            "cache_read_percent_is_ceiling": True,
+            "scope_is_inferred_model_rounds": True,
+        },
+        "actual_usage": None,
+        "billing_total": None,
     }

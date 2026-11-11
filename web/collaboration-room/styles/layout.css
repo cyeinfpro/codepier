@@ -1,0 +1,87 @@
+/* ------------------------------------------------------------------------
+   CodePier Collaboration Center — Seamless Split-View Architecture
+   Zero nested boxes: regions are separated by single hairlines and tonal
+   planes; inner controls are borderless until hovered or focused.
+   ------------------------------------------------------------------------ */
+.cr-shell,
+.cr-panel {
+  --cr-blue: var(--ui-accent);
+  --cr-line: var(--ui-line);
+  --cr-muted: var(--ui-muted);
+  --cr-surface: var(--ui-panel);
+}
+
+.cr-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: var(--cr-surface);
+  color: var(--ui-text);
+  box-shadow: none;
+}
+
+/* Desktop full-bleed canvas: remove outer page padding and duplicate topbar
+   so the collaboration split-view sits directly beside the app sidebar. */
+@media (min-width: 901px) {
+  .main:has(> #page .cr-shell) > .topbar {
+    display: none;
+  }
+  .main:has(> #page .cr-shell) > #page {
+    padding: 0;
+    max-width: none;
+  }
+}
+
+.cr-shell *,
+.cr-panel * {
+  box-sizing: border-box;
+}
+
+.cr-shell :where(button, input, select, textarea),
+.cr-panel :where(button, input, select, textarea) {
+  font: inherit;
+}
+
+.cr-shell :is(input, select, textarea),
+.cr-panel :is(input, select, textarea) {
+  font-size: var(--ui-text-input);
+}
+
+.cr-shell button,
+.cr-panel button {
+  cursor: pointer;
+}
+
+.cr-shell button:disabled,
+.cr-panel button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.cr-shell :is(button, input, textarea, select):focus-visible,
+.cr-panel :is(button, input, textarea, select):focus-visible,
+.cr-feed:focus-visible {
+  outline: var(--ui-focus-width) solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+.cr-shell .sr-only,
+.cr-panel .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

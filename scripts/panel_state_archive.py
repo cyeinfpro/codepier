@@ -13,6 +13,7 @@ Restore never overwrites data; a failed partial restore has no initialization
 marker until publication. An error after publication may mean durability is
 uncertain: inspect the destination, never automatically delete or retry in place.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,12 @@ import tempfile
 import zlib
 
 from hub.keyring import CIPHER_COLUMNS, CipherSuite, private_read
-from hub.state_layout import STATE_LAYOUT, STATE_MARKER, STATE_SNAPSHOT_FILES, STATE_SNAPSHOT_REQUIRED
+from hub.state_layout import (
+    STATE_LAYOUT,
+    STATE_MARKER,
+    STATE_SNAPSHOT_FILES,
+    STATE_SNAPSHOT_REQUIRED,
+)
 
 MAGIC = b"CODEPIER-STATE\x00\x01"
 VERSION = 1
@@ -111,7 +117,12 @@ def _validate(root):
     if len(raw) > 4096:
         raise ValueError("State marker too large")
     marker = json.loads(raw)
-    if not isinstance(marker, dict) or type(marker.get("schema_version")) is not int or marker.get("schema_version") != 1 or marker.get("layout") != STATE_LAYOUT:
+    if (
+        not isinstance(marker, dict)
+        or type(marker.get("schema_version")) is not int
+        or marker.get("schema_version") != 1
+        or marker.get("layout") != STATE_LAYOUT
+    ):
         raise ValueError("Unknown state marker")
     cipher = CipherSuite(root, private_read(root / "master.key").strip())
     for name in ("hub.sqlite3", "native-cli/native.sqlite3"):
@@ -119,17 +130,23 @@ def _validate(root):
             continue
         # immutable is safe ONLY because callers require a completed offline
         # snapshot with no sidecars; it also prevents SQLite creating files.
-        with closing(sqlite3.connect((root / name).as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+        with closing(
+            sqlite3.connect((root / name).as_uri() + "?mode=ro&immutable=1", uri=True)
+        ) as db:
             # Bound SQLite materialization too, not only the gzip stream.
             db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 64 * 1024 * 1024)
             if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise ValueError("Database integrity failed")
             if name == "hub.sqlite3":
                 for table, column in CIPHER_COLUMNS:
-                    if column not in {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}:
+                    if column not in {
+                        row[1] for row in db.execute(f'PRAGMA table_info("{table}")')
+                    }:
                         continue
                     # Constants are trusted project schema, never manifest SQL.
-                    for (value,) in db.execute(f'SELECT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'):
+                    for (value,) in db.execute(
+                        f'SELECT "{column}" FROM "{table}" WHERE "{column}" IS NOT NULL'
+                    ):
                         if value:
                             cipher.decrypt(value.encode() if isinstance(value, str) else value)
     return names
@@ -160,7 +177,13 @@ def _manifest(stream, max_bytes):
     if len(raw) != length:
         raise ValueError("Truncated manifest")
     manifest = json.loads(raw)
-    if not isinstance(manifest, dict) or set(manifest) != {"version", "layout", "files"} or type(manifest["version"]) is not int or manifest["version"] != VERSION or manifest["layout"] != STATE_LAYOUT:
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"version", "layout", "files"}
+        or type(manifest["version"]) is not int
+        or manifest["version"] != VERSION
+        or manifest["layout"] != STATE_LAYOUT
+    ):
         raise ValueError("Unknown manifest version or layout")
     entries = manifest["files"]
     if not isinstance(entries, list) or not 3 <= len(entries) <= len(FILES):
@@ -168,7 +191,13 @@ def _manifest(stream, max_bytes):
     names = set()
     total = compressed = 0
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != {"path", "bytes", "sha256", "gzip_bytes", "gzip_sha256"}:
+        if not isinstance(entry, dict) or set(entry) != {
+            "path",
+            "bytes",
+            "sha256",
+            "gzip_bytes",
+            "gzip_sha256",
+        }:
             raise ValueError("Invalid manifest entry")
         name = entry["path"]
         if not isinstance(name, str) or name not in FILES or name in names:
@@ -214,7 +243,12 @@ def _extract(stream, root, max_bytes):
                         raise ValueError("Gzip size mismatch or trailing members")
                     output.write(clear)
                     raw_hash.update(clear)
-            if not decoder.eof or produced != entry["bytes"] or raw_hash.hexdigest() != entry["sha256"] or zipped_hash.hexdigest() != entry["gzip_sha256"]:
+            if (
+                not decoder.eof
+                or produced != entry["bytes"]
+                or raw_hash.hexdigest() != entry["sha256"]
+                or zipped_hash.hexdigest() != entry["gzip_sha256"]
+            ):
                 raise ValueError("Archive checksum or length mismatch")
             output.flush()
             os.fsync(output.fileno())
@@ -224,11 +258,11 @@ def _extract(stream, root, max_bytes):
     return manifest
 
 
-
 @contextmanager
 def _offline_locks(source):
     # Reuse existing lock inodes without changing modes, content or source data.
     import fcntl
+
     with ExitStack() as stack:
         for name in (".hub.lock", ".keys.lock"):
             path = Path(source) / name
@@ -282,10 +316,20 @@ def _export_state(source, archive, *, confirm_offline=False, max_bytes=DEFAULT_L
                     outgoing.write(compressor.compress(chunk))
                 outgoing.write(compressor.flush())
             compressed_size, compressed_hash = _digest(target)
-            entries.append({"path": name, "bytes": size, "sha256": raw_hash.hexdigest(), "gzip_bytes": compressed_size, "gzip_sha256": compressed_hash})
+            entries.append(
+                {
+                    "path": name,
+                    "bytes": size,
+                    "sha256": raw_hash.hexdigest(),
+                    "gzip_bytes": compressed_size,
+                    "gzip_sha256": compressed_hash,
+                }
+            )
         # Detect accidental source changes before accepting the archive; this is
         # not a substitute for the operator's offline/quiescence precondition.
-        if _validate(source) != names or any(_digest(source / e["path"]) != (e["bytes"], e["sha256"]) for e in entries):
+        if _validate(source) != names or any(
+            _digest(source / e["path"]) != (e["bytes"], e["sha256"]) for e in entries
+        ):
             raise ValueError("Source snapshot changed during export")
         manifest = {"version": VERSION, "layout": STATE_LAYOUT, "files": entries}
         raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
@@ -309,7 +353,10 @@ def _export_state(source, archive, *, confirm_offline=False, max_bytes=DEFAULT_L
 def verify_archive(archive, *, max_bytes=DEFAULT_LIMIT):
     archive = _path(archive)
     _private_directory(archive.parent)
-    with _open(archive) as stream, tempfile.TemporaryDirectory(prefix=".state-verify-", dir=archive.parent) as scratch:
+    with (
+        _open(archive) as stream,
+        tempfile.TemporaryDirectory(prefix=".state-verify-", dir=archive.parent) as scratch,
+    ):
         return _extract(stream, Path(scratch), max_bytes)
 
 
@@ -320,7 +367,10 @@ def restore_state(archive, destination, *, max_bytes=DEFAULT_LIMIT):
         raise ValueError("Restore destination must be empty")
     archive = _path(archive)
     _private_directory(archive.parent)
-    with _open(archive) as stream, tempfile.TemporaryDirectory(prefix=".state-restore-", dir=destination) as scratch:
+    with (
+        _open(archive) as stream,
+        tempfile.TemporaryDirectory(prefix=".state-restore-", dir=destination) as scratch,
+    ):
         scratch = Path(scratch)
         manifest = _extract(stream, scratch, max_bytes)
         if set(destination.iterdir()) != {scratch}:
@@ -355,15 +405,31 @@ def main():
         parser.error("destination is required")
     try:
         if args.operation == "export":
-            result = export_state(args.source, args.destination, confirm_offline=args.confirm_offline, max_bytes=args.max_bytes)
+            result = export_state(
+                args.source,
+                args.destination,
+                confirm_offline=args.confirm_offline,
+                max_bytes=args.max_bytes,
+            )
         elif args.operation == "restore":
             result = restore_state(args.source, args.destination, max_bytes=args.max_bytes)
         else:
             result = verify_archive(args.source, max_bytes=args.max_bytes)
     except Exception:
         # No database values, key material or third-party exception payloads.
-        parser.exit(1, "State archive operation failed; original state retained. Inspect private storage.\n")
-    print(json.dumps({"verified": True, "files": len(result["files"]), "bytes": sum(e["bytes"] for e in result["files"]), "attachments_copied": False}))
+        parser.exit(
+            1, "State archive operation failed; original state retained. Inspect private storage.\n"
+        )
+    print(
+        json.dumps(
+            {
+                "verified": True,
+                "files": len(result["files"]),
+                "bytes": sum(e["bytes"] for e in result["files"]),
+                "attachments_copied": False,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

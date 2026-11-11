@@ -146,7 +146,7 @@ window.CodePierIntegrations = (() => {
     return (
       heading(
         '开发工具',
-        'DEVELOPMENT / WORKFLOW',
+        '开发流程',
         '围绕当前项目检查、验证与继续工作。',
         action('refresh', '重新检查'),
       ) +
@@ -297,8 +297,7 @@ window.CodePierIntegrations = (() => {
             r.name === name &&
             r !== entry,
         );
-        if (other)
-          throw new Error('这类操作还有待确认的原请求。请先在上方查询原结果，不要换参数重复提交。');
+        if (other) throw new Error('这类操作还有待确认的请求，请先在上方查看执行结果。');
         if (!entry) {
           entry = {
             name,
@@ -793,7 +792,7 @@ window.CodePierIntegrations = (() => {
       const uncertain = r.pending_or_uncertain || [],
         changed = r.mapping_changed || w.mapping_changed,
         otherWorkspace = !!w.workspace_id && w.workspace_id !== workspace_id;
-      section.innerHTML = `<div class="integration-section-head"><h2>${esc(w.title || '任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal || '未记录')}</p>${r.summary ? `<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>` : ''}${changed ? U().note('项目映射已经变化', '只能核对历史记录，请先为当前设备或目录建立新的任务。', '', 'warning') : ''}${otherWorkspace ? U().note('此任务绑定了另一隔离目录', '以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。', '', 'warning') : ''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary || '无额外摘要')}</p></article>`).join('') || '<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance || s.summary || '请先核对原任务要求')}</p></article>`).join('') || '<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length ? `<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先查询原回执，不要重复执行。</p>${uncertain.map((o) => `<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}` : ''}<div class="actions">${action('handoff-copy', '复制交接说明')}${action('handoff-chat', '带到 CLI 草稿', `${changed || otherWorkspace || workspace_id ? 'disabled' : ''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation', '核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
+      section.innerHTML = `<div class="integration-section-head"><h2>${esc(w.title || '任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal || '未记录')}</p>${r.summary ? `<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>` : ''}${changed ? U().note('项目映射已经变化', '只能核对历史记录，请先为当前设备或目录建立新的任务。', '', 'warning') : ''}${otherWorkspace ? U().note('此任务绑定了另一隔离目录', '以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。', '', 'warning') : ''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary || '无额外摘要')}</p></article>`).join('') || '<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance || s.summary || '请先核对原任务要求')}</p></article>`).join('') || '<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length ? `<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先打开原请求，确认执行结果。</p>${uncertain.map((o) => `<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}` : ''}<div class="actions">${action('handoff-copy', '复制交接说明')}${action('handoff-chat', '带到 CLI 草稿', `${changed || otherWorkspace || workspace_id ? 'disabled' : ''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation', '核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
       box.append(section);
       const text = U().handoffText(r, w.title);
       $('[data-i-action=handoff-copy]', section).onclick = wire(() => copy(text));
@@ -834,6 +833,19 @@ window.CodePierIntegrations = (() => {
       };
       await section(selector, load);
     }
+    function showRecordErrors(box, errors = [], hasRecords = false) {
+      if (!errors.length) return;
+      if (!hasRecords) box.replaceChildren();
+      box.insertAdjacentHTML(
+        'beforeend',
+        errors
+          .map(
+            (item) =>
+              `<article class="integration-row"><div><strong>记录需要核对</strong><code>${esc(item.record_id)}</code><small>${esc(item.message || '原记录已保留，请核对原操作。')}</small></div></article>`,
+          )
+          .join(''),
+      );
+    }
     async function validationList(selector) {
       await section(selector, async (box, valid) => {
         const r = await request('validations_list');
@@ -850,6 +862,7 @@ window.CodePierIntegrations = (() => {
           'beforeend',
           `<p class="integration-help">最近最多 ${esc(r.limit || 100)} 条；历史通过不等于当前版本通过。</p>`,
         );
+        showRecordErrors(box, r.record_errors, rows.length > 0);
         for (const b of $$('[data-i-action=validation-detail]', box))
           b.onclick = wire(() => showValidation(b.dataset.id));
       });
@@ -1112,7 +1125,7 @@ window.CodePierIntegrations = (() => {
           offline +
           U().note(
             '把实验性修改放到独立目录',
-            '需要已有提交的 Git 项目；原目录未提交修改不会复制，不会自动合并、初始化 Git 或扩大目录权限。',
+            '基于已有 Git 提交创建工作区，只复制已提交的内容。合并修改需另行操作，目录权限保持现有设置。',
             jump('setup', '查看本机配置'),
           ) +
           form(
@@ -1154,6 +1167,7 @@ window.CodePierIntegrations = (() => {
                     `<article class="integration-row"><div><strong>${esc(t.label || t.workspace_id)}</strong><small>${esc(U().label(t.state))} · ${t.dirty ? '有未提交修改' : t.state === 'ready' ? '目录干净' : '待核对'}</small><code>${esc(t.path || '')}</code><small>${t.error ? esc(t.error) : t.source_dirty ? '创建时未复制原目录未提交改动' : ''}</small></div><div class="actions">${action('tree-open', '进入编辑', `data-id="${esc(t.workspace_id)}" ${t.state !== 'ready' ? 'disabled' : ''}`)}${action('tree-remove', '移除', `data-id="${esc(t.workspace_id)}" ${t.state !== 'ready' || t.dirty ? 'disabled' : ''} title="${t.dirty ? '请先处理未提交改动' : '只删除已确认干净的受管隔离目录'}"`)}</div></article>`,
                 )
                 .join('') || empty('尚无隔离目录。日常开发可继续使用原项目目录。');
+            showRecordErrors(box, r.record_errors, v.trees.length > 0);
             for (const b of $$('[data-i-action=tree-open]', box))
               b.onclick = wire(() => openEditor('', 1, 1, b.dataset.id));
             for (const b of $$('[data-i-action=tree-remove]', box))
@@ -1453,6 +1467,7 @@ window.CodePierIntegrations = (() => {
                     `<article class="integration-row"><div><strong>后台页面 ${esc(l.lease_id.slice(0, 8))}</strong><small>${esc(U().label(l.state))} · 到期 ${esc(timeText(l.expires_at || l.expires))}</small></div><div class="actions">${action('snapshot', '观察页面', `data-id="${esc(l.lease_id)}"`)}${action('browser-close', '释放页面', `data-id="${esc(l.lease_id)}"`)}</div></article>`,
                 )
                 .join('') || empty('没有正在验证的页面。先打开一个已授权地址。');
+            showRecordErrors(leases, r.record_errors, (r.active_leases || []).length > 0);
             for (const b of $$('[data-i-action=snapshot]', leases))
               b.onclick = wire(() => snapshot(b.dataset.id));
             for (const b of $$('[data-i-action=browser-close]', leases))
@@ -1607,7 +1622,7 @@ window.CodePierIntegrations = (() => {
             `${p.device_name || '当前设备'} · ${p.alias}。此页不会安装程序、改变真实 Agent 配置、授权网站或重启服务。`,
             readinessActions(),
           ) +
-          `<div class="integration-setup-grid"><section class="panel integration-section"><span class="eyebrow">可选能力 / 代码导航</span><h2>连接本机语言服务</h2><ol class="integration-steps"><li><strong>在目标设备安装语言服务</strong><p>例如 Python 使用已安装的 Pyright。填写可执行文件的完整路径，避免服务启动环境与终端不同。</p></li><li><strong>生成本项目配置片段</strong><p>下方表单只生成 JSON。不会替换完整 Agent 配置，也不会修改其他项目授权。</p></li><li><strong>本机预览，再明确应用</strong><p>使用 Agent 的 Python 环境，在其运行目录执行下方示例，替换尖括号里的路径。默认只预览，核对后再添加 --apply。</p><pre class="integration-page-text">python -m agent.setup_integrations --config "&lt;Agent 配置文件路径&gt;" configure --settings "&lt;下载的配置片段路径&gt;"</pre></li><li><strong>按维护流程重启，再检查</strong><p>先结束活动任务，再由主理人确认重启。磁盘配置与运行进程的状态分别核对。</p>${jump('navigation', '重新检查语言服务')}</li></ol></section><section class="panel integration-section"><span class="eyebrow">可选能力 / 网页验证</span><h2>连接后台浏览器</h2><ol class="integration-steps"><li><strong>安装浏览器扩展</strong><p>下载并解压到长期保留的目录。在 Chrome 扩展管理中加载已解压扩展。</p><a class="btn ghost small" href="/static/browser-extension.zip" download>浏览器扩展源码包</a></li><li><strong>绑定档案、项目与准确站点</strong><p>从扩展取得扩展编号和档案编号；按安装说明使用 agent.install_browser_bridge 在本机预览，核对后添加 --apply。站点端口不同属于不同授权范围。</p></li><li><strong>准备空闲标签页</strong><p>由你在扩展中授权网站并点击“准备标签页”。远程调用不会自行创建或激活窗口。</p></li><li><strong>检查连接并观察页面</strong><p>连接成功后输入已授权网址。先观察，再核对具体动作。</p>${jump('browser', '重新检查浏览器')}</li></ol></section></div>` +
+          `<div class="integration-setup-grid"><section class="panel integration-section"><span class="eyebrow">可选能力 / 代码导航</span><h2>连接本机语言服务</h2><ol class="integration-steps"><li><strong>在目标设备安装语言服务</strong><p>例如 Python 使用已安装的 Pyright。填写可执行文件的完整路径，避免服务启动环境与终端不同。</p></li><li><strong>生成本项目配置片段</strong><p>下方表单生成此项目的 JSON 配置片段，保留其余 Agent 配置和项目授权。</p></li><li><strong>本机预览，再明确应用</strong><p>使用 Agent 的 Python 环境，在其运行目录执行下方示例，替换尖括号里的路径。默认只预览，核对后再添加 --apply。</p><pre class="integration-page-text">python -m agent.setup_integrations --config "&lt;Agent 配置文件路径&gt;" configure --settings "&lt;下载的配置片段路径&gt;"</pre></li><li><strong>按维护流程重启，再检查</strong><p>先结束活动任务，再由主理人确认重启。磁盘配置与运行进程的状态分别核对。</p>${jump('navigation', '重新检查语言服务')}</li></ol></section><section class="panel integration-section"><span class="eyebrow">可选能力 / 网页验证</span><h2>连接后台浏览器</h2><ol class="integration-steps"><li><strong>安装浏览器扩展</strong><p>下载并解压到长期保留的目录。在 Chrome 扩展管理中加载已解压扩展。</p><a class="btn ghost small" href="/static/browser-extension.zip" download>浏览器扩展源码包</a></li><li><strong>绑定档案、项目与准确站点</strong><p>从扩展取得扩展编号和档案编号；按安装说明使用 agent.install_browser_bridge 在本机预览，核对后添加 --apply。站点端口不同属于不同授权范围。</p></li><li><strong>准备空闲标签页</strong><p>由你在扩展中授权网站并点击“准备标签页”。远程调用不会自行创建或激活窗口。</p></li><li><strong>检查连接并观察页面</strong><p>连接成功后输入已授权网址。先观察，再核对具体动作。</p>${jump('browser', '重新检查浏览器')}</li></ol></section></div>` +
           form(
             'settings',
             '生成语言服务配置片段',

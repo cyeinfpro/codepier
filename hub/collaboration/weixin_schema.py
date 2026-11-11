@@ -1,4 +1,5 @@
 """Forward-only channel ledgers; no old room, grant or subscription changes."""
+
 from typing import Literal
 
 from hub.collaboration.channel_consent import OwnerPreapproval
@@ -8,7 +9,7 @@ from pydantic import Field, SecretStr, model_validator
 from hub.access import AccessModel
 from hub.collaboration.weixin_protocol import API_BASE
 
-SCHEMA = '''
+SCHEMA = """
 CREATE TABLE IF NOT EXISTS weixin_accounts(
  id TEXT PRIMARY KEY,space_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,bot_id TEXT NOT NULL UNIQUE,
  label TEXT NOT NULL,api_base TEXT NOT NULL,secret TEXT NOT NULL,state TEXT NOT NULL,
@@ -65,92 +66,106 @@ CREATE TABLE IF NOT EXISTS channel_attachments(
  UNIQUE(message_id,direction,ordinal));
 CREATE INDEX IF NOT EXISTS channel_attachment_pending ON channel_attachments(state,next_attempt,created,id);
 CREATE INDEX IF NOT EXISTS channel_attachment_room ON channel_attachments(room_id,message_id,ordinal);
-'''
+"""
 
 
 def migrate(db):
     from hub.collaboration.channel_inbound import migrate as migrate_inbound
+
     migrate_inbound(db)
-    revisions_existed = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='weixin_inbound_versions'").fetchone() is not None
-    for statement in SCHEMA.split(';'):
+    revisions_existed = (
+        db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='weixin_inbound_versions'"
+        ).fetchone()
+        is not None
+    )
+    for statement in SCHEMA.split(";"):
         if statement.strip():
             db.execute(statement)
-    enrollments = {r[1] for r in db.execute('PRAGMA table_info(weixin_enrollments)')}
-    if 'conversation_id' not in enrollments:
-        db.execute("ALTER TABLE weixin_enrollments ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''")
-    columns = {r[1] for r in db.execute('PRAGMA table_info(weixin_bindings)')}
-    if 'pairing_secret' not in columns:
+    enrollments = {r[1] for r in db.execute("PRAGMA table_info(weixin_enrollments)")}
+    if "conversation_id" not in enrollments:
+        db.execute(
+            "ALTER TABLE weixin_enrollments ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''"
+        )
+    columns = {r[1] for r in db.execute("PRAGMA table_info(weixin_bindings)")}
+    if "pairing_secret" not in columns:
         db.execute("ALTER TABLE weixin_bindings ADD COLUMN pairing_secret TEXT NOT NULL DEFAULT ''")
-    if 'revalidation_required' not in columns:
-        db.execute('ALTER TABLE weixin_bindings ADD COLUMN revalidation_required INTEGER NOT NULL DEFAULT 0')
-    accounts = {r[1] for r in db.execute('PRAGMA table_info(weixin_accounts)')}
-    if 'last_sync_at' not in accounts:
+    if "revalidation_required" not in columns:
+        db.execute(
+            "ALTER TABLE weixin_bindings ADD COLUMN revalidation_required INTEGER NOT NULL DEFAULT 0"
+        )
+    accounts = {r[1] for r in db.execute("PRAGMA table_info(weixin_accounts)")}
+    if "last_sync_at" not in accounts:
         # No historical successful poll proof is invented from account.updated.
-        db.execute('ALTER TABLE weixin_accounts ADD COLUMN last_sync_at REAL')
-    inbound = {r[1] for r in db.execute('PRAGMA table_info(weixin_inbound)')}
-    for name in ('provider_version', 'provider_created'):
+        db.execute("ALTER TABLE weixin_accounts ADD COLUMN last_sync_at REAL")
+    inbound = {r[1] for r in db.execute("PRAGMA table_info(weixin_inbound)")}
+    for name in ("provider_version", "provider_created"):
         if name not in inbound:
             db.execute(f"ALTER TABLE weixin_inbound ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-    db.execute('''CREATE TABLE IF NOT EXISTS weixin_inbound_versions(
+    db.execute("""CREATE TABLE IF NOT EXISTS weixin_inbound_versions(
         account_id TEXT NOT NULL,generation INTEGER NOT NULL,peer_id TEXT NOT NULL,external_id TEXT NOT NULL,
         provider_version TEXT NOT NULL,source_digest TEXT NOT NULL,message_id TEXT,created REAL NOT NULL,
-        PRIMARY KEY(account_id,generation,peer_id,external_id,provider_version))''')
-    db.execute('CREATE INDEX IF NOT EXISTS weixin_versions_received ON weixin_inbound_versions(account_id,created)')
-    db.execute('CREATE INDEX IF NOT EXISTS weixin_versions_message ON weixin_inbound_versions(message_id)')
+        PRIMARY KEY(account_id,generation,peer_id,external_id,provider_version))""")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS weixin_versions_received ON weixin_inbound_versions(account_id,created)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS weixin_versions_message ON weixin_inbound_versions(message_id)"
+    )
     if not revisions_existed:
         # Copy only already-recorded facts; an empty version stays unverified.
-        db.execute('''INSERT INTO weixin_inbound_versions
+        db.execute("""INSERT INTO weixin_inbound_versions
             SELECT account_id,generation,peer_id,external_id,provider_version,source_digest,message_id,created
-            FROM weixin_inbound''')
-
+            FROM weixin_inbound""")
 
     migrate_delivery_order(db)
     from hub.collaboration.weixin_delivery_transport import migrate as migrate_transport
+
     migrate_transport(db)
 
 
 def delivery_order_key(goal_id, thread_root_id, source_id):
     if goal_id:
-        return 'work:' + goal_id
+        return "work:" + goal_id
     if source_id and thread_root_id:
-        return 'thread:' + thread_root_id
-    return ''
+        return "thread:" + thread_root_id
+    return ""
 
 
 def migrate_delivery_order(db):
-    columns = {row[1] for row in db.execute('PRAGMA table_info(weixin_deliveries)')}
-    new_order = 'ordering_key' not in columns
+    columns = {row[1] for row in db.execute("PRAGMA table_info(weixin_deliveries)")}
+    new_order = "ordering_key" not in columns
     for name, definition in (
-        ('ordering_key', "TEXT NOT NULL DEFAULT ''"),
-        ('depends_on_delivery_id', 'TEXT'),
-        ('kind', "TEXT NOT NULL DEFAULT 'reply'"),
-        ('status_code', "TEXT NOT NULL DEFAULT ''"),
-        ('projection_message_id', 'TEXT'),
-        ('ordering_revision', 'INTEGER NOT NULL DEFAULT 1'),
-        ('ordering_evidence', "TEXT NOT NULL DEFAULT ''"),
-        ('canonical_source_id', "TEXT NOT NULL DEFAULT ''"),
-        ('dependency_mode', "TEXT NOT NULL DEFAULT 'after_settled'"),
-        ('ordering_schema_version', 'INTEGER NOT NULL DEFAULT 1'),
-        ('ordering_checked_version', 'INTEGER NOT NULL DEFAULT 0'),
+        ("ordering_key", "TEXT NOT NULL DEFAULT ''"),
+        ("depends_on_delivery_id", "TEXT"),
+        ("kind", "TEXT NOT NULL DEFAULT 'reply'"),
+        ("status_code", "TEXT NOT NULL DEFAULT ''"),
+        ("projection_message_id", "TEXT"),
+        ("ordering_revision", "INTEGER NOT NULL DEFAULT 1"),
+        ("ordering_evidence", "TEXT NOT NULL DEFAULT ''"),
+        ("canonical_source_id", "TEXT NOT NULL DEFAULT ''"),
+        ("dependency_mode", "TEXT NOT NULL DEFAULT 'after_settled'"),
+        ("ordering_schema_version", "INTEGER NOT NULL DEFAULT 1"),
+        ("ordering_checked_version", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if name not in columns:
-            db.execute(f'ALTER TABLE weixin_deliveries ADD COLUMN {name} {definition}')
-    db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_order
-        ON weixin_deliveries(binding_id,generation,peer_id,ordering_key,created)''')
-    db.execute('''CREATE INDEX IF NOT EXISTS weixin_delivery_projection
-        ON weixin_deliveries(projection_message_id) WHERE projection_message_id IS NOT NULL''')
-    db.execute('''CREATE INDEX IF NOT EXISTS weixin_order_pending
-        ON weixin_deliveries(id) WHERE ordering_checked_version<2''')
-    db.execute('''CREATE INDEX IF NOT EXISTS weixin_order_dependency
-        ON weixin_deliveries(depends_on_delivery_id) WHERE depends_on_delivery_id IS NOT NULL''')
-    db.execute('''CREATE TABLE IF NOT EXISTS weixin_part_route_recoveries(
+            db.execute(f"ALTER TABLE weixin_deliveries ADD COLUMN {name} {definition}")
+    db.execute("""CREATE INDEX IF NOT EXISTS weixin_delivery_order
+        ON weixin_deliveries(binding_id,generation,peer_id,ordering_key,created)""")
+    db.execute("""CREATE INDEX IF NOT EXISTS weixin_delivery_projection
+        ON weixin_deliveries(projection_message_id) WHERE projection_message_id IS NOT NULL""")
+    db.execute("""CREATE INDEX IF NOT EXISTS weixin_order_pending
+        ON weixin_deliveries(id) WHERE ordering_checked_version<2""")
+    db.execute("""CREATE INDEX IF NOT EXISTS weixin_order_dependency
+        ON weixin_deliveries(depends_on_delivery_id) WHERE depends_on_delivery_id IS NOT NULL""")
+    db.execute("""CREATE TABLE IF NOT EXISTS weixin_part_route_recoveries(
         part_id TEXT NOT NULL REFERENCES weixin_parts(id),channel_generation INTEGER NOT NULL,
         evidence TEXT NOT NULL,approved_by TEXT NOT NULL,approved_at REAL NOT NULL,
-        PRIMARY KEY(part_id,channel_generation))''')
-    db.execute('''CREATE TABLE IF NOT EXISTS weixin_order_migrations(
+        PRIMARY KEY(part_id,channel_generation))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS weixin_order_migrations(
         name TEXT PRIMARY KEY,last_delivery_id TEXT NOT NULL DEFAULT '',
         checked_count INTEGER NOT NULL DEFAULT 0,changed_count INTEGER NOT NULL DEFAULT 0,
-        unresolved_count INTEGER NOT NULL DEFAULT 0,started_at REAL NOT NULL,finished_at REAL)''')
+        unresolved_count INTEGER NOT NULL DEFAULT 0,started_at REAL NOT NULL,finished_at REAL)""")
     if not new_order:
         return
     db.execute("""UPDATE weixin_deliveries AS d
@@ -182,8 +197,8 @@ def migrate_delivery_order(db):
 
 class Scope(AccessModel):
     project: str = Field(min_length=1, max_length=100)
-    environment_id: str = Field(default='production', min_length=1, max_length=100)
-    conversation_id: str = Field(default='', max_length=100)
+    environment_id: str = Field(default="production", min_length=1, max_length=100)
+    conversation_id: str = Field(default="", max_length=100)
 
 
 class Mutation(Scope):
@@ -201,32 +216,36 @@ class AccountImport(Mutation):
 
 
 class Bind(Mutation):
-    owner_preapproval: OwnerPreapproval | None = Field(default=None, exclude_if=lambda value: value is None)
+    owner_preapproval: OwnerPreapproval | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     account_id: str = Field(min_length=1, max_length=100)
     dot_id: str = Field(min_length=1, max_length=100)
     confirm_external_data_ingress: Literal[True]
     allow_replies: bool = False
     allow_media_outbound: bool = False
     expires_seconds: int = Field(default=86400, ge=300, le=30 * 86400)
-    lifetime_mode: Literal['timed', 'until_revoked'] = Field(default='timed', exclude_if=lambda value: value == 'timed')
+    lifetime_mode: Literal["timed", "until_revoked"] = Field(
+        default="timed", exclude_if=lambda value: value == "timed"
+    )
     confirm_until_revoked: bool = Field(default=False, exclude_if=lambda value: not value)
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def explicit_lifetime(self):
-        if self.lifetime_mode == 'until_revoked' and not self.confirm_until_revoked:
-            raise ValueError('Until-revoked channel consent must be explicitly confirmed')
+        if self.lifetime_mode == "until_revoked" and not self.confirm_until_revoked:
+            raise ValueError("Until-revoked channel consent must be explicitly confirmed")
         return self
 
 
 class Control(Mutation):
     binding_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=1)
-    action: Literal['activate', 'pause', 'resume', 'revoke', 'refresh_pairing']
-    confirm_peer_id: str = Field(default='', max_length=256)
+    action: Literal["activate", "pause", "resume", "revoke", "refresh_pairing"]
+    confirm_peer_id: str = Field(default="", max_length=256)
 
 
 class QRStart(Mutation):
-    renew_account_id: str = Field(default='', max_length=100, exclude_if=lambda value: not value)
+    renew_account_id: str = Field(default="", max_length=100, exclude_if=lambda value: not value)
     expected_credential_version: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
     confirm_credential_storage: Literal[True]
     confirm_provider_terms: Literal[True]
@@ -235,7 +254,7 @@ class QRStart(Mutation):
 class QRStatus(Scope):
     enrollment_id: str = Field(min_length=1, max_length=100)
     expected_version: int = Field(ge=1)
-    verify_code: str = Field(default='', max_length=32)
+    verify_code: str = Field(default="", max_length=32)
 
 
 class QRCancel(QRStatus):
@@ -247,17 +266,23 @@ class QRAccept(QRStatus):
     idempotency_key: str = Field(min_length=8, max_length=128)
     label: str = Field(min_length=1, max_length=80)
     confirm_scanner_id: str = Field(min_length=1, max_length=256)
-    consent_receipt_id: str = Field(default='', max_length=100, exclude_if=lambda value: not value)
-    confirm_credential_storage: bool | None = Field(default=None, exclude_if=lambda value: value is None)
-    confirm_provider_terms: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    consent_receipt_id: str = Field(default="", max_length=100, exclude_if=lambda value: not value)
+    confirm_credential_storage: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    confirm_provider_terms: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def exact_prior_or_fresh_consent(self):
         if self.consent_receipt_id:
             if self.confirm_credential_storage is False or self.confirm_provider_terms is False:
-                raise ValueError('A prior receipt cannot override an explicit refusal')
+                raise ValueError("A prior receipt cannot override an explicit refusal")
         elif self.confirm_credential_storage is not True or self.confirm_provider_terms is not True:
-            raise ValueError('Credential storage and provider terms each need explicit consent or their exact prior receipt')
+            raise ValueError(
+                "Credential storage and provider terms each need explicit consent or their exact prior receipt"
+            )
         return self
 
 
@@ -269,15 +294,18 @@ class AttachmentAdd(Mutation):
 
 
 class DeliverySelection(AccessModel):
-    action: Literal['cancel_unsent', 'confirm_received']
-    part_ids: list[str] | None = Field(default=None, min_length=1, max_length=50,
-                                       exclude_if=lambda value: value is None)
+    action: Literal["cancel_unsent", "confirm_received"]
+    part_ids: list[str] | None = Field(
+        default=None, min_length=1, max_length=50, exclude_if=lambda value: value is None
+    )
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def unique_parts(self):
-        if self.part_ids is not None and (len(set(self.part_ids)) != len(self.part_ids)
-                or any(not part_id or len(part_id) > 100 for part_id in self.part_ids)):
-            raise ValueError('Invalid or duplicate delivery part IDs')
+        if self.part_ids is not None and (
+            len(set(self.part_ids)) != len(self.part_ids)
+            or any(not part_id or len(part_id) > 100 for part_id in self.part_ids)
+        ):
+            raise ValueError("Invalid or duplicate delivery part IDs")
         return self
 
 
@@ -287,11 +315,13 @@ class DeliveryPreview(Scope, DeliverySelection):
 
 class DeliveryRevision(DeliverySelection):
     expected_version: int = Field(ge=1)
-    expected_ordering_revision: int | None = Field(default=None, ge=1,
-                                                  exclude_if=lambda value: value is None)
-    preview_digest: str = Field(default='', pattern=r'^(?:[0-9a-f]{64})?$',
-                                exclude_if=lambda value: not value)
-    confirmation_note: str = Field(default='', max_length=1000)
+    expected_ordering_revision: int | None = Field(
+        default=None, ge=1, exclude_if=lambda value: value is None
+    )
+    preview_digest: str = Field(
+        default="", pattern=r"^(?:[0-9a-f]{64})?$", exclude_if=lambda value: not value
+    )
+    confirmation_note: str = Field(default="", max_length=1000)
 
 
 class DeliveryControl(Mutation, DeliveryRevision):

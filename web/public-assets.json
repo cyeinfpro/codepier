@@ -1,0 +1,21 @@
+{
+  "routes": {
+    "collaboration": [
+      "collaboration-room.css",
+      "collaboration-room-store.js",
+      "collaboration-room.js"
+    ],
+    "vps": [
+      "vps.css",
+      "vps.js"
+    ],
+    "mcp-gateway": [
+      "mcp-gateway.css",
+      "mcp-gateway.js"
+    ]
+  },
+  "downloads": [
+    "browser-extension.zip",
+    "integration-guide.md"
+  ]
+}

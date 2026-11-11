@@ -3,6 +3,7 @@
 A half-written/invalid configuration must not stop the reconnection watcher.
 Named tasks and full-access shell are explicit local-owner capabilities.
 """
+
 from __future__ import annotations
 import copy
 from pathlib import Path
@@ -25,7 +26,11 @@ def validate_config(value: object, config_path: Path) -> dict:
     if not isinstance(c.get("hub_url"), str) or not c["hub_url"].strip():
         raise ValueError("hub_url 必须是面板 IP:端口或 HTTP(S) 根地址")
     c["hub_url"] = normalize_url(c["hub_url"])
-    if not isinstance(c.get("device_id"), str) or not 1 <= len(c["device_id"]) <= 100 or any(not (x.isascii() and (x.isalnum() or x in "-_.")) for x in c["device_id"]):
+    if (
+        not isinstance(c.get("device_id"), str)
+        or not 1 <= len(c["device_id"]) <= 100
+        or any(not (x.isascii() and (x.isalnum() or x in "-_.")) for x in c["device_id"])
+    ):
         raise ValueError("device_id 无效；请保留配对文件中的设备身份")
     if not isinstance(c.get("secret"), str) or not 40 <= len(c["secret"]) <= 512:
         raise ValueError("Agent 配置缺少有效设备密钥，请先运行 init")
@@ -41,7 +46,12 @@ def validate_config(value: object, config_path: Path) -> dict:
     if not isinstance(roots, list):
         raise ValueError("allowed_roots 应是目录授权对象数组")
     for root in roots:
-        if not isinstance(root, dict) or not isinstance(root.get("path"), str) or not root["path"].strip() or "\x00" in root["path"]:
+        if (
+            not isinstance(root, dict)
+            or not isinstance(root.get("path"), str)
+            or not root["path"].strip()
+            or "\x00" in root["path"]
+        ):
             raise ValueError("每个 allowed_roots 条目必须包含有效 path")
         if not Path(root["path"]).expanduser().is_absolute():
             raise ValueError("本机目录授权 path 必须是绝对路径")
@@ -56,7 +66,13 @@ def validate_config(value: object, config_path: Path) -> dict:
         if not isinstance(name, str) or not 1 <= len(name) <= 100 or not isinstance(task, dict):
             raise ValueError("任务名称或任务配置无效")
         command = task.get("command")
-        if not isinstance(command, list) or not command or not isinstance(command[0], str) or not command[0].strip() or any(not isinstance(x, str) or "\x00" in x for x in command):
+        if (
+            not isinstance(command, list)
+            or not command
+            or not isinstance(command[0], str)
+            or not command[0].strip()
+            or any(not isinstance(x, str) or "\x00" in x for x in command)
+        ):
             raise ValueError(f"任务 {name}: command 必须是非空命令参数数组")
         projects = task.get("projects", [])
         if not isinstance(projects, list) or any(not isinstance(p, str) or not p for p in projects):
@@ -69,6 +85,7 @@ def validate_config(value: object, config_path: Path) -> dict:
         if not isinstance(task.get("cwd", "."), str):
             raise ValueError(f"任务 {name}: cwd 必须是项目相对路径")
         from agent.filesystem import relative_path
+
         try:
             relative_path(task.get("cwd", "."))
         except DevError as exc:
@@ -76,11 +93,20 @@ def validate_config(value: object, config_path: Path) -> dict:
         if not isinstance(task.get("description", ""), str):
             raise ValueError(f"任务 {name}: description 必须是文字")
         if "env" in task:
-            if not isinstance(task["env"], dict) or any(not isinstance(k, str) or not k or "=" in k or "\x00" in k or not isinstance(v, str) or "\x00" in v for k, v in task["env"].items()):
+            if not isinstance(task["env"], dict) or any(
+                not isinstance(k, str)
+                or not k
+                or "=" in k
+                or "\x00" in k
+                or not isinstance(v, str)
+                or "\x00" in v
+                for k, v in task["env"].items()
+            ):
                 raise ValueError(f"任务 {name}: env 必须是文字键值对象")
     c["tasks"] = tasks
     c["shell"] = validate_shell(c.get("shell", {}))
     from agent.project_runtime import validate_runtimes
+
     c["project_runtimes"] = validate_runtimes(c.get("project_runtimes", {}))
     c["mcp_policy"] = validate_policy(c.get("mcp_policy", {}))
     c["skills"] = validate_skills(c.get("skills", {}))
@@ -88,12 +114,13 @@ def validate_config(value: object, config_path: Path) -> dict:
     c["integrations"] = validate_integrations(c.get("integrations", {}))
     c["scheduler"] = validate_scheduler(c.get("scheduler"))
     from agent.journal_retention import validate as validate_retention
+
     c["journal_retention"] = validate_retention(c.get("journal_retention", {}))
-    review = c.get('review_storage', {})
-    if not isinstance(review, dict) or set(review) - {'max_storage_mib', 'max_records'}:
-        raise ValueError('review_storage 只支持 max_storage_mib 和 max_records')
-    for key, low, high in [('max_storage_mib', 64, 65536), ('max_records', 16, 10000)]:
+    review = c.get("review_storage", {})
+    if not isinstance(review, dict) or set(review) - {"max_storage_mib", "max_records"}:
+        raise ValueError("review_storage 只支持 max_storage_mib 和 max_records")
+    for key, low, high in [("max_storage_mib", 64, 65536), ("max_records", 16, 10000)]:
         if key in review and (type(review[key]) is not int or not low <= review[key] <= high):
-            raise ValueError(f'review_storage.{key} 必须是 {low}–{high} 的整数')
-    c['review_storage'] = review
+            raise ValueError(f"review_storage.{key} 必须是 {low}–{high} 的整数")
+    c["review_storage"] = review
     return c

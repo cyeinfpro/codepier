@@ -70,7 +70,8 @@ tool:async(name,args)=>{calls.push({name,args});if(name==='operations_wait')retu
 vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),context);
 (async()=>{
  await context.vpsCheck('v');await elements['#vps-check-run'].onclick();
- assert.equal(elements['#vps-check-run'].textContent,'恢复本次检查');
+ // The shorter caption still resumes the original operation; verify calls below.
+ assert.equal(elements['#vps-check-run'].textContent,'重试');
  await elements['#vps-check-run'].onclick();
  assert.equal(elements['#vps-check-run'].textContent,'重新检查');
  assert.equal(elements['#vps-check-project'].disabled,false);

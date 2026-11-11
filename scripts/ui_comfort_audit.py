@@ -1,4 +1,5 @@
 """Isolated UI geometry and rendered text contrast audit; no real model submission."""
+
 from __future__ import annotations
 import argparse
 import json
@@ -47,38 +48,81 @@ MEASURE = r"""() => {
 }"""
 
 
-def capture(output: Path, *, full: bool=False, engine: str='chromium') -> dict:
+def capture(output: Path, *, full: bool = False, engine: str = "chromium") -> dict:
     output.mkdir(parents=True, exist_ok=True)
-    results=[]
-    routes=['overview','devices','projects','workbench','settings','native']
-    viewports=[(1366,768)] if not full else [(1280,720),(1366,768),(1440,900),(1920,1080),(1024,768),(390,844),(320,568)]
-    with TemporaryDirectory(prefix='codepier-ui-comfort-') as tmp, running_stack(Path(tmp)) as stack:
+    results = []
+    routes = ["overview", "devices", "projects", "workbench", "settings", "native"]
+    viewports = (
+        [(1366, 768)]
+        if not full
+        else [
+            (1280, 720),
+            (1366, 768),
+            (1440, 900),
+            (1920, 1080),
+            (1024, 768),
+            (390, 844),
+            (320, 568),
+        ]
+    )
+    with (
+        TemporaryDirectory(prefix="codepier-ui-comfort-") as tmp,
+        running_stack(Path(tmp)) as stack,
+    ):
         _prepare_native_fixture(stack)
         with sync_playwright() as pw:
-            browser=launch_browser(getattr(pw,engine))
+            browser = launch_browser(getattr(pw, engine))
             try:
-                for width,height in viewports:
-                    for scheme in ['light','dark']:
-                        page=browser.new_page(viewport={'width':width,'height':height},color_scheme=scheme,reduced_motion='reduce')
-                        errors=[]
-                        page.on('pageerror',lambda e, errors=errors:errors.append(str(e)))
-                        _login(page,stack);_set_scheme(page,scheme)
+                for width, height in viewports:
+                    for scheme in ["light", "dark"]:
+                        page = browser.new_page(
+                            viewport={"width": width, "height": height},
+                            color_scheme=scheme,
+                            reduced_motion="reduce",
+                        )
+                        errors = []
+                        page.on("pageerror", lambda e, errors=errors: errors.append(str(e)))
+                        _login(page, stack)
+                        _set_scheme(page, scheme)
                         for route in routes:
-                            _navigate(page,route)
-                            data=page.evaluate(MEASURE)
-                            data.update(route=route,scheme=scheme,engine=engine)
-                            name=f'{engine}-{scheme}-{width}-{height}-{route}.png'
-                            page.screenshot(path=str(output/name),animations='disabled')
-                            data['screenshot']=name;results.append(data)
-                            print(json.dumps({'route':route,'scheme':scheme,'width':width,'height':height,'documentHeight':data['documentHeight'],'contrastFailures':len(data['failures'])},ensure_ascii=False),flush=True)
+                            _navigate(page, route)
+                            data = page.evaluate(MEASURE)
+                            data.update(route=route, scheme=scheme, engine=engine)
+                            name = f"{engine}-{scheme}-{width}-{height}-{route}.png"
+                            page.screenshot(path=str(output / name), animations="disabled")
+                            data["screenshot"] = name
+                            results.append(data)
+                            print(
+                                json.dumps(
+                                    {
+                                        "route": route,
+                                        "scheme": scheme,
+                                        "width": width,
+                                        "height": height,
+                                        "documentHeight": data["documentHeight"],
+                                        "contrastFailures": len(data["failures"]),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                flush=True,
+                            )
                         assert not errors, errors
                         page.close()
             finally:
                 browser.close()
-    report={'engine':engine,'scope':'isolated fixtures; no real model messages; measured visible solid-background text, not full WCAG certification','cases':results}
-    (output/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    report = {
+        "engine": engine,
+        "scope": "isolated fixtures; no real model messages; measured visible solid-background text, not full WCAG certification",
+        "cases": results,
+    }
+    (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 
-if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--output',type=Path,required=True);p.add_argument('--full',action='store_true');p.add_argument('--engine',choices=['chromium','webkit'],default='chromium');a=p.parse_args()
-    capture(a.output,full=a.full,engine=a.engine)
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--full", action="store_true")
+    p.add_argument("--engine", choices=["chromium", "webkit"], default="chromium")
+    a = p.parse_args()
+    capture(a.output, full=a.full, engine=a.engine)

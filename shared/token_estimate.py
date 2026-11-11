@@ -4,6 +4,7 @@ This is not a tokenizer or billing meter. Only integer measurements leave this
 module. JSON is normalized, excluded fields/URLs/media are not counted, and a
 bounded prefix is never extrapolated to an unseen complete payload.
 """
+
 from __future__ import annotations
 
 import json
@@ -11,7 +12,12 @@ import math
 import re
 import unicodedata
 
-from shared.token_cost import DEFAULT_CACHE_READ_PERCENT, DEFAULT_REFERENCE_MODEL, combined_total, reference_cost
+from shared.token_cost import (
+    DEFAULT_CACHE_READ_PERCENT,
+    DEFAULT_REFERENCE_MODEL,
+    combined_total,
+    reference_cost,
+)
 
 VERSION = "codepier-text-v1"
 MAX_CHARACTERS = 262_144
@@ -20,29 +26,67 @@ MAX_DEPTH = 32
 NUMBERS = ("estimated_tokens", "low", "high", "characters", "utf8_bytes")
 # Whole fields are excluded, including their JSON keys. All URLs are excluded:
 # this deliberately avoids trying to distinguish private signed URL formats.
-EXCLUDED_KEYS = frozenset({
-    "_meta", "authorization", "proxyauthorization", "headers", "cookie",
-    "cookies", "setcookie", "password", "passwd", "secret", "secrets",
-    "token", "accesstoken", "refreshtoken", "idtoken", "apikey",
-    "credentials", "credential", "privatekey", "clientsecret",
-    "downloadurl", "uploadurl", "signedurl", "file", "files",
-    "base64", "contentbase64", "chunkbase64", "datauri", "blob",
-    "inputschema", "outputschema", "schema",
-})
+EXCLUDED_KEYS = frozenset(
+    {
+        "_meta",
+        "authorization",
+        "proxyauthorization",
+        "headers",
+        "cookie",
+        "cookies",
+        "setcookie",
+        "password",
+        "passwd",
+        "secret",
+        "secrets",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "apikey",
+        "credentials",
+        "credential",
+        "privatekey",
+        "clientsecret",
+        "downloadurl",
+        "uploadurl",
+        "signedurl",
+        "file",
+        "files",
+        "base64",
+        "contentbase64",
+        "chunkbase64",
+        "datauri",
+        "blob",
+        "inputschema",
+        "outputschema",
+        "schema",
+    }
+)
 URL = re.compile(r"(?:https?://|data:)[^\s\"'<>]+", re.I)
 ENCODED = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{128,}={0,2}(?![A-Za-z0-9+/=_-])")
 BEARER = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]+=*", re.I)
 
 
 def unavailable():
-    return {"state": "unavailable", **dict.fromkeys(NUMBERS), "excluded_fields": 0,
-            "truncated": False, "source_truncated": False}
+    return {
+        "state": "unavailable",
+        **dict.fromkeys(NUMBERS),
+        "excluded_fields": 0,
+        "truncated": False,
+        "source_truncated": False,
+    }
 
 
 def _excluded(key):
     normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    return key == "_meta" or normalized in EXCLUDED_KEYS or normalized.endswith(
-        ("password", "secret", "accesstoken", "refreshtoken", "apikey", "base64"))
+    return (
+        key == "_meta"
+        or normalized in EXCLUDED_KEYS
+        or normalized.endswith(
+            ("password", "secret", "accesstoken", "refreshtoken", "apikey", "base64")
+        )
+    )
 
 
 class Projection:
@@ -110,10 +154,17 @@ class Projection:
                 if self.nodes >= MAX_NODES or self.characters >= MAX_CHARACTERS:
                     self.truncated = True
                     break
-                if not isinstance(key, str) or _excluded(key) or (key == "data" and "upload_id" in value and "chunk_sha256" in value):
+                if (
+                    not isinstance(key, str)
+                    or _excluded(key)
+                    or (key == "data" and "upload_id" in value and "chunk_sha256" in value)
+                ):
                     self.excluded += 1
                     continue
-                if key in {"truncated", "output_truncated", "diff_truncated", "content_truncated"} and item is True:
+                if (
+                    key in {"truncated", "output_truncated", "diff_truncated", "content_truncated"}
+                    and item is True
+                ):
                     self.source_truncated = True
                 if not first:
                     self.append(",")
@@ -144,18 +195,23 @@ class Projection:
         for character in text:
             code = ord(character)
             if code < 128:
-                weight += .28 if character.isalnum() else .10 if character.isspace() else .60
+                weight += 0.28 if character.isalnum() else 0.10 if character.isspace() else 0.60
             elif unicodedata.east_asian_width(character) in {"W", "F"}:
                 weight += 1.30 if code < 0x1F000 else 2.50
             else:
-                weight += .90
+                weight += 0.90
         estimate = math.ceil(weight)
-        return {"state": "partial" if self.truncated else "available",
-                "estimated_tokens": estimate, "low": math.ceil(weight * .5),
-                "high": math.ceil(weight * 2), "characters": len(text),
-                "utf8_bytes": len(text.encode("utf-8")),
-                "excluded_fields": self.excluded, "truncated": self.truncated,
-                "source_truncated": self.source_truncated}
+        return {
+            "state": "partial" if self.truncated else "available",
+            "estimated_tokens": estimate,
+            "low": math.ceil(weight * 0.5),
+            "high": math.ceil(weight * 2),
+            "characters": len(text),
+            "utf8_bytes": len(text.encode("utf-8")),
+            "excluded_fields": self.excluded,
+            "truncated": self.truncated,
+            "source_truncated": self.source_truncated,
+        }
 
 
 def estimate_input(arguments):
@@ -185,14 +241,22 @@ def estimate_output(result):
                 projection.excluded += 1
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
-                if len(block["text"]) > MAX_CHARACTERS and block["text"].lstrip().startswith(("{", "[")) and "structuredContent" in result:
+                if (
+                    len(block["text"]) > MAX_CHARACTERS
+                    and block["text"].lstrip().startswith(("{", "["))
+                    and "structuredContent" in result
+                ):
                     # Use the already materialized object without reparsing an
                     # oversized JSON mirror or scanning a raw sensitive prefix.
                     projection.value(result["structuredContent"])
                 else:
                     projection.text(block["text"])
                 found_text = True
-            elif block.get("type") == "resource" and isinstance(block.get("resource"), dict) and isinstance(block["resource"].get("text"), str):
+            elif (
+                block.get("type") == "resource"
+                and isinstance(block.get("resource"), dict)
+                and isinstance(block["resource"].get("text"), str)
+            ):
                 projection.text(block["resource"]["text"])
                 found_text = True
             else:
@@ -213,28 +277,46 @@ def estimate_output(result):
 
 
 def usage(input_metric=None, output_metric=None):
-    return {"version": VERSION, "kind": "estimate", "scope": "project_tool_payload",
-            "input": input_metric or unavailable(), "output": output_metric or unavailable(),
-            "actual_usage": None}
+    return {
+        "version": VERSION,
+        "kind": "estimate",
+        "scope": "project_tool_payload",
+        "input": input_metric or unavailable(),
+        "output": output_metric or unavailable(),
+        "actual_usage": None,
+    }
 
 
-def summarize(rows, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT, reference_model=DEFAULT_REFERENCE_MODEL):
+def summarize(
+    rows, *, cache_read_percent=DEFAULT_CACHE_READ_PERCENT, reference_model=DEFAULT_REFERENCE_MODEL
+):
     directions = {}
     for direction in ("input", "output"):
         metrics = [(row.get("token_usage") or {}).get(direction) or unavailable() for row in rows]
         measured = [metric for metric in metrics if metric["state"] != "unavailable"]
         directions[direction] = {
-            **{key: sum(metric[key] for metric in measured) if measured else None for key in NUMBERS},
-            "measured_attempts": len(measured), "unavailable_attempts": len(metrics) - len(measured),
+            **{
+                key: sum(metric[key] for metric in measured) if measured else None
+                for key in NUMBERS
+            },
+            "measured_attempts": len(measured),
+            "unavailable_attempts": len(metrics) - len(measured),
             "partial_attempts": sum(metric["state"] == "partial" for metric in measured),
             "source_truncated_attempts": sum(metric["source_truncated"] for metric in measured),
         }
-    result = {"version": VERSION, "kind": "estimate", "scope": "returned_activity_page",
-            "wire_attempts": len(rows),
-            "measured_attempts": sum(bool(row.get("token_usage")) for row in rows),
-            "unavailable_attempts": sum(not row.get("token_usage") for row in rows),
-            "distinct_server_operation_ids": len({row["operation_id"] for row in rows if row.get("operation_id")}),
-            **directions, "actual_usage": None}
+    result = {
+        "version": VERSION,
+        "kind": "estimate",
+        "scope": "returned_activity_page",
+        "wire_attempts": len(rows),
+        "measured_attempts": sum(bool(row.get("token_usage")) for row in rows),
+        "unavailable_attempts": sum(not row.get("token_usage") for row in rows),
+        "distinct_server_operation_ids": len(
+            {row["operation_id"] for row in rows if row.get("operation_id")}
+        ),
+        **directions,
+        "actual_usage": None,
+    }
     result["total"] = combined_total(result)
     result["reference_cost"] = reference_cost(result, cache_read_percent, reference_model)
     return result

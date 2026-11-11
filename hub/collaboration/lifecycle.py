@@ -1,4 +1,5 @@
 """Hub-owned, bounded lifecycle; no model or native CLI is a process supervisor."""
+
 import asyncio
 import logging
 from threading import Lock
@@ -27,30 +28,46 @@ class CollaborationLoops:
             self._event_loop = asyncio.get_running_loop()
             self._event_wake = asyncio.Event() if self.service.config.events_enabled else None
             self._wake_scheduled = None
-        operations = [('reconcile', self.reconcile, 5)]
+        operations = [("reconcile", self.reconcile, 5)]
         if self.service.config.events_enabled:
-            operations.extend([
-                ('events', partial(self.service.events.tick, wake=self._event_wake), 2),
-                ('room_subscription_renewal', self.renew_room_subscriptions, 5),
-            ])
+            operations.extend(
+                [
+                    ("events", partial(self.service.events.tick, wake=self._event_wake), 2),
+                    ("room_subscription_renewal", self.renew_room_subscriptions, 5),
+                ]
+            )
         if self.service.config.collector_enabled:
-            operations.append(('collector', self.service.monitor.tick, 2))
+            operations.append(("collector", self.service.monitor.tick, 2))
         # Owner switches are persisted and can change without a Hub restart.
         # These bounded loops remain idle unless a current owner/account is enabled.
         if self.service.config.enabled:
-            operations.extend([('weixin_poll', self.service.weixin.tick, 1),
-                               ('weixin_delivery', self.service.weixin.delivery.tick, 1),
-                               ('weixin_media', self.service.weixin.media.tick, 2)])
+            operations.extend(
+                [
+                    ("weixin_poll", self.service.weixin.tick, 1),
+                    ("weixin_delivery", self.service.weixin.delivery.tick, 1),
+                    ("weixin_media", self.service.weixin.media.tick, 2),
+                ]
+            )
         if self.service.config.enabled:
-            operations.extend([('telegram_poll', self.service.telegram.tick, 1),
-                               ('telegram_media', self.service.channels.media.tick, 2)])
+            operations.extend(
+                [
+                    ("telegram_poll", self.service.telegram.tick, 1),
+                    ("telegram_media", self.service.channels.media.tick, 2),
+                ]
+            )
         if self.service.config.enabled:
-            operations.append(('channel_mirrors', self.service.channels.tick, 1))
+            operations.append(("channel_mirrors", self.service.channels.tick, 1))
         for name, operation, interval in operations:
-            if name.startswith(('weixin_', 'telegram_')) or name == 'channel_mirrors':
+            if name.startswith(("weixin_", "telegram_")) or name == "channel_mirrors":
                 self._channel_wakes[name] = asyncio.Event()
-            self.service.health.setdefault(name, {'enabled': True, 'running': False, 'reason_code': ''})
-            self.tasks.append(asyncio.create_task(self.loop(name, operation, interval), name='collaboration:' + name))
+            self.service.health.setdefault(
+                name, {"enabled": True, "running": False, "reason_code": ""}
+            )
+            self.tasks.append(
+                asyncio.create_task(
+                    self.loop(name, operation, interval), name="collaboration:" + name
+                )
+            )
 
     def wake_events(self):
         """Coalesce a committed outbox hint onto the existing event loop."""
@@ -88,11 +105,18 @@ class CollaborationLoops:
                     return
 
     def channel_delay(self, name, interval):
-        channels = (('weixin', 'telegram') if name == 'channel_mirrors' else
-                    ('weixin',) if name.startswith('weixin_') else ('telegram',))
+        channels = (
+            ("weixin", "telegram")
+            if name == "channel_mirrors"
+            else ("weixin",)
+            if name.startswith("weixin_")
+            else ("telegram",)
+        )
         for channel in channels:
-            enabled = self.service.channel_settings.sql_enabled(channel, 'a')
-            if self.service.store.one(f"SELECT 1 FROM {channel}_accounts a WHERE a.state='active' AND {enabled} LIMIT 1"):
+            enabled = self.service.channel_settings.sql_enabled(channel, "a")
+            if self.service.store.one(
+                f"SELECT 1 FROM {channel}_accounts a WHERE a.state='active' AND {enabled} LIMIT 1"
+            ):
                 return interval
         # Still run periodic expiry/reconciliation; no enabled owner/account
         # should consume the one database worker every second.
@@ -111,7 +135,7 @@ class CollaborationLoops:
         store = self.service.store
         with store.lock:
             if advance_auto_backfill(store):
-                self.service.config = replace(self.service.config, host_connections_mode='on')
+                self.service.config = replace(self.service.config, host_connections_mode="on")
                 self.host_backfill_pending = False
 
     async def renew_room_subscriptions(self):
@@ -119,30 +143,45 @@ class CollaborationLoops:
 
     async def loop(self, name, operation, interval):
         while True:
-            wake = self._event_wake if name == 'events' else self._channel_wakes.get(name)
+            wake = self._event_wake if name == "events" else self._channel_wakes.get(name)
             # Clear BEFORE the DB scan. A commit during the scan/network await
             # stays set and triggers one more serialized pass, never a lost wake.
             if wake is not None:
                 wake.clear()
             idle_delay = interval
             try:
-                self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
+                self.service.health[name] = {
+                    "status": "running",
+                    "observed_at": self.service.clock(),
+                }
                 await operation()
-                idle_delay = (await self.service.store.run(lambda: self.channel_delay(name, interval))
-                              if name in self._channel_wakes else interval)
+                idle_delay = (
+                    await self.service.store.run(lambda: self.channel_delay(name, interval))
+                    if name in self._channel_wakes
+                    else interval
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 # Do not log exception bodies: HTTP exceptions can embed callback
                 # paths, authentication material or untrusted response content.
                 code = type(exc).__name__
-                self.service.health[name] = {'status': 'degraded', 'reason_code': code,
-                                             'observed_at': self.service.clock()}
-                logger.warning('Collaboration component %s degraded (%s)', name, code)
+                self.service.health[name] = {
+                    "status": "degraded",
+                    "reason_code": code,
+                    "observed_at": self.service.clock(),
+                }
+                logger.warning("Collaboration component %s degraded (%s)", name, code)
             else:
-                self.service.health[name] = {'status': 'running', 'observed_at': self.service.clock()}
-            deadline = (getattr(getattr(self.service, 'events', None), 'next_dispatch_delay', None)
-                        if name == 'events' else None)
+                self.service.health[name] = {
+                    "status": "running",
+                    "observed_at": self.service.clock(),
+                }
+            deadline = (
+                getattr(getattr(self.service, "events", None), "next_dispatch_delay", None)
+                if name == "events"
+                else None
+            )
             delay = deadline(interval) if deadline is not None else idle_delay
             if wake is None:
                 await asyncio.sleep(delay)
@@ -163,19 +202,25 @@ class CollaborationLoops:
                 await task
         self.started = False
         for name in self.service.health:
-            self.service.health[name] = {'status': 'stopped', 'observed_at': self.service.clock()}
+            self.service.health[name] = {"status": "stopped", "observed_at": self.service.clock()}
 
 
 def install(runtime, *, config=None):
     from hub.collaboration.service import CollaborationService
     from hub.collaboration.events import EventService
     from hub.collaboration.monitor import MonitorService
+
     service = CollaborationService(runtime, config=config)
     service.events = EventService(service)
     service.monitor = MonitorService(service)
-    service.health = {name: {'status': 'not_started' if enabled else 'disabled'} for name, enabled in (
-        ('reconcile', service.config.enabled), ('events', service.config.events_enabled),
-        ('collector', service.config.collector_enabled))}
+    service.health = {
+        name: {"status": "not_started" if enabled else "disabled"}
+        for name, enabled in (
+            ("reconcile", service.config.enabled),
+            ("events", service.config.events_enabled),
+            ("collector", service.config.collector_enabled),
+        )
+    }
     service.loops = CollaborationLoops(service)
     runtime.collaboration = service
     runtime.store.collaboration = service

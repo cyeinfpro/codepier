@@ -1,4 +1,5 @@
 """CodePier Hub composition root. Domain behavior lives in hub.api.*."""
+
 from __future__ import annotations
 
 import os
@@ -33,7 +34,6 @@ from hub.api.file_import_settings import make_file_import_settings_router
 from hub.file_import_settings import initialize as initialize_file_import_settings
 from hub.api.connection import make_connection_router
 from hub.api.system import make_system_router
-from hub.api.models import Model, ComputerDecision, Login, DeviceCreate, DeviceUpdate, ProjectInput, ToolCall, TokenInput, PasswordInput, SettingsInput
 from hub.access import make_access_router
 from hub.artifacts import make_artifact_router
 from hub.incoming_files import make_incoming_file_router
@@ -55,7 +55,10 @@ BASE = Path(__file__).resolve().parent.parent
 def create_app(data_dir: str | None = None):
     from hub.collaboration.config import CollaborationConfig
     from hub.collaboration.room_host_rollout import resolve_startup_mode
-    collaboration_config = CollaborationConfig.from_env()  # Check rollout before opening the database.
+
+    collaboration_config = (
+        CollaborationConfig.from_env()
+    )  # Check rollout before opening the database.
     config = HubConfig.from_env()
     directory = Path(data_dir or os.getenv("HUB_DATA_DIR", str(BASE / "data"))).resolve()
     from hub.state_layout import state_directory
@@ -65,23 +68,36 @@ def create_app(data_dir: str | None = None):
     instance_lock = InstanceLock(state / ".hub.lock")
     store = None
     try:
-        host_connections_on = collaboration_config.host_connections_mode == 'on'
+        host_connections_on = collaboration_config.host_connections_mode == "on"
         check_path(state, VERSION, required=host_connections_on)
-        store = Store(directory, initialize_host_contract=collaboration_config.host_connections_mode == 'auto')
-        collaboration_config, host_backfill_pending = resolve_startup_mode(store, collaboration_config)
+        store = Store(
+            directory, initialize_host_contract=collaboration_config.host_connections_mode == "auto"
+        )
+        collaboration_config, host_backfill_pending = resolve_startup_mode(
+            store, collaboration_config
+        )
         initialize_file_import_settings(store)
         runtime, auth = Runtime(store, collaboration_config=collaboration_config), Auth(store)
         runtime.collaboration.loops.host_backfill_pending = host_backfill_pending
         runtime.gateway = Gateway(store)
+
         def public_url():
             row = store.one("SELECT value FROM meta WHERE key='public_url'")
             return normalize_url(row["value"] if row else config.public_url)
 
         runtime.oauth = OAuth(auth, runtime, public_url)
+
         def oidc_public_url():
             return config.oidc_public_url or config.public_url
 
-        oidc = OIDCService(auth, runtime, oidc_public_url, seed=config.oidc_seed, bootstrap_admin=config.oidc_bootstrap_admin, legacy_public_url=public_url)
+        oidc = OIDCService(
+            auth,
+            runtime,
+            oidc_public_url,
+            seed=config.oidc_seed,
+            bootstrap_admin=config.oidc_bootstrap_admin,
+            legacy_public_url=public_url,
+        )
 
         @asynccontextmanager
         async def lifespan(app):
@@ -94,8 +110,10 @@ def create_app(data_dir: str | None = None):
             finally:
                 try:
                     try:
-                        await runtime.panel_agent_rollouts.stop()
-                        await oidc.stop()
+                        try:
+                            await runtime.panel_agent_rollouts.stop()
+                        finally:
+                            await oidc.stop()
                     finally:
                         try:
                             try:
@@ -110,8 +128,20 @@ def create_app(data_dir: str | None = None):
                     finally:
                         instance_lock.close()
 
-        app = FastAPI(title="CodePier Agent", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-        app.state.store, app.state.runtime, app.state.auth, app.state.config = store, runtime, auth, config
+        app = FastAPI(
+            title="CodePier Hub",
+            version=VERSION,
+            lifespan=lifespan,
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
+        )
+        app.state.store, app.state.runtime, app.state.auth, app.state.config = (
+            store,
+            runtime,
+            auth,
+            config,
+        )
         maintenance = PanelMaintenance(runtime, os.getenv("HUB_PANEL_UPDATE_SOCKET", ""))
         runtime.panel_maintenance = maintenance
         app.state.oidc = oidc
@@ -123,20 +153,36 @@ def create_app(data_dir: str | None = None):
         install_http_behaviors(app)
         app.add_middleware(MCPRequestAuditMiddleware)
         context = HubContext(store, runtime, auth, config, maintenance, public_url, BASE)
-        for make in (make_accounts_router, make_devices_router, make_projects_router,
-                     make_activity_router, make_settings_router, make_file_import_settings_router, make_system_router, make_connection_router,
-                     make_project_runtimes_router, make_agent_roots_router):
+        for make in (
+            make_accounts_router,
+            make_devices_router,
+            make_projects_router,
+            make_activity_router,
+            make_settings_router,
+            make_file_import_settings_router,
+            make_system_router,
+            make_connection_router,
+            make_project_runtimes_router,
+            make_agent_roots_router,
+        ):
             app.include_router(make(context))
         app.include_router(oidc.router)
         for make in (make_iam_router, make_profiles_router, make_roles_router, make_gateway_router):
             app.include_router(make(auth, runtime))
         app.include_router(runtime.oauth.router)
         app.include_router(make_router(auth, runtime, public_url))
-        for make in (make_artifact_router, make_incoming_file_router, make_access_router, make_native_router,
-                     make_vps_router, make_panel_update_router):
+        for make in (
+            make_artifact_router,
+            make_incoming_file_router,
+            make_access_router,
+            make_native_router,
+            make_vps_router,
+            make_panel_update_router,
+        ):
             app.include_router(make(auth, runtime))
         app.include_router(make_agent_install_router(runtime, auth))
         from hub.collaboration.api import make_router as make_collaboration_router
+
         app.include_router(make_collaboration_router(auth, runtime))
         register_call_log(app, runtime, auth)
         app.mount("/static", ReleaseAssets(directory=BASE / "web"), name="static")

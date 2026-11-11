@@ -314,19 +314,21 @@ async def test_watchdog_stops_when_service_exits(monkeypatch):
     assert not watchdog.thread.is_alive()
 
 
-def test_source_adoption_preserves_config_and_uses_managed_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform_name, executable, service", [("nt", "Scripts/python.exe", "schtasks"), ("posix", "bin/python", "launchd")])
+def test_source_adoption_preserves_config_and_uses_managed_runtime(tmp_path, monkeypatch, platform_name, executable, service):
+    monkeypatch.setattr(installer, "os", SimpleNamespace(**{**vars(installer.os), "name": platform_name}))
     base = tmp_path/'agent'
     base.mkdir()
     config = base/'config.json'
     original = '{"device_id":"same-node", "hub_url":"https://hub.example", "secret":"preserve"}\n'
     config.write_text(original)
-    monkeypatch.setattr(installer, 'service_identity', lambda: ('schtasks', 'user'))
+    monkeypatch.setattr(installer, 'service_identity', lambda: (service, 'user'))
     monkeypatch.setattr(installer, 'service_preflight', lambda *_a: None)
     monkeypatch.setattr(installer, 'find_uv', lambda *_a: tmp_path/'uv.exe')
     calls = []
     monkeypatch.setattr(installer, 'run', lambda command, **_kw: calls.append([str(p) for p in command]))
     def start(actual_base, python):
-        assert actual_base == base and python == base/'runtime/.venv/Scripts/python.exe'
+        assert actual_base == base and python == base/'runtime/.venv'/executable
         assert (base/'runtime/agent/service_watchdog.py').exists()
         assert config.read_text() == original
     monkeypatch.setattr(installer, 'start_service', start)

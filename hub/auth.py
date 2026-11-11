@@ -24,6 +24,7 @@ class Auth:
         self.store = store
         # Unknown users still pay password verification cost.
         from shared.crypto import password_hash
+
         self.dummy = password_hash(token())
         self.login_inflight = 0
         self.resource = None
@@ -32,17 +33,25 @@ class Auth:
         cookie = request.cookies.get("rd_session", "")
         if not cookie:
             raise DevError("LOGIN_REQUIRED", "请先登录面板", 401)
-        session = self.store.one("SELECT s.*,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires>?", (digest(cookie), time.time()))
+        session = self.store.one(
+            "SELECT s.*,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires>?",
+            (digest(cookie), time.time()),
+        )
         if not session:
             raise DevError("LOGIN_REQUIRED", "登录已过期，请重新登录", 401)
-        user = iam.user_security(self.store, session['user_id'])
-        security = self.store.one('SELECT * FROM session_security WHERE session_hash=?', (session['id_hash'],))
-        if not security or security['epoch'] != user['epoch']:
-            raise DevError('LOGIN_REQUIRED', '会话已撤销', 401)
-        session.update(identity_id=security['identity_id'] if security else None,
-                       user_epoch=user['epoch'], instance_admin=bool(user['instance_admin']),
-                       authenticated_at=security['authenticated_at'] if security else 0)
-        iam.check_identity(self.store, session['identity_id'], require_fresh=False)
+        user = iam.user_security(self.store, session["user_id"])
+        security = self.store.one(
+            "SELECT * FROM session_security WHERE session_hash=?", (session["id_hash"],)
+        )
+        if not security or security["epoch"] != user["epoch"]:
+            raise DevError("LOGIN_REQUIRED", "会话已撤销", 401)
+        session.update(
+            identity_id=security["identity_id"] if security else None,
+            user_epoch=user["epoch"],
+            instance_admin=bool(user["instance_admin"]),
+            authenticated_at=security["authenticated_at"] if security else 0,
+        )
+        iam.check_identity(self.store, session["identity_id"], require_fresh=False)
         return session
 
     @staticmethod
@@ -59,7 +68,9 @@ class Auth:
         # Space membership or periodic entitlement freshness has expired.
         session = self.session(request)
         self.check_origin(request)
-        if not __import__('hmac').compare_digest(request.headers.get("x-rd-csrf", "").encode("utf-8"), session["csrf"].encode("utf-8")):
+        if not __import__("hmac").compare_digest(
+            request.headers.get("x-rd-csrf", "").encode("utf-8"), session["csrf"].encode("utf-8")
+        ):
             raise DevError("CSRF_REJECTED", "页面会话已变化，请刷新后重试", 403)
         return session
 
@@ -67,14 +78,27 @@ class Auth:
         session = self.session_write(request) if write else self.session(request)
         # A per-request selector never changes another tab's session. Membership
         # is checked below; a supplied Space ID is not authority.
-        space_id = request.headers.get('x-codepier-space') or (request.query_params.get('space_id') if 'query_string' in request.scope else None)
+        space_id = request.headers.get("x-codepier-space") or (
+            request.query_params.get("space_id") if "query_string" in request.scope else None
+        )
         if not space_id:
-            row = self.store.one("SELECT m.space_id FROM memberships m JOIN spaces s ON s.id=m.space_id WHERE m.user_id=? AND m.active=1 AND s.active=1 AND (m.expires IS NULL OR m.expires>?) AND NOT EXISTS(SELECT 1 FROM membership_blocks b WHERE b.space_id=m.space_id AND b.user_id=m.user_id AND b.blocked=1) ORDER BY CASE WHEN m.space_id='legacy' THEN 0 ELSE 1 END,m.space_id LIMIT 1", (session['user_id'], time.time()))
+            row = self.store.one(
+                "SELECT m.space_id FROM memberships m JOIN spaces s ON s.id=m.space_id WHERE m.user_id=? AND m.active=1 AND s.active=1 AND (m.expires IS NULL OR m.expires>?) AND NOT EXISTS(SELECT 1 FROM membership_blocks b WHERE b.space_id=m.space_id AND b.user_id=m.user_id AND b.blocked=1) ORDER BY CASE WHEN m.space_id='legacy' THEN 0 ELSE 1 END,m.space_id LIMIT 1",
+                (session["user_id"], time.time()),
+            )
             if not row:
-                raise DevError('SPACE_FORBIDDEN', '账号没有已启用的空间', 403)
-            space_id = row['space_id']
-        principal = Principal('panel:' + session['username'], session['user_id'], {'read'}, [],
-                              space_id=space_id, identity_id=session['identity_id'], user_epoch=session['user_epoch'], session_hash=session['id_hash'])
+                raise DevError("SPACE_FORBIDDEN", "账号没有已启用的空间", 403)
+            space_id = row["space_id"]
+        principal = Principal(
+            "panel:" + session["username"],
+            session["user_id"],
+            {"read"},
+            [],
+            space_id=space_id,
+            identity_id=session["identity_id"],
+            user_epoch=session["user_epoch"],
+            session_hash=session["id_hash"],
+        )
         principal = iam.live_principal(self.store, principal)
         iam.audit_context.set((self.store, principal.actor, principal.space_id, principal.user_id))
         return principal
@@ -82,22 +106,27 @@ class Auth:
     def admin(self, request: Request, write=False):
         principal = self.panel(request, write)
         if not principal.admin:
-            raise DevError('SPACE_ADMIN_REQUIRED', '此操作需要空间管理员权限', 403)
+            raise DevError("SPACE_ADMIN_REQUIRED", "此操作需要空间管理员权限", 403)
         return principal
 
     def instance(self, request: Request, write=False):
         principal = self.panel(request, write)
         if not principal.instance_admin:
-            raise DevError('INSTANCE_ADMIN_REQUIRED', '此操作需要实例管理员权限', 403)
+            raise DevError("INSTANCE_ADMIN_REQUIRED", "此操作需要实例管理员权限", 403)
         return principal
 
     def new_session(self, user_id, *, identity_id=None, provider_sid=None):
         user = iam.user_security(self.store, user_id)
         secret, csrf, now = token(), token(), time.time()
-        self.store.db.execute('INSERT INTO sessions VALUES (?,?,?,?)', (digest(secret), user_id, csrf, now + SESSION_SECONDS))
-        self.store.db.execute('INSERT INTO session_security(session_hash,epoch,authenticated_at,identity_id,provider_sid) VALUES (?,?,?,?,?)',
-                              (digest(secret), user['epoch'], now, identity_id, provider_sid))
-        return {'cookie': secret, 'csrf': csrf, 'username': user['username'], 'user_id': user_id}
+        self.store.db.execute(
+            "INSERT INTO sessions VALUES (?,?,?,?)",
+            (digest(secret), user_id, csrf, now + SESSION_SECONDS),
+        )
+        self.store.db.execute(
+            "INSERT INTO session_security(session_hash,epoch,authenticated_at,identity_id,provider_sid) VALUES (?,?,?,?,?)",
+            (digest(secret), user["epoch"], now, identity_id, provider_sid),
+        )
+        return {"cookie": secret, "csrf": csrf, "username": user["username"], "user_id": user_id}
 
     def bearer(self, request: Request):
         header = request.headers.get("authorization", "")
@@ -107,16 +136,38 @@ class Auth:
         value = value.strip()
         if not value or len(value) > 500:
             raise DevError("INVALID_TOKEN", "无效的凭据", 401)
-        row = self.store.one("SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id,g.authorization_mode,g.role_id,g.space_id,g.identity_id,g.user_epoch FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (digest(value), time.time()))
-        if not row or (row["kind"] == "access" and self.resource and row["resource"] != self.resource()):
+        row = self.store.one(
+            "SELECT t.*,g.user_id,g.label,g.scopes,g.projects,g.revoked,g.resource,g.profile_id,g.authorization_mode,g.role_id,g.space_id,g.identity_id,g.user_epoch FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0",
+            (digest(value), time.time()),
+        )
+        if not row or (
+            row["kind"] == "access" and self.resource and row["resource"] != self.resource()
+        ):
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
         grant_expiry.check(self.store, row["grant_id"])
         scopes, projects, _ = effective_grant(self.store, row)
-        iam.audit_context.set((self.store, "mcp:" + row["grant_id"] + ":" + row["label"], row["space_id"], row["user_id"]))
-        return Principal("mcp:" + row["grant_id"] + ":" + row["label"], row["user_id"], scopes, projects,
-                         grant_id=row["grant_id"], profile_id=row["profile_id"],
-                         authorization_mode=row['authorization_mode'], role_id=row['role_id'],
-                         space_id=row['space_id'], identity_id=row['identity_id'], user_epoch=row['user_epoch'], token_hash=digest(value))
+        iam.audit_context.set(
+            (
+                self.store,
+                "mcp:" + row["grant_id"] + ":" + row["label"],
+                row["space_id"],
+                row["user_id"],
+            )
+        )
+        return Principal(
+            "mcp:" + row["grant_id"] + ":" + row["label"],
+            row["user_id"],
+            scopes,
+            projects,
+            grant_id=row["grant_id"],
+            profile_id=row["profile_id"],
+            authorization_mode=row["authorization_mode"],
+            role_id=row["role_id"],
+            space_id=row["space_id"],
+            identity_id=row["identity_id"],
+            user_epoch=row["user_epoch"],
+            token_hash=digest(value),
+        )
 
     def _login_attempt(self, request, username):
         ip = request.client.host if request.client else "unknown"
@@ -129,18 +180,31 @@ class Auth:
         with self.store.transaction():
             self.store.db.execute("DELETE FROM login_attempts WHERE at<?", (now - 900,))
             self.store.db.execute("DELETE FROM login_account_attempts WHERE at<=?", (cutoff,))
-            count = self.store.one("SELECT count(*) AS n FROM login_attempts WHERE ip=? AND at>?", (ip, cutoff))["n"]
-            account_count = self.store.one("SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=? AND at>?", (username_hash, cutoff))["n"]
+            count = self.store.one(
+                "SELECT count(*) AS n FROM login_attempts WHERE ip=? AND at>?", (ip, cutoff)
+            )["n"]
+            account_count = self.store.one(
+                "SELECT count(*) AS n FROM login_account_attempts WHERE username_hash=? AND at>?",
+                (username_hash, cutoff),
+            )["n"]
             if count >= LOGIN_IP_ATTEMPT_LIMIT or account_count >= LOGIN_ACCOUNT_ATTEMPT_LIMIT:
                 raise DevError("LOGIN_THROTTLED", "登录尝试过多，5 分钟后重试", 429)
             # Unknown-user probes have a bounded shared budget. Existing accounts
             # retain their independently bounded account/IP budgets at saturation.
-            user = self.store.one("SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?", (username,))
+            user = self.store.one(
+                "SELECT u.*,s.local_login FROM users u JOIN iam_users s ON s.user_id=u.id WHERE username=?",
+                (username,),
+            )
             total = self.store.one("SELECT count(*) AS n FROM login_account_attempts")["n"]
             if total >= LOGIN_ATTEMPT_STORAGE_LIMIT and not user:
                 raise DevError("LOGIN_THROTTLED", "登录服务繁忙，请稍后重试", 429)
-            ip_row = self.store.db.execute("INSERT INTO login_attempts VALUES (?,?)", (ip, now)).lastrowid
-            account_row = self.store.db.execute("INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)", (username_hash, now)).lastrowid
+            ip_row = self.store.db.execute(
+                "INSERT INTO login_attempts VALUES (?,?)", (ip, now)
+            ).lastrowid
+            account_row = self.store.db.execute(
+                "INSERT INTO login_account_attempts(username_hash,at) VALUES (?,?)",
+                (username_hash, now),
+            ).lastrowid
             if user:
                 # Request-local receipt, never persisted with the user/session.
                 # Include time and subject so a stale receipt cannot refund a
@@ -148,20 +212,23 @@ class Auth:
                 user["_login_reservation"] = (ip_row, account_row, now, ip, username_hash)
             return ip, user
 
-
     def _login_session(self, user, ip, username, upgraded_hash=None):
         now = time.time()
         with self.store.lock, self.store.db:
-            current = self.store.db.execute("SELECT password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
+            current = self.store.db.execute(
+                "SELECT password_hash FROM users WHERE id=?", (user["id"],)
+            ).fetchone()
             if not current or current["password_hash"] != user["password_hash"]:
                 raise DevError("LOGIN_FAILED", "密码已变化，请重新登录", 401)
             self.store.db.execute("DELETE FROM sessions WHERE expires<=?", (now,))
-            security = iam.user_security(self.store, user['id'])
-            if not security['local_login']:
-                raise DevError('LOGIN_FAILED', '此账号仅允许身份提供者登录', 401)
+            security = iam.user_security(self.store, user["id"])
+            if not security["local_login"]:
+                raise DevError("LOGIN_FAILED", "此账号仅允许身份提供者登录", 401)
             if upgraded_hash is not None:
-                self.store.db.execute('UPDATE users SET password_hash=? WHERE id=?', (upgraded_hash, user['id']))
-            value = self.new_session(user['id'])
+                self.store.db.execute(
+                    "UPDATE users SET password_hash=? WHERE id=?", (upgraded_hash, user["id"])
+                )
+            value = self.new_session(user["id"])
             reservation = user.get("_login_reservation")
             if reservation:
                 ip_row, account_row, at, attempt_ip, username_hash = reservation
@@ -169,11 +236,16 @@ class Auth:
                     # Refund exactly this successful admission in the same
                     # transaction as session creation. Other failed/in-flight
                     # logins and OAuth's shared IP budget remain untouched.
-                    self.store.db.execute("DELETE FROM login_attempts WHERE rowid=? AND ip=? AND at=?", (ip_row, ip, at))
-                    self.store.db.execute("DELETE FROM login_account_attempts WHERE rowid=? AND username_hash=? AND at=?", (account_row, username_hash, at))
+                    self.store.db.execute(
+                        "DELETE FROM login_attempts WHERE rowid=? AND ip=? AND at=?",
+                        (ip_row, ip, at),
+                    )
+                    self.store.db.execute(
+                        "DELETE FROM login_account_attempts WHERE rowid=? AND username_hash=? AND at=?",
+                        (account_row, username_hash, at),
+                    )
             self.store.audit("panel:" + username, "auth.login", status="ok", detail={"ip": ip})
         return value
-
 
     async def login(self, request: Request, username: str, password: str):
         self.check_origin(request)
@@ -185,47 +257,87 @@ class Auth:
         hash_owns_slot = False
         try:
             ip, user = await self.store.run(self._login_attempt, request, username)
+
             def verify_and_upgrade():
                 encoded = user["password_hash"] if user and user["local_login"] else self.dummy
                 valid = password_verify(password, encoded)
-                upgraded = password_hash(password) if valid and user and password_needs_rehash(encoded) else None
+                upgraded = (
+                    password_hash(password)
+                    if valid and user and password_needs_rehash(encoded)
+                    else None
+                )
                 return valid, upgraded
+
             verification = asyncio.create_task(asyncio.to_thread(verify_and_upgrade))
+
             def finished(task):
                 self.login_inflight -= 1
                 if not task.cancelled():
                     task.exception()
+
             verification.add_done_callback(finished)
             hash_owns_slot = True
             valid, upgraded_hash = await asyncio.shield(verification)
             if not user or not valid:
                 # Preserve correlation without logging raw, unauthenticated input
                 # (the username field can accidentally contain a password).
-                await self.store.run(self.store.audit, "anonymous", "auth.login", "username-sha256:" + digest(username), "failed", {"ip": ip})
+                await self.store.run(
+                    self.store.audit,
+                    "anonymous",
+                    "auth.login",
+                    "username-sha256:" + digest(username),
+                    "failed",
+                    {"ip": ip},
+                )
                 raise DevError("LOGIN_FAILED", "用户名或密码不正确", 401)
             return await self.store.run(self._login_session, user, ip, username, upgraded_hash)
         finally:
             if not hash_owns_slot:
                 self.login_inflight -= 1
 
-
-    def issue_grant(self, principal: Principal, label: str, scopes: list[str], projects: list[str], days: int | None = 30, client_id=None, *, profile_id=None, profile_version=None, authorization_mode='fixed', role_version=None, confirm_dynamic_role=False, confirm_external_mcp=False):
+    def issue_grant(
+        self,
+        principal: Principal,
+        label: str,
+        scopes: list[str],
+        projects: list[str],
+        days: int | None = 30,
+        client_id=None,
+        *,
+        profile_id=None,
+        profile_version=None,
+        authorization_mode="fixed",
+        role_version=None,
+        confirm_dynamic_role=False,
+        confirm_external_mcp=False,
+    ):
         principal = iam.live_principal(self.store, principal)
-        if authorization_mode == 'role':
+        if authorization_mode == "role":
             if scopes != [ROLE_SCOPE] or projects:
-                raise DevError('INVALID_SCOPE', '动态角色仅接受 codepier.role_access，资源清单由角色实时决定')
-        elif authorization_mode != 'fixed':
-            raise DevError('INVALID_SCOPE', '未知授权模式')
-        elif "read" not in scopes or not set(scopes).issubset({"read", "write", "execute", "computer"}):
-            raise DevError("INVALID_SCOPE", "权限必须包含 read，且只支持 read/write/execute/computer")
-        if not projects and authorization_mode != 'role':
+                raise DevError(
+                    "INVALID_SCOPE", "动态角色仅接受 codepier.role_access，资源清单由角色实时决定"
+                )
+        elif authorization_mode != "fixed":
+            raise DevError("INVALID_SCOPE", "未知授权模式")
+        elif "read" not in scopes or not set(scopes).issubset(
+            {"read", "write", "execute", "computer"}
+        ):
+            raise DevError(
+                "INVALID_SCOPE", "权限必须包含 read，且只支持 read/write/execute/computer"
+            )
+        if not projects and authorization_mode != "role":
             raise DevError("NO_PROJECTS", "至少选择一个项目")
         if "*" not in projects:
-            found = {x["id"] for x in self.store.all("SELECT id FROM projects WHERE space_id=?", (principal.space_id,))}
+            found = {
+                x["id"]
+                for x in self.store.all(
+                    "SELECT id FROM projects WHERE space_id=?", (principal.space_id,)
+                )
+            }
             if not set(projects).issubset(found):
                 raise DevError("INVALID_PROJECT", "授权的项目已不存在")
         if type(confirm_external_mcp) is not bool:
-            raise DevError('INVALID_CONSENT', '外部 MCP 同意必须为布尔值')
+            raise DevError("INVALID_CONSENT", "外部 MCP 同意必须为布尔值")
         expires = grant_expiry.expiration(days)
         gid, tid, secret = token(16), token(16), "rd_" + token()
         now = time.time()
@@ -233,27 +345,83 @@ class Auth:
             self.store.db.execute("BEGIN IMMEDIATE")
             principal = iam.live_principal(self.store, principal)
             role_id = None
-            if authorization_mode == 'role':
-                role = validate_role_consent(self.store, principal.user_id, profile_id, profile_version, role_version, confirm_dynamic_role, space_id=principal.space_id)
-                role_id = role['id']
+            if authorization_mode == "role":
+                role = validate_role_consent(
+                    self.store,
+                    principal.user_id,
+                    profile_id,
+                    profile_version,
+                    role_version,
+                    confirm_dynamic_role,
+                    space_id=principal.space_id,
+                )
+                role_id = role["id"]
             else:
-                validate_profile_consent(self.store, principal.user_id, profile_id, scopes, projects, profile_version, space_id=principal.space_id)
-            if authorization_mode == 'fixed' and not principal.admin:
-                if '*' in projects:
-                    raise DevError('DYNAMIC_ROLE_REQUIRED', '未来项目委派请使用已分配的动态角色', 403)
+                validate_profile_consent(
+                    self.store,
+                    principal.user_id,
+                    profile_id,
+                    scopes,
+                    projects,
+                    profile_version,
+                    space_id=principal.space_id,
+                )
+            if authorization_mode == "fixed" and not principal.admin:
+                if "*" in projects:
+                    raise DevError(
+                        "DYNAMIC_ROLE_REQUIRED", "未来项目委派请使用已分配的动态角色", 403
+                    )
                 permissions = iam.project_permissions(self.store, principal)
                 for project_id in projects:
                     if not set(scopes) <= permissions.get(project_id, set()):
-                        raise DevError('INSUFFICIENT_SCOPE', '不能委派自己没有的项目权限', 403)
-            self.store.db.execute("INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)", (gid, principal.user_id, label, client_id, json.dumps(sorted(set(scopes))), json.dumps(projects), now, profile_id, authorization_mode, role_id, principal.space_id, principal.user_id, principal.identity_id, principal.user_epoch))
-            self.store.db.execute("INSERT INTO tokens VALUES (?,?,?,'pat',?,?)", (tid, digest(secret), gid, grant_expiry.UNLIMITED_TOKEN_EXPIRY if expires is None else expires, now))
+                        raise DevError("INSUFFICIENT_SCOPE", "不能委派自己没有的项目权限", 403)
+            self.store.db.execute(
+                "INSERT INTO grants(id,user_id,label,client_id,scopes,projects,revoked,created,profile_id,authorization_mode,role_id,space_id,owner_user_id,identity_id,user_epoch) VALUES (?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
+                (
+                    gid,
+                    principal.user_id,
+                    label,
+                    client_id,
+                    json.dumps(sorted(set(scopes))),
+                    json.dumps(projects),
+                    now,
+                    profile_id,
+                    authorization_mode,
+                    role_id,
+                    principal.space_id,
+                    principal.user_id,
+                    principal.identity_id,
+                    principal.user_epoch,
+                ),
+            )
+            self.store.db.execute(
+                "INSERT INTO tokens VALUES (?,?,?,'pat',?,?)",
+                (
+                    tid,
+                    digest(secret),
+                    gid,
+                    grant_expiry.UNLIMITED_TOKEN_EXPIRY if expires is None else expires,
+                    now,
+                ),
+            )
             grant_expiry.save_new(self.store, gid, expires)
             if confirm_external_mcp:
                 from hub.gateway.policy import consent_grant
+
                 consent_grant(self.store, principal, gid, role_version)
             if role_id:
-                iam.audit(self.store, principal, 'role.consent', gid, detail={
-                        'source': 'pat', 'profile_id': profile_id, 'role_id': role_id,
-                        'role_version': role['version'], 'policy': json.loads(role['policy']),
-                        'dynamic_resources_and_actions': True})
+                iam.audit(
+                    self.store,
+                    principal,
+                    "role.consent",
+                    gid,
+                    detail={
+                        "source": "pat",
+                        "profile_id": profile_id,
+                        "role_id": role_id,
+                        "role_version": role["version"],
+                        "policy": json.loads(role["policy"]),
+                        "dynamic_resources_and_actions": True,
+                    },
+                )
         return {"grant_id": gid, "token": secret, "expires": expires, "unlimited": expires is None}

@@ -1,0 +1,259 @@
+/* ------------------------------------------------------------------------
+   Single-Surface Composer (No Inner Tool Boxes or Divider Lines)
+   ------------------------------------------------------------------------ */
+.cr-composer {
+  width: min(820px, calc(100% - 56px));
+  margin: 6px auto 20px;
+  border: 1px solid color-mix(in srgb, var(--cr-line) 85%, transparent);
+  border-radius: var(--ui-radius-xl);
+  background: var(--ui-side);
+  transition:
+    background var(--ui-motion-fast) var(--ui-ease),
+    border-color var(--ui-motion-fast) var(--ui-ease),
+    box-shadow var(--ui-motion-fast) var(--ui-ease);
+}
+
+.cr-composer:focus-within {
+  background: var(--cr-surface);
+  border-color: var(--ui-border);
+  box-shadow: var(--ui-elev-2);
+}
+
+.cr-composer-line {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 14px 4px 18px;
+}
+
+.cr-composer textarea {
+  display: block;
+  flex: 1;
+  width: 100%;
+  min-height: 32px;
+  max-height: 180px;
+  resize: none;
+  outline: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 4px 0;
+  font-size: var(--ui-text-input);
+  line-height: 1.55;
+}
+
+.cr-composer textarea::placeholder {
+  color: var(--cr-muted);
+}
+
+.cr-send {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition:
+    background var(--ui-motion-fast) var(--ui-ease),
+    opacity var(--ui-motion-fast) var(--ui-ease);
+}
+
+.cr-send svg {
+  width: 16px;
+  height: 16px;
+  transform: rotate(-90deg);
+}
+
+.cr-composer > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 16px 10px 12px;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cr-composer .cr-attach {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 5px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--cr-muted);
+}
+
+.cr-composer .cr-attach:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-text) 6%, transparent);
+  color: var(--ui-text);
+}
+
+.cr-draft-files {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px 0;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.cr-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--ui-radius-small);
+  background: var(--cr-surface);
+}
+
+.cr-file > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.cr-file strong,
+.cr-file small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.cr-file strong {
+  font-size: var(--ui-text-xs);
+  font-weight: var(--ui-weight-medium);
+}
+
+.cr-file small {
+  margin-top: 2px;
+  font-size: var(--ui-text-xs);
+  color: var(--cr-muted);
+}
+
+.cr-recipient {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--ui-radius-small);
+}
+
+.cr-recipient:hover {
+  background: color-mix(in srgb, var(--ui-text) 5%, transparent);
+}
+
+.cr-recipient > span {
+  white-space: nowrap;
+  font-size: var(--ui-text-xs);
+}
+
+.cr-recipient select {
+  border: 0;
+  color: var(--ui-text);
+  background: transparent;
+  max-width: 190px;
+  font-size: var(--ui-text-xs);
+  font-weight: var(--ui-weight-medium);
+  cursor: pointer;
+}
+
+.cr-composer.is-locked .cr-composer-line,
+.cr-composer.is-locked .cr-composer-tools,
+.cr-composer.is-locked .cr-draft-files {
+  display: none;
+}
+
+.cr-composer.is-locked {
+  border-color: transparent;
+  background: var(--ui-side);
+}
+
+.cr-composer.is-locked > footer {
+  justify-content: center;
+  padding: 10px 16px;
+}
+
+.cr-composer.is-locked > footer > span {
+  display: inline-block;
+  font-size: var(--ui-text-xs);
+}
+
+.cr-reply {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  border-bottom: 1px solid var(--cr-line);
+  padding: 6px 10px 6px 16px;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+}
+
+.cr-reply span {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.cr-reply .cr-icon {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  background: transparent;
+  border: 0;
+}
+
+.cr-context-correction {
+  align-items: center;
+}
+
+.cr-context-correction > span {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.cr-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 148px;
+  transform: translateX(-50%);
+  box-shadow: var(--ui-elev-2);
+  z-index: 2;
+  border-radius: var(--ui-radius-pill);
+}
+
+.cr-load-older {
+  display: flex;
+  justify-content: center;
+  margin: 0 0 18px;
+}
+
+.cr-window-note {
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+  line-height: 1.6;
+  margin: 6px 0 16px;
+  text-align: center;
+}
+
+.cr-history-end {
+  padding: 32px 12px;
+  text-align: center;
+  color: var(--cr-muted);
+  font-size: var(--ui-text-xs);
+  border-top: 1px solid var(--cr-line);
+}
+
+.cr-history-end p {
+  line-height: 1.7;
+}

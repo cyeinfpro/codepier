@@ -2,6 +2,7 @@
 testpaths = ["tests"]
 addopts = "--strict-markers"
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
   "browser: requires a real isolated Playwright browser or its shared browser fixture",
   "integration: exercises processes, transports, or a real Hub/Agent stack",
@@ -29,7 +30,11 @@ skip_covered = true
 python_version = "3.13"
 # Expand deliberately; this is an incremental contract/configuration gate,
 # not a claim that the legacy application has been fully type-checked.
-files = ["shared/config.py", "hub/config.py", "scripts/regression_plan.py"]
+files = [
+  "shared/config.py", "hub/config.py", "scripts/regression_plan.py",
+  "agent/async_work.py", "agent/integration_state.py", "hub/collaboration/history_retention.py",
+  "shared/execution_policy.py", "shared/runtime_requirements.py", "shared/runtime_results.py",
+]
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true

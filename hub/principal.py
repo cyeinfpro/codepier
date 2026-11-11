@@ -1,4 +1,5 @@
 """Authenticated authority value; no Runtime or service imports."""
+
 from dataclasses import dataclass
 
 
@@ -21,7 +22,6 @@ class Principal:
     token_hash: str = ""
 
 
-
 def validate_credential(store, principal):
     """Validate the original HTTP credential, without choosing a different Space."""
     import time
@@ -29,19 +29,32 @@ def validate_credential(store, principal):
     from shared.util import DevError
 
     if principal.session_hash:
-        row = store.one("SELECT s.user_id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires>?", (principal.session_hash, time.time()))
+        row = store.one(
+            "SELECT s.user_id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires>?",
+            (principal.session_hash, time.time()),
+        )
         if not row or row["user_id"] != principal.user_id:
             raise DevError("LOGIN_REQUIRED", "登录已过期，请重新登录", 401)
         if getattr(store, "iam_enabled", False):
-            security = store.one("SELECT * FROM session_security WHERE session_hash=?", (principal.session_hash,))
-            if not security or security['epoch'] != principal.user_epoch or security['identity_id'] != principal.identity_id:
+            security = store.one(
+                "SELECT * FROM session_security WHERE session_hash=?", (principal.session_hash,)
+            )
+            if (
+                not security
+                or security["epoch"] != principal.user_epoch
+                or security["identity_id"] != principal.identity_id
+            ):
                 raise DevError("LOGIN_REQUIRED", "会话身份已改变，请重新登录", 401)
         return replace(principal, actor="panel:" + row["username"])
     if principal.token_hash:
-        row = store.one("SELECT g.*,t.kind AS token_kind FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0", (principal.token_hash, time.time()))
-        if not row or row["id"] != principal.grant_id or row['user_id'] != principal.user_id:
+        row = store.one(
+            "SELECT g.*,t.kind AS token_kind FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('access','pat') AND t.expires>? AND g.revoked=0",
+            (principal.token_hash, time.time()),
+        )
+        if not row or row["id"] != principal.grant_id or row["user_id"] != principal.user_id:
             raise DevError("INVALID_TOKEN", "凭据已过期或撤销", 401)
         from hub.grant_expiry import check
+
         check(store, principal.grant_id)
         resource = getattr(store, "oauth_resource", None)
         if row["token_kind"] == "access" and resource and row["resource"] != resource():
@@ -56,4 +69,5 @@ def refresh_principal(store, principal):
     may lack an HTTP credential, but still pass live user/membership checks.
     """
     from hub.access_profiles import refresh_profile_principal
+
     return refresh_profile_principal(store, principal)

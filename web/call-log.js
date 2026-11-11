@@ -226,7 +226,7 @@ window.CodePierCallLog = (() => {
     return (
       heading(
         '操作审计',
-        'AUDIT TRAIL / OBSERVABILITY',
+        '调用记录',
         '',
         `<button type="button" class="btn ghost" data-call-action="export">${icon('download')}导出本页调用</button>`,
       ) +

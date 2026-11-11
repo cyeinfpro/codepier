@@ -11,6 +11,7 @@ from shared.util import DevError, fsync_directory
 
 MAX_INTERRUPTED_READS = 3
 
+
 class Journal:
     def __init__(self, state_dir: Path):
         self.directory = state_dir.resolve()
@@ -24,46 +25,106 @@ class Journal:
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.db:
-            self.db.executescript('''
+            self.db.executescript("""
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status TEXT NOT NULL, result TEXT, acked INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS backups (id TEXT PRIMARY KEY, root TEXT NOT NULL, path TEXT NOT NULL, existed INTEGER NOT NULL, before_sha TEXT NOT NULL, after_sha TEXT NOT NULL, at REAL NOT NULL);
-            ''')
-            self.db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            self.db.execute("CREATE TABLE IF NOT EXISTS cancellations (id TEXT PRIMARY KEY, at REAL NOT NULL)")
+            """)
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS cancellations (id TEXT PRIMARY KEY, at REAL NOT NULL)"
+            )
             columns = {r[1] for r in self.db.execute("PRAGMA table_info(calls)")}
-            for name, definition in {"tool": "TEXT", "output": "TEXT NOT NULL DEFAULT ''", "output_seq": "INTEGER NOT NULL DEFAULT 0",
-                                     "recovery_attempts": "INTEGER NOT NULL DEFAULT 0", "result_expired": "INTEGER NOT NULL DEFAULT 0"}.items():
+            for name, definition in {
+                "tool": "TEXT",
+                "output": "TEXT NOT NULL DEFAULT ''",
+                "output_seq": "INTEGER NOT NULL DEFAULT 0",
+                "recovery_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "result_expired": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
                 if name not in columns:
                     self.db.execute(f"ALTER TABLE calls ADD COLUMN {name} {definition}")
             backup_columns = {r[1] for r in self.db.execute("PRAGMA table_info(backups)")}
             if "before_mode" not in backup_columns:
                 self.db.execute("ALTER TABLE backups ADD COLUMN before_mode INTEGER")
-            self.db.execute("CREATE INDEX IF NOT EXISTS calls_retention ON calls(result_expired,acked,status,at DESC)")
-            self.db.execute("CREATE INDEX IF NOT EXISTS calls_outbox ON calls(at) WHERE status IN ('done','interrupted') AND acked=0")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS calls_retention ON calls(result_expired,acked,status,at DESC)"
+            )
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS calls_outbox ON calls(at) WHERE status IN ('done','interrupted') AND acked=0"
+            )
             self.db.execute("CREATE INDEX IF NOT EXISTS backups_root_at ON backups(root,at DESC)")
-            self.db.execute("CREATE INDEX IF NOT EXISTS backups_root_path_at ON backups(root,path,at DESC)")
-            self.db.execute("INSERT OR IGNORE INTO meta VALUES ('journal_id',?)", (uuid.uuid4().hex,))
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS backups_root_path_at ON backups(root,path,at DESC)"
+            )
+            self.db.execute(
+                "INSERT OR IGNORE INTO meta VALUES ('journal_id',?)", (uuid.uuid4().hex,)
+            )
             # accepted means the command was durably received but never started.
             self.db.execute("UPDATE calls SET status='retryable' WHERE status='accepted'")
             from shared.contracts import TOOLS
             from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+
             # These byte-ingress mutations have their own durable offset/identity
             # state machine. Replay only this explicit set, never general writes.
-            reads = [name for name, tool in TOOLS.items()
-                     if tool.scope == 'read' or name in INCOMING_UPLOAD_TOOLS]
+            reads = [
+                name
+                for name, tool in TOOLS.items()
+                if tool.scope == "read" or name in INCOMING_UPLOAD_TOOLS
+            ]
             # Only count reads that actually began. A poison request must not
             # kill every replacement Agent indefinitely; preserve its receipt.
-            self.db.execute("UPDATE calls SET recovery_attempts=recovery_attempts+1 WHERE status='running' AND tool IN (%s)" % ','.join('?' for _ in reads), reads)
-            self.db.execute("UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running' AND tool IN (%s) AND recovery_attempts>=?" % ','.join('?' for _ in reads), [
-                json.dumps({"ok": False, "error": {"code": "AGENT_RESTART_LIMIT", "message": f"此只读请求已连续 {MAX_INTERRUPTED_READS} 次在 Agent 退出时未完成；已停止自动重试，请检查文件与日志后再发起新请求"}}), *reads, MAX_INTERRUPTED_READS])
-            self.db.execute("UPDATE calls SET status='retryable' WHERE status='running' AND tool IN (%s)" % ','.join('?' for _ in reads), reads)
-            self.db.execute("UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running'", (json.dumps({"ok": False, "error": {"code": "INTERRUPTED", "message": "Agent 进程在操作执行期间停止；网络重连不会重跑它。请检查文件或测试进程后再决定下一步。"}}),))
-        self.journal_id = self.db.execute("SELECT value FROM meta WHERE key='journal_id'").fetchone()[0]
+            self.db.execute(
+                "UPDATE calls SET recovery_attempts=recovery_attempts+1 WHERE status='running' AND tool IN (%s)"
+                % ",".join("?" for _ in reads),
+                reads,
+            )
+            self.db.execute(
+                "UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running' AND tool IN (%s) AND recovery_attempts>=?"
+                % ",".join("?" for _ in reads),
+                [
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "AGENT_RESTART_LIMIT",
+                                "message": f"此只读请求已连续 {MAX_INTERRUPTED_READS} 次在 Agent 退出时未完成；已停止自动重试，请检查文件与日志后再发起新请求",
+                            },
+                        }
+                    ),
+                    *reads,
+                    MAX_INTERRUPTED_READS,
+                ],
+            )
+            self.db.execute(
+                "UPDATE calls SET status='retryable' WHERE status='running' AND tool IN (%s)"
+                % ",".join("?" for _ in reads),
+                reads,
+            )
+            self.db.execute(
+                "UPDATE calls SET status='interrupted',acked=0,result=? WHERE status='running'",
+                (
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "INTERRUPTED",
+                                "message": "Agent 进程在操作执行期间停止；网络重连不会重跑它。请检查文件或测试进程后再决定下一步。",
+                            },
+                        }
+                    ),
+                ),
+            )
+        self.journal_id = self.db.execute(
+            "SELECT value FROM meta WHERE key='journal_id'"
+        ).fetchone()[0]
         os.chmod(self.directory / "agent.sqlite3", 0o600)
 
     def prune(self, **settings):
         from agent.journal_retention import prune
+
         return prune(self, **settings)
 
     def meta(self, key):
@@ -73,7 +134,10 @@ class Journal:
 
     def set_meta(self, key, value):
         with self.lock, self.db:
-            self.db.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+            self.db.execute(
+                "INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
 
     def start(self, id: str, request: dict):
         fingerprint = digest(json.dumps(request, sort_keys=True, ensure_ascii=False))
@@ -85,16 +149,23 @@ class Journal:
                 if old["status"] in {"running", "accepted"}:
                     raise DevError("ALREADY_RUNNING", "该操作已接收或正在执行")
                 if old["status"] == "retryable":
-                    self.db.execute("UPDATE calls SET status='accepted',result=NULL,acked=0 WHERE id=?", (id,))
+                    self.db.execute(
+                        "UPDATE calls SET status='accepted',result=NULL,acked=0 WHERE id=?", (id,)
+                    )
                     return None
                 return json.loads(old["result"])
             tool = request.get("tool")
-            self.db.execute("INSERT INTO calls(id,fingerprint,status,at,tool) VALUES (?,?,'accepted',?,?)", (id, fingerprint, time.time(), tool if isinstance(tool, str) else None))
+            self.db.execute(
+                "INSERT INTO calls(id,fingerprint,status,at,tool) VALUES (?,?,'accepted',?,?)",
+                (id, fingerprint, time.time(), tool if isinstance(tool, str) else None),
+            )
         return None
 
     def mark_running(self, id):
         with self.lock, self.db:
-            self.db.execute("UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,))
+            self.db.execute(
+                "UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,)
+            )
 
     def cancel(self, id):
         with self.lock, self.db:
@@ -102,23 +173,38 @@ class Journal:
 
     def is_cancelled(self, id):
         with self.lock:
-            return self.db.execute("SELECT id FROM cancellations WHERE id=?", (id,)).fetchone() is not None
+            return (
+                self.db.execute("SELECT id FROM cancellations WHERE id=?", (id,)).fetchone()
+                is not None
+            )
 
     def status(self, id):
         with self.lock:
-            row = self.db.execute("SELECT status,result,output,output_seq FROM calls WHERE id=?", (id,)).fetchone()
+            row = self.db.execute(
+                "SELECT status,result,output,output_seq FROM calls WHERE id=?", (id,)
+            ).fetchone()
         if not row:
             return {"status": "missing"}
-        return {"status": row['status'], "result": json.loads(row['result']) if row['result'] else None,
-                "output": row['output'], "output_seq": row['output_seq']}
+        return {
+            "status": row["status"],
+            "result": json.loads(row["result"]) if row["result"] else None,
+            "output": row["output"],
+            "output_seq": row["output_seq"],
+        }
 
     def update_output(self, id, output, seq):
         with self.lock, self.db:
-            self.db.execute("UPDATE calls SET output=?,output_seq=? WHERE id=? AND output_seq<?", (output[-131072:], seq, id, seq))
+            self.db.execute(
+                "UPDATE calls SET output=?,output_seq=? WHERE id=? AND output_seq<?",
+                (output[-131072:], seq, id, seq),
+            )
 
     def finish(self, id: str, result: dict):
         with self.lock, self.db:
-            self.db.execute("UPDATE calls SET status='done',result=?,acked=0 WHERE id=?", (json.dumps(result, ensure_ascii=False), id))
+            self.db.execute(
+                "UPDATE calls SET status='done',result=?,acked=0 WHERE id=?",
+                (json.dumps(result, ensure_ascii=False), id),
+            )
 
     def ack(self, id: str):
         with self.lock, self.db:
@@ -129,17 +215,26 @@ class Journal:
         # before processing ACKs can exhaust a small home machine or slow its link.
         items, size = [], 0
         with self.lock:
-            rows = self.db.execute("SELECT id,result FROM calls WHERE status IN ('done','interrupted') AND acked=0 ORDER BY at LIMIT 32")
+            rows = self.db.execute(
+                "SELECT id,result FROM calls WHERE status IN ('done','interrupted') AND acked=0 ORDER BY at LIMIT 32"
+            )
             for row in rows:
-                encoded = len(row['result'].encode('utf-8'))
+                encoded = len(row["result"].encode("utf-8"))
                 if items and size + encoded > 4 * 1024 * 1024:
                     break
-                items.append({"id": row['id'], "result": json.loads(row['result'])})
+                items.append({"id": row["id"], "result": json.loads(row["result"])})
                 size += encoded
         return items
 
-    def add_backup(self, id: str, root: str, path: str, before: bytes | None, after_sha: str,
-                   before_mode: int | None = None):
+    def add_backup(
+        self,
+        id: str,
+        root: str,
+        path: str,
+        before: bytes | None,
+        after_sha: str,
+        before_mode: int | None = None,
+    ):
         # Persist backup before mutating the project; a failed write may leave an unused backup.
         if before is not None:
             dest = self.backups / id
@@ -150,7 +245,19 @@ class Journal:
             os.chmod(dest, 0o600)
             fsync_directory(self.backups)
         with self.lock, self.db:
-            self.db.execute("INSERT INTO backups(id,root,path,existed,before_sha,after_sha,at,before_mode) VALUES (?,?,?,?,?,?,?,?)", (id, root, path, int(before is not None), digest(before) if before is not None else "new", after_sha, time.time(), before_mode))
+            self.db.execute(
+                "INSERT INTO backups(id,root,path,existed,before_sha,after_sha,at,before_mode) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    id,
+                    root,
+                    path,
+                    int(before is not None),
+                    digest(before) if before is not None else "new",
+                    after_sha,
+                    time.time(),
+                    before_mode,
+                ),
+            )
 
     def history(self, root: str, path: str = "", limit: int = 30):
         sql, args = "SELECT * FROM backups WHERE root=?", [root]
@@ -163,7 +270,9 @@ class Journal:
 
     def backup(self, root: str, id: str):
         with self.lock:
-            row = self.db.execute("SELECT * FROM backups WHERE root=? AND id=?", (root, id)).fetchone()
+            row = self.db.execute(
+                "SELECT * FROM backups WHERE root=? AND id=?", (root, id)
+            ).fetchone()
         if not row:
             raise DevError("NOT_FOUND", "该项目没有此备份，或备份已超过保留期", 404)
         row = dict(row)

@@ -1,4 +1,5 @@
 """Bounded preparation pipeline with strictly ordered per-device sends."""
+
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +42,12 @@ async def ordered_delivery(identifiers, *, prepare, send, failed, slots, stoppin
                     await send(identifier, lease[1])
             except asyncio.CancelledError:
                 # A task may have finished just as cancellation was delivered.
-                if lease is None and task.done() and not task.cancelled() and task.exception() is None:
+                if (
+                    lease is None
+                    and task.done()
+                    and not task.cancelled()
+                    and task.exception() is None
+                ):
                     lease = task.result()
                 raise
             except Exception as exc:

@@ -3,14 +3,14 @@ name: hub-agent-upgrade
 description: 在用户授权发布后，协调 CodePier Hub 与 Agent 升级，保护当前远程控制通道和持久化状态。
 ---
 
-仅在用户明确授权部署时使用。此清单不构成发布授权，不自动运行命令。
+仅在用户明确授权部署时使用；本清单不自动运行命令。
 
-区分本地源码版本、云端 Hub 镜像版本、正在运行的 Agent 版本和客户端缓存的工具目录。修改源码不等于线上生效。不要为了升级主动终止当前唯一的 Home 控制通道。
+区分源码、已发布包、运行中的 Hub/Agent 版本及客户端工具目录。先用 query(action="project", project=...) 核对项目、权限、现有改动和部署文档，再检查真实服务管理方式。保留并发工作，不猜测 SSH 目标或输出密钥。
 
-发布前核对项目映射、执行权限、现有 release/deploy 文档和真实服务管理方式。不得猜测 SSH 目标、密码、容器或路径。不要输出任何现有密钥或凭据值。
+按 docs/PANEL_UPDATE.md、docs/AGENT_LIFECYCLE.md 和 docs/RELEASING.md 的当前协议执行。使用 SQLite 一致性备份；一并保存匹配的 master.keys.json、仍存在的 master.key、轮换日志及完整状态目录。Agent 需保存配置和状态。源码 checkpoint 不替代数据库备份。根据 shared/hub_data_contract.py 核对实际兼容契约；回滚恢复匹配代码、数据库与密钥，不伪改 schema/version。
 
-备份 Hub 的完整数据目录（SQLite 一致性备份及 master.key）和 Agent 状态/配置。v1.3.0 的 Hub 数据库升级到 schema 4；旧 Hub 会拒绝 schema 4，回滚必须恢复匹配版本的数据备份，不能只回滚代码或伪改版本号。源码 checkpoint 不是运行中数据库的一致性备份。
+先完成与改动相关的回归、依赖锁、生成物和发布包检查。全量或真实平台验收按发布需求运行，不用旧证据代替本轮结果。先验证可恢复的更新路径，再更新当前控制通道；不要在将被关闭的进程内等待自己重启。
 
-先通过全量测试和新功能端到端检查，再按已有部署流程更新。保留 HTTP＋端口及 Agent 主动连出的方式，不为此次功能强制修改连接、认证和防火墙策略。Hub/Agent 均更新后验证 health、initialize、tools/list 的 31 个工具、实际 project_context 和工作流读取/写入，再核对旧操作续跑。
+长命令只提交一次，使用 act(action="exec", ...) 的 operation_id 经 query(action="job", ...) 续查。网络中断不表示命令未执行。升级后验证 health、initialize、当前 tools/list、query 项目读取、获准的 act 操作、原操作恢复及实际 Hub/Agent 版本。默认目录按 query / act / get_profile 核对，并检查启用的兼容 profile；不固定工具数量。
 
-长命令只提交一次；网络波动后查询原操作号，必要时按原幂等键恢复回执。若升级会中断当前通道，使用现有可回滚的受控流程，而不是在同一被关闭进程内等待自己重启。只有实际核验线上版本及功能后，才把 RELEASE.json 标为已部署。
+只在真实发布或部署证据成立后更新对应记录；本地 prepared 源码、Git 标签、GitHub Release 和线上部署分别记录。

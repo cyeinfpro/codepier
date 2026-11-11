@@ -4,6 +4,7 @@ Only inspect executable positions, nested shell commands and recognized launch A
 Never run an executable to identify it. Hub uses text-only inspection; Agent can also
 resolve symlinks and inspect explicitly invoked local scripts. See docs/EXECUTION_CAPABILITIES.md.
 """
+
 from __future__ import annotations
 
 import ast
@@ -11,12 +12,15 @@ import os
 import re
 import shlex
 from pathlib import Path
+from typing import TypeGuard
 
 from shared.util import DevError
 
 POLICY_VERSION = 2
 DENIAL_MESSAGE = "MCP 不允许启动本地 Codex 模型/CLI；原生 computer 能力按独立策略授权，普通命令和文件读写不受此规则限制"
-COMPUTER_DENIAL_MESSAGE = "MCP 不允许使用原生 computer 能力；probe=false 静态状态和关闭现有会话仍可使用"
+COMPUTER_DENIAL_MESSAGE = (
+    "MCP 不允许使用原生 computer 能力；probe=false 静态状态和关闭现有会话仍可使用"
+)
 COMPUTER_DENIAL_CODE = "NATIVE_COMPUTER_REMOTE_DISABLED"
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 _POWERSHELL = {"powershell", "pwsh"}
@@ -38,9 +42,12 @@ def hub_blocks_computer() -> bool:
 
 def hub_execution_policy(*, panel: bool) -> dict:
     """Authenticated transport metadata, never accepted from tool arguments."""
-    return {"version": POLICY_VERSION, "origin": "panel" if panel else "mcp",
-            "block_local_codex": not panel and hub_blocks_codex(),
-            "block_native_computer": not panel and hub_blocks_computer()}
+    return {
+        "version": POLICY_VERSION,
+        "origin": "panel" if panel else "mcp",
+        "block_local_codex": not panel and hub_blocks_codex(),
+        "block_native_computer": not panel and hub_blocks_computer(),
+    }
 
 
 def validate_policy(value: object) -> dict:
@@ -61,12 +68,16 @@ def local_blocks_computer(config: dict) -> bool:
     return policy.get("block_native_computer", False)
 
 
-def _valid_policy(policy: object) -> bool:
-    return (isinstance(policy, dict) and type(policy.get("version")) is int
-            and policy["version"] in {1, POLICY_VERSION}
-            and isinstance(policy.get("origin"), str) and policy["origin"] in {"panel", "mcp"}
-            and type(policy.get("block_local_codex")) is bool
-            and (policy["version"] == 1 or type(policy.get("block_native_computer")) is bool))
+def _valid_policy(policy: object) -> TypeGuard[dict]:
+    return (
+        isinstance(policy, dict)
+        and type(policy.get("version")) is int
+        and policy["version"] in {1, POLICY_VERSION}
+        and isinstance(policy.get("origin"), str)
+        and policy["origin"] in {"panel", "mcp"}
+        and type(policy.get("block_local_codex")) is bool
+        and (policy["version"] == 1 or type(policy.get("block_native_computer")) is bool)
+    )
 
 
 def agent_blocks_codex(config: dict, project: dict) -> bool:
@@ -95,8 +106,10 @@ def agent_blocks_computer(config: dict, project: dict) -> bool:
 
 def computer_denial(name: str, args: dict) -> bool:
     from shared.computer_contracts import COMPUTER_TOOLS
+
     return (name == "computer_status" and bool(args.get("probe"))) or (
-        name in COMPUTER_TOOLS - {"computer_status", "computer_session_close"})
+        name in COMPUTER_TOOLS - {"computer_status", "computer_session_close"}
+    )
 
 
 def codex_computer_target(name: str, args: dict, session: dict | None = None) -> bool:
@@ -106,14 +119,20 @@ def codex_computer_target(name: str, args: dict, session: dict | None = None) ->
     Existing app allowlists, native consent and observation fences still apply.
     """
     app = args.get("app") if name == "computer_session_open" else None
-    if (name in {"computer_observe", "computer_action"} and isinstance(session, dict)
-            and session.get("id") == args.get("session_id")):
+    if (
+        name in {"computer_observe", "computer_action"}
+        and isinstance(session, dict)
+        and session.get("id") == args.get("session_id")
+    ):
         app = session.get("app")
     if not isinstance(app, str):
         return False
     normalized = app.replace("\\", "/").strip().rstrip("/").casefold()
-    return (normalized in {"codex", "com.openai.codex"} or _codex(normalized)
-            or "codex.app" in normalized.split("/"))
+    return (
+        normalized in {"codex", "com.openai.codex"}
+        or _codex(normalized)
+        or "codex.app" in normalized.split("/")
+    )
 
 
 def _base(value: str) -> str:
@@ -126,9 +145,11 @@ def _program(value: str) -> str:
 
 def _codex(value: str) -> bool:
     value = value.replace("\\", "/").lower()
-    return bool(re.search(r"(?:^|/)@openai/codex(?:-sdk)?(?:@[^/]+)?(?:/|$)", value)
-                or _program(value) == "codex"
-                or re.fullmatch(r"codex-(?:aarch64|x86_64|arm64)[\w.-]*", _base(value)))
+    return bool(
+        re.search(r"(?:^|/)@openai/codex(?:-sdk)?(?:@[^/]+)?(?:/|$)", value)
+        or _program(value) == "codex"
+        or re.fullmatch(r"codex-(?:aarch64|x86_64|arm64)[\w.-]*", _base(value))
+    )
 
 
 def _python(name: str) -> bool:
@@ -137,6 +158,7 @@ def _python(name: str) -> bool:
 
 class InvocationInspector:
     """Bounded best-effort static analysis; unknown dynamic code is not executed."""
+
     def __init__(self, *, cwd: Path | None = None, env: dict | None = None):
         self.cwd = Path(cwd) if cwd is not None else None
         self.env = dict(env or {})
@@ -145,7 +167,11 @@ class InvocationInspector:
 
     def _check_budget(self, depth: int) -> None:
         if depth > 24 or self.remaining <= 0:
-            raise DevError("EXECUTION_POLICY_LIMIT", "命令结构超过静态检查上限；请拆成较小的命令，未启动进程", 403)
+            raise DevError(
+                "EXECUTION_POLICY_LIMIT",
+                "命令结构超过静态检查上限；请拆成较小的命令，未启动进程",
+                403,
+            )
 
     def _resolve(self, value: str, *, search_path: bool = True) -> Path | None:
         if self.cwd is None or not value or any(x in value for x in ("$", "`", "\x00")):
@@ -153,8 +179,10 @@ class InvocationInspector:
         path = Path(value).expanduser()
         candidates = [path if path.is_absolute() else self.cwd / path]
         if search_path and "/" not in value and "\\" not in value:
-            candidates = [(Path(p) if Path(p).is_absolute() else self.cwd / p) / value
-                          for p in self.env.get("PATH", os.defpath).split(os.pathsep)]
+            candidates = [
+                (Path(p) if Path(p).is_absolute() else self.cwd / p) / value
+                for p in self.env.get("PATH", os.defpath).split(os.pathsep)
+            ]
         for candidate in candidates:
             try:
                 if candidate.is_file():
@@ -163,7 +191,9 @@ class InvocationInspector:
                 continue
         return None
 
-    def _script(self, value: str, depth: int, *, search_path: bool = False, language: str | None = None) -> bool:
+    def _script(
+        self, value: str, depth: int, *, search_path: bool = False, language: str | None = None
+    ) -> bool:
         path = self._resolve(value, search_path=search_path)
         self._check_budget(depth)
         if path is None or (path, language) in self.files or len(self.files) >= 16:
@@ -186,9 +216,20 @@ class InvocationInspector:
         first = source.split("\n", 1)[0] if source.startswith("#!") else ""
         if language == "python" or language is None and (suffix == ".py" or "python" in first):
             return self.python(source, depth + 1)
-        if language == "javascript" or language is None and (suffix in {".js", ".mjs", ".cjs"} or "node" in first):
+        if (
+            language == "javascript"
+            or language is None
+            and (suffix in {".js", ".mjs", ".cjs"} or "node" in first)
+        ):
             return self.javascript(source, depth + 1)
-        if language == "shell" or language is None and (suffix in {".sh", ".bash", ".zsh", ".ps1", ".cmd", ".bat"} or any(x in first for x in ("/sh", "bash", "zsh"))):
+        if (
+            language == "shell"
+            or language is None
+            and (
+                suffix in {".sh", ".bash", ".zsh", ".ps1", ".cmd", ".bat"}
+                or any(x in first for x in ("/sh", "bash", "zsh"))
+            )
+        ):
             return self.shell(source, depth + 1)
         return False
 
@@ -198,7 +239,13 @@ class InvocationInspector:
         Explicit interpreters determine a file's language even without a suffix
         or shebang. This is bounded inspection, not a full option parser.
         """
-        language = "python" if _python(name) else "javascript" if name in {"node", "nodejs", "deno"} else "shell"
+        language = (
+            "python"
+            if _python(name)
+            else "javascript"
+            if name in {"node", "nodejs", "deno"}
+            else "shell"
+        )
         i, stdin_script = 0, False
         while i < len(arguments):
             arg = arguments[i]
@@ -210,35 +257,57 @@ class InvocationInspector:
                 return False  # Input streams are not inferred from unrelated arguments.
             if language == "python" and arg == "-m":
                 return False  # Module/dependency execution is outside file inspection.
-            inline = (language == "python" and arg == "-c" or
-                      language == "javascript" and arg in {"-e", "--eval", "-p", "--print"} or
-                      language == "shell" and (lower in {"-command", "/c", "/k"} or
-                                                re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", arg)))
+            inline = (
+                language == "python"
+                and arg == "-c"
+                or language == "javascript"
+                and arg in {"-e", "--eval", "-p", "--print"}
+                or language == "shell"
+                and (
+                    lower in {"-command", "/c", "/k"} or re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", arg)
+                )
+            )
             if inline:
                 if i + 1 >= len(arguments):
                     return False
                 source = arguments[i + 1]
-                return (self.python(source, depth + 1) if language == "python" else
-                        self.javascript(source, depth + 1) if language == "javascript" else
-                        self.shell(source, depth + 1))
+                return (
+                    self.python(source, depth + 1)
+                    if language == "python"
+                    else self.javascript(source, depth + 1)
+                    if language == "javascript"
+                    else self.shell(source, depth + 1)
+                )
             if name in _POWERSHELL and lower in {"-file", "-f"}:
                 i += 1
                 break
             if language == "shell" and re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", arg):
                 stdin_script = True
-            value_options = ({"-W", "-X"} if language == "python" else
-                             {"-r", "--require", "--import", "--loader", "--conditions"} if language == "javascript" else
-                             {"-o", "-O", "--rcfile", "--init-file"})
+            value_options = (
+                {"-W", "-X"}
+                if language == "python"
+                else {"-r", "--require", "--import", "--loader", "--conditions"}
+                if language == "javascript"
+                else {"-o", "-O", "--rcfile", "--init-file"}
+            )
             if arg in value_options:
-                if (language == "javascript" and arg in {"-r", "--require", "--import", "--loader"}
-                        and i + 1 < len(arguments) and self._script(arguments[i + 1], depth + 1, language="javascript")):
+                if (
+                    language == "javascript"
+                    and arg in {"-r", "--require", "--import", "--loader"}
+                    and i + 1 < len(arguments)
+                    and self._script(arguments[i + 1], depth + 1, language="javascript")
+                ):
                     return True
                 i += 2
             elif arg.startswith("-"):
                 i += 1
             else:
                 break
-        return not stdin_script and i < len(arguments) and self._script(arguments[i], depth + 1, language=language)
+        return (
+            not stdin_script
+            and i < len(arguments)
+            and self._script(arguments[i], depth + 1, language=language)
+        )
 
     def argv(self, argv: list[str], depth: int = 0) -> bool:
         self._check_budget(depth)
@@ -254,19 +323,68 @@ class InvocationInspector:
             return True
         if name == "command" and rest and rest[0] in {"-v", "-V", "-pv", "-pV"}:
             return False  # Lookup, not execution.
-        if name in {"env", "sudo", "doas", "nice", "nohup", "time", "command", "exec", "builtin", "xargs"}:
+        if name in {
+            "env",
+            "sudo",
+            "doas",
+            "nice",
+            "nohup",
+            "time",
+            "command",
+            "exec",
+            "builtin",
+            "xargs",
+        }:
             i = 0
             environment = dict(self.env)
             # The same flag can be unary for one wrapper and value-taking for
             # another: sudo -n is NOT nice -n or xargs -n.
             values = {
                 "env": {"-u", "--unset", "-C", "--chdir"},
-                "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-T", "--command-timeout", "-D", "--chdir", "-R", "--chroot", "-r", "--role", "-t", "--type"},
+                "sudo": {
+                    "-u",
+                    "--user",
+                    "-g",
+                    "--group",
+                    "-h",
+                    "--host",
+                    "-p",
+                    "--prompt",
+                    "-C",
+                    "--close-from",
+                    "-T",
+                    "--command-timeout",
+                    "-D",
+                    "--chdir",
+                    "-R",
+                    "--chroot",
+                    "-r",
+                    "--role",
+                    "-t",
+                    "--type",
+                },
                 "doas": {"-u", "-C"},
                 "nice": {"-n", "--adjustment"},
                 "time": {"-f", "--format", "-o", "--output"},
                 "exec": {"-a"},
-                "xargs": {"-I", "--replace", "-L", "--max-lines", "-P", "--max-procs", "-d", "--delimiter", "-s", "--max-chars", "-a", "--arg-file", "-n", "--max-args", "-E", "--eof"},
+                "xargs": {
+                    "-I",
+                    "--replace",
+                    "-L",
+                    "--max-lines",
+                    "-P",
+                    "--max-procs",
+                    "-d",
+                    "--delimiter",
+                    "-s",
+                    "--max-chars",
+                    "-a",
+                    "--arg-file",
+                    "-n",
+                    "--max-args",
+                    "-E",
+                    "--eof",
+                },
             }.get(name, set())
             while i < len(rest):
                 arg = rest[i]
@@ -309,7 +427,11 @@ class InvocationInspector:
         if name in {"source", "."}:
             return bool(rest) and self._script(rest[0], depth + 1, language="shell")
         if name == "find":
-            return any(self.argv(rest[i + 1:], depth + 1) for i, x in enumerate(rest) if x in {"-exec", "-execdir", "-ok", "-okdir"})
+            return any(
+                self.argv(rest[i + 1 :], depth + 1)
+                for i, x in enumerate(rest)
+                if x in {"-exec", "-execdir", "-ok", "-okdir"}
+            )
         if name in {"npx", "npm", "pnpm", "yarn", "bun", "bunx"}:
             # Inspect package selectors and the executable, not arbitrary data
             # arguments (e.g. `npx echo codex` must remain a plain echo).
@@ -331,7 +453,7 @@ class InvocationInspector:
                         return True
                     i += 1
                 elif arg == "--":
-                    return self.argv(rest[i + 1:], depth + 1)
+                    return self.argv(rest[i + 1 :], depth + 1)
                 elif arg.startswith("-"):
                     i += 1
                 else:
@@ -345,7 +467,15 @@ class InvocationInspector:
         if name == "start":
             return bool(rest) and _codex(rest[0])
         if name == "open":
-            return any(x in {"-a", "-b"} and i + 1 < len(rest) and (_program(rest[i + 1]) in {"codex", "codex.app"} or rest[i + 1] == "com.openai.codex") for i, x in enumerate(rest))
+            return any(
+                x in {"-a", "-b"}
+                and i + 1 < len(rest)
+                and (
+                    _program(rest[i + 1]) in {"codex", "codex.app"}
+                    or rest[i + 1] == "com.openai.codex"
+                )
+                for i, x in enumerate(rest)
+            )
         if _python(name) or name in {"node", "nodejs", "deno"}:
             return self._interpreter(name, rest, depth + 1)
         return self._script(command, depth + 1, search_path=True)
@@ -384,7 +514,11 @@ class InvocationInspector:
             from tree_sitter import Language, Parser
             import tree_sitter_bash
         except ImportError as exc:
-            raise DevError("EXECUTION_POLICY_UNAVAILABLE", "执行策略缺少 tree-sitter-bash；请更新 Hub/Agent 依赖，文件工具仍可用", 503) from exc
+            raise DevError(
+                "EXECUTION_POLICY_UNAVAILABLE",
+                "执行策略缺少 tree-sitter-bash；请更新 Hub/Agent 依赖，文件工具仍可用",
+                503,
+            ) from exc
         parser = Parser(Language(tree_sitter_bash.language()))
         root = parser.parse(source.encode("utf-8")).root_node
         variables = dict(self.env)
@@ -396,30 +530,47 @@ class InvocationInspector:
             self.remaining -= 1
             if node.type == "variable_assignment":
                 key, value = node.child_by_field_name("name"), node.child_by_field_name("value")
-                if key is not None and value is not None and node.parent.type != "command":
+                parent = node.parent
+                if (
+                    key is not None
+                    and key.text is not None
+                    and value is not None
+                    and parent is not None
+                    and parent.type != "command"
+                ):
                     name = key.text.decode()
                     variables[name] = self._word(value, variables)
-                    if name in self.env or (node.parent.type == "declaration_command" and node.parent.text.lstrip().startswith(b"export ")):
+                    if name in self.env or (
+                        parent.type == "declaration_command"
+                        and (parent.text or b"").lstrip().startswith(b"export ")
+                    ):
                         self.env[name] = variables[name]
             if node.type == "command":
                 command = node.child_by_field_name("name")
                 if command is not None:
-                    args = [self._word(command, variables)] + [self._word(c, variables) for c in node.children_by_field_name("argument")]
+                    args = [self._word(command, variables)] + [
+                        self._word(c, variables) for c in node.children_by_field_name("argument")
+                    ]
                     if args[0] == "alias":
                         for item in args[1:]:
                             if _ASSIGNMENT.match(item):
-                                key, value = item.split("=", 1)
-                                aliases[key] = value
+                                alias_name, alias_value = item.split("=", 1)
+                                aliases[alias_name] = alias_value
                     elif args[0] == "unalias":
-                        for key in args[1:]:
-                            aliases.pop(key, None)
-                    elif args[0] in aliases and self.shell(aliases[args[0]] + " " + shlex.join(args[1:]), depth + 1, aliases=aliases):
+                        for alias_name in args[1:]:
+                            aliases.pop(alias_name, None)
+                    elif args[0] in aliases and self.shell(
+                        aliases[args[0]] + " " + shlex.join(args[1:]), depth + 1, aliases=aliases
+                    ):
                         return True
                     environment = dict(self.env)
                     for assignment in node.named_children:
                         if assignment.type == "variable_assignment":
-                            key, value = assignment.child_by_field_name("name"), assignment.child_by_field_name("value")
-                            if key is not None and value is not None:
+                            key, value = (
+                                assignment.child_by_field_name("name"),
+                                assignment.child_by_field_name("value"),
+                            )
+                            if key is not None and key.text is not None and value is not None:
                                 environment[key.text.decode()] = self._word(value, variables)
                     original = self.env
                     self.env = environment
@@ -433,8 +584,11 @@ class InvocationInspector:
                         for redirect in parent.named_children:
                             if redirect.type != "heredoc_redirect":
                                 continue
-                            body = next((c for c in redirect.named_children if c.type == "heredoc_body"), None)
-                            if body is not None:
+                            body = next(
+                                (c for c in redirect.named_children if c.type == "heredoc_body"),
+                                None,
+                            )
+                            if body is not None and body.text is not None:
                                 text = body.text.decode("utf-8", "replace")
                                 name = _program(args[0])
                                 if name in _SHELLS and self.shell(text, depth + 1):
@@ -456,6 +610,7 @@ class InvocationInspector:
             return False
         symbols: dict[str, object] = {}
         aliases = {"subprocess": "subprocess", "os": "os"}
+
         def literal(node):
             if isinstance(node, ast.Constant):
                 return node.value
@@ -468,6 +623,7 @@ class InvocationInspector:
                 if isinstance(a, str) and isinstance(b, str):
                     return (a + b)[:262144]
             return None
+
         for node in ast.walk(root):
             self._check_budget(depth)
             self.remaining -= 1
@@ -478,9 +634,9 @@ class InvocationInspector:
                 for item in node.names:
                     aliases[item.asname or item.name] = (node.module or "") + "." + item.name
             elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        symbols[target.id] = literal(node.value)
+                for assignment_target in node.targets:
+                    if isinstance(assignment_target, ast.Name):
+                        symbols[assignment_target.id] = literal(node.value)
             elif isinstance(node, ast.Call):
                 function = ast.unparse(node.func)
                 head, dot, tail = function.partition(".")
@@ -489,7 +645,17 @@ class InvocationInspector:
                     code = literal(node.args[0])
                     if isinstance(code, str) and self.python(code, depth + 1):
                         return True
-                supported = function in {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "os.system", "os.popen"} or function.startswith(("os.exec", "os.spawn"))
+                supported = function in {
+                    "subprocess.run",
+                    "subprocess.Popen",
+                    "subprocess.call",
+                    "subprocess.check_call",
+                    "subprocess.check_output",
+                    "subprocess.getoutput",
+                    "subprocess.getstatusoutput",
+                    "os.system",
+                    "os.popen",
+                } or function.startswith(("os.exec", "os.spawn"))
                 if not supported:
                     continue
                 if function.startswith(("os.exec", "os.spawn")):
@@ -497,32 +663,60 @@ class InvocationInspector:
                     # These APIs receive an executable path, not shell text, and
                     # argv[0] is a display name rather than a second executable.
                     target_index = 1 if function.startswith("os.spawn") else 0
-                    target = (node.args[target_index] if len(node.args) > target_index else
-                              next((item.value for item in node.keywords if item.arg in {"path", "file"}), None))
+                    target = (
+                        node.args[target_index]
+                        if len(node.args) > target_index
+                        else next(
+                            (item.value for item in node.keywords if item.arg in {"path", "file"}),
+                            None,
+                        )
+                    )
                     executable = literal(target)
                     if isinstance(executable, str):
                         if self.argv([executable], depth + 1):
                             return True
                         method = function.removeprefix("os.")
                         if method.startswith(("execv", "spawnv")):
-                            vector = (node.args[target_index + 1] if len(node.args) > target_index + 1 else
-                                      next((item.value for item in node.keywords if item.arg == "args"), None))
+                            vector = (
+                                node.args[target_index + 1]
+                                if len(node.args) > target_index + 1
+                                else next(
+                                    (item.value for item in node.keywords if item.arg == "args"),
+                                    None,
+                                )
+                            )
                             arguments = literal(vector)
                         else:
-                            tail = node.args[target_index + 1:]
-                            if method.endswith("e") and tail:
-                                tail = tail[:-1]  # The final environment is not argv.
-                            arguments = [literal(item) for item in tail]
-                        if (isinstance(arguments, list) and arguments and
-                                all(isinstance(item, str) for item in arguments) and
-                                self.argv([executable, *arguments[1:]], depth + 1)):
+                            positional_args = node.args[target_index + 1 :]
+                            if method.endswith("e") and positional_args:
+                                positional_args = positional_args[
+                                    :-1
+                                ]  # The final environment is not argv.
+                            arguments = [literal(item) for item in positional_args]
+                        if (
+                            isinstance(arguments, list)
+                            and arguments
+                            and all(isinstance(item, str) for item in arguments)
+                            and self.argv([executable, *arguments[1:]], depth + 1)
+                        ):
                             return True
                     continue
-                target = node.args[0] if node.args else next((x.value for x in node.keywords if x.arg in {"args", "command"}), None)
+                target = (
+                    node.args[0]
+                    if node.args
+                    else next(
+                        (x.value for x in node.keywords if x.arg in {"args", "command"}), None
+                    )
+                )
                 value = literal(target)
                 if isinstance(value, str) and self.shell(value, depth + 1):
                     return True
-                if isinstance(value, list) and value and all(isinstance(x, str) for x in value) and self.argv(value, depth + 1):
+                if (
+                    isinstance(value, list)
+                    and value
+                    and all(isinstance(x, str) for x in value)
+                    and self.argv(value, depth + 1)
+                ):
                     return True
         return False
 
@@ -530,11 +724,14 @@ class InvocationInspector:
         self._check_budget(depth)
         from tree_sitter import Language, Parser
         import tree_sitter_javascript
+
         root = Parser(Language(tree_sitter_javascript.language())).parse(source.encode()).root_node
         modules, launchers = set(), {}
         supported = {"exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync"}
+
         def text(node):
             return node.text.decode() if node is not None else ""
+
         def literal(node):
             if node is None or node.type != "string":
                 return None
@@ -543,24 +740,38 @@ class InvocationInspector:
                 return value if isinstance(value, str) else None
             except (ValueError, SyntaxError):
                 return None
+
         def required(node):
-            if node is None or node.type != "call_expression" or text(node.child_by_field_name("function")) != "require":
+            if (
+                node is None
+                or node.type != "call_expression"
+                or text(node.child_by_field_name("function")) != "require"
+            ):
                 return None
             args = node.child_by_field_name("arguments")
-            return literal(args.named_children[0]) if args is not None and args.named_children else None
+            return (
+                literal(args.named_children[0])
+                if args is not None and args.named_children
+                else None
+            )
+
         stack = [root]
         while stack:
             self._check_budget(depth)
             node = stack.pop()
             self.remaining -= 1
-            if node.type == "variable_declarator" and required(node.child_by_field_name("value")) in {"child_process", "node:child_process"}:
+            if node.type == "variable_declarator" and required(
+                node.child_by_field_name("value")
+            ) in {"child_process", "node:child_process"}:
                 binding = node.child_by_field_name("name")
                 if binding is not None and binding.type == "identifier":
                     modules.add(text(binding))
                 elif binding is not None and binding.type == "object_pattern":
                     for item in binding.named_children:
                         if item.type == "pair_pattern":
-                            launchers[text(item.child_by_field_name("value"))] = text(item.child_by_field_name("key"))
+                            launchers[text(item.child_by_field_name("value"))] = text(
+                                item.child_by_field_name("key")
+                            )
                         else:
                             launchers[text(item)] = text(item)
             if node.type == "import_statement":
@@ -583,11 +794,17 @@ class InvocationInspector:
                 module = required(node)
                 if module and _codex(module):
                     return True
-                function, arguments = node.child_by_field_name("function"), node.child_by_field_name("arguments")
+                function, arguments = (
+                    node.child_by_field_name("function"),
+                    node.child_by_field_name("arguments"),
+                )
                 method = launchers.get(text(function))
                 if function is not None and function.type == "member_expression":
                     owner = function.child_by_field_name("object")
-                    if text(owner) in modules or required(owner) in {"child_process", "node:child_process"}:
+                    if text(owner) in modules or required(owner) in {
+                        "child_process",
+                        "node:child_process",
+                    }:
                         method = text(function.child_by_field_name("property"))
                 # RegExp.exec(), unrelated objects and strings are not process APIs.
                 if method in supported and arguments is not None and arguments.named_children:

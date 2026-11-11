@@ -12,6 +12,7 @@ frame already being written is never interrupted, so the worst-case control
 delay is one bulk frame. Bulk senders are additionally windowed by their own
 protocol (see ``agent.native_sync_flow``), so bulk cannot starve either.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,7 +56,11 @@ class PrioritySendLock:
         return False
 
     async def acquire(self, bulk: bool = False) -> bool:
-        if not self._locked and not self.control_waiting() and (not bulk or not self._pending(self._bulk)):
+        if (
+            not self._locked
+            and not self.control_waiting()
+            and (not bulk or not self._pending(self._bulk))
+        ):
             self._locked = True
             return True
         queue = self._bulk if bulk else self._control

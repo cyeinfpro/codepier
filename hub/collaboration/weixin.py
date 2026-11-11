@@ -1,4 +1,5 @@
 """Owner-approved external channel; pairing alone is never execution authority."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +14,16 @@ import uuid
 
 from hub.collaboration.common import canonical, digest, redact, validate
 from hub.collaboration import weixin_schema as models
-from hub.collaboration.weixin_protocol import API_BASE, ITEM_NAMES, MAX_JSON, WeixinClient, approved_url, safe_filename, text, uint64, validate_updates
+from hub.collaboration.weixin_protocol import (
+    API_BASE,
+    ITEM_NAMES,
+    MAX_JSON,
+    WeixinClient,
+    approved_url,
+    text,
+    uint64,
+    validate_updates,
+)
 from hub.principal import Principal, refresh_principal
 from hub.room_scope import snapshot as project_snapshot
 from hub.collaboration.weixin_protocol import incoming_text, incoming_items
@@ -31,103 +41,148 @@ def backpressure_key(account, binding, message):
     if not isinstance(message, dict):
         return None
     try:
-        peer = text(message.get('from_user_id'), 256)
-        external_id = uint64(message.get('message_id'))
-        version = max(int(uint64(message.get(field, 0)))
-                      for field in ('create_time_ms', 'update_time_ms', 'delete_time_ms'))
+        peer = text(message.get("from_user_id"), 256)
+        external_id = uint64(message.get("message_id"))
+        version = max(
+            int(uint64(message.get(field, 0)))
+            for field in ("create_time_ms", "update_time_ms", "delete_time_ms")
+        )
     except DevError:
         return None  # The normal per-message validator handles malformed packets.
-    source = {key: value for key, value in message.items() if key not in {'context_token', 'seq'}}
-    return digest(['weixin-backpressure', account['id'], binding['generation'], peer, external_id, version]), digest(source)
+    source = {key: value for key, value in message.items() if key not in {"context_token", "seq"}}
+    return digest(
+        ["weixin-backpressure", account["id"], binding["generation"], peer, external_id, version]
+    ), digest(source)
 
 
 def principal_record(principal):
     value = asdict(principal)
-    value['scopes'] = sorted(value['scopes'])
+    value["scopes"] = sorted(value["scopes"])
     # Owner consent is durable, not a stolen panel session or another token.
-    value['session_hash'] = value['token_hash'] = ''
+    value["session_hash"] = value["token_hash"] = ""
     return canonical(value)
 
 
 class WeixinService:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
-        bases = (API_BASE, *os.environ.get('CODEPIER_WEIXIN_APPROVED_API_BASES', '').split())
-        self.allowed_api_bases = tuple(dict.fromkeys(approved_url(v, bases=(v,), exact_base=True) for v in bases))
-        self.client_factory = lambda base, token: WeixinClient(base, token=token, allowed_api_bases=self.allowed_api_bases)
+        bases = (API_BASE, *os.environ.get("CODEPIER_WEIXIN_APPROVED_API_BASES", "").split())
+        self.allowed_api_bases = tuple(
+            dict.fromkeys(approved_url(v, bases=(v,), exact_base=True) for v in bases)
+        )
+        self.client_factory = lambda base, token: WeixinClient(
+            base, token=token, allowed_api_bases=self.allowed_api_bases
+        )
         from hub.collaboration.channel_media import ChannelMedia
         from hub.collaboration.weixin_delivery import WeixinDelivery
+
         self.media = ChannelMedia(self)
         self.delivery = WeixinDelivery(self)
         from hub.collaboration.weixin_qr import WeixinEnrollment
+
         self.qr = WeixinEnrollment(self)
 
     def require_enabled(self, owner):
-        self.c.channel_settings.require_enabled('weixin', owner)
+        self.c.channel_settings.require_enabled("weixin", owner)
 
     def owner(self, raw, principal, model, *, enabled=True):
         args = validate(model, raw)
         principal, room = self.c.scope(principal, args)
         self.c.owner(principal)
         conversation = self.c.conversations.resolve(principal, room, args)
-        args['conversation_id'] = conversation['id']
+        args["conversation_id"] = conversation["id"]
         if enabled:
-            self.c.rooms.migration.legacy_write(conversation['id'])
+            self.c.rooms.migration.legacy_write(conversation["id"])
             self.c.live_room(room)
             self.require_enabled(principal)
         return args, principal, room
 
     def account(self, identifier, principal):
-        row = self.store.one('SELECT * FROM weixin_accounts WHERE id=? AND space_id=? AND owner_user_id=?',
-                             (identifier, principal.space_id, principal.user_id))
+        row = self.store.one(
+            "SELECT * FROM weixin_accounts WHERE id=? AND space_id=? AND owner_user_id=?",
+            (identifier, principal.space_id, principal.user_id),
+        )
         if not row:
-            raise DevError('WEIXIN_ACCOUNT_NOT_FOUND', '当前房主未登记这个微信账号', 404)
+            raise DevError("WEIXIN_ACCOUNT_NOT_FOUND", "当前房主未登记这个微信账号", 404)
         return row
 
     def binding(self, identifier, principal, room):
-        row = self.store.one('SELECT * FROM weixin_bindings WHERE id=? AND room_id=? AND owner_user_id=? AND space_id=?',
-                             (identifier, room['id'], principal.user_id, principal.space_id))
+        row = self.store.one(
+            "SELECT * FROM weixin_bindings WHERE id=? AND room_id=? AND owner_user_id=? AND space_id=?",
+            (identifier, room["id"], principal.user_id, principal.space_id),
+        )
         if not row:
-            raise DevError('WEIXIN_BINDING_NOT_FOUND', '当前房间没有这个微信绑定', 404)
-        self.c.conversations.object(principal, row['conversation_id'])
+            raise DevError("WEIXIN_BINDING_NOT_FOUND", "当前房间没有这个微信绑定", 404)
+        self.c.conversations.object(principal, row["conversation_id"])
         return row
 
     def valid(self, identifier, *, pairing=False):
-        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
-        if binding and binding.get('native_member_id'):
-            return self.c.room_channels.native.valid(binding,pairing=pairing)
+        binding = self.store.one("SELECT * FROM weixin_bindings WHERE id=?", (identifier,))
+        if binding and binding.get("native_member_id"):
+            return self.c.room_channels.native.valid(binding, pairing=pairing)
         if binding:
             self.require_enabled(binding)
-        allowed = {'active', 'pairing', 'awaiting_owner'} if pairing else {'active'}
-        if not binding or binding['state'] not in allowed or (binding.get('lifetime_mode') != 'until_revoked' and binding['expires_at'] <= self.c.clock()):
-            raise DevError('WEIXIN_BINDING_INACTIVE', '原微信绑定已暂停、撤销或到期', 403)
-        if binding['state'] == 'pairing' and binding['pairing_until'] <= self.c.clock():
-            raise DevError('WEIXIN_PAIRING_EXPIRED', '配对码已到期；原登录凭据保留，请在面板明确撤销后重新绑定', 403)
-        value = json.loads(binding['owner_principal'])
-        value['scopes'] = set(value['scopes'])
+        allowed = {"active", "pairing", "awaiting_owner"} if pairing else {"active"}
+        if (
+            not binding
+            or binding["state"] not in allowed
+            or (
+                binding.get("lifetime_mode") != "until_revoked"
+                and binding["expires_at"] <= self.c.clock()
+            )
+        ):
+            raise DevError("WEIXIN_BINDING_INACTIVE", "原微信绑定已暂停、撤销或到期", 403)
+        if binding["state"] == "pairing" and binding["pairing_until"] <= self.c.clock():
+            raise DevError(
+                "WEIXIN_PAIRING_EXPIRED",
+                "配对码已到期；原登录凭据保留，请在面板明确撤销后重新绑定",
+                403,
+            )
+        value = json.loads(binding["owner_principal"])
+        value["scopes"] = set(value["scopes"])
         owner = refresh_principal(self.store, Principal(**value))
         self.c.owner(owner)
-        account = self.account(binding['account_id'], owner)
-        if (account['state'] != 'active' or account['credential_version'] != binding['credential_version']
-                or account['generation'] != binding['generation']):
-            raise DevError('WEIXIN_CREDENTIAL_CHANGED', '原微信账号凭据或绑定世代已变化，不继承新授权', 403)
-        _, room = self.c.scope(owner, {'project': binding['project_id'], 'environment_id': binding['environment_id'],
-                                       'conversation_id': binding['conversation_id']})
+        account = self.account(binding["account_id"], owner)
+        if (
+            account["state"] != "active"
+            or account["credential_version"] != binding["credential_version"]
+            or account["generation"] != binding["generation"]
+        ):
+            raise DevError(
+                "WEIXIN_CREDENTIAL_CHANGED", "原微信账号凭据或绑定世代已变化，不继承新授权", 403
+            )
+        _, room = self.c.scope(
+            owner,
+            {
+                "project": binding["project_id"],
+                "environment_id": binding["environment_id"],
+                "conversation_id": binding["conversation_id"],
+            },
+        )
         self.c.live_room(room)
-        project = self.c.runtime.project(binding['project_id'], owner)
-        if (project_snapshot(project) != json.loads(binding['project_snapshot'])
-                or room['id'] != binding['room_id'] or room['owner_user_id'] != binding['owner_user_id']):
-            raise DevError('WEIXIN_MAPPING_CHANGED', '原微信房间项目、节点或目录已变化，需重新确认', 403)
-        dot = self.c.dots.find(binding['dot_id'])
-        if not dot or dot['room_id'] != room['id'] or dot['conversation_id'] != binding['conversation_id']:
-            raise DevError('WEIXIN_DOT_CHANGED', '原微信目标 dot 已变化', 403)
+        project = self.c.runtime.project(binding["project_id"], owner)
+        if (
+            project_snapshot(project) != json.loads(binding["project_snapshot"])
+            or room["id"] != binding["room_id"]
+            or room["owner_user_id"] != binding["owner_user_id"]
+        ):
+            raise DevError(
+                "WEIXIN_MAPPING_CHANGED", "原微信房间项目、节点或目录已变化，需重新确认", 403
+            )
+        dot = self.c.dots.find(binding["dot_id"])
+        if (
+            not dot
+            or dot["room_id"] != room["id"]
+            or dot["conversation_id"] != binding["conversation_id"]
+        ):
+            raise DevError("WEIXIN_DOT_CHANGED", "原微信目标 dot 已变化", 403)
         slot = self.c.dot_chat.authorize(owner, room, dot)
-        self.c.grant_reader(room, slot['grant_id'], snapshot=json.loads(binding['dot_principal']))
+        self.c.grant_reader(room, slot["grant_id"], snapshot=json.loads(binding["dot_principal"]))
         return binding, account, owner, room, dot
 
     def valid_inbound(self, identifier, *, pairing=False):
-        binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (identifier,))
-        if binding and binding.get('native_member_id'):
+        binding = self.store.one("SELECT * FROM weixin_bindings WHERE id=?", (identifier,))
+        if binding and binding.get("native_member_id"):
             return self.c.room_channels.native.inbound(identifier, pairing=pairing)
         return self.valid(identifier, pairing=pairing)
 
@@ -136,508 +191,1093 @@ class WeixinService:
             args, principal, room = self.owner(raw, principal, models.AccountImport)
             if renewal is not None:
                 self.qr.check_renewal(renewal, room, principal)
-            token = args.pop('token').get_secret_value()
+            token = args.pop("token").get_secret_value()
             text(token, 16384)
             if any(ord(c) < 33 or ord(c) > 126 for c in token):
-                raise DevError('WEIXIN_CREDENTIAL_INVALID', '微信凭据不能包含控制字符', 422)
-            args['credential_digest'] = hashlib.sha256(token.encode()).hexdigest()
-            approved_url(args['api_base'], bases=self.allowed_api_bases, exact_base=True)
+                raise DevError("WEIXIN_CREDENTIAL_INVALID", "微信凭据不能包含控制字符", 422)
+            args["credential_digest"] = hashlib.sha256(token.encode()).hexdigest()
+            approved_url(args["api_base"], bases=self.allowed_api_bases, exact_base=True)
 
             def save():
-                old = self.store.one('SELECT * FROM weixin_accounts WHERE bot_id=?', (args['bot_id'],))
-                if old and (old['space_id'] != principal.space_id or old['owner_user_id'] != principal.user_id):
-                    raise DevError('WEIXIN_ACCOUNT_CONFLICT', '此机器人已绑定另一个认证身份，不可复用其账号', 409)
+                old = self.store.one(
+                    "SELECT * FROM weixin_accounts WHERE bot_id=?", (args["bot_id"],)
+                )
+                if old and (
+                    old["space_id"] != principal.space_id
+                    or old["owner_user_id"] != principal.user_id
+                ):
+                    raise DevError(
+                        "WEIXIN_ACCOUNT_CONFLICT",
+                        "此机器人已绑定另一个认证身份，不可复用其账号",
+                        409,
+                    )
                 if not old:
-                    owned = self.store.one('SELECT COUNT(*) AS n FROM weixin_accounts WHERE owner_user_id=? AND space_id=?', (principal.user_id, principal.space_id))['n']
-                    total = self.store.one('SELECT COUNT(*) AS n FROM weixin_accounts')['n']
+                    owned = self.store.one(
+                        "SELECT COUNT(*) AS n FROM weixin_accounts WHERE owner_user_id=? AND space_id=?",
+                        (principal.user_id, principal.space_id),
+                    )["n"]
+                    total = self.store.one("SELECT COUNT(*) AS n FROM weixin_accounts")["n"]
                     if owned >= MAX_OWNER_ACCOUNTS or total >= MAX_INSTANCE_ACCOUNTS:
-                        raise DevError('WEIXIN_ACCOUNT_QUOTA', '已登记机器人数量达到明确上限；不覆盖其他账号或绕过房间预算', 409)
-                if (old['credential_version'] if old else 0) != args['expected_version']:
-                    raise DevError('STALE_VERSION', '微信账号版本已变化', 409)
+                        raise DevError(
+                            "WEIXIN_ACCOUNT_QUOTA",
+                            "已登记机器人数量达到明确上限；不覆盖其他账号或绕过房间预算",
+                            409,
+                        )
+                if (old["credential_version"] if old else 0) != args["expected_version"]:
+                    raise DevError("STALE_VERSION", "微信账号版本已变化", 409)
                 if old:
-                    for bound in self.store.all("SELECT conversation_id FROM weixin_bindings WHERE account_id=? AND state!='revoked'",(old['id'],)):
-                        self.c.rooms.migration.legacy_write(bound['conversation_id'])
-                now, identifier = self.c.clock(), old['id'] if old else uuid.uuid4().hex
-                self.store.execute('''INSERT INTO weixin_accounts
+                    for bound in self.store.all(
+                        "SELECT conversation_id FROM weixin_bindings WHERE account_id=? AND state!='revoked'",
+                        (old["id"],),
+                    ):
+                        self.c.rooms.migration.legacy_write(bound["conversation_id"])
+                now, identifier = self.c.clock(), old["id"] if old else uuid.uuid4().hex
+                self.store.execute(
+                    """INSERT INTO weixin_accounts
                     (id,space_id,owner_user_id,bot_id,label,api_base,secret,state,credential_version,cursor,created,updated)
                     VALUES (?,?,?,?,?,?,?,'active',?,?,?,?) ON CONFLICT(id) DO UPDATE SET
                     label=excluded.label,api_base=excluded.api_base,secret=excluded.secret,state='active',
                     credential_version=excluded.credential_version,generation=generation+1,poll_fence=poll_fence+1,poll_until=0,
-                    reason_code='',failures=0,next_poll=0,last_sync_at=NULL,updated=excluded.updated''',
-                    (identifier, principal.space_id, principal.user_id, args['bot_id'], args['label'], args['api_base'],
-                     self.store.encrypt(token), args['expected_version'] + 1, self.store.encrypt(''), now, now))
+                    reason_code='',failures=0,next_poll=0,last_sync_at=NULL,updated=excluded.updated""",
+                    (
+                        identifier,
+                        principal.space_id,
+                        principal.user_id,
+                        args["bot_id"],
+                        args["label"],
+                        args["api_base"],
+                        self.store.encrypt(token),
+                        args["expected_version"] + 1,
+                        self.store.encrypt(""),
+                        now,
+                        now,
+                    ),
+                )
                 if old:
-                    for previous in self.store.all("SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'", (identifier,)):
-                        self.c.channel_enrollment.invalidate(previous['id'], 'credential_changed')
+                    for previous in self.store.all(
+                        "SELECT * FROM weixin_bindings WHERE account_id=? AND state!='revoked'",
+                        (identifier,),
+                    ):
+                        self.c.channel_enrollment.invalidate(previous["id"], "credential_changed")
                         if renewal is not None:
-                            self.c.channel_owner.pending_revalidation(previous['id'])
-                            challenge = 'CPW-' + secrets.token_hex(16).upper()
-                            self.store.execute("""UPDATE weixin_bindings SET state='pairing',credential_version=?,generation=?,
+                            self.c.channel_owner.pending_revalidation(previous["id"])
+                            challenge = "CPW-" + secrets.token_hex(16).upper()
+                            self.store.execute(
+                                """UPDATE weixin_bindings SET state='pairing',credential_version=?,generation=?,
                                 pairing_hash=?,pairing_secret=?,pairing_until=?,pending_peer_id='',revalidation_required=1,version=version+1,updated=? WHERE id=?""",
-                                (args['expected_version'] + 1, old['generation'] + 1, digest(challenge), self.store.encrypt(challenge),
-                                 now + 900, now, previous['id']))
+                                (
+                                    args["expected_version"] + 1,
+                                    old["generation"] + 1,
+                                    digest(challenge),
+                                    self.store.encrypt(challenge),
+                                    now + 900,
+                                    now,
+                                    previous["id"],
+                                ),
+                            )
                         else:
-                            self.c.channel_owner.revoke(previous['id'], 'credential_replaced')
-                            self.store.execute("UPDATE weixin_bindings SET state='revoked',version=version+1,updated=? WHERE id=?", (now, previous['id']))
-                    self.store.execute('DELETE FROM weixin_contexts WHERE account_id=?', (identifier,))
-                    self.delivery.quarantine_account(identifier, 'credential_changed')
-                self.c.channel_enrollment.evidence('weixin', identifier, principal, room, args['conversation_id'],
-                    {'credential_storage': args['confirm_credential_storage'], 'provider_terms': args['confirm_provider_terms']},
-                    {'credential_version': args['expected_version'] + 1})
-                self.c.audit(room, principal.actor, 'weixin.account_approved', identifier,
-                    {'credential_version': args['expected_version'] + 1, 'creates_mcp_grant': False})
-                return {'account_id': identifier, 'credential_version': args['expected_version'] + 1,
-                        'bot_id': args['bot_id'], 'state': 'active', 'credential_stored': True, 'room_bound': False,
-                        're_pair_required': bool(old)}
-            return self.c.mutation(principal, room, 'weixin_account', args, save)
+                            self.c.channel_owner.revoke(previous["id"], "credential_replaced")
+                            self.store.execute(
+                                "UPDATE weixin_bindings SET state='revoked',version=version+1,updated=? WHERE id=?",
+                                (now, previous["id"]),
+                            )
+                    self.store.execute(
+                        "DELETE FROM weixin_contexts WHERE account_id=?", (identifier,)
+                    )
+                    self.delivery.quarantine_account(identifier, "credential_changed")
+                self.c.channel_enrollment.evidence(
+                    "weixin",
+                    identifier,
+                    principal,
+                    room,
+                    args["conversation_id"],
+                    {
+                        "credential_storage": args["confirm_credential_storage"],
+                        "provider_terms": args["confirm_provider_terms"],
+                    },
+                    {"credential_version": args["expected_version"] + 1},
+                )
+                self.c.audit(
+                    room,
+                    principal.actor,
+                    "weixin.account_approved",
+                    identifier,
+                    {
+                        "credential_version": args["expected_version"] + 1,
+                        "creates_mcp_grant": False,
+                    },
+                )
+                return {
+                    "account_id": identifier,
+                    "credential_version": args["expected_version"] + 1,
+                    "bot_id": args["bot_id"],
+                    "state": "active",
+                    "credential_stored": True,
+                    "room_bound": False,
+                    "re_pair_required": bool(old),
+                }
+
+            return self.c.mutation(principal, room, "weixin_account", args, save)
 
     def bind(self, raw, principal):
         with self.store.transaction():
             args, principal, room = self.owner(raw, principal, models.Bind)
-            account = self.account(args['account_id'], principal)
-            dot = self.c.dots.find(args['dot_id'])
-            if not dot or dot['room_id'] != room['id'] or dot['conversation_id'] != args['conversation_id']:
-                raise DevError('WEIXIN_DOT_SCOPE', '必须选择此话题已经登记的双向 dot', 403)
+            account = self.account(args["account_id"], principal)
+            dot = self.c.dots.find(args["dot_id"])
+            if (
+                not dot
+                or dot["room_id"] != room["id"]
+                or dot["conversation_id"] != args["conversation_id"]
+            ):
+                raise DevError("WEIXIN_DOT_SCOPE", "必须选择此话题已经登记的双向 dot", 403)
             slot = self.c.dot_chat.authorize(principal, room, dot)
-            project = self.c.runtime.project(room['project_id'], principal)
+            project = self.c.runtime.project(room["project_id"], principal)
 
             def save():
-                if account['state'] != 'active' or self.store.one("SELECT 1 FROM weixin_bindings WHERE state!='revoked' AND (account_id=? OR conversation_id=?)", (account['id'], dot['conversation_id'])):
-                    raise DevError('WEIXIN_BINDING_CONFLICT', '一个话题仅绑定一个机器人；当前机器人不跨话题复用。先明确撤销旧绑定', 409)
-                self.c.channel_enrollment.prepare('weixin', args, principal, room, account, dot)
+                if account["state"] != "active" or self.store.one(
+                    "SELECT 1 FROM weixin_bindings WHERE state!='revoked' AND (account_id=? OR conversation_id=?)",
+                    (account["id"], dot["conversation_id"]),
+                ):
+                    raise DevError(
+                        "WEIXIN_BINDING_CONFLICT",
+                        "一个话题仅绑定一个机器人；当前机器人不跨话题复用。先明确撤销旧绑定",
+                        409,
+                    )
+                self.c.channel_enrollment.prepare("weixin", args, principal, room, account, dot)
                 identifier, now = uuid.uuid4().hex, self.c.clock()
-                challenge = 'CPW-' + secrets.token_hex(16).upper()
-                generation = account['generation'] + 1
-                self.store.execute('UPDATE weixin_accounts SET generation=?,poll_fence=poll_fence+1,poll_until=0,next_poll=0,last_sync_at=NULL,updated=? WHERE id=?',
-                                   (generation, now, account['id']))
-                self.store.execute('''INSERT INTO weixin_bindings
+                challenge = "CPW-" + secrets.token_hex(16).upper()
+                generation = account["generation"] + 1
+                self.store.execute(
+                    "UPDATE weixin_accounts SET generation=?,poll_fence=poll_fence+1,poll_until=0,next_poll=0,last_sync_at=NULL,updated=? WHERE id=?",
+                    (generation, now, account["id"]),
+                )
+                self.store.execute(
+                    """INSERT INTO weixin_bindings
                     (id,account_id,space_id,owner_user_id,room_id,conversation_id,project_id,environment_id,dot_id,
                      owner_principal,dot_principal,project_snapshot,credential_version,generation,state,pairing_hash,
                      pairing_until,allow_replies,allow_media_outbound,expires_at,created,updated)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pairing',?,?,?,?,?,?,?)''',
-                    (identifier, account['id'], principal.space_id, principal.user_id, room['id'], dot['conversation_id'],
-                     room['project_id'], room['environment_id'], dot['id'], principal_record(principal), slot['principal'],
-                     canonical(project_snapshot(project)), account['credential_version'], generation, digest(challenge),
-                     now + 900, int(args['allow_replies']), int(args['allow_media_outbound']), now + args['expires_seconds'], now, now))
-                self.store.execute('UPDATE weixin_bindings SET lifetime_mode=? WHERE id=?', (args.get('lifetime_mode', 'timed'), identifier))
-                if args.get('lifetime_mode', 'timed') == 'until_revoked':
-                    self.store.execute("UPDATE collaboration_join_slots SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
-                                       ('weixin-binding:' + identifier, dot['id']))
-                self.store.execute('UPDATE weixin_bindings SET pairing_secret=? WHERE id=?', (self.store.encrypt(challenge), identifier))
-                self.c.channel_enrollment.record_binding('weixin', args, principal, room, identifier)
-                self.c.audit(room, principal.actor, 'weixin.binding_pairing_requested', identifier,
-                    {'generation': generation, 'dot_id': dot['id'], 'allow_replies': args['allow_replies'],
-                     'allow_media_outbound': args['allow_media_outbound'], 'automatic_execution': False})
-                return {'binding_id': identifier, 'version': 1, 'generation': generation, 'state': 'pairing',
-                        'pairing_challenge': challenge, 'pairing_until': now + 900,
-                        'onboarding': self.c.channel_enrollment.view(identifier),
-                        'instructions': ('请仅用本人微信向此机器人私聊发送一次性授权码；验证后自动连接并开通摘要中的任务范围，无需返回面板确认。' if args.get('owner_preapproval') else '在准备绑定的微信私聊中发送此一次性配对码；回到面板核对真实 peer 编号后明确激活。扫码人身份不自动等同房主。')}
-            return self.c.mutation(principal, room, 'weixin_bind', args, save)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pairing',?,?,?,?,?,?,?)""",
+                    (
+                        identifier,
+                        account["id"],
+                        principal.space_id,
+                        principal.user_id,
+                        room["id"],
+                        dot["conversation_id"],
+                        room["project_id"],
+                        room["environment_id"],
+                        dot["id"],
+                        principal_record(principal),
+                        slot["principal"],
+                        canonical(project_snapshot(project)),
+                        account["credential_version"],
+                        generation,
+                        digest(challenge),
+                        now + 900,
+                        int(args["allow_replies"]),
+                        int(args["allow_media_outbound"]),
+                        now + args["expires_seconds"],
+                        now,
+                        now,
+                    ),
+                )
+                self.store.execute(
+                    "UPDATE weixin_bindings SET lifetime_mode=? WHERE id=?",
+                    (args.get("lifetime_mode", "timed"), identifier),
+                )
+                if args.get("lifetime_mode", "timed") == "until_revoked":
+                    self.store.execute(
+                        "UPDATE collaboration_join_slots SET lifetime_mode='until_revoked',lifetime_authorization_id=? WHERE id=?",
+                        ("weixin-binding:" + identifier, dot["id"]),
+                    )
+                self.store.execute(
+                    "UPDATE weixin_bindings SET pairing_secret=? WHERE id=?",
+                    (self.store.encrypt(challenge), identifier),
+                )
+                self.c.channel_enrollment.record_binding(
+                    "weixin", args, principal, room, identifier
+                )
+                self.c.audit(
+                    room,
+                    principal.actor,
+                    "weixin.binding_pairing_requested",
+                    identifier,
+                    {
+                        "generation": generation,
+                        "dot_id": dot["id"],
+                        "allow_replies": args["allow_replies"],
+                        "allow_media_outbound": args["allow_media_outbound"],
+                        "automatic_execution": False,
+                    },
+                )
+                return {
+                    "binding_id": identifier,
+                    "version": 1,
+                    "generation": generation,
+                    "state": "pairing",
+                    "pairing_challenge": challenge,
+                    "pairing_until": now + 900,
+                    "onboarding": self.c.channel_enrollment.view(identifier),
+                    "instructions": (
+                        "请仅用本人微信向此机器人私聊发送一次性授权码；验证后自动连接并开通摘要中的任务范围，无需返回面板确认。"
+                        if args.get("owner_preapproval")
+                        else "在准备绑定的微信私聊中发送此一次性配对码；回到面板核对真实 peer 编号后明确激活。扫码人身份不自动等同房主。"
+                    ),
+                }
+
+            return self.c.mutation(principal, room, "weixin_bind", args, save)
 
     def control(self, raw, principal, *, room_owner_binding=None):
         with self.store.transaction():
             if room_owner_binding is not None:
-                args,principal,room,binding=self.c.room_channels.legacy_stop_scope('weixin',raw,principal,models.Control,room_owner_binding)
+                args, principal, room, binding = self.c.room_channels.legacy_stop_scope(
+                    "weixin", raw, principal, models.Control, room_owner_binding
+                )
             else:
                 args, principal, room = self.owner(raw, principal, models.Control, enabled=False)
-                binding = self.binding(args['binding_id'], principal, room)
+                binding = self.binding(args["binding_id"], principal, room)
 
             def save():
-                current=(self.c.room_channels.legacy_stop_scope('weixin',args,principal,models.Control,room_owner_binding)[3]
-                    if room_owner_binding is not None else self.binding(binding['id'], principal, room))
-                if args['action'] not in {'pause','revoke'}:
-                    self.c.rooms.migration.legacy_write(current['conversation_id'])
-                if current['version'] != args['expected_version']:
-                    raise DevError('STALE_VERSION', '微信绑定已变化，请重新核对', 409)
-                action = args['action']
-                self.c.channel_enrollment.invalidate(current['id'], 'binding_' + action)
-                if action == 'refresh_pairing':
-                    if current['state'] not in {'pairing', 'awaiting_owner', 'paused'}:
-                        raise DevError('WEIXIN_PAIRING_UNAVAILABLE', '只有未完成配对或暂停的原绑定可以刷新配对码', 409)
-                    challenge = 'CPW-' + secrets.token_hex(16).upper()
-                    self.store.execute("""UPDATE weixin_bindings SET state='pairing',pairing_hash=?,pairing_secret=?,
+                current = (
+                    self.c.room_channels.legacy_stop_scope(
+                        "weixin", args, principal, models.Control, room_owner_binding
+                    )[3]
+                    if room_owner_binding is not None
+                    else self.binding(binding["id"], principal, room)
+                )
+                if args["action"] not in {"pause", "revoke"}:
+                    self.c.rooms.migration.legacy_write(current["conversation_id"])
+                if current["version"] != args["expected_version"]:
+                    raise DevError("STALE_VERSION", "微信绑定已变化，请重新核对", 409)
+                action = args["action"]
+                self.c.channel_enrollment.invalidate(current["id"], "binding_" + action)
+                if action == "refresh_pairing":
+                    if current["state"] not in {"pairing", "awaiting_owner", "paused"}:
+                        raise DevError(
+                            "WEIXIN_PAIRING_UNAVAILABLE",
+                            "只有未完成配对或暂停的原绑定可以刷新配对码",
+                            409,
+                        )
+                    challenge = "CPW-" + secrets.token_hex(16).upper()
+                    self.store.execute(
+                        """UPDATE weixin_bindings SET state='pairing',pairing_hash=?,pairing_secret=?,
                         pairing_until=?,pending_peer_id='',version=version+1,updated=? WHERE id=?""",
-                        (digest(challenge), self.store.encrypt(challenge), self.c.clock() + 900, self.c.clock(), current['id']))
-                    self.valid(current['id'], pairing=True)
-                    self.store.execute('UPDATE weixin_accounts SET poll_fence=poll_fence+1,poll_until=0,next_poll=0 WHERE id=?', (current['account_id'],))
-                    self.c.audit(room, principal.actor, 'weixin.pairing_refreshed', current['id'], {'automatic_execution': False})
-                    return {'binding_id': current['id'], 'version': args['expected_version'] + 1, 'state': 'pairing',
-                            'pairing_challenge': challenge, 'pairing_until': self.c.clock() + 900}
-                if action == 'activate':
-                    self.valid(current['id'], pairing=True)
-                    if (current['state'] != 'awaiting_owner' or not current['pending_peer_id']
-                            or not hmac.compare_digest(current['pending_peer_id'], args['confirm_peer_id'])):
-                        raise DevError('WEIXIN_PAIRING_UNVERIFIED', '必须核对当前配对挑战实际返回的微信 peer 编号', 409)
-                    if current['peer_id'] and not hmac.compare_digest(current['peer_id'], current['pending_peer_id']):
-                        raise DevError('CHANNEL_OWNER_PEER_CHANGED', '重新验证必须来自原联系人，不能替换为另一人', 403)
-                    authorization = self.c.channel_owner.current(current['id'])
-                    if authorization and authorization['state'] == 'pending_revalidation' and not hmac.compare_digest(
-                            json.loads(authorization['scope'])['peer_id'], current['pending_peer_id']):
-                        raise DevError('CHANNEL_OWNER_PEER_CHANGED', '新配对必须是原本人联系人，不能继承他人的授权', 403)
-                    state, peer = 'active', current['pending_peer_id']
-                elif action == 'resume':
+                        (
+                            digest(challenge),
+                            self.store.encrypt(challenge),
+                            self.c.clock() + 900,
+                            self.c.clock(),
+                            current["id"],
+                        ),
+                    )
+                    self.valid(current["id"], pairing=True)
+                    self.store.execute(
+                        "UPDATE weixin_accounts SET poll_fence=poll_fence+1,poll_until=0,next_poll=0 WHERE id=?",
+                        (current["account_id"],),
+                    )
+                    self.c.audit(
+                        room,
+                        principal.actor,
+                        "weixin.pairing_refreshed",
+                        current["id"],
+                        {"automatic_execution": False},
+                    )
+                    return {
+                        "binding_id": current["id"],
+                        "version": args["expected_version"] + 1,
+                        "state": "pairing",
+                        "pairing_challenge": challenge,
+                        "pairing_until": self.c.clock() + 900,
+                    }
+                if action == "activate":
+                    self.valid(current["id"], pairing=True)
+                    if (
+                        current["state"] != "awaiting_owner"
+                        or not current["pending_peer_id"]
+                        or not hmac.compare_digest(
+                            current["pending_peer_id"], args["confirm_peer_id"]
+                        )
+                    ):
+                        raise DevError(
+                            "WEIXIN_PAIRING_UNVERIFIED",
+                            "必须核对当前配对挑战实际返回的微信 peer 编号",
+                            409,
+                        )
+                    if current["peer_id"] and not hmac.compare_digest(
+                        current["peer_id"], current["pending_peer_id"]
+                    ):
+                        raise DevError(
+                            "CHANNEL_OWNER_PEER_CHANGED",
+                            "重新验证必须来自原联系人，不能替换为另一人",
+                            403,
+                        )
+                    authorization = self.c.channel_owner.current(current["id"])
+                    if (
+                        authorization
+                        and authorization["state"] == "pending_revalidation"
+                        and not hmac.compare_digest(
+                            json.loads(authorization["scope"])["peer_id"],
+                            current["pending_peer_id"],
+                        )
+                    ):
+                        raise DevError(
+                            "CHANNEL_OWNER_PEER_CHANGED",
+                            "新配对必须是原本人联系人，不能继承他人的授权",
+                            403,
+                        )
+                    state, peer = "active", current["pending_peer_id"]
+                elif action == "resume":
                     self.require_enabled(principal)
-                    if current.get('revalidation_required') or current['state'] != 'paused' or not current['peer_id'] or (current.get('lifetime_mode') != 'until_revoked' and current['expires_at'] <= self.c.clock()):
-                        raise DevError('WEIXIN_RESUME_DENIED', '只有原配对仍有效的暂停绑定可以恢复；不会重放历史消息', 409)
-                    state, peer = 'active', current['peer_id']
-                elif action == 'pause':
-                    if current['state'] == 'revoked':
-                        raise DevError('WEIXIN_BINDING_INACTIVE', '已撤销绑定不能恢复为暂停', 409)
-                    state, peer = 'paused', current['peer_id']
+                    if (
+                        current.get("revalidation_required")
+                        or current["state"] != "paused"
+                        or not current["peer_id"]
+                        or (
+                            current.get("lifetime_mode") != "until_revoked"
+                            and current["expires_at"] <= self.c.clock()
+                        )
+                    ):
+                        raise DevError(
+                            "WEIXIN_RESUME_DENIED",
+                            "只有原配对仍有效的暂停绑定可以恢复；不会重放历史消息",
+                            409,
+                        )
+                    state, peer = "active", current["peer_id"]
+                elif action == "pause":
+                    if current["state"] == "revoked":
+                        raise DevError("WEIXIN_BINDING_INACTIVE", "已撤销绑定不能恢复为暂停", 409)
+                    state, peer = "paused", current["peer_id"]
                 else:
-                    state, peer = 'revoked', current['peer_id']
+                    state, peer = "revoked", current["peer_id"]
                 now = self.c.clock()
-                self.store.execute('UPDATE weixin_bindings SET state=?,peer_id=?,pairing_hash=\'\',pairing_secret=\'\',version=version+1,updated=? WHERE id=? AND version=?',
-                    (state, peer, now, current['id'], args['expected_version']))
-                self.store.execute('UPDATE weixin_accounts SET poll_fence=poll_fence+1,poll_until=0,next_poll=0 WHERE id=?', (current['account_id'],))
-                if state == 'revoked':
-                    self.c.channel_owner.revoke(current['id'], 'binding_revoked')
-                    self.delivery.quarantine_binding(current['id'], 'binding_revoked')
-                    self.store.execute('DELETE FROM weixin_contexts WHERE account_id=? AND generation=?', (current['account_id'], current['generation']))
-                if state == 'active':
-                    if action == 'activate':
-                        self.store.execute('UPDATE weixin_bindings SET revalidation_required=0 WHERE id=?', (current['id'],))
-                    self.c.channel_owner.restore_verified_peer(self.binding(current['id'], principal, room))
-                    self.valid(current['id'])
-                self.c.audit(room, principal.actor, 'weixin.binding_' + action, current['id'],
-                             {'generation': current['generation'], 'automatic_replay': False})
-                return {'binding_id': current['id'], 'version': args['expected_version'] + 1, 'state': state,
-                        'peer_id': peer, 'automatic_execution': False, 'historical_replay': False}
-            return self.c.mutation(principal, room, 'weixin_control', args, save)
+                self.store.execute(
+                    "UPDATE weixin_bindings SET state=?,peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=? AND version=?",
+                    (state, peer, now, current["id"], args["expected_version"]),
+                )
+                self.store.execute(
+                    "UPDATE weixin_accounts SET poll_fence=poll_fence+1,poll_until=0,next_poll=0 WHERE id=?",
+                    (current["account_id"],),
+                )
+                if state == "revoked":
+                    self.c.channel_owner.revoke(current["id"], "binding_revoked")
+                    self.delivery.quarantine_binding(current["id"], "binding_revoked")
+                    self.store.execute(
+                        "DELETE FROM weixin_contexts WHERE account_id=? AND generation=?",
+                        (current["account_id"], current["generation"]),
+                    )
+                if state == "active":
+                    if action == "activate":
+                        self.store.execute(
+                            "UPDATE weixin_bindings SET revalidation_required=0 WHERE id=?",
+                            (current["id"],),
+                        )
+                    self.c.channel_owner.restore_verified_peer(
+                        self.binding(current["id"], principal, room)
+                    )
+                    self.valid(current["id"])
+                self.c.audit(
+                    room,
+                    principal.actor,
+                    "weixin.binding_" + action,
+                    current["id"],
+                    {"generation": current["generation"], "automatic_replay": False},
+                )
+                return {
+                    "binding_id": current["id"],
+                    "version": args["expected_version"] + 1,
+                    "state": state,
+                    "peer_id": peer,
+                    "automatic_execution": False,
+                    "historical_replay": False,
+                }
+
+            return self.c.mutation(principal, room, "weixin_control", args, save)
 
     def owner_request(self, raw, principal):
         with self.store.transaction():
             args, principal, room = self.owner(raw, principal, models.OwnerRequest)
-            source = self.c.object('collaboration_messages', room, args['message_id'])
+            source = self.c.object("collaboration_messages", room, args["message_id"])
             self.c.chatroom.require_message_visible(principal, source)
-            origin = json.loads(source['body']).get('external_origin', {})
-            if (source['origin'] != 'external_channel' or source['version'] != args['expected_message_version']
-                    or source['conversation_id'] != args['conversation_id'] or not origin.get('binding_id')):
-                raise DevError('WEIXIN_SOURCE_CHANGED', '外部原消息或话题已变化', 409)
-            binding, *_ = self.valid(origin['binding_id'])
+            origin = json.loads(source["body"]).get("external_origin", {})
+            if (
+                source["origin"] != "external_channel"
+                or source["version"] != args["expected_message_version"]
+                or source["conversation_id"] != args["conversation_id"]
+                or not origin.get("binding_id")
+            ):
+                raise DevError("WEIXIN_SOURCE_CHANGED", "外部原消息或话题已变化", 409)
+            binding, *_ = self.valid(origin["binding_id"])
             # A NEW explicit panel-owner message carries only the owner's newly
             # reviewed text. The external source keeps its untrusted identity.
-            return self.c.chatroom.create({'project': args['project'], 'environment_id': args['environment_id'],
-                'room_id': room['id'], 'conversation_id': args['conversation_id'], 'body_text': args['request_text'],
-                'reply_to_id': source['id'], 'mentions': [{'slot_id': binding['dot_id']}],
-                'client_message_id': 'weixin-owner:' + digest([source['id'], args['idempotency_key']]),
-                'idempotency_key': args['idempotency_key']}, principal)
+            return self.c.chatroom.create(
+                {
+                    "project": args["project"],
+                    "environment_id": args["environment_id"],
+                    "room_id": room["id"],
+                    "conversation_id": args["conversation_id"],
+                    "body_text": args["request_text"],
+                    "reply_to_id": source["id"],
+                    "mentions": [{"slot_id": binding["dot_id"]}],
+                    "client_message_id": "weixin-owner:"
+                    + digest([source["id"], args["idempotency_key"]]),
+                    "idempotency_key": args["idempotency_key"],
+                },
+                principal,
+            )
 
     def listing(self, raw, principal):
         with self.store.transaction(immediate=False):
             args, principal, room = self.owner(raw, principal, models.Scope, enabled=False)
-            accounts = self.store.all('''SELECT id,bot_id,label,state,credential_version,reason_code,last_sync_at,next_poll,updated FROM weixin_accounts
-                WHERE space_id=? AND owner_user_id=? ORDER BY created DESC LIMIT 100''', (principal.space_id, principal.user_id))
+            accounts = self.store.all(
+                """SELECT id,bot_id,label,state,credential_version,reason_code,last_sync_at,next_poll,updated FROM weixin_accounts
+                WHERE space_id=? AND owner_user_id=? ORDER BY created DESC LIMIT 100""",
+                (principal.space_id, principal.user_id),
+            )
             for account in accounts:
-                account['inbound_health'] = channel_inbound.summary(self.store, 'weixin', account['id'])
-            bindings = self.store.all('''SELECT id,account_id,dot_id,conversation_id,generation,version,state,peer_id,pending_peer_id,
+                account["inbound_health"] = channel_inbound.summary(
+                    self.store, "weixin", account["id"]
+                )
+            bindings = self.store.all(
+                """SELECT id,account_id,dot_id,conversation_id,generation,version,state,peer_id,pending_peer_id,
                 pairing_until,allow_replies,allow_media_outbound,lifetime_mode,revalidation_required,expires_at,updated FROM weixin_bindings
-                WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 100''', (room['id'], args['conversation_id']))
+                WHERE room_id=? AND conversation_id=? ORDER BY created DESC LIMIT 100""",
+                (room["id"], args["conversation_id"]),
+            )
             for binding in bindings:
-                binding['effective_capabilities'] = self.c.channels.capabilities.for_binding('weixin', binding['id'])
-                binding['onboarding'] = self.c.channel_enrollment.view(binding['id'])
-                binding['owner_authorization'] = self.c.channel_owner.view(self.c.channel_owner.current(binding['id']))
-                if binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
-                    secret = self.store.one('SELECT pairing_secret FROM weixin_bindings WHERE id=?', (binding['id'],))['pairing_secret']
-                    binding['pairing_challenge'] = self.store.decrypt(secret) if secret else None
-            artifacts = self.c.runtime.artifacts.list({'project': room['project_id'], 'limit': 50, 'cursor': ''}, principal)
+                binding["effective_capabilities"] = self.c.channels.capabilities.for_binding(
+                    "weixin", binding["id"]
+                )
+                binding["onboarding"] = self.c.channel_enrollment.view(binding["id"])
+                binding["owner_authorization"] = self.c.channel_owner.view(
+                    self.c.channel_owner.current(binding["id"])
+                )
+                if binding["state"] == "pairing" and binding["pairing_until"] > self.c.clock():
+                    secret = self.store.one(
+                        "SELECT pairing_secret FROM weixin_bindings WHERE id=?", (binding["id"],)
+                    )["pairing_secret"]
+                    binding["pairing_challenge"] = self.store.decrypt(secret) if secret else None
+            artifacts = self.c.runtime.artifacts.list(
+                {"project": room["project_id"], "limit": 50, "cursor": ""}, principal
+            )
             candidates = []
-            for message in self.store.all('''SELECT * FROM collaboration_messages WHERE room_id=? AND conversation_id=?
-                AND origin='bound_connector' ORDER BY created DESC,id DESC LIMIT 50''', (room['id'], args['conversation_id'])):
+            for message in self.store.all(
+                """SELECT * FROM collaboration_messages WHERE room_id=? AND conversation_id=?
+                AND origin='bound_connector' ORDER BY created DESC,id DESC LIMIT 50""",
+                (room["id"], args["conversation_id"]),
+            ):
                 self.c.chatroom.require_message_visible(principal, message)
-                body = json.loads(message['body'])
-                if body.get('sender_dot_id') and body.get('dot_reply_complete') is not False and (source := self.delivery.root_source(message)) and json.loads(source['body']).get('external_origin', {}).get('channel') == 'weixin':
-                    candidates.append({'id': message['id'], 'version': message['version'], 'body_text': body.get('body_text', '')[:120]})
+                body = json.loads(message["body"])
+                if (
+                    body.get("sender_dot_id")
+                    and body.get("dot_reply_complete") is not False
+                    and (source := self.delivery.root_source(message))
+                    and json.loads(source["body"]).get("external_origin", {}).get("channel")
+                    == "weixin"
+                ):
+                    candidates.append(
+                        {
+                            "id": message["id"],
+                            "version": message["version"],
+                            "body_text": body.get("body_text", "")[:120],
+                        }
+                    )
                 if len(candidates) == 20:
                     break
-            deliveries = self.delivery.listing(room['id'], args['conversation_id'])
-            setting = self.c.channel_settings.setting('weixin', principal)
-            return {'enabled': setting['enabled'], 'setting': setting, 'accounts': accounts,
-                    'bindings': bindings, 'owner_task_options': [self.c.channel_owner.options(self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (b['id'],))) for b in bindings], 'deliveries': deliveries, 'read_only': True,
-                    'artifact_candidates': [r for r in artifacts['artifacts'] if not r['expired'] and r['bytes'] <= 32 * 1024 * 1024],
-                    'artifact_candidates_more': bool(artifacts['next_cursor']), 'reply_candidates': candidates,
-                    'candidate_scope': 'most_recent_50_artifacts_and_20_replies',
-                    'capabilities': {'direct_chat': True, 'native_groups': False, 'automatic_execution': False,
-                        'provider_receipt_lookup': False, 'delivery_verified': False, 'external_account_poc_verified': False,
-                        'received_attachments': ['image', 'video', 'voice', 'file'], 'sent_attachments': ['image', 'video', 'file']},
-                    'warning': '仅机器人私聊桥接；通道已接收不代表用户已读，未知发送不会自动重发。'}
+            deliveries = self.delivery.listing(room["id"], args["conversation_id"])
+            setting = self.c.channel_settings.setting("weixin", principal)
+            return {
+                "enabled": setting["enabled"],
+                "setting": setting,
+                "accounts": accounts,
+                "bindings": bindings,
+                "owner_task_options": [
+                    self.c.channel_owner.options(
+                        self.store.one("SELECT * FROM weixin_bindings WHERE id=?", (b["id"],))
+                    )
+                    for b in bindings
+                ],
+                "deliveries": deliveries,
+                "read_only": True,
+                "artifact_candidates": [
+                    r
+                    for r in artifacts["artifacts"]
+                    if not r["expired"] and r["bytes"] <= 32 * 1024 * 1024
+                ],
+                "artifact_candidates_more": bool(artifacts["next_cursor"]),
+                "reply_candidates": candidates,
+                "candidate_scope": "most_recent_50_artifacts_and_20_replies",
+                "capabilities": {
+                    "direct_chat": True,
+                    "native_groups": False,
+                    "automatic_execution": False,
+                    "provider_receipt_lookup": False,
+                    "delivery_verified": False,
+                    "external_account_poc_verified": False,
+                    "received_attachments": ["image", "video", "voice", "file"],
+                    "sent_attachments": ["image", "video", "file"],
+                },
+                "warning": "仅机器人私聊桥接；通道已接收不代表用户已读，未知发送不会自动重发。",
+            }
 
     def claim_poll(self, account_id):
         with self.store.transaction():
-            account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (account_id,))
+            account = self.store.one("SELECT * FROM weixin_accounts WHERE id=?", (account_id,))
             now = self.c.clock()
-            if not account or account['state'] != 'active' or (account['poll_until'] or 0) > now or account['next_poll'] > now:
+            if (
+                not account
+                or account["state"] != "active"
+                or (account["poll_until"] or 0) > now
+                or account["next_poll"] > now
+            ):
                 return None
-            binding = self.store.one("SELECT id FROM weixin_bindings WHERE account_id=? AND state IN ('pairing','awaiting_owner','active')", (account_id,))
+            binding = self.store.one(
+                "SELECT id FROM weixin_bindings WHERE account_id=? AND state IN ('pairing','awaiting_owner','active')",
+                (account_id,),
+            )
             if not binding:
                 return None
             try:
-                current, account, *_ = self.valid_inbound(binding['id'], pairing=True)
+                current, account, *_ = self.valid_inbound(binding["id"], pairing=True)
             except DevError as exc:
                 # Persist backoff even when authorization fails before acquiring
                 # a poll. Otherwise a few invalid accounts monopolize every scan.
-                self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?',
-                    (exc.code, now + 60, now, account_id))
+                self.store.execute(
+                    "UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?",
+                    (exc.code, now + 60, now, account_id),
+                )
                 return None
-            if self.store.one("""SELECT 1 FROM channel_inbound_failures
-                    WHERE channel='weixin' AND account_id=? AND state='deferred' LIMIT 1""", (account_id,)):
-                self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?',
-                    ('WEIXIN_INBOX_QUOTA', now + 2, now, account_id))
+            if self.store.one(
+                """SELECT 1 FROM channel_inbound_failures
+                    WHERE channel='weixin' AND account_id=? AND state='deferred' LIMIT 1""",
+                (account_id,),
+            ):
+                self.store.execute(
+                    "UPDATE weixin_accounts SET reason_code=?,next_poll=?,updated=? WHERE id=?",
+                    ("WEIXIN_INBOX_QUOTA", now + 2, now, account_id),
+                )
                 return None
-            owner, fence = uuid.uuid4().hex, account['poll_fence'] + 1
-            self.store.execute('UPDATE weixin_accounts SET poll_owner=?,poll_fence=?,poll_until=? WHERE id=?', (owner, fence, now + 55, account_id))
-            return {**account, 'poll_owner': owner, 'poll_fence': fence, 'binding_id': current['id'],
-                    'binding_version': current['version'], 'generation': current['generation']}
+            owner, fence = uuid.uuid4().hex, account["poll_fence"] + 1
+            self.store.execute(
+                "UPDATE weixin_accounts SET poll_owner=?,poll_fence=?,poll_until=? WHERE id=?",
+                (owner, fence, now + 55, account_id),
+            )
+            return {
+                **account,
+                "poll_owner": owner,
+                "poll_fence": fence,
+                "binding_id": current["id"],
+                "binding_version": current["version"],
+                "generation": current["generation"],
+            }
 
     def poll_current(self, claim):
         self.require_enabled(claim)
-        account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (claim['id'],))
-        if (not account or account['poll_owner'] != claim['poll_owner'] or account['poll_fence'] != claim['poll_fence']
-                or account['state'] != 'active' or account['poll_until'] <= self.c.clock()):
-            raise DevError('WEIXIN_POLL_FENCE_LOST', '原微信轮询世代已失效；不能提交游标或外部消息', 409)
+        account = self.store.one("SELECT * FROM weixin_accounts WHERE id=?", (claim["id"],))
+        if (
+            not account
+            or account["poll_owner"] != claim["poll_owner"]
+            or account["poll_fence"] != claim["poll_fence"]
+            or account["state"] != "active"
+            or account["poll_until"] <= self.c.clock()
+        ):
+            raise DevError(
+                "WEIXIN_POLL_FENCE_LOST", "原微信轮询世代已失效；不能提交游标或外部消息", 409
+            )
         return account
 
     def commit_updates(self, claim, response):
         with self.store.transaction():
             self.poll_current(claim)
-            binding, account, owner, room, dot = self.valid_inbound(claim['binding_id'], pairing=True)
-            if binding['version'] != claim['binding_version'] or binding['generation'] != claim['generation']:
-                raise DevError('WEIXIN_BINDING_CHANGED', '轮询期间房间绑定变化，丢弃旧批次且不前移游标', 409)
+            binding, account, owner, room, dot = self.valid_inbound(
+                claim["binding_id"], pairing=True
+            )
+            if (
+                binding["version"] != claim["binding_version"]
+                or binding["generation"] != claim["generation"]
+            ):
+                raise DevError(
+                    "WEIXIN_BINDING_CHANGED", "轮询期间房间绑定变化，丢弃旧批次且不前移游标", 409
+                )
             validate_updates(response)
-            messages, cursor = response.get('msgs', []), response.get('get_updates_buf', '')
+            messages, cursor = response.get("msgs", []), response.get("get_updates_buf", "")
             if len(canonical(response).encode()) > MAX_JSON:
-                raise DevError('WEIXIN_BATCH_LIMIT', '收件批次字节超过上限', 413)
+                raise DevError("WEIXIN_BATCH_LIMIT", "收件批次字节超过上限", 413)
             received = []
             deferred_count = 0
             for message in messages:
-                binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (binding['id'],))
-                scope = {'binding_id': binding['id'], 'version': binding['version'], 'generation': binding['generation']}
+                binding = self.store.one(
+                    "SELECT * FROM weixin_bindings WHERE id=?", (binding["id"],)
+                )
+                scope = {
+                    "binding_id": binding["id"],
+                    "version": binding["version"],
+                    "generation": binding["generation"],
+                }
                 capture = None
-                if binding.get('native_member_id'):
-                    capture = lambda: self.c.room_channels.native.deferred_evidence(
-                        binding, owner, room, dot, message)
-                receipt, failure = channel_inbound.isolate(self, 'weixin', account, scope, message,
-                    lambda: self.ingest_one(binding, account, owner, room, dot, message),
-                    deferred_evidence=capture, backpressure_key=backpressure_key(account, binding, message))
+                if binding.get("native_member_id"):
+                    capture = lambda *, binding=binding, message=message: (
+                        self.c.room_channels.native.deferred_evidence(
+                            binding, owner, room, dot, message
+                        )
+                    )
+                receipt, failure = channel_inbound.isolate(
+                    self,
+                    "weixin",
+                    account,
+                    scope,
+                    message,
+                    lambda *, binding=binding, message=message: self.ingest_one(
+                        binding, account, owner, room, dot, message
+                    ),
+                    deferred_evidence=capture,
+                    backpressure_key=backpressure_key(account, binding, message),
+                )
                 if receipt:
                     received.append(receipt)
-                if failure == 'deferred:WEIXIN_INBOX_QUOTA':
+                if failure == "deferred:WEIXIN_INBOX_QUOTA":
                     deferred_count += 1
             if deferred_count:
                 # Retain the exact provider cursor. The encrypted deferred entries
                 # only preserve source evidence and are not admitted room messages.
                 # Already committed inputs are deduplicated when the batch returns.
                 now = self.c.clock()
-                self.store.execute('''UPDATE weixin_accounts SET poll_until=0,reason_code=?,
-                    next_poll=?,updated=? WHERE id=? AND poll_owner=? AND poll_fence=?''',
-                    ('WEIXIN_INBOX_QUOTA', now + 2, now, account['id'], claim['poll_owner'], claim['poll_fence']))
-                return {'committed': False, 'accepted': False, 'message_ids': received, 'cursor_persisted': False,
-                        'reason_code': 'WEIXIN_INBOX_QUOTA', 'deferred_count': deferred_count,
-                        'next_poll_at': now + 2}
+                self.store.execute(
+                    """UPDATE weixin_accounts SET poll_until=0,reason_code=?,
+                    next_poll=?,updated=? WHERE id=? AND poll_owner=? AND poll_fence=?""",
+                    (
+                        "WEIXIN_INBOX_QUOTA",
+                        now + 2,
+                        now,
+                        account["id"],
+                        claim["poll_owner"],
+                        claim["poll_fence"],
+                    ),
+                )
+                return {
+                    "committed": False,
+                    "accepted": False,
+                    "message_ids": received,
+                    "cursor_persisted": False,
+                    "reason_code": "WEIXIN_INBOX_QUOTA",
+                    "deferred_count": deferred_count,
+                    "next_poll_at": now + 2,
+                }
             # Canonical message, ordered attachment jobs, Dot inbox, dedup and
             # opaque cursor commit together. Network/media work never runs here.
-            self.store.execute('''UPDATE weixin_accounts SET cursor=?,poll_until=0,failures=0,reason_code='',
-                next_poll=?,updated=?,last_sync_at=? WHERE id=? AND poll_owner=? AND poll_fence=?''',
-                (self.store.encrypt(cursor or self.store.decrypt(account['cursor'])), self.c.clock() + 2,
-                 self.c.clock(), self.c.clock(), account['id'], claim['poll_owner'], claim['poll_fence']))
-            return {'committed': True, 'message_ids': received, 'cursor_persisted': bool(cursor)}
+            self.store.execute(
+                """UPDATE weixin_accounts SET cursor=?,poll_until=0,failures=0,reason_code='',
+                next_poll=?,updated=?,last_sync_at=? WHERE id=? AND poll_owner=? AND poll_fence=?""",
+                (
+                    self.store.encrypt(cursor or self.store.decrypt(account["cursor"])),
+                    self.c.clock() + 2,
+                    self.c.clock(),
+                    self.c.clock(),
+                    account["id"],
+                    claim["poll_owner"],
+                    claim["poll_fence"],
+                ),
+            )
+            return {"committed": True, "message_ids": received, "cursor_persisted": bool(cursor)}
 
     def ingest_one(self, binding, account, owner, room, dot, message, *, deferred=None):
         incoming_items(message)
-        if binding.get('native_member_id'):
-            return self.c.room_channels.native.ingest(binding,account,owner,room,dot,message,deferred=deferred)
-        self.c.rooms.migration.legacy_write(binding['conversation_id'])
+        if binding.get("native_member_id"):
+            return self.c.room_channels.native.ingest(
+                binding, account, owner, room, dot, message, deferred=deferred
+            )
+        self.c.rooms.migration.legacy_write(binding["conversation_id"])
         if not isinstance(message, dict):
-            raise DevError('WEIXIN_MESSAGE_INVALID', '消息不是结构化对象；整批保留原游标', 422)
-        peer = text(message.get('from_user_id'), 256)
-        identifier = uint64(message.get('message_id'))
-        source = {k: v for k, v in message.items() if k not in {'context_token', 'seq'}}
+            raise DevError("WEIXIN_MESSAGE_INVALID", "消息不是结构化对象；整批保留原游标", 422)
+        peer = text(message.get("from_user_id"), 256)
+        identifier = uint64(message.get("message_id"))
+        source = {k: v for k, v in message.items() if k not in {"context_token", "seq"}}
         source_hash = digest(source)
-        identity = (account['id'], binding['generation'], peer, identifier)
-        created = uint64(message.get('create_time_ms', 0))
-        updated = uint64(message.get('update_time_ms', 0))
-        deleted = uint64(message.get('delete_time_ms', 0))
+        identity = (account["id"], binding["generation"], peer, identifier)
+        created = uint64(message.get("create_time_ms", 0))
+        updated = uint64(message.get("update_time_ms", 0))
+        deleted = uint64(message.get("delete_time_ms", 0))
         version = str(max(int(created), int(updated), int(deleted)))
-        version = '' if version == '0' else version
-        created = '' if created == '0' else created
-        old = self.store.one('SELECT * FROM weixin_inbound WHERE account_id=? AND generation=? AND peer_id=? AND external_id=?', identity)
-        historical = self.store.one('''SELECT * FROM weixin_inbound_versions WHERE account_id=? AND generation=?
-            AND peer_id=? AND external_id=? AND provider_version=?''', (*identity, version))
+        version = "" if version == "0" else version
+        created = "" if created == "0" else created
+        old = self.store.one(
+            "SELECT * FROM weixin_inbound WHERE account_id=? AND generation=? AND peer_id=? AND external_id=?",
+            identity,
+        )
+        historical = self.store.one(
+            """SELECT * FROM weixin_inbound_versions WHERE account_id=? AND generation=?
+            AND peer_id=? AND external_id=? AND provider_version=?""",
+            (*identity, version),
+        )
         if historical:
-            if historical['source_digest'] != source_hash:
-                raise DevError('WEIXIN_DUPLICATE_CONFLICT', '同一微信消息版本出现不同内容，保留原游标和历史供核对', 409)
-            return historical['message_id']
-        if old and old['source_digest'] == source_hash:
-            return old['message_id']
-        if old and (not version or not old['provider_version']
-                    or version == old['provider_version']
-                    or created and old['provider_created'] and created != old['provider_created']):
-            raise DevError('WEIXIN_DUPLICATE_CONFLICT', '同一微信消息编号出现不同内容但没有可比较的版本，保留原游标和历史', 409)
-        newest = not old or int(version) > int(old['provider_version'])
-        daily = self.store.one('SELECT COUNT(*) AS n FROM weixin_inbound_versions WHERE account_id=? AND created>?',
-                               (account['id'], self.c.clock() - 86400))['n']
+            if historical["source_digest"] != source_hash:
+                raise DevError(
+                    "WEIXIN_DUPLICATE_CONFLICT",
+                    "同一微信消息版本出现不同内容，保留原游标和历史供核对",
+                    409,
+                )
+            return historical["message_id"]
+        if old and old["source_digest"] == source_hash:
+            return old["message_id"]
+        if old and (
+            not version
+            or not old["provider_version"]
+            or version == old["provider_version"]
+            or created
+            and old["provider_created"]
+            and created != old["provider_created"]
+        ):
+            raise DevError(
+                "WEIXIN_DUPLICATE_CONFLICT",
+                "同一微信消息编号出现不同内容但没有可比较的版本，保留原游标和历史",
+                409,
+            )
+        newest = not old or int(version) > int(old["provider_version"])
+        daily = self.store.one(
+            "SELECT COUNT(*) AS n FROM weixin_inbound_versions WHERE account_id=? AND created>?",
+            (account["id"], self.c.clock() - 86400),
+        )["n"]
         if daily >= MAX_DAILY_INBOUND_VERSIONS:
-            raise DevError('WEIXIN_DAILY_QUOTA', '微信每日持久收件预算用尽，保留原游标；已提交的相同版本仍可核对', 429)
-        disposition, message_id = 'unpaired_peer_quarantined', None
-        items = message.get('item_list', [])
+            raise DevError(
+                "WEIXIN_DAILY_QUOTA",
+                "微信每日持久收件预算用尽，保留原游标；已提交的相同版本仍可核对",
+                429,
+            )
+        disposition, message_id = "unpaired_peer_quarantined", None
+        items = message.get("item_list", [])
         if not isinstance(items, list) or len(items) > 32:
-            raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项超过上限', 422)
-        echo = bool(message.get('client_id') and (self.store.one("SELECT 1 FROM channel_onboarding_notices WHERE 'cpo-' || id=?", (message['client_id'],)) or self.store.one('SELECT 1 FROM weixin_parts WHERE client_id=?', (message['client_id'],)) or self.store.one("SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?", (message['client_id'],))))
-        direct = not message.get('group_id') and type(message.get('message_type')) is int and message['message_type'] == 1 and not echo and peer != account['bot_id']
-        if direct and message.get('to_user_id') not in (None, '', account['bot_id']):
-            raise DevError('WEIXIN_RECEIVER_MISMATCH', '微信应答接收机器人不属于原绑定', 409)
+            raise DevError("WEIXIN_ITEMS_INVALID", "外部消息分项超过上限", 422)
+        echo = bool(
+            message.get("client_id")
+            and (
+                self.store.one(
+                    "SELECT 1 FROM channel_onboarding_notices WHERE 'cpo-' || id=?",
+                    (message["client_id"],),
+                )
+                or self.store.one(
+                    "SELECT 1 FROM weixin_parts WHERE client_id=?", (message["client_id"],)
+                )
+                or self.store.one(
+                    "SELECT 1 FROM channel_mirror_parts WHERE 'cpm-' || id=?",
+                    (message["client_id"],),
+                )
+            )
+        )
+        direct = (
+            not message.get("group_id")
+            and type(message.get("message_type")) is int
+            and message["message_type"] == 1
+            and not echo
+            and peer != account["bot_id"]
+        )
+        if direct and message.get("to_user_id") not in (None, "", account["bot_id"]):
+            raise DevError("WEIXIN_RECEIVER_MISMATCH", "微信应答接收机器人不属于原绑定", 409)
         if not direct:
-            disposition = 'group_or_echo_quarantined'
-        elif binding['state'] == 'pairing' and binding['pairing_until'] > self.c.clock():
-            body = '\n'.join(incoming_text(i.get('text_item', {}).get('text'), 12000, empty=True) for i in items if isinstance(i, dict) and i.get('type') == 1)
+            disposition = "group_or_echo_quarantined"
+        elif binding["state"] == "pairing" and binding["pairing_until"] > self.c.clock():
+            body = "\n".join(
+                incoming_text(i.get("text_item", {}).get("text"), 12000, empty=True)
+                for i in items
+                if isinstance(i, dict) and i.get("type") == 1
+            )
             from hub.collaboration.room_weixin_native import pairing_text
-            matched = hmac.compare_digest(digest(pairing_text(body)), binding['pairing_hash'])
-            preapproval = self.c.channel_enrollment.current(binding['id'])
-            fresh = (not old and not int(deleted) and not int(updated)
-                     and (not created or not preapproval or int(created) >= int(preapproval['created'] * 1000)))
-            handled = self.c.channel_enrollment.incoming('weixin', binding, account, owner, room, dot, peer, identifier,
-                matched=matched, context=message.get('context_token', ''), fresh=fresh,
-                pairing_attempt=body.strip().startswith('CPW-') or len(body.strip()) == 36)
+
+            matched = hmac.compare_digest(digest(pairing_text(body)), binding["pairing_hash"])
+            preapproval = self.c.channel_enrollment.current(binding["id"])
+            fresh = (
+                not old
+                and not int(deleted)
+                and not int(updated)
+                and (
+                    not created
+                    or not preapproval
+                    or int(created) >= int(preapproval["created"] * 1000)
+                )
+            )
+            handled = self.c.channel_enrollment.incoming(
+                "weixin",
+                binding,
+                account,
+                owner,
+                room,
+                dot,
+                peer,
+                identifier,
+                matched=matched,
+                context=message.get("context_token", ""),
+                fresh=fresh,
+                pairing_attempt=body.strip().startswith("CPW-") or len(body.strip()) == 36,
+            )
             if handled:
-                disposition = 'pairing_preapproval_processed'
+                disposition = "pairing_preapproval_processed"
             elif matched:
-                self.store.execute("UPDATE weixin_bindings SET state='awaiting_owner',pending_peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?",
-                                   (peer, self.c.clock(), binding['id']))
-                disposition = 'pairing_waits_for_panel_owner'
-        elif re.fullmatch(r'CPW-[A-F0-9]{32}', '\n'.join(i.get('text_item', {}).get('text', '') for i in items if isinstance(i, dict) and i.get('type') == 1).strip()):
-            disposition = 'pairing_code_never_a_task'
-        elif binding['state'] == 'active' and hmac.compare_digest(peer, binding['peer_id']):
+                self.store.execute(
+                    "UPDATE weixin_bindings SET state='awaiting_owner',pending_peer_id=?,pairing_hash='',pairing_secret='',version=version+1,updated=? WHERE id=?",
+                    (peer, self.c.clock(), binding["id"]),
+                )
+                disposition = "pairing_waits_for_panel_owner"
+        elif re.fullmatch(
+            r"CPW-[A-F0-9]{32}",
+            "\n".join(
+                i.get("text_item", {}).get("text", "")
+                for i in items
+                if isinstance(i, dict) and i.get("type") == 1
+            ).strip(),
+        ):
+            disposition = "pairing_code_never_a_task"
+        elif binding["state"] == "active" and hmac.compare_digest(peer, binding["peer_id"]):
             body_text, attachment_items = [], []
             for index, item in enumerate(items):
-                if not isinstance(item, dict) or type(item.get('type')) is not int:
-                    raise DevError('WEIXIN_ITEMS_INVALID', '外部消息分项类型无效', 422)
-                if item['type'] == 1:
-                    body_text.append(incoming_text(item.get('text_item', {}).get('text'), 12000, empty=True))
-                elif item['type'] in ITEM_NAMES:
+                if not isinstance(item, dict) or type(item.get("type")) is not int:
+                    raise DevError("WEIXIN_ITEMS_INVALID", "外部消息分项类型无效", 422)
+                if item["type"] == 1:
+                    body_text.append(
+                        incoming_text(item.get("text_item", {}).get("text"), 12000, empty=True)
+                    )
+                elif item["type"] in ITEM_NAMES:
                     attachment_items.append((index, item))
                 else:
-                    body_text.append('[未支持的外部消息分项]')
-            rendered = '\n'.join(body_text) or '[附件消息]'
+                    body_text.append("[未支持的外部消息分项]")
+            rendered = "\n".join(body_text) or "[附件消息]"
             if int(deleted):
-                rendered, attachment_items = '[微信上游标记消息已删除；旧版本保留为审计历史。]', []
+                rendered, attachment_items = "[微信上游标记消息已删除；旧版本保留为审计历史。]", []
             rendered = incoming_text(rendered, 24000)
             if newest:
-                pending = self.store.one('''SELECT COUNT(*) AS n FROM weixin_inbound_versions v
+                pending = self.store.one(
+                    """SELECT COUNT(*) AS n FROM weixin_inbound_versions v
                     JOIN collaboration_dot_messages m ON m.message_id=v.message_id
-                    WHERE v.account_id=? AND v.generation=? AND m.dot_id=? AND m.state!='handled' ''',
-                    (account['id'], binding['generation'], dot['id']))['n']
+                    WHERE v.account_id=? AND v.generation=? AND m.dot_id=? AND m.state!='handled' """,
+                    (account["id"], binding["generation"], dot["id"]),
+                )["n"]
                 if pending >= MAX_PENDING_INBOUND:
-                    raise DevError('WEIXIN_INBOX_QUOTA', '原 dot 未处理消息达到积压上限；保留原游标，不丢弃正文', 429)
+                    raise DevError(
+                        "WEIXIN_INBOX_QUOTA",
+                        "原 dot 未处理消息达到积压上限；保留原游标，不丢弃正文",
+                        429,
+                    )
             message_id = uuid.uuid4().hex
-            previous_id = old['message_id'] if old and old['message_id'] else ''
-            previous = self.c.object('collaboration_messages', room, previous_id) if previous_id else None
-            thread_root = previous['thread_root_id'] if previous else message_id
-            body = {'body_text': redact(rendered), 'mentions': [{'slot_id': dot['id']}],
-                    'duplex_recipients': [dot['id']], 'provenance_project_ids': [room['project_id']],
-                    'external_origin': {'schema_version': 1, 'channel': 'weixin', 'binding_id': binding['id'],
-                        'generation': binding['generation'], 'account_id': account['id'], 'external_message_id': identifier,
-                        'peer_id': peer, 'peer_pairing_verified': True, 'execution_authority': False,
-                        'provider_version': version or None, 'provider_created': created or None, 'revision_is_latest_at_commit': newest,
-                        'provider_deleted': bool(int(deleted)),
-                        'supersedes_message_id': previous_id if newest else '',
-                        'related_current_message_id': previous_id if not newest else ''},
-                    'requires_owner_execution_request': True}
-            self.store.execute('''INSERT INTO collaboration_messages
+            previous_id = old["message_id"] if old and old["message_id"] else ""
+            previous = (
+                self.c.object("collaboration_messages", room, previous_id) if previous_id else None
+            )
+            thread_root = previous["thread_root_id"] if previous else message_id
+            body = {
+                "body_text": redact(rendered),
+                "mentions": [{"slot_id": dot["id"]}],
+                "duplex_recipients": [dot["id"]],
+                "provenance_project_ids": [room["project_id"]],
+                "external_origin": {
+                    "schema_version": 1,
+                    "channel": "weixin",
+                    "binding_id": binding["id"],
+                    "generation": binding["generation"],
+                    "account_id": account["id"],
+                    "external_message_id": identifier,
+                    "peer_id": peer,
+                    "peer_pairing_verified": True,
+                    "execution_authority": False,
+                    "provider_version": version or None,
+                    "provider_created": created or None,
+                    "revision_is_latest_at_commit": newest,
+                    "provider_deleted": bool(int(deleted)),
+                    "supersedes_message_id": previous_id if newest else "",
+                    "related_current_message_id": previous_id if not newest else "",
+                },
+                "requires_owner_execution_request": True,
+            }
+            self.store.execute(
+                """INSERT INTO collaboration_messages
                 (id,room_id,conversation_id,thread_id,thread_root_id,reply_to_id,author,origin,source_id,kind,body,state,created)
-                VALUES (?,?,?,?,?,?,?,'external_channel',?,'text',?,'saved',?)''',
-                (message_id, room['id'], binding['conversation_id'], thread_root, thread_root, previous_id,
-                 'weixin:' + account['id'] + ':' + digest(peer)[:20],
-                 'generation:' + str(binding['generation']) + ':' + identifier + ':version:' + (version or 'initial'),
-                 canonical(body), self.c.clock()))
+                VALUES (?,?,?,?,?,?,?,'external_channel',?,'text',?,'saved',?)""",
+                (
+                    message_id,
+                    room["id"],
+                    binding["conversation_id"],
+                    thread_root,
+                    thread_root,
+                    previous_id,
+                    "weixin:" + account["id"] + ":" + digest(peer)[:20],
+                    "generation:"
+                    + str(binding["generation"])
+                    + ":"
+                    + identifier
+                    + ":version:"
+                    + (version or "initial"),
+                    canonical(body),
+                    self.c.clock(),
+                ),
+            )
             for ordinal, item in attachment_items:
                 self.media.add_inbound(binding, message_id, ordinal, item)
             if newest:
-                self.store.execute('''INSERT INTO collaboration_dot_messages(dot_id,message_id,message_version,message_digest,created)
-                    VALUES (?,?,1,?,?)''', (dot['id'], message_id, digest(body['body_text']), self.c.clock()))
-            canonical_message = self.c.object('collaboration_messages', room, message_id)
+                self.store.execute(
+                    """INSERT INTO collaboration_dot_messages(dot_id,message_id,message_version,message_digest,created)
+                    VALUES (?,?,1,?,?)""",
+                    (dot["id"], message_id, digest(body["body_text"]), self.c.clock()),
+                )
+            canonical_message = self.c.object("collaboration_messages", room, message_id)
             # Keep transport provenance. Only explicit owner consent may add a
             # separate immutable authentication attestation for a fresh message.
             self.c.channel_owner.attest(canonical_message)
             if newest:
-                canonical_message = self.c.owner_task_context.incoming(room, dot, canonical_message, owner)
-                body = json.loads(canonical_message['body'])
-            body['notifications'] = self.c.chatroom.notify(room, canonical_message, owner, body['mentions']) if newest else []
-            self.store.execute('UPDATE collaboration_messages SET body=? WHERE id=?', (canonical(body), message_id))
-            context = message.get('context_token')
+                canonical_message = self.c.owner_task_context.incoming(
+                    room, dot, canonical_message, owner
+                )
+                body = json.loads(canonical_message["body"])
+            body["notifications"] = (
+                self.c.chatroom.notify(room, canonical_message, owner, body["mentions"])
+                if newest
+                else []
+            )
+            self.store.execute(
+                "UPDATE collaboration_messages SET body=? WHERE id=?", (canonical(body), message_id)
+            )
+            context = message.get("context_token")
             if context and newest:
                 text(context, 65536)
-                self.store.execute('''INSERT INTO weixin_contexts(account_id,generation,peer_id,token,observed_at)
+                self.store.execute(
+                    """INSERT INTO weixin_contexts(account_id,generation,peer_id,token,observed_at)
                     VALUES (?,?,?,?,?) ON CONFLICT(account_id,generation,peer_id) DO UPDATE SET
-                    token=excluded.token,observed_at=excluded.observed_at,version=version+1''',
-                    (account['id'], binding['generation'], peer, self.store.encrypt(context), self.c.clock()))
-            self.c.channels.queue(self.c.object('collaboration_messages', room, message_id))
-            disposition = 'message_committed'
-        self.store.execute('INSERT INTO weixin_inbound_versions VALUES (?,?,?,?,?,?,?,?)',
-            (*identity, version, source_hash, message_id, self.c.clock()))
+                    token=excluded.token,observed_at=excluded.observed_at,version=version+1""",
+                    (
+                        account["id"],
+                        binding["generation"],
+                        peer,
+                        self.store.encrypt(context),
+                        self.c.clock(),
+                    ),
+                )
+            self.c.channels.queue(self.c.object("collaboration_messages", room, message_id))
+            disposition = "message_committed"
+        self.store.execute(
+            "INSERT INTO weixin_inbound_versions VALUES (?,?,?,?,?,?,?,?)",
+            (*identity, version, source_hash, message_id, self.c.clock()),
+        )
         if newest:
-            self.store.execute('''INSERT INTO weixin_inbound
+            self.store.execute(
+                """INSERT INTO weixin_inbound
                 (account_id,generation,peer_id,external_id,source_digest,message_id,disposition,created,provider_version,provider_created)
                 VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(account_id,generation,peer_id,external_id) DO UPDATE SET
                 source_digest=excluded.source_digest,message_id=excluded.message_id,disposition=excluded.disposition,
-                provider_version=excluded.provider_version,provider_created=excluded.provider_created''',
-                (*identity, source_hash, message_id, disposition, self.c.clock(), version,
-                 created or (old['provider_created'] if old else '')))
+                provider_version=excluded.provider_version,provider_created=excluded.provider_created""",
+                (
+                    *identity,
+                    source_hash,
+                    message_id,
+                    disposition,
+                    self.c.clock(),
+                    version,
+                    created or (old["provider_created"] if old else ""),
+                ),
+            )
         return message_id
 
     def poll_failed(self, claim, error):
         with self.store.transaction():
-            row = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (claim['id'],))
-            if not row or row['poll_owner'] != claim['poll_owner'] or row['poll_fence'] != claim['poll_fence']:
+            row = self.store.one("SELECT * FROM weixin_accounts WHERE id=?", (claim["id"],))
+            if (
+                not row
+                or row["poll_owner"] != claim["poll_owner"]
+                or row["poll_fence"] != claim["poll_fence"]
+            ):
                 return
             code = error.code if isinstance(error, DevError) else type(error).__name__
-            if code in {'WEIXIN_POLL_IDLE', 'WEIXIN_POLL_FENCE_LOST', 'WEIXIN_POLL_CANCELLED',
-                        'WEIXIN_BINDING_CHANGED', 'WEIXIN_PAIRING_EXPIRED'}:
+            if code in {
+                "WEIXIN_POLL_IDLE",
+                "WEIXIN_POLL_FENCE_LOST",
+                "WEIXIN_POLL_CANCELLED",
+                "WEIXIN_BINDING_CHANGED",
+                "WEIXIN_PAIRING_EXPIRED",
+            }:
                 # Expected idle/read timeout and obsolete local leases are not
                 # credential failures. Never advance a cursor, fabricate sync
                 # success, or let an old claim overwrite its replacement.
-                self.store.execute('UPDATE weixin_accounts SET reason_code=?,next_poll=?,poll_until=0,updated=? WHERE id=?',
-                    (code, self.c.clock() + 2, self.c.clock(), row['id']))
+                self.store.execute(
+                    "UPDATE weixin_accounts SET reason_code=?,next_poll=?,poll_until=0,updated=? WHERE id=?",
+                    (code, self.c.clock() + 2, self.c.clock(), row["id"]),
+                )
                 return
-            permanent = isinstance(error, DevError) and error.code in {'WEIXIN_AUTH_REJECTED', 'WEIXIN_SESSION_EXPIRED'}
-            failures = min(row['failures'] + 1, 10)
-            delay = min(3600, 5 * 2 ** failures) + secrets.randbelow(6)
+            permanent = isinstance(error, DevError) and error.code in {
+                "WEIXIN_AUTH_REJECTED",
+                "WEIXIN_SESSION_EXPIRED",
+            }
+            failures = min(row["failures"] + 1, 10)
+            delay = min(3600, 5 * 2**failures) + secrets.randbelow(6)
             if isinstance(error, DevError):
-                delay = max(delay, error.details.get('retry_after_seconds', 0))
-            self.store.execute('UPDATE weixin_accounts SET state=?,reason_code=?,failures=?,next_poll=?,poll_until=0,updated=? WHERE id=?',
-                ('attention' if permanent else row['state'], code, failures, self.c.clock() + delay, self.c.clock(), row['id']))
+                delay = max(delay, error.details.get("retry_after_seconds", 0))
+            self.store.execute(
+                "UPDATE weixin_accounts SET state=?,reason_code=?,failures=?,next_poll=?,poll_until=0,updated=? WHERE id=?",
+                (
+                    "attention" if permanent else row["state"],
+                    code,
+                    failures,
+                    self.c.clock() + delay,
+                    self.c.clock(),
+                    row["id"],
+                ),
+            )
 
     def replay_deferred(self, account_id):
         with self.store.transaction():
-            account = self.store.one('SELECT * FROM weixin_accounts WHERE id=?', (account_id,))
-            if not account or account['state'] != 'active':
+            account = self.store.one("SELECT * FROM weixin_accounts WHERE id=?", (account_id,))
+            if not account or account["state"] != "active":
                 return
             self.require_enabled(account)
-            for row in channel_inbound.pending(self, 'weixin', account_id):
+            for row in channel_inbound.pending(self, "weixin", account_id):
                 saved = channel_inbound.unpack(self, row)
                 if saved is None:
                     continue
-                scope = saved['scope']
-                binding = self.store.one('SELECT * FROM weixin_bindings WHERE id=?', (scope['binding_id'],))
-                if (not binding or binding['state'] != 'active' or binding['version'] != scope['version']
-                        or binding['generation'] != scope['generation']
-                        or account['credential_version'] != saved['credential_version']
-                        or account['generation'] != saved['generation']):
+                scope = saved["scope"]
+                binding = self.store.one(
+                    "SELECT * FROM weixin_bindings WHERE id=?", (scope["binding_id"],)
+                )
+                if (
+                    not binding
+                    or binding["state"] != "active"
+                    or binding["version"] != scope["version"]
+                    or binding["generation"] != scope["generation"]
+                    or account["credential_version"] != saved["credential_version"]
+                    or account["generation"] != saved["generation"]
+                ):
                     channel_inbound.stale(self, row)
                     continue
                 try:
-                    current, current_account, owner, room, dot = self.valid_inbound(binding['id'])
+                    current, current_account, owner, room, dot = self.valid_inbound(binding["id"])
                 except DevError as exc:
-                    if exc.code == 'ROOM_PAUSED':
+                    if exc.code == "ROOM_PAUSED":
                         break
                     channel_inbound.stale(self, row)
                     continue
 
-                def ingest():
-                    return self.ingest_one(current, current_account, owner, room, dot, saved['source'],
-                                           deferred=saved.get('authority') or {})
-                _, failure = channel_inbound.isolate(self, 'weixin', account, scope, saved['source'], ingest,
-                    replay=True, replay_id=row['id'])
-                if failure.startswith('deferred:'):
+                def ingest(
+                    *,
+                    current=current,
+                    current_account=current_account,
+                    dot=dot,
+                    owner=owner,
+                    room=room,
+                    saved=saved,
+                ):
+                    return self.ingest_one(
+                        current,
+                        current_account,
+                        owner,
+                        room,
+                        dot,
+                        saved["source"],
+                        deferred=saved.get("authority") or {},
+                    )
+
+                _, failure = channel_inbound.isolate(
+                    self,
+                    "weixin",
+                    account,
+                    scope,
+                    saved["source"],
+                    ingest,
+                    replay=True,
+                    replay_id=row["id"],
+                )
+                if failure.startswith("deferred:"):
                     break
 
     async def poll_once(self, account_id):
@@ -651,24 +1291,33 @@ class WeixinService:
             return
         try:
             await self.store.run(self.poll_current, claim)
-            client = self.client_factory(claim['api_base'], self.store.decrypt(claim['secret']))
-            response = await client.updates(self.store.decrypt(claim['cursor']))
+            client = self.client_factory(claim["api_base"], self.store.decrypt(claim["secret"]))
+            response = await client.updates(self.store.decrypt(claim["cursor"]))
             await self.store.run(self.commit_updates, claim, response)
         except asyncio.CancelledError:
-            await self.store.run(self.poll_failed, claim, DevError('WEIXIN_POLL_CANCELLED', '本轮收件已停止，原游标不变', 503))
+            await self.store.run(
+                self.poll_failed,
+                claim,
+                DevError("WEIXIN_POLL_CANCELLED", "本轮收件已停止，原游标不变", 503),
+            )
             raise
         except Exception as exc:
             await self.store.run(self.poll_failed, claim, exc)
 
     async def tick(self):
-        if getattr(self, 'qr', None):
+        if getattr(self, "qr", None):
             await self.store.run(self.qr.expire)
         if not self.c.config.enabled:
             return
-        gate = self.c.channel_settings.sql_enabled('weixin', 'a')
-        accounts = await self.store.run(lambda: self.store.all(f'''SELECT a.id FROM weixin_accounts a
+        gate = self.c.channel_settings.sql_enabled("weixin", "a")
+        accounts = await self.store.run(
+            lambda: self.store.all(
+                f"""SELECT a.id FROM weixin_accounts a
             JOIN weixin_bindings b ON b.account_id=a.id AND b.state IN ('pairing','awaiting_owner','active')
             WHERE {gate} AND a.state='active' AND a.next_poll<=? AND COALESCE(a.poll_until,0)<=?
-            ORDER BY a.next_poll,a.updated,a.id LIMIT 4''', (self.c.clock(), self.c.clock())))
+            ORDER BY a.next_poll,a.updated,a.id LIMIT 4""",
+                (self.c.clock(), self.c.clock()),
+            )
+        )
         # Send/media run in independent lifecycle loops, not behind this long poll.
-        await asyncio.gather(*(self.poll_once(row['id']) for row in accounts))
+        await asyncio.gather(*(self.poll_once(row["id"]) for row in accounts))

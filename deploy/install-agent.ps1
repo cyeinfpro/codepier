@@ -8,8 +8,8 @@ if (-not (Test-Path -LiteralPath $InstallDirectory) -and (Test-Path -LiteralPath
 }
 $CodePierPython = Join-Path $InstallDirectory 'runtime/.venv/Scripts/python.exe'
 if (-not (Test-Path -LiteralPath $CodePierPython)) { $CodePierPython = (Get-Command python -ErrorAction Stop).Source }
-& $CodePierPython -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 'Python 3.12+ required')"
-if ($LASTEXITCODE -ne 0) { throw 'Install Python 3.12+ and add it to PATH first.' }
+& $CodePierPython -c "import sys; sys.exit(0 if sys.version_info >= (3,13) else 'Python 3.13+ required')"
+if ($LASTEXITCODE -ne 0) { throw 'Install Python 3.13+ and add it to PATH first.' }
 if (-not (Test-Path -LiteralPath (Join-Path $InstallDirectory 'config.json'))) {
   if (-not $PairingFile) { $PairingFile = Read-Host 'Pairing JSON full path' }
   if (-not $AllowRoot) { $AllowRoot = Read-Host 'Allowed project parent directory, e.g. D:\Projects' }

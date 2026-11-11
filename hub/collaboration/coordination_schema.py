@@ -49,15 +49,18 @@ def migrate(db):
         created REAL NOT NULL
     )
     """
-    for statement in statements.split(';'):
+    for statement in statements.split(";"):
         if statement.strip():
             db.execute(statement)
-    columns = {row[1] for row in db.execute('PRAGMA table_info(coordination_work)')}
-    if 'required_capabilities' not in columns:
-        db.execute('ALTER TABLE coordination_work ADD COLUMN required_capabilities TEXT NOT NULL DEFAULT \'["read"]\'')
+    columns = {row[1] for row in db.execute("PRAGMA table_info(coordination_work)")}
+    if "required_capabilities" not in columns:
+        db.execute(
+            "ALTER TABLE coordination_work ADD COLUMN required_capabilities TEXT NOT NULL DEFAULT '[\"read\"]'"
+        )
     db.execute("""CREATE TRIGGER IF NOT EXISTS coordination_approval_immutable
         BEFORE UPDATE ON coordination_approvals
         BEGIN SELECT RAISE(ABORT,'goal approvals are immutable'); END""")
 
     from hub.collaboration.team_collaboration import migrate as migrate_teams
+
     migrate_teams(db)

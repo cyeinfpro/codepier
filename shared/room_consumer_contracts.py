@@ -1,4 +1,5 @@
 """Strict room-member inbox and fenced-consumption requests."""
+
 from typing import Literal
 
 from pydantic import Field
@@ -13,7 +14,7 @@ class RoomConsumerRead(MemberTurnRead):
 
 
 class RoomInboxRead(MemberTurnRead):
-    cursor: str = Field(default='', max_length=2048)
+    cursor: str = Field(default="", max_length=2048)
     limit: int = Field(default=40, ge=1, le=100, strict=True)
 
 
@@ -45,7 +46,7 @@ class RoomConsumerLease(MemberIdentity):
 
 class RoomConsumerYield(RoomConsumerLease):
     expected_inbox_revision: int = Field(ge=0, strict=True)
-    yield_mode: Literal['if_drained', 'continue_later'] = 'if_drained'
+    yield_mode: Literal["if_drained", "continue_later"] = "if_drained"
 
 
 class RoomInboxAck(RoomConsumerLease):
@@ -57,14 +58,18 @@ class RoomInboxRecover(MemberIdentity):
     idempotency_key: Key
 
 
-ROOM_CONSUMER_QUERIES = {'room_consumer': RoomConsumerRead, 'room_inbox': RoomInboxRead,
-                         'room_message_read': RoomMessageRead, 'room_attachment_read': RoomAttachmentRead,
-                         'room_context': RoomContextRead}
+ROOM_CONSUMER_QUERIES = {
+    "room_consumer": RoomConsumerRead,
+    "room_inbox": RoomInboxRead,
+    "room_message_read": RoomMessageRead,
+    "room_attachment_read": RoomAttachmentRead,
+    "room_context": RoomContextRead,
+}
 ROOM_CONSUMER_ACTIONS = {
-    'room_consumer_begin': RoomConsumerBegin,
-    'room_consumer_heartbeat': RoomConsumerLease,
-    'room_consumer_yield': RoomConsumerYield,
-    'room_inbox_ack': RoomInboxAck,
-    'room_inbox_recover': RoomInboxRecover,
-    'room_context_update': RoomContextUpdate,
+    "room_consumer_begin": RoomConsumerBegin,
+    "room_consumer_heartbeat": RoomConsumerLease,
+    "room_consumer_yield": RoomConsumerYield,
+    "room_inbox_ack": RoomInboxAck,
+    "room_inbox_recover": RoomInboxRecover,
+    "room_context_update": RoomContextUpdate,
 }

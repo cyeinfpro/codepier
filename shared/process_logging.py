@@ -1,4 +1,5 @@
 """Small process-log policy; audit records remain separately authorized."""
+
 from __future__ import annotations
 
 import logging
@@ -12,7 +13,9 @@ LOG_LEVELS = frozenset({"debug", "info", "warning", "error", "critical"})
 def process_log_level(value: str | None = None) -> str:
     level = (os.getenv("CODEPIER_LOG_LEVEL", "info") if value is None else value).strip().lower()
     if level not in LOG_LEVELS:
-        raise ConfigurationError("CODEPIER_LOG_LEVEL must be debug, info, warning, error or critical")
+        raise ConfigurationError(
+            "CODEPIER_LOG_LEVEL must be debug, info, warning, error or critical"
+        )
     return level
 
 

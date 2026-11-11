@@ -1,4 +1,5 @@
 """Managed Agent lifecycle preparation and post-ACK handoff."""
+
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +42,11 @@ class LifecycleManager:
         self.plan_dir = self.state_dir / "lifecycle"
         self.runtime_root = Path(__file__).resolve().parent.parent
         candidate = self.runtime_root.parent
-        self.base = candidate if self.runtime_root.name == "runtime" and self.config_path == candidate / "config.json" else None
+        self.base = (
+            candidate
+            if self.runtime_root.name == "runtime" and self.config_path == candidate / "config.json"
+            else None
+        )
 
     @staticmethod
     def _read_json(path: Path) -> dict:
@@ -72,6 +77,7 @@ class LifecycleManager:
         if not self.base:
             return None
         from shared.brand_migration import service_name, service_target, SERVICE_NAMES
+
         kind, scope = self._service_kind()
         if kind not in SERVICE_NAMES:
             return None
@@ -84,19 +90,31 @@ class LifecycleManager:
         raw = metadata.get("helper_python")
         candidates = [Path(raw)] if isinstance(raw, str) and raw else []
         if os.name == "nt":
-            candidates.extend(sorted((self.base / "python").glob("cpython-*/python.exe"), reverse=True))
+            candidates.extend(
+                sorted((self.base / "python").glob("cpython-*/python.exe"), reverse=True)
+            )
         else:
-            candidates.extend(sorted(
-                (path for path in (self.base / "python").glob("cpython-*/bin/python3*")
-                 if re.fullmatch(r"python3(?:\.\d+)*(?:t)?", path.name)),
-                reverse=True,
-            ))
+            candidates.extend(
+                sorted(
+                    (
+                        path
+                        for path in (self.base / "python").glob("cpython-*/bin/python3*")
+                        if re.fullmatch(r"python3(?:\.\d+)*(?:t)?", path.name)
+                    ),
+                    reverse=True,
+                )
+            )
         runtime = self.runtime_root.resolve()
         for candidate in candidates:
             try:
                 resolved = candidate.expanduser().resolve()
-                if (not candidate.name.endswith("-config") and not resolved.name.endswith("-config")
-                        and resolved.is_file() and resolved != runtime and runtime not in resolved.parents):
+                if (
+                    not candidate.name.endswith("-config")
+                    and not resolved.name.endswith("-config")
+                    and resolved.is_file()
+                    and resolved != runtime
+                    and runtime not in resolved.parents
+                ):
                     return resolved
             except OSError:
                 continue
@@ -150,7 +168,8 @@ class LifecycleManager:
             self.base.name == ".remote-dev-agent"
             or metadata.get("service_name") in {"RemoteDevAgent", "remote-dev-agent.service"}
             or is_legacy_launchd_name(metadata.get("service_name"))
-            or target is not None and (target.name == "remote-dev-agent.service" or is_legacy_launchd_name(target.stem))
+            or target is not None
+            and (target.name == "remote-dev-agent.service" or is_legacy_launchd_name(target.stem))
         )
         reason = ""
         if not service:
@@ -167,7 +186,10 @@ class LifecycleManager:
             "layout": "managed-runtime",
             "installed_version": str(metadata.get("installed_version") or VERSION)[:80],
             "product": "CodePier",
-            "brand_migration": str(metadata.get("brand_migration") or ("pending" if legacy_installation else "completed")),
+            "brand_migration": str(
+                metadata.get("brand_migration")
+                or ("pending" if legacy_installation else "completed")
+            ),
             "status": str(metadata.get("status", "ready"))[:40],
             "last_error": str(metadata.get("last_error", ""))[:500],
             "update_ready": bool(service and helper and external_python and uv and handoff),
@@ -206,20 +228,45 @@ class LifecycleManager:
                 path = PurePosixPath(item.filename)
                 total += item.file_size
                 mode = (item.external_attr >> 16) & 0o170000
-                if (item.is_dir() or item.filename in seen or path.is_absolute() or ".." in path.parts
-                        or "\\" in item.filename or ":" in item.filename or mode == 0o120000
-                        or total > 32 * 1024 * 1024):
+                if (
+                    item.is_dir()
+                    or item.filename in seen
+                    or path.is_absolute()
+                    or ".." in path.parts
+                    or "\\" in item.filename
+                    or ":" in item.filename
+                    or mode == 0o120000
+                    or total > 32 * 1024 * 1024
+                ):
                     raise DevError("AGENT_PACKAGE_INVALID", "Agent 更新包结构不安全")
-                allowed = len(path.parts) == 2 and path.parts[0] in {"agent", "shared"} and path.suffix == ".py"
-                allowed |= item.filename in {"scripts/install_agent.py", "scripts/agent_lifecycle.py", "requirements-agent.txt"}
+                allowed = (
+                    len(path.parts) == 2
+                    and path.parts[0] in {"agent", "shared"}
+                    and path.suffix == ".py"
+                )
                 allowed |= item.filename in {
-                    "deploy/install-from-hub.sh", "deploy/install-from-hub.ps1", "deploy/install-agent.sh",
-                    "deploy/install-agent.ps1", "deploy/start-agent.sh", "deploy/start-agent.cmd", "deploy/agent.service",
+                    "scripts/install_agent.py",
+                    "scripts/agent_lifecycle.py",
+                    "requirements-agent.txt",
+                }
+                allowed |= item.filename in {
+                    "deploy/install-from-hub.sh",
+                    "deploy/install-from-hub.ps1",
+                    "deploy/install-agent.sh",
+                    "deploy/install-agent.ps1",
+                    "deploy/start-agent.sh",
+                    "deploy/start-agent.cmd",
+                    "deploy/agent.service",
                 }
                 if not allowed:
                     raise DevError("AGENT_PACKAGE_INVALID", "Agent 更新包包含未知文件")
                 seen.add(item.filename)
-            required = {"agent/__main__.py", "shared/util.py", "requirements-agent.txt", "scripts/agent_lifecycle.py"}
+            required = {
+                "agent/__main__.py",
+                "shared/util.py",
+                "requirements-agent.txt",
+                "scripts/agent_lifecycle.py",
+            }
             if not required <= seen:
                 raise DevError("AGENT_PACKAGE_INVALID", "Agent 更新包不完整")
             for item in bundle.infolist():
@@ -239,20 +286,35 @@ class LifecycleManager:
                 raw = response.read(MAX_AGENT_PACKAGE_BYTES + 1)
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             raise DevError("AGENT_DOWNLOAD_FAILED", "无法从当前面板下载 Agent 更新包") from exc
-        if len(raw) != expected_bytes or len(raw) > MAX_AGENT_PACKAGE_BYTES or hashlib.sha256(raw).hexdigest() != sha256:
-            raise DevError("AGENT_PACKAGE_CHANGED", "Agent 更新包大小或校验值不匹配，请重新发起更新")
+        if (
+            len(raw) != expected_bytes
+            or len(raw) > MAX_AGENT_PACKAGE_BYTES
+            or hashlib.sha256(raw).hexdigest() != sha256
+        ):
+            raise DevError(
+                "AGENT_PACKAGE_CHANGED", "Agent 更新包大小或校验值不匹配，请重新发起更新"
+            )
         target.write_bytes(raw)
 
     @staticmethod
     def _run(command: list[object], *, cwd: Path | None = None, timeout: int = 600) -> None:
         try:
-            result = subprocess.run([str(part) for part in command], cwd=cwd, timeout=timeout,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            result = subprocess.run(
+                [str(part) for part in command],
+                cwd=cwd,
+                timeout=timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise DevError("AGENT_UPDATE_PREPARE_FAILED", "准备 Agent 新版本失败") from exc
         if result.returncode:
             detail = (result.stdout or "")[-1200:].strip()
-            raise DevError("AGENT_UPDATE_PREPARE_FAILED", "准备 Agent 新版本失败" + ("：" + detail if detail else ""))
+            raise DevError(
+                "AGENT_UPDATE_PREPARE_FAILED",
+                "准备 Agent 新版本失败" + ("：" + detail if detail else ""),
+            )
 
     @staticmethod
     def _package_version(runtime: Path) -> str:
@@ -300,24 +362,50 @@ class LifecycleManager:
             self._extract(archive, sha256, candidate)
             if self._package_version(candidate) != target_version:
                 raise DevError("AGENT_PACKAGE_CHANGED", "更新包版本与面板声明不一致")
-            python = candidate / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python = (
+                candidate / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            )
             phase("preparing_update", target_version=target_version)
             self._run([uv, "venv", "--relocatable", "--python", helper_python, candidate / ".venv"])
-            self._run([uv, "pip", "install", "--require-hashes", "--python", python, "-r", candidate / "requirements-agent.txt"])
-            self._run([python, "-c", "import agent.config, agent.runner, agent.lifecycle"], cwd=candidate, timeout=90)
+            self._run(
+                [
+                    uv,
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "--python",
+                    python,
+                    "-r",
+                    candidate / "requirements-agent.txt",
+                ]
+            )
+            self._run(
+                [python, "-c", "import agent.config, agent.runner, agent.lifecycle"],
+                cwd=candidate,
+                timeout=90,
+            )
             helper = self._copy_helper(operation_id, candidate)
-            self._write_plan(operation_id, {
-                "action": "agent_update", "helper": str(helper), "python": str(helper_python),
-                "base": str(self.base), "candidate": str(candidate), "target_version": target_version,
-                "created_at": time.time(),
-            })
+            self._write_plan(
+                operation_id,
+                {
+                    "action": "agent_update",
+                    "helper": str(helper),
+                    "python": str(helper_python),
+                    "base": str(self.base),
+                    "candidate": str(candidate),
+                    "target_version": target_version,
+                    "created_at": time.time(),
+                },
+            )
         except Exception:
             shutil.rmtree(candidate, ignore_errors=True)
             raise
         finally:
             archive.unlink(missing_ok=True)
         return {
-            "action": "agent_update", "stage": "prepared", "target_version": target_version,
+            "action": "agent_update",
+            "stage": "prepared",
+            "target_version": target_version,
             "message": "新版本已完成校验，面板确认结果后将原子切换并重启；配置、状态和日志保持不变。",
         }
 
@@ -328,37 +416,57 @@ class LifecycleManager:
         if not helper_python:
             raise DevError("AGENT_NOT_MANAGED", "当前安装缺少独立 Python，无法安全执行此操作")
         helper = self._copy_helper(operation_id)
-        self._write_plan(operation_id, {
-            "action": action, "helper": str(helper), "python": str(helper_python),
-            "base": str(self.base), "created_at": time.time(),
-        })
+        self._write_plan(
+            operation_id,
+            {
+                "action": action,
+                "helper": str(helper),
+                "python": str(helper_python),
+                "base": str(self.base),
+                "created_at": time.time(),
+            },
+        )
         if action == "agent_restart":
-            return {"action": action, "stage": "prepared", "message": "重启已准备，将在面板确认结果后执行。"}
+            return {
+                "action": action,
+                "stage": "prepared",
+                "message": "重启已准备，将在面板确认结果后执行。",
+            }
         return {
-            "action": action, "stage": "prepared",
+            "action": action,
+            "stage": "prepared",
             "message": "卸载已准备，将在面板确认结果后移除服务、运行时、配置、状态和日志；面板节点记录会保留。",
         }
 
     def check_native_sessions(self):
-        live = getattr(self, 'native_live', lambda: [])()
+        live = getattr(self, "native_live", lambda: [])()
         if live:
-            raise DevError('CLI_BUSY', '请先显式停止原生 CLI 会话再管理 Agent', 409,
-                           sessions=[{'id': r['id'], 'project_id': r['project_id']} for r in live])
+            raise DevError(
+                "CLI_BUSY",
+                "请先显式停止原生 CLI 会话再管理 Agent",
+                409,
+                sessions=[{"id": r["id"], "project_id": r["project_id"]} for r in live],
+            )
 
     def check_activity(self, operation_id):
         self.check_native_sessions()
-        getattr(self, 'activity_check', lambda _id: None)(operation_id)
+        getattr(self, "activity_check", lambda _id: None)(operation_id)
 
-    async def prepare(self, operation_id: str, action: str, args: dict, phase=lambda *a, **k: None) -> dict:
+    async def prepare(
+        self, operation_id: str, action: str, args: dict, phase=lambda *a, **k: None
+    ) -> dict:
         if self.handoff_pending and self.maintenance_operation != operation_id:
             raise DevError("AGENT_MAINTENANCE", "Agent 正在交接更新，请等待原操作完成", 409)
         if action not in DEVICE_ACTIONS:
             raise DevError("UNKNOWN_TOOL", "未知 Agent 生命周期操作")
         if action not in self.actions():
-            raise DevError("AGENT_NOT_MANAGED", self.describe().get("reason") or "当前 Agent 不支持一键生命周期管理")
+            raise DevError(
+                "AGENT_NOT_MANAGED",
+                self.describe().get("reason") or "当前 Agent 不支持一键生命周期管理",
+            )
         async with self.lock:
             if self.handoff_pending and self.maintenance_operation != operation_id:
-                raise DevError('AGENT_MAINTENANCE', 'Agent 已有维护操作，请恢复原操作', 409)
+                raise DevError("AGENT_MAINTENANCE", "Agent 已有维护操作，请恢复原操作", 409)
             # Fence admission BEFORE the first await/download, and retain the
             # fence until the durable plan is acknowledged or preparation fails.
             self.handoff_pending = True
@@ -367,11 +475,17 @@ class LifecycleManager:
                 self.check_activity(operation_id)
                 if self.has_pending(operation_id):
                     plan = self._read_json(self._plan_path(operation_id))
-                    return {"action": action, "stage": "prepared", "target_version": plan.get("target_version", ""),
-                            "message": "生命周期操作已经准备完成。"}
-                work = asyncio.create_task(asyncio.to_thread(
-                    self._prepare_update, operation_id, args, phase) if action == 'agent_update'
-                    else asyncio.to_thread(self._prepare_control, operation_id, action))
+                    return {
+                        "action": action,
+                        "stage": "prepared",
+                        "target_version": plan.get("target_version", ""),
+                        "message": "生命周期操作已经准备完成。",
+                    }
+                work = asyncio.create_task(
+                    asyncio.to_thread(self._prepare_update, operation_id, args, phase)
+                    if action == "agent_update"
+                    else asyncio.to_thread(self._prepare_control, operation_id, action)
+                )
                 try:
                     return await asyncio.shield(work)
                 except asyncio.CancelledError:
@@ -391,9 +505,19 @@ class LifecycleManager:
             launch = [runner]
             if scope != "system":
                 launch.append("--user")
-            launch += ["--unit", unit, "--collect", "--quiet", "--property=Type=exec",
-                       "--property=RuntimeMaxSec=15min", "--", *command]
-            subprocess.run(launch, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            launch += [
+                "--unit",
+                unit,
+                "--collect",
+                "--quiet",
+                "--property=Type=exec",
+                "--property=RuntimeMaxSec=15min",
+                "--",
+                *command,
+            ]
+            subprocess.run(
+                launch, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
             return
         if kind == "launchd":
             runner = shutil.which("launchctl")
@@ -401,15 +525,27 @@ class LifecycleManager:
                 raise OSError("launchctl is unavailable")
             label = "com.codepier.agent.lifecycle." + operation_id[:20]
             import plistlib
+
             self.plan_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             definition = self.plan_dir / f"{operation_id}.plist"
-            definition.write_bytes(plistlib.dumps({
-                "Label": label, "ProgramArguments": [*command, "--handoff-label", label],
-                "RunAtLoad": True, "KeepAlive": False,
-            }))
+            definition.write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": label,
+                        "ProgramArguments": [*command, "--handoff-label", label],
+                        "RunAtLoad": True,
+                        "KeepAlive": False,
+                    }
+                )
+            )
             try:
-                subprocess.run([runner, "bootstrap", f"gui/{os.getuid()}", str(definition)],
-                               check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                subprocess.run(
+                    [runner, "bootstrap", f"gui/{os.getuid()}", str(definition)],
+                    check=True,
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
             finally:
                 definition.unlink(missing_ok=True)
             return
@@ -418,15 +554,18 @@ class LifecycleManager:
             if not runner:
                 raise OSError("schtasks.exe is unavailable")
             import xml.etree.ElementTree as ET
+
             task_name = "CodePierAgentLifecycle-" + operation_id[:20]
             command = [*command, "--handoff-task", task_name]
             ns = "http://schemas.microsoft.com/windows/2004/02/mit/task"
             ET.register_namespace("", ns)
+
             def child(parent, name, value=None):
                 element = ET.SubElement(parent, "{" + ns + "}" + name)
                 if value is not None:
                     element.text = value
                 return element
+
             user = subprocess.check_output(["whoami.exe"], text=True).strip()
             logon = "InteractiveToken"
             service = self._service_target()
@@ -458,10 +597,20 @@ class LifecycleManager:
             xml_path = self.plan_dir / f"{operation_id}.xml"
             ET.ElementTree(task).write(xml_path, encoding="utf-16", xml_declaration=True)
             try:
-                subprocess.run([runner, "/Create", "/TN", task_name, "/XML", str(xml_path), "/F"],
-                               check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                subprocess.run([runner, "/Run", "/TN", task_name], check=True, timeout=30,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                subprocess.run(
+                    [runner, "/Create", "/TN", task_name, "/XML", str(xml_path), "/F"],
+                    check=True,
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                subprocess.run(
+                    [runner, "/Run", "/TN", task_name],
+                    check=True,
+                    timeout=30,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
             finally:
                 xml_path.unlink(missing_ok=True)
             return
@@ -482,8 +631,14 @@ class LifecycleManager:
             try:
                 plan = self._read_json(claimed)
                 action = plan.get("action")
-                command = [plan["python"], plan["helper"], "--install-dir", plan["base"],
-                           "--wait-pid", str(os.getpid())]
+                command = [
+                    plan["python"],
+                    plan["helper"],
+                    "--install-dir",
+                    plan["base"],
+                    "--wait-pid",
+                    str(os.getpid()),
+                ]
                 if action == "agent_update":
                     command += ["--apply-update", plan["candidate"]]
                 elif action == "agent_restart":

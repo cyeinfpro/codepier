@@ -47,6 +47,7 @@ def _write_backup(store: Store, output: Path):
                 keyring = store.state_directory / "master.keys.json"
                 if keyring.exists() or keyring.is_symlink():
                     from hub.keyring import private_read
+
                     z.writestr("master.keys.json", private_read(keyring))
             handle.flush()
             os.fsync(handle.fileno())
@@ -58,7 +59,10 @@ def _write_backup(store: Store, output: Path):
 def main():
     parser = argparse.ArgumentParser(description="CodePier Hub")
     parser.add_argument("--version", action="version", version=VERSION)
-    parser.add_argument("--data-dir", default=os.getenv("HUB_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")))
+    parser.add_argument(
+        "--data-dir",
+        default=os.getenv("HUB_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="本机创建面板管理员；不会开放网页抢注")
     init.add_argument("--username", default="admin")
@@ -70,20 +74,23 @@ def main():
     run.add_argument("--port", default=os.getenv("HUB_PORT", str(DEFAULT_HUB_PORT)), type=int)
     backup = sub.add_parser("backup", help="一致性备份数据库和 master.key；备份含敏感凭据")
     backup.add_argument("--output", required=True)
-    rekey = sub.add_parser("rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换")
+    rekey = sub.add_parser(
+        "rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换"
+    )
     rekey.add_argument("--resume", action="store_true", help="继续已记录的密钥轮换，不创建新的轮换")
-    activate_hosts = sub.add_parser('room-host-activate', help='离线启用独立连接数据契约')
-    activate_hosts.add_argument('--confirm-compatible-deployment', action='store_true')
-    backfill_hosts = sub.add_parser('room-host-backfill', help='报告或分批认领历史房间连接')
-    backfill_hosts.add_argument('--apply', action='store_true')
-    backfill_hosts.add_argument('--after', default='')
-    backfill_hosts.add_argument('--limit', type=int, default=64)
-    backfill_hosts.add_argument('--restart-scan', action='store_true')
+    activate_hosts = sub.add_parser("room-host-activate", help="离线启用独立连接数据契约")
+    activate_hosts.add_argument("--confirm-compatible-deployment", action="store_true")
+    backfill_hosts = sub.add_parser("room-host-backfill", help="报告或分批认领历史房间连接")
+    backfill_hosts.add_argument("--apply", action="store_true")
+    backfill_hosts.add_argument("--after", default="")
+    backfill_hosts.add_argument("--limit", type=int, default=64)
+    backfill_hosts.add_argument("--restart-scan", action="store_true")
     args = parser.parse_args()
     os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
     if args.command in {"run", "check-compatibility", "rekey"}:
         from hub.collaboration.delivery_compatibility import check_database
         from hub.state_layout import state_directory
+
         try:
             check_database(state_directory(args.data_dir))
         except (OSError, RuntimeError, sqlite3.Error) as exc:
@@ -100,38 +107,57 @@ def main():
         except ConfigurationError as exc:
             parser.error(str(exc))
         import uvicorn
-        uvicorn.run("hub.app:create_app", factory=True, host=args.host, port=args.port, workers=1,
-                    log_level=config.log_level,
-                    ws_max_size=16 * 1024 * 1024, proxy_headers=True,
-                    forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
-                    access_log=False, timeout_graceful_shutdown=10)
+
+        uvicorn.run(
+            "hub.app:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            workers=1,
+            log_level=config.log_level,
+            ws_max_size=16 * 1024 * 1024,
+            proxy_headers=True,
+            forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+            access_log=False,
+            timeout_graceful_shutdown=10,
+        )
         return
-    if args.command in {'room-host-activate', 'room-host-backfill'}:
+    if args.command in {"room-host-activate", "room-host-backfill"}:
         from hub.collaboration.room_host_rollout import activate, backfill
+
         try:
-            result = (activate(args.data_dir, confirmed=args.confirm_compatible_deployment)
-                      if args.command == 'room-host-activate'
-                      else backfill(args.data_dir, apply=args.apply, after=args.after,
-                                    limit=args.limit, restart=args.restart_scan))
+            result = (
+                activate(args.data_dir, confirmed=args.confirm_compatible_deployment)
+                if args.command == "room-host-activate"
+                else backfill(
+                    args.data_dir,
+                    apply=args.apply,
+                    after=args.after,
+                    limit=args.limit,
+                    restart=args.restart_scan,
+                )
+            )
         except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
             message = str(exc)
-            if isinstance(exc, sqlite3.Error) and getattr(exc, 'sqlite_errorname', None):
+            if isinstance(exc, sqlite3.Error) and getattr(exc, "sqlite_errorname", None):
                 message += f" ({exc.sqlite_errorname}, code {exc.sqlite_errorcode})"
             parser.error(message)
         print(json.dumps(result, ensure_ascii=False))
         return
     if args.command == "rekey":
         from hub.keyring import rotate_key
+
         try:
             print(json.dumps(rotate_key(args.data_dir, resume=args.resume), ensure_ascii=False))
         except (OSError, ValueError, RuntimeError) as exc:
             parser.error(str(exc))
         return
     initialize_host_contract = False
-    if args.command == 'init':
+    if args.command == "init":
         from hub.collaboration.config import host_connections_mode_from_env
+
         try:
-            initialize_host_contract = host_connections_mode_from_env() == 'auto'
+            initialize_host_contract = host_connections_mode_from_env() == "auto"
         except ConfigurationError as exc:
             parser.error(str(exc))
     store = Store(args.data_dir, initialize_host_contract=initialize_host_contract)
@@ -139,8 +165,12 @@ def main():
         if args.command in {"init", "reset-password"}:
             user = store.one("SELECT * FROM users WHERE username=?", (args.username,))
             if args.command == "init" and user:
-                parser.error("账号已存在；创建恢复管理员请使用新的账号名，重置请使用 reset-password")
-            if args.command == "init" and store.one("SELECT 1 AS ok FROM iam_users WHERE local_login=1"):
+                parser.error(
+                    "账号已存在；创建恢复管理员请使用新的账号名，重置请使用 reset-password"
+                )
+            if args.command == "init" and store.one(
+                "SELECT 1 AS ok FROM iam_users WHERE local_login=1"
+            ):
                 parser.error("面板已有本地登录账号。重置请使用 reset-password")
             if args.command == "reset-password" and not user:
                 parser.error("账号不存在")
@@ -155,22 +185,40 @@ def main():
             with store.lock, store.db:
                 # Serialize local CLI initialization with other initializers.
                 store.db.execute("BEGIN IMMEDIATE")
-                if args.command == "init" and store.one("SELECT 1 AS ok FROM users WHERE username=?", (args.username,)):
+                if args.command == "init" and store.one(
+                    "SELECT 1 AS ok FROM users WHERE username=?", (args.username,)
+                ):
                     parser.error("账号已存在；创建恢复管理员请使用新的账号名")
                 if user:
-                    store.db.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"]))
-                    store.db.execute('UPDATE iam_users SET local_login=1,active=1,epoch=epoch+1,version=version+1 WHERE user_id=?',(user['id'],))
+                    store.db.execute(
+                        "UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"])
+                    )
+                    store.db.execute(
+                        "UPDATE iam_users SET local_login=1,active=1,epoch=epoch+1,version=version+1 WHERE user_id=?",
+                        (user["id"],),
+                    )
                     store.db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
                     store.db.execute("UPDATE grants SET revoked=1 WHERE user_id=?", (user["id"],))
                 else:
-                    if store.db.execute("SELECT 1 FROM iam_users WHERE local_login=1 LIMIT 1").fetchone():
+                    if store.db.execute(
+                        "SELECT 1 FROM iam_users WHERE local_login=1 LIMIT 1"
+                    ).fetchone():
                         parser.error("面板已有本地登录账号。重置请使用 reset-password")
                     user_id = uuid.uuid4().hex
-                    store.db.execute("INSERT INTO users VALUES (?,?,?,?)", (user_id, args.username, hashed, time.time()))
+                    store.db.execute(
+                        "INSERT INTO users VALUES (?,?,?,?)",
+                        (user_id, args.username, hashed, time.time()),
+                    )
                     # A recovery administrator added after OIDC bootstrap holds the same
                     # instance authority and Legacy ownership as the very first account.
-                    store.db.execute("UPDATE iam_users SET local_login=1,instance_admin=1 WHERE user_id=?", (user_id,))
-                    store.db.execute("UPDATE memberships SET level='owner' WHERE user_id=? AND space_id='legacy'", (user_id,))
+                    store.db.execute(
+                        "UPDATE iam_users SET local_login=1,instance_admin=1 WHERE user_id=?",
+                        (user_id,),
+                    )
+                    store.db.execute(
+                        "UPDATE memberships SET level='owner' WHERE user_id=? AND space_id='legacy'",
+                        (user_id,),
+                    )
             store.audit("local-cli", "account." + args.command, args.username)
             print(f"账号 {args.username} 已就绪。没有默认密码。")
         elif args.command == "backup":
@@ -181,6 +229,7 @@ def main():
             print(f"备份已保存：{output}。包含设备密钥解密材料，请私密保管。")
     finally:
         store.close()
+
 
 if __name__ == "__main__":
     main()

@@ -246,7 +246,7 @@ window.CodePierIdentity = (() => {
       return (
         heading(
           '我的账号',
-          'IDENTITY / SPACES',
+          '账号与空间',
           me.display_name,
           `<button class="btn primary" data-iam="new-space">新建团队空间</button><button class="btn" data-iam="accept-invite">接受邀请</button>`,
         ) +
@@ -260,7 +260,7 @@ window.CodePierIdentity = (() => {
       if (!admin()) return uiPermissionState('空间成员', '只有空间管理员可以管理成员与角色分配。');
       if (current()?.kind === 'personal')
         return (
-          heading('空间成员', 'PERSONAL / TEAM', current().label) +
+          heading('空间成员', '空间成员', current().label) +
           notice(
             '个人空间只属于你。邀请他人需要独立的团队空间；已有项目、连接和权限不会自动迁移。',
           ) +
@@ -281,7 +281,7 @@ window.CodePierIdentity = (() => {
       return (
         heading(
           '空间成员',
-          'SPACE / MEMBERS',
+          '成员权限',
           current()?.label,
           `<button class="btn" data-iam="edit-space">空间设置</button><button class="btn" data-iam="assign-role">分配角色</button><button class="btn primary" data-iam="invite">创建邀请</button>`,
         ) +
@@ -298,7 +298,7 @@ window.CodePierIdentity = (() => {
     return (
       heading(
         '身份管理',
-        'INSTANCE / IDENTITY',
+        '登录管理',
         'OIDC 只负责认证；CodePier 管理角色和资源授权。',
         `<button class="btn" data-iam="sync">校验群组权限</button><button class="btn primary" data-iam="new-provider">添加 OIDC 提供者</button>`,
       ) +

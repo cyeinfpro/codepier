@@ -1,11 +1,12 @@
 """Redact exact credential values before streaming or persisting process output."""
+
 from __future__ import annotations
 
 
 class SecretOutput:
-    def __init__(self, secret: str = ''):
+    def __init__(self, secret: str = ""):
         self.secret = secret
-        self.pending = ''
+        self.pending = ""
 
     def feed(self, text: str, *, final: bool = False) -> str:
         if not self.secret:
@@ -17,8 +18,8 @@ class SecretOutput:
         while self.pending:
             index = self.pending.find(self.secret)
             if index >= 0:
-                parts.extend((self.pending[:index], '<redacted>'))
-                self.pending = self.pending[index + len(self.secret):]
+                parts.extend((self.pending[:index], "<redacted>"))
+                self.pending = self.pending[index + len(self.secret) :]
                 continue
             keep = 0 if final else min(len(self.secret) - 1, len(self.pending))
             while keep and not self.secret.startswith(self.pending[-keep:]):
@@ -27,18 +28,20 @@ class SecretOutput:
             parts.append(self.pending[:end])
             self.pending = self.pending[end:]
             break
-        return ''.join(parts)
+        return "".join(parts)
 
     def redact(self, text: str) -> str:
-        return text.replace(self.secret, '<redacted>') if self.secret else text
+        return text.replace(self.secret, "<redacted>") if self.secret else text
 
 
 class SecretOutputs:
     """Compose exact-value streaming filters without persisting their values."""
 
     def __init__(self, secrets):
-        values = sorted({value for value in secrets if isinstance(value, str) and value},
-                        key=lambda value: (-len(value), value))
+        values = sorted(
+            {value for value in secrets if isinstance(value, str) and value},
+            key=lambda value: (-len(value), value),
+        )
         self.filters = [SecretOutput(value) for value in values]
 
     def feed(self, text: str, *, final: bool = False) -> str:
@@ -54,6 +57,13 @@ class SecretOutputs:
 
 def credential_output_values(environment):
     """Known injected authentication values; never read credential stores."""
-    return [environment.get(name, '') for name in (
-        'SSHPASS', 'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN',
-        'GITHUB_ENTERPRISE_TOKEN')]
+    return [
+        environment.get(name, "")
+        for name in (
+            "SSHPASS",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        )
+    ]

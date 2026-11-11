@@ -4,6 +4,7 @@ A prepared keyring can read both generations before any ciphertext is rewritten.
 The DB switch is atomic; retiring old keys happens only after that commit. Ordinary
 startup never rotates keys, deletes backups, or guesses how to recover a bad key.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -22,36 +23,67 @@ from shared.instance_lock import InstanceLock
 
 RING_FILE = "master.keys.json"
 JOURNAL_FILE = "rekey.json"
-CIPHER_COLUMNS = (("operation_payload_archives", "body"), ("devices", "secret"), ("operations", "payload"), ("vps_connections", "secret"),
-                  ("oidc_providers", "client_secret"), ("external_identities", "upstream_tokens"),
-                  ("oidc_transactions", "verifier"), ("gateway_secrets", "secret"), ("gateway_accounts", "secret"),
-                  ("gateway_calls", "result"), ("collaboration_secrets", "secret"),
-                  ("mcp_event_subscriptions", "secret"),
-                  ("dot_consumer_sessions", "proof_secret"), ("dot_wake_tickets", "ticket_secret"),
-                  ("room_members", "connection_proof_secret"), ("room_members", "probe_nonce_secret"),
-                  ("room_connect_flows", "invite_secret"),
-                  ("room_pending_bindings", "invite_secret"),
-                  ("room_pending_bindings", "connection_proof_secret"),
-                  ("room_pending_bindings", "probe_nonce_secret"),
-                  ("room_host_control_handles", "exchange_secret"),
-                  ("room_host_attach_challenges", "encrypted_secret"),
-                  ("channel_attachments", "content"), ("channel_attachments", "private_source"),
-                  ("channel_attachment_chunks", "content"), ("channel_inbound_failures", "body"),
-                  ("weixin_accounts", "secret"), ("weixin_accounts", "cursor"),
-                  ("weixin_bindings", "pairing_secret"), ("weixin_contexts", "token"),
-                  ("weixin_enrollments", "payload"), ("weixin_parts", "body"),
-                  ("weixin_parts", "wire_body"), ("telegram_accounts", "secret"),
-                  ("telegram_bindings", "pairing_secret"), ("telegram_inbox", "body"),
-                  ("channel_onboarding_notices", "body"), ("room_weixin_logins", "payload"),
-                  ("knowledge_maintenance", "principal"))
+CIPHER_COLUMNS = (
+    ("operation_payload_archives", "body"),
+    ("devices", "secret"),
+    ("operations", "payload"),
+    ("vps_connections", "secret"),
+    ("oidc_providers", "client_secret"),
+    ("external_identities", "upstream_tokens"),
+    ("oidc_transactions", "verifier"),
+    ("gateway_secrets", "secret"),
+    ("gateway_accounts", "secret"),
+    ("gateway_calls", "result"),
+    ("collaboration_secrets", "secret"),
+    ("mcp_event_subscriptions", "secret"),
+    ("dot_consumer_sessions", "proof_secret"),
+    ("dot_wake_tickets", "ticket_secret"),
+    ("room_members", "connection_proof_secret"),
+    ("room_members", "probe_nonce_secret"),
+    ("room_connect_flows", "invite_secret"),
+    ("room_pending_bindings", "invite_secret"),
+    ("room_pending_bindings", "connection_proof_secret"),
+    ("room_pending_bindings", "probe_nonce_secret"),
+    ("room_host_control_handles", "exchange_secret"),
+    ("room_host_attach_challenges", "encrypted_secret"),
+    ("channel_attachments", "content"),
+    ("channel_attachments", "private_source"),
+    ("channel_attachment_chunks", "content"),
+    ("channel_inbound_failures", "body"),
+    ("weixin_accounts", "secret"),
+    ("weixin_accounts", "cursor"),
+    ("weixin_bindings", "pairing_secret"),
+    ("weixin_contexts", "token"),
+    ("weixin_enrollments", "payload"),
+    ("weixin_parts", "body"),
+    ("weixin_parts", "wire_body"),
+    ("telegram_accounts", "secret"),
+    ("telegram_bindings", "pairing_secret"),
+    ("telegram_inbox", "body"),
+    ("channel_onboarding_notices", "body"),
+    ("room_weixin_logins", "payload"),
+    ("knowledge_maintenance", "principal"),
+)
 # Delivery bodies from older protocols remain plaintext JSON; only explicitly
 # sealed bodies participate in rotation and missing-key detection.
-PREFIXED_CIPHER_COLUMNS = (("mcp_event_deliveries", "body", "sealed:v1:"),
-    ("operations", "result", "history:v1:"), ("operations", "output", "history:v1:"),
+PREFIXED_CIPHER_COLUMNS = (
+    ("mcp_event_deliveries", "body", "sealed:v1:"),
+    ("operations", "result", "history:v1:"),
+    ("operations", "output", "history:v1:"),
     ("operation_output_tails", "sealed_output", "history:v1:"),
     ("mcp_tasks", "terminal_result", "history:v1:"),
-    ("mcp_tasks", "terminal_operation", "history:v1:"))
-CIPHER_PRIMARY_KEYS = {"operation_payload_archives": "operation_id", "oidc_transactions": "state_hash", "operation_output_tails": "operation_id", "mcp_tasks": "task_id", "dot_wake_tickets": "ticket_hash", "channel_attachment_chunks": "rowid", "weixin_contexts": "rowid", "telegram_inbox": "rowid"}
+    ("mcp_tasks", "terminal_operation", "history:v1:"),
+)
+CIPHER_PRIMARY_KEYS = {
+    "operation_payload_archives": "operation_id",
+    "oidc_transactions": "state_hash",
+    "operation_output_tails": "operation_id",
+    "mcp_tasks": "task_id",
+    "dot_wake_tickets": "ticket_hash",
+    "channel_attachment_chunks": "rowid",
+    "weixin_contexts": "rowid",
+    "telegram_inbox": "rowid",
+}
 
 
 def key_id(key: bytes) -> str:
@@ -89,7 +121,17 @@ def atomic_private(path: Path, raw: bytes) -> None:
 
 
 def encode_ring(active: str, keys: dict[str, bytes]) -> bytes:
-    return (json.dumps({"version": 1, "active": active, "keys": {identifier: value.decode("ascii") for identifier, value in keys.items()}}, sort_keys=True) + "\n").encode()
+    return (
+        json.dumps(
+            {
+                "version": 1,
+                "active": active,
+                "keys": {identifier: value.decode("ascii") for identifier, value in keys.items()},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
 
 
 def decode_ring(raw: bytes) -> tuple[str, dict[str, bytes]]:
@@ -114,7 +156,9 @@ def decode_ring(raw: bytes) -> tuple[str, dict[str, bytes]]:
             raise ValueError()
         return active, parsed
     except (ValueError, TypeError, KeyError, UnicodeError):
-        raise RuntimeError("Invalid encryption keyring; restore its matching private backup") from None
+        raise RuntimeError(
+            "Invalid encryption keyring; restore its matching private backup"
+        ) from None
 
 
 class CipherSuite:
@@ -133,7 +177,11 @@ class CipherSuite:
         encrypted = self.ciphers[self.active].encrypt(plaintext)
         # Do not force a cipher-format migration during an ordinary upgrade.
         # The explicit offline rekey command enables versioned ciphertext.
-        return b"cp1:" + self.active.encode("ascii") + b":" + encrypted if self.versioned else encrypted
+        return (
+            b"cp1:" + self.active.encode("ascii") + b":" + encrypted
+            if self.versioned
+            else encrypted
+        )
 
     def decrypt(self, ciphertext: bytes) -> bytes:
         if not ciphertext.startswith(b"cp"):
@@ -187,17 +235,21 @@ def verify_cipher_inventory(store):
                 if (table, column) in covered:
                     continue
                 field = '"' + column.replace('"', '""') + '"'
-                cursor = store.db.execute(f"SELECT {field} FROM {quoted} WHERE typeof({field})='text'")
+                cursor = store.db.execute(
+                    f"SELECT {field} FROM {quoted} WHERE typeof({field})='text'"
+                )
                 while rows := cursor.fetchmany(128):
                     for row in rows:
                         value = row[0]
-                        if not value.startswith(('cp1:', 'gAAAA')):
+                        if not value.startswith(("cp1:", "gAAAA")):
                             continue
                         try:
-                            store.cipher.decrypt(value.encode('ascii'))
+                            store.cipher.decrypt(value.encode("ascii"))
                         except (InvalidToken, UnicodeError):
                             continue
-                        raise RuntimeError(f"Unregistered encrypted column: {table}.{column}; no key retired")
+                        raise RuntimeError(
+                            f"Unregistered encrypted column: {table}.{column}; no key retired"
+                        )
 
 
 def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
@@ -208,6 +260,7 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
     """
     from hub.store import Store
     from hub.state_layout import state_directory
+
     data_directory = directory
     directory = state_directory(directory)
     if directory.is_symlink() or not directory.is_dir():
@@ -221,19 +274,34 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
         store = Store(data_directory)
         verify_cipher_inventory(store)
         journal_path = directory / JOURNAL_FILE
-        previous = json.loads(private_read(journal_path)) if journal_path.exists() or journal_path.is_symlink() else None
-        if previous is not None and (not isinstance(previous, dict) or previous.get("version") != 1):
+        previous = (
+            json.loads(private_read(journal_path))
+            if journal_path.exists() or journal_path.is_symlink()
+            else None
+        )
+        if previous is not None and (
+            not isinstance(previous, dict) or previous.get("version") != 1
+        ):
             raise RuntimeError("Unrecognized rotation journal; no metadata was replaced")
         if previous and previous.get("stage") != "complete" and not resume:
-            raise RuntimeError("A rotation is unfinished; inspect its backup and use rekey --resume")
+            raise RuntimeError(
+                "A rotation is unfinished; inspect its backup and use rekey --resume"
+            )
         if resume:
             if not isinstance(previous, dict):
                 raise RuntimeError("No recorded rotation is available to resume")
             journal = previous
             if journal.get("stage") == "complete":
-                return {"status": "already_completed", "key_id": journal["active"], "backup": journal["backup"]}
+                return {
+                    "status": "already_completed",
+                    "key_id": journal["active"],
+                    "backup": journal["backup"],
+                }
             identifier = journal.get("id", "")
-            if not re.fullmatch(r"[a-f0-9]{32}", identifier) or journal.get("backup") != ".rekey/" + identifier:
+            if (
+                not re.fullmatch(r"[a-f0-9]{32}", identifier)
+                or journal.get("backup") != ".rekey/" + identifier
+            ):
                 raise RuntimeError("Unrecognized rotation journal; no metadata was replaced")
             destination = directory / ".rekey" / identifier
             if destination.is_symlink() or destination.parent.is_symlink():
@@ -254,13 +322,28 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
             destination = parent / identifier
             _backup(store, destination)
             fresh = Fernet.generate_key()
-            active, keys = key_id(fresh), {**store.cipher.keys, key_id(store.cipher.legacy_key): store.cipher.legacy_key, key_id(fresh): fresh}
+            active, keys = (
+                key_id(fresh),
+                {
+                    **store.cipher.keys,
+                    key_id(store.cipher.legacy_key): store.cipher.legacy_key,
+                    key_id(fresh): fresh,
+                },
+            )
             if len(keys) > 16:
-                raise RuntimeError("Too many retained key generations; inspect unfinished rotations")
+                raise RuntimeError(
+                    "Too many retained key generations; inspect unfinished rotations"
+                )
             staged = encode_ring(active, keys)
             atomic_private(destination / "next-keyring.json", staged)
-            journal = {"version": 1, "id": identifier, "active": active, "backup": ".rekey/" + identifier,
-                       "next_sha256": hashlib.sha256(staged).hexdigest(), "created": time.time()}
+            journal = {
+                "version": 1,
+                "id": identifier,
+                "active": active,
+                "backup": ".rekey/" + identifier,
+                "next_sha256": hashlib.sha256(staged).hexdigest(),
+                "created": time.time(),
+            }
             _stage(directory, journal, "prepared")
         # Both generations remain readable through every interruption point.
         atomic_private(directory / RING_FILE, encode_ring(active, keys))
@@ -271,30 +354,46 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
             store.db.execute("BEGIN IMMEDIATE")
             columns = [(table, column, "") for table, column in CIPHER_COLUMNS]
             for table, column, prefix in [*columns, *PREFIXED_CIPHER_COLUMNS]:
-                if column not in {row[1] for row in store.db.execute(f"PRAGMA table_info({table})").fetchall()}:
+                if column not in {
+                    row[1] for row in store.db.execute(f"PRAGMA table_info({table})").fetchall()
+                }:
                     continue
                 primary = CIPHER_PRIMARY_KEYS.get(table, "id")
                 condition = f" AND substr({column},1,?)=?" if prefix else ""
                 if prefix == "history:v1:":
                     condition += f" AND ({column} GLOB 'history:v1:gAAAA*' OR {column} GLOB 'history:v1:cp1:*')"
-                cursor = store.db.execute(f"SELECT {primary} AS id,{column} FROM {table} "
+                cursor = store.db.execute(
+                    f"SELECT {primary} AS id,{column} FROM {table} "
                     f"WHERE {column} IS NOT NULL AND {column} != ''" + condition,
-                    (len(prefix), prefix) if prefix else ())
+                    (len(prefix), prefix) if prefix else (),
+                )
                 while rows := cursor.fetchmany(128):
                     for row in rows:
-                        plaintext = store.cipher.decrypt(row[column][len(prefix):].encode("ascii"))
+                        plaintext = store.cipher.decrypt(row[column][len(prefix) :].encode("ascii"))
                         encrypted = prefix + store.cipher.encrypt(plaintext).decode("ascii")
-                        if table == 'mcp_tasks' and column in {'terminal_operation', 'terminal_result'}:
+                        if table == "mcp_tasks" and column in {
+                            "terminal_operation",
+                            "terminal_result",
+                        }:
                             from hub.operation_history import rewrite_task_ciphertext
-                            rewrite_task_ciphertext(store, row['id'], column, encrypted)
+
+                            rewrite_task_ciphertext(store, row["id"], column, encrypted)
                         else:
-                            store.db.execute(f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"]))
-                        if table == 'external_identities' and column == 'upstream_tokens':
+                            store.db.execute(
+                                f"UPDATE {table} SET {column}=? WHERE {primary}=?",
+                                (encrypted, row["id"]),
+                            )
+                        if table == "external_identities" and column == "upstream_tokens":
                             # Re-encryption changes ciphertext, not identity ownership.
                             # Carry only the matching scheduler generation, atomically.
-                            store.db.execute('UPDATE oidc_sync_state SET credential_hash=? WHERE identity_id=? AND credential_hash=?',
-                                (hashlib.sha256(encrypted.encode()).hexdigest(), row['id'],
-                                 hashlib.sha256(row[column].encode()).hexdigest()))
+                            store.db.execute(
+                                "UPDATE oidc_sync_state SET credential_hash=? WHERE identity_id=? AND credential_hash=?",
+                                (
+                                    hashlib.sha256(encrypted.encode()).hexdigest(),
+                                    row["id"],
+                                    hashlib.sha256(row[column].encode()).hexdigest(),
+                                ),
+                            )
                         changed += 1
             store.audit("hub:offline", "keys.rotated", active, detail={"records": changed})
         _stage(directory, journal, "database_committed")
@@ -302,7 +401,12 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
         _stage(directory, journal, "legacy_key_replaced")
         atomic_private(directory / RING_FILE, encode_ring(active, {active: keys[active]}))
         _stage(directory, journal, "complete")
-        return {"status": "completed", "key_id": active, "records": changed, "backup": journal["backup"]}
+        return {
+            "status": "completed",
+            "key_id": active,
+            "records": changed,
+            "backup": journal["backup"],
+        }
     finally:
         try:
             if store is not None:

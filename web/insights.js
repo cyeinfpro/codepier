@@ -18,7 +18,7 @@ async function diagnosticsHTML(seq) {
   return (
     heading(
       '运行诊断',
-      'RUNTIME / OBSERVED STATE',
+      '运行状态',
       '',
       `<button class="btn ghost" data-action="refresh">${icon('refresh')}刷新</button>`,
     ) +
@@ -63,7 +63,7 @@ async function artifactsHTML(seq) {
   return (
     heading(
       '产物交付',
-      'ARTIFACTS / VERIFIED DELIVERY',
+      '文件交付',
       '',
       `<button class="btn ghost" data-action="refresh">${icon('refresh')}刷新</button><button class="btn primary" data-insight="register">${icon('plus')}登记产物</button>`,
     ) +

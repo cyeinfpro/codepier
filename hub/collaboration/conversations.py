@@ -1,4 +1,5 @@
 """Independent rooms with explicit project partitions and current grant filtering."""
+
 from __future__ import annotations
 
 import json
@@ -13,78 +14,126 @@ from shared.util import DevError
 
 def migrate(db):
     from hub.collaboration.working_scopes import migrate as migrate_working_scopes
+
     migrate_working_scopes(db)
     from hub.collaboration.project_scopes import migrate as migrate_project_scopes
+
     migrate_project_scopes(db)
-    db.execute('''CREATE TABLE IF NOT EXISTS conversation_rooms (
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_rooms (
         id TEXT PRIMARY KEY,space_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,title TEXT NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)''')
-    columns_room = {row[1] for row in db.execute('PRAGMA table_info(conversation_rooms)')}
-    if 'history_sequence' not in columns_room:
-        db.execute('ALTER TABLE conversation_rooms ADD COLUMN history_sequence INTEGER NOT NULL DEFAULT 0')
+        version INTEGER NOT NULL DEFAULT 1,created REAL NOT NULL)""")
+    columns_room = {row[1] for row in db.execute("PRAGMA table_info(conversation_rooms)")}
+    if "history_sequence" not in columns_room:
+        db.execute(
+            "ALTER TABLE conversation_rooms ADD COLUMN history_sequence INTEGER NOT NULL DEFAULT 0"
+        )
     from hub.collaboration.conversation_archive import migrate as migrate_archive
+
     migrate_archive(db)
-    db.execute('''CREATE TABLE IF NOT EXISTS conversation_projects (
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_projects (
         conversation_id TEXT NOT NULL REFERENCES conversation_rooms(id),room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
-        created REAL NOT NULL,PRIMARY KEY(conversation_id,room_id))''')
-    db.execute('''CREATE TABLE IF NOT EXISTS conversation_writers (
+        created REAL NOT NULL,PRIMARY KEY(conversation_id,room_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_writers (
         conversation_id TEXT NOT NULL REFERENCES conversation_rooms(id),room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
         grant_id TEXT NOT NULL,enabled INTEGER NOT NULL,expires_at REAL NOT NULL,principal TEXT NOT NULL,
-        updated REAL NOT NULL,version INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(conversation_id,room_id,grant_id))''')
-    db.execute('''CREATE TABLE IF NOT EXISTS conversation_idempotency (
-        id TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT NOT NULL,created REAL NOT NULL)''')
-    db.execute('''CREATE TABLE IF NOT EXISTS conversation_read_cursors (
+        updated REAL NOT NULL,version INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(conversation_id,room_id,grant_id))""")
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_idempotency (
+        id TEXT PRIMARY KEY,digest TEXT NOT NULL,response TEXT NOT NULL,created REAL NOT NULL)""")
+    db.execute("""CREATE TABLE IF NOT EXISTS conversation_read_cursors (
         conversation_id TEXT NOT NULL REFERENCES conversation_rooms(id),user_id TEXT NOT NULL,sequence INTEGER NOT NULL,
-        updated REAL NOT NULL,PRIMARY KEY(conversation_id,user_id))''')
-    columns = {row[1] for row in db.execute('PRAGMA table_info(collaboration_messages)')}
-    for name, declaration in [('conversation_id', "TEXT NOT NULL DEFAULT ''"), ('conversation_sequence', 'INTEGER NOT NULL DEFAULT 0')]:
+        updated REAL NOT NULL,PRIMARY KEY(conversation_id,user_id))""")
+    columns = {row[1] for row in db.execute("PRAGMA table_info(collaboration_messages)")}
+    for name, declaration in [
+        ("conversation_id", "TEXT NOT NULL DEFAULT ''"),
+        ("conversation_sequence", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
         if name not in columns:
-            db.execute(f'ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}')
+            db.execute(f"ALTER TABLE collaboration_messages ADD COLUMN {name} {declaration}")
     # A detached partition is historical data, not an instruction to recreate
     # a default user room on the next process start. Migrate each partition once.
-    db.execute('CREATE TABLE IF NOT EXISTS conversation_partition_migrations (room_id TEXT PRIMARY KEY)')
-    for room in db.execute('''SELECT r.id,r.space_id,r.owner_user_id,r.project_id,r.environment_id,
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS conversation_partition_migrations (room_id TEXT PRIMARY KEY)"
+    )
+    for room in db.execute("""SELECT r.id,r.space_id,r.owner_user_id,r.project_id,r.environment_id,
         r.title,r.created,r.chat_history_sequence FROM collaboration_rooms r
-        WHERE NOT EXISTS (SELECT 1 FROM conversation_partition_migrations m WHERE m.room_id=r.id)''').fetchall():
-        db.execute('INSERT INTO conversation_partition_migrations VALUES (?)', (room[0],))
-        archived = db.execute('SELECT archived_at FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
+        WHERE NOT EXISTS (SELECT 1 FROM conversation_partition_migrations m WHERE m.room_id=r.id)""").fetchall():
+        db.execute("INSERT INTO conversation_partition_migrations VALUES (?)", (room[0],))
+        archived = db.execute(
+            "SELECT archived_at FROM conversation_rooms WHERE id=?", (room[0],)
+        ).fetchone()
         if archived and archived[0] is not None:
             continue  # Restart must never resurrect a removed default conversation.
-        if db.execute('''SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
-                WHERE json_extract(p.value,'$.id')=?''', (room[0],)).fetchone():
+        if db.execute(
+            """SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
+                WHERE json_extract(p.value,'$.id')=?""",
+            (room[0],),
+        ).fetchone():
             continue  # Detached archived partitions remain tombstones, not new defaults.
         # New working partitions belong to their one existing conversation. Do not
         # manufacture a second user-visible room on restart; keep legacy defaults.
-        if (not db.execute('SELECT 1 FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
-                and db.execute('SELECT 1 FROM conversation_projects WHERE room_id=?', (room[0],)).fetchone()):
+        if (
+            not db.execute("SELECT 1 FROM conversation_rooms WHERE id=?", (room[0],)).fetchone()
+            and db.execute(
+                "SELECT 1 FROM conversation_projects WHERE room_id=?", (room[0],)
+            ).fetchone()
+        ):
             continue
-        db.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created) VALUES (?,?,?,?,?)''',
-                   (room[0], room[1], room[2], room[5] or room[3] + ' · ' + room[4], room[6]))
-        db.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room[0], room[0], room[6]))
-        if 'history_sequence' not in columns_room:
-            db.execute('UPDATE conversation_rooms SET history_sequence=? WHERE id=?', (room[7], room[0]))
-        db.execute("UPDATE collaboration_messages SET conversation_id=room_id WHERE room_id=? AND conversation_id=''", (room[0],))
-        db.execute('''INSERT OR IGNORE INTO conversation_writers
+        db.execute(
+            """INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created) VALUES (?,?,?,?,?)""",
+            (room[0], room[1], room[2], room[5] or room[3] + " · " + room[4], room[6]),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)",
+            (room[0], room[0], room[6]),
+        )
+        if "history_sequence" not in columns_room:
+            db.execute(
+                "UPDATE conversation_rooms SET history_sequence=? WHERE id=?", (room[7], room[0])
+            )
+        db.execute(
+            "UPDATE collaboration_messages SET conversation_id=room_id WHERE room_id=? AND conversation_id=''",
+            (room[0],),
+        )
+        db.execute(
+            """INSERT OR IGNORE INTO conversation_writers
             SELECT room_id,room_id,grant_id,enabled,expires_at,principal,updated,version
-            FROM collaboration_message_writers WHERE room_id=?''', (room[0],))
-        db.execute('''INSERT OR IGNORE INTO conversation_read_cursors
-            SELECT room_id,user_id,MAX(sequence,?),updated FROM collaboration_read_cursors WHERE room_id=?''', (room[7], room[0]))
+            FROM collaboration_message_writers WHERE room_id=?""",
+            (room[0],),
+        )
+        db.execute(
+            """INSERT OR IGNORE INTO conversation_read_cursors
+            SELECT room_id,user_id,MAX(sequence,?),updated FROM collaboration_read_cursors WHERE room_id=?""",
+            (room[7], room[0]),
+        )
     # Keep restart work proportional to unfinished backfill, including after a
     # rolled-back upgrade. Completed conversation history is not loaded again.
-    db.execute('''CREATE INDEX IF NOT EXISTS conversation_message_backfill_pending
-        ON collaboration_messages(conversation_id) WHERE conversation_sequence=0''')
-    db.execute('''UPDATE collaboration_messages SET conversation_sequence=server_sequence
-        WHERE conversation_sequence=0 AND conversation_id=room_id''')
-    for conversation in db.execute('''SELECT DISTINCT m.conversation_id FROM collaboration_messages m
-        JOIN conversation_rooms c ON c.id=m.conversation_id WHERE m.conversation_sequence=0''').fetchall():
+    db.execute("""CREATE INDEX IF NOT EXISTS conversation_message_backfill_pending
+        ON collaboration_messages(conversation_id) WHERE conversation_sequence=0""")
+    db.execute("""UPDATE collaboration_messages SET conversation_sequence=server_sequence
+        WHERE conversation_sequence=0 AND conversation_id=room_id""")
+    for (
+        conversation
+    ) in db.execute("""SELECT DISTINCT m.conversation_id FROM collaboration_messages m
+        JOIN conversation_rooms c ON c.id=m.conversation_id WHERE m.conversation_sequence=0""").fetchall():
         cid = conversation[0]
-        maximum = db.execute('SELECT COALESCE(MAX(conversation_sequence),0) FROM collaboration_messages WHERE conversation_id=?', (cid,)).fetchone()[0]
-        for message in db.execute('SELECT id FROM collaboration_messages WHERE conversation_id=? AND conversation_sequence=0 ORDER BY server_sequence,created,id', (cid,)).fetchall():
+        maximum = db.execute(
+            "SELECT COALESCE(MAX(conversation_sequence),0) FROM collaboration_messages WHERE conversation_id=?",
+            (cid,),
+        ).fetchone()[0]
+        for message in db.execute(
+            "SELECT id FROM collaboration_messages WHERE conversation_id=? AND conversation_sequence=0 ORDER BY server_sequence,created,id",
+            (cid,),
+        ).fetchall():
             maximum += 1
-            db.execute('UPDATE collaboration_messages SET conversation_sequence=? WHERE id=?', (maximum, message[0]))
-    db.execute('CREATE UNIQUE INDEX IF NOT EXISTS conversation_message_sequence ON collaboration_messages(conversation_id,conversation_sequence) WHERE conversation_sequence>0')
-    db.execute('DROP TRIGGER IF EXISTS collaboration_message_insert')
-    db.execute('''CREATE TRIGGER collaboration_message_insert AFTER INSERT ON collaboration_messages BEGIN
+            db.execute(
+                "UPDATE collaboration_messages SET conversation_sequence=? WHERE id=?",
+                (maximum, message[0]),
+            )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS conversation_message_sequence ON collaboration_messages(conversation_id,conversation_sequence) WHERE conversation_sequence>0"
+    )
+    db.execute("DROP TRIGGER IF EXISTS collaboration_message_insert")
+    db.execute("""CREATE TRIGGER collaboration_message_insert AFTER INSERT ON collaboration_messages BEGIN
         UPDATE collaboration_messages SET
             server_sequence=(SELECT COALESCE(MAX(server_sequence),0)+1 FROM collaboration_messages WHERE room_id=NEW.room_id AND id!=NEW.id),
             conversation_id=CASE WHEN NEW.conversation_id='' THEN NEW.room_id ELSE NEW.conversation_id END,
@@ -96,179 +145,301 @@ def migrate(db):
                     AND id=NEW.thread_id AND id!=NEW.id),NEW.id) END WHERE id=NEW.id;
         INSERT INTO collaboration_room_changes(room_id,kind,object_id,version,created)
             VALUES (NEW.room_id,'message',NEW.id,NEW.version,NEW.created);
-        END''')
+        END""")
 
 
 class ConversationService:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
         from hub.collaboration.project_scopes import ProjectScopes
+
         self.project_scopes = ProjectScopes(collaboration)
         from hub.collaboration.working_scopes import WorkingScopes
+
         self.working_scopes = WorkingScopes(collaboration)
         from hub.collaboration.conversation_archive import ConversationArchive
+
         self.archive = ConversationArchive(self)
 
     def ensure_default(self, room):
-        existing = self.store.one('SELECT archived_at FROM conversation_rooms WHERE id=?', (room['id'],))
-        if self.store.one('SELECT 1 FROM conversation_partition_migrations WHERE room_id=?', (room['id'],)):
+        existing = self.store.one(
+            "SELECT archived_at FROM conversation_rooms WHERE id=?", (room["id"],)
+        )
+        if self.store.one(
+            "SELECT 1 FROM conversation_partition_migrations WHERE room_id=?", (room["id"],)
+        ):
             return
-        if not existing and self.store.one('SELECT 1 FROM conversation_projects WHERE room_id=?', (room['id'],)):
-            self.store.execute('INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)', (room['id'],))
+        if not existing and self.store.one(
+            "SELECT 1 FROM conversation_projects WHERE room_id=?", (room["id"],)
+        ):
+            self.store.execute(
+                "INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)", (room["id"],)
+            )
             return  # A new room already owns this partition; no second default.
-        if existing and existing['archived_at'] is not None:
+        if existing and existing["archived_at"] is not None:
             return
-        if not existing and self.store.one('''SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
-                WHERE json_extract(p.value,'$.id')=?''', (room['id'],)):
+        if not existing and self.store.one(
+            """SELECT 1 FROM conversation_archives a,json_each(a.snapshot,'$.projects') p
+                WHERE json_extract(p.value,'$.id')=?""",
+            (room["id"],),
+        ):
             return
-        self.store.execute('''INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created)
-            VALUES (?,?,?,?,?)''', (room['id'], room['space_id'], room['owner_user_id'],
-            room['title'] or room['project_id'] + ' · ' + room['environment_id'], room['created']))
-        self.store.execute('INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)', (room['id'], room['id'], room['created']))
-        self.store.execute('INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)', (room['id'],))
+        self.store.execute(
+            """INSERT OR IGNORE INTO conversation_rooms (id,space_id,owner_user_id,title,created)
+            VALUES (?,?,?,?,?)""",
+            (
+                room["id"],
+                room["space_id"],
+                room["owner_user_id"],
+                room["title"] or room["project_id"] + " · " + room["environment_id"],
+                room["created"],
+            ),
+        )
+        self.store.execute(
+            "INSERT OR IGNORE INTO conversation_projects VALUES (?,?,?)",
+            (room["id"], room["id"], room["created"]),
+        )
+        self.store.execute(
+            "INSERT OR IGNORE INTO conversation_partition_migrations VALUES (?)", (room["id"],)
+        )
 
     def object(self, principal, identifier, *, include_archived=False):
         from hub.room_scope import current
+
         restriction = current(self.store, principal.grant_id)
-        if restriction and restriction['conversation_id'] != identifier:
-            raise DevError('ROOM_SCOPE_CONVERSATION_DENIED', '当前连接仅属于原批准话题，不能按已知编号读取其他话题', 403)
-        row = self.store.one('SELECT * FROM conversation_rooms WHERE id=? AND space_id=? AND owner_user_id=?',
-                             (identifier, principal.space_id, principal.user_id))
+        if restriction and restriction["conversation_id"] != identifier:
+            raise DevError(
+                "ROOM_SCOPE_CONVERSATION_DENIED",
+                "当前连接仅属于原批准话题，不能按已知编号读取其他话题",
+                403,
+            )
+        row = self.store.one(
+            "SELECT * FROM conversation_rooms WHERE id=? AND space_id=? AND owner_user_id=?",
+            (identifier, principal.space_id, principal.user_id),
+        )
         if not row:
-            raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
-        if row['archived_at'] is not None and not include_archived:
-            raise DevError('CONVERSATION_ARCHIVED', '此房间已删除，旧连接和授权不可继续使用', 410)
+            raise DevError("CONVERSATION_NOT_FOUND", "当前授权下没有这个聊天室", 404)
+        if row["archived_at"] is not None and not include_archived:
+            raise DevError("CONVERSATION_ARCHIVED", "此房间已删除，旧连接和授权不可继续使用", 410)
         return row
 
     @memoized
     def visible(self, principal, conversation, *, include_archived=False):
         if include_archived:
             self.c.owner(principal)
-        self.object(principal, conversation['id'], include_archived=include_archived)
-        rows = self.store.all('''SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
-            WHERE p.conversation_id=? ORDER BY p.created,r.id''', (conversation['id'],))
-        if include_archived and conversation['archived_at'] is not None:
+        self.object(principal, conversation["id"], include_archived=include_archived)
+        rows = self.store.all(
+            """SELECT r.* FROM collaboration_rooms r JOIN conversation_projects p ON p.room_id=r.id
+            WHERE p.conversation_id=? ORDER BY p.created,r.id""",
+            (conversation["id"],),
+        )
+        if include_archived and conversation["archived_at"] is not None:
             # Archive membership is historical visibility only. It never
             # reattaches projects, subscriptions, writers or execution scopes.
-            archive = self.store.one('SELECT snapshot FROM conversation_archives WHERE conversation_id=? ORDER BY version DESC LIMIT 1',
-                                     (conversation['id'],))
-            members = json.loads(archive['snapshot']).get('projects', []) if archive else []
-            saved = {item['id']: item for item in members}
-            rows = self.store.all('SELECT * FROM collaboration_rooms WHERE space_id=? AND owner_user_id=? AND id IN (' +
-                ','.join('?' for _ in saved) + ')', (principal.space_id, principal.user_id, *saved)) if saved else []
-            rows = [row for row in rows if row['project_id'] == saved[row['id']]['project_id']
-                    and row['environment_id'] == saved[row['id']]['environment_id']]
+            archive = self.store.one(
+                "SELECT snapshot FROM conversation_archives WHERE conversation_id=? ORDER BY version DESC LIMIT 1",
+                (conversation["id"],),
+            )
+            members = json.loads(archive["snapshot"]).get("projects", []) if archive else []
+            saved = {item["id"]: item for item in members}
+            rows = (
+                self.store.all(
+                    "SELECT * FROM collaboration_rooms WHERE space_id=? AND owner_user_id=? AND id IN ("
+                    + ",".join("?" for _ in saved)
+                    + ")",
+                    (principal.space_id, principal.user_id, *saved),
+                )
+                if saved
+                else []
+            )
+            rows = [
+                row
+                for row in rows
+                if row["project_id"] == saved[row["id"]]["project_id"]
+                and row["environment_id"] == saved[row["id"]]["environment_id"]
+            ]
         result = []
         for room in rows:
             try:
-                project = projected_project(self.c, room['project_id'], principal)
+                project = projected_project(self.c, room["project_id"], principal)
             except DevError:
                 continue
-            result.append({**room, 'project_label': project.get('alias', room['project_id'])})
+            result.append({**room, "project_label": project.get("alias", room["project_id"])})
         return result
 
     def resolve(self, principal, room, args):
-        identifier = args.get('conversation_id') or room['id']
+        identifier = args.get("conversation_id") or room["id"]
         conversation = self.object(principal, identifier)
-        if not self.store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?', (identifier, room['id'])):
-            raise DevError('CONVERSATION_PROJECT_MISMATCH', '当前项目没有加入这个聊天室', 409)
+        if not self.store.one(
+            "SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?",
+            (identifier, room["id"]),
+        ):
+            raise DevError("CONVERSATION_PROJECT_MISMATCH", "当前项目没有加入这个聊天室", 409)
         return conversation
 
     def message(self, principal, room, conversation_id, identifier):
         """Read historical partitions without moving the room's message connection."""
-        self.resolve(principal, room, {'conversation_id': conversation_id})
+        self.resolve(principal, room, {"conversation_id": conversation_id})
         working = self.working_scopes.current(conversation_id)
-        if not working or working['spec']['connection']['room_id'] != room['id']:
-            row = self.c.object('collaboration_messages', room, identifier)
+        if not working or working["spec"]["connection"]["room_id"] != room["id"]:
+            row = self.c.object("collaboration_messages", room, identifier)
         else:
-            row = self.store.one('''SELECT m.* FROM collaboration_messages m
+            row = self.store.one(
+                """SELECT m.* FROM collaboration_messages m
                 JOIN conversation_projects p ON p.room_id=m.room_id AND p.conversation_id=m.conversation_id
                 JOIN collaboration_rooms r ON r.id=m.room_id
-                WHERE m.id=? AND m.conversation_id=? AND r.space_id=? AND r.owner_user_id=?''',
-                (identifier, conversation_id, principal.space_id, principal.user_id))
+                WHERE m.id=? AND m.conversation_id=? AND r.space_id=? AND r.owner_user_id=?""",
+                (identifier, conversation_id, principal.space_id, principal.user_id),
+            )
             if not row:
-                raise DevError('NOT_FOUND', '当前授权下没有这条消息', 404)
-            source = self.store.one('SELECT project_id FROM collaboration_rooms WHERE id=?', (row['room_id'],))
-            projected_project(self.c, source['project_id'], principal)
-        if row['conversation_id'] != conversation_id:
-            raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
+                raise DevError("NOT_FOUND", "当前授权下没有这条消息", 404)
+            source = self.store.one(
+                "SELECT project_id FROM collaboration_rooms WHERE id=?", (row["room_id"],)
+            )
+            projected_project(self.c, source["project_id"], principal)
+        if row["conversation_id"] != conversation_id:
+            raise DevError("THREAD_NOT_FOUND", "话题不属于这个聊天室", 404)
         self.c.chatroom.require_message_visible(principal, row)
         return row
 
     def title_is_generated(self, conversation):
         """Display provenance only; never expose an inaccessible source project."""
-        room = self.store.one('SELECT project_id,environment_id,title FROM collaboration_rooms WHERE id=?',
-                              (conversation['id'],))
-        return bool(room and not room['title'] and
-                    conversation['title'] == room['project_id'] + ' · ' + room['environment_id'])
+        room = self.store.one(
+            "SELECT project_id,environment_id,title FROM collaboration_rooms WHERE id=?",
+            (conversation["id"],),
+        )
+        return bool(
+            room
+            and not room["title"]
+            and conversation["title"] == room["project_id"] + " · " + room["environment_id"]
+        )
 
     def view(self, principal, conversation):
         projects = self.visible(principal, conversation)
         # The owner retains a room after its last project is removed. A grant
         # still needs an explicit live member binding for a zero-project room.
         if not projects and principal.grant_id:
-            member = self.store.one("SELECT 1 FROM room_members WHERE conversation_id=? AND grant_id=? AND status NOT IN ('removed','paused','legacy')",
-                                    (conversation['id'], principal.grant_id))
+            member = self.store.one(
+                "SELECT 1 FROM room_members WHERE conversation_id=? AND grant_id=? AND status NOT IN ('removed','paused','legacy')",
+                (conversation["id"], principal.grant_id),
+            )
             if not member:
-                raise DevError('CONVERSATION_NOT_FOUND', '当前授权下没有这个聊天室', 404)
-        working = self.working_scopes.current(conversation['id'])
-        active_ids = {r['project_id'] for r in working['spec']['projects']} if working else None
-        visible_ids = {r['project_id'] for r in projects}
-        extra = {'working_scope': {**self.working_scopes.reference(working),
-                    'project_ids': sorted(active_ids & visible_ids)}} if working else {}
-        if working and working['spec']['connection']['project_id'] in visible_ids:
-            extra['working_scope']['dot_id'] = working['spec']['dot_id']
-            connection = working['spec']['connection']
-            source = next((room for room in projects if room['project_id'] == connection['project_id'] and
-                           room['environment_id'] == connection['environment_id']), None)
-            extra['connection'] = {**connection, **({'project_label': source['project_label']} if source else {})}
-        restored = self.store.one('SELECT 1 FROM conversation_archives WHERE conversation_id=? LIMIT 1', (conversation['id'],))
+                raise DevError("CONVERSATION_NOT_FOUND", "当前授权下没有这个聊天室", 404)
+        working = self.working_scopes.current(conversation["id"])
+        active_ids = {r["project_id"] for r in working["spec"]["projects"]} if working else None
+        visible_ids = {r["project_id"] for r in projects}
+        extra = (
+            {
+                "working_scope": {
+                    **self.working_scopes.reference(working),
+                    "project_ids": sorted(active_ids & visible_ids),
+                }
+            }
+            if working
+            else {}
+        )
+        if working and working["spec"]["connection"]["project_id"] in visible_ids:
+            extra["working_scope"]["dot_id"] = working["spec"]["dot_id"]
+            connection = working["spec"]["connection"]
+            source = next(
+                (
+                    room
+                    for room in projects
+                    if room["project_id"] == connection["project_id"]
+                    and room["environment_id"] == connection["environment_id"]
+                ),
+                None,
+            )
+            extra["connection"] = {
+                **connection,
+                **({"project_label": source["project_label"]} if source else {}),
+            }
+        restored = self.store.one(
+            "SELECT 1 FROM conversation_archives WHERE conversation_id=? LIMIT 1",
+            (conversation["id"],),
+        )
         if restored:
             # Historical membership is display-only, never an executable working
             # scope. Keep current project visibility filtering on every read.
-            extra['history_projects'] = [
-                {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} |
-                {'room_id': room['id'], 'execution_authorized': False, 'capabilities': [], 'execution_targets': []}
-                for room in projects]
-        return {**conversation, **extra, 'kind': 'conversation', 'title_is_generated': self.title_is_generated(conversation),
-                'restored_from_archive': bool(restored), 'projects': [
-            {key: room[key] for key in ('project_id', 'environment_id', 'project_label', 'state')} | {'room_id': room['id']}
-            for room in projects if active_ids is None or room['project_id'] in active_ids],
-            'project_authorizations': self.project_scopes.listing(principal, conversation, {room['project_id'] for room in projects}),
-            'visibility_token': digest([principal.grant_id or principal.user_id, [room['id'] for room in projects]])}
+            extra["history_projects"] = [
+                {
+                    key: room[key]
+                    for key in ("project_id", "environment_id", "project_label", "state")
+                }
+                | {
+                    "room_id": room["id"],
+                    "execution_authorized": False,
+                    "capabilities": [],
+                    "execution_targets": [],
+                }
+                for room in projects
+            ]
+        return {
+            **conversation,
+            **extra,
+            "kind": "conversation",
+            "title_is_generated": self.title_is_generated(conversation),
+            "restored_from_archive": bool(restored),
+            "projects": [
+                {
+                    key: room[key]
+                    for key in ("project_id", "environment_id", "project_label", "state")
+                }
+                | {"room_id": room["id"]}
+                for room in projects
+                if active_ids is None or room["project_id"] in active_ids
+            ],
+            "project_authorizations": self.project_scopes.listing(
+                principal, conversation, {room["project_id"] for room in projects}
+            ),
+            "visibility_token": digest(
+                [principal.grant_id or principal.user_id, [room["id"] for room in projects]]
+            ),
+        }
 
     def listing(self, principal, *, include_archived=False):
         self.c.guard()
         principal = refresh_principal(self.store, principal)
         if include_archived:
             self.c.owner(principal)
-        rows = self.store.all('SELECT * FROM conversation_rooms WHERE space_id=? AND owner_user_id=?' +
-                             ('' if include_archived else ' AND archived_at IS NULL') + ' ORDER BY created,id LIMIT 128',
-                             (principal.space_id, principal.user_id))
+        rows = self.store.all(
+            "SELECT * FROM conversation_rooms WHERE space_id=? AND owner_user_id=?"
+            + ("" if include_archived else " AND archived_at IS NULL")
+            + " ORDER BY created,id LIMIT 128",
+            (principal.space_id, principal.user_id),
+        )
         result = []
         for row in rows:
             try:
-                result.append(self.archive.archived_view(principal, row) if row['archived_at'] is not None
-                              else self.view(principal, row))
+                result.append(
+                    self.archive.archived_view(principal, row)
+                    if row["archived_at"] is not None
+                    else self.view(principal, row)
+                )
             except DevError:
                 continue
-        return {'items': result, 'next_cursor': None}
+        return {"items": result, "next_cursor": None}
 
     def mutation(self, principal, action, args, perform):
-        identifier = digest([principal.space_id, principal.user_id, action, args['idempotency_key']])
+        identifier = digest(
+            [principal.space_id, principal.user_id, action, args["idempotency_key"]]
+        )
         fingerprint = digest(args)
-        saved = self.store.one('SELECT * FROM conversation_idempotency WHERE id=?', (identifier,))
+        saved = self.store.one("SELECT * FROM conversation_idempotency WHERE id=?", (identifier,))
         if saved:
-            if saved['digest'] != fingerprint:
-                raise DevError('IDEMPOTENCY_CONFLICT', '同一请求键不能用于不同内容', 409)
-            result = json.loads(saved['response'])
+            if saved["digest"] != fingerprint:
+                raise DevError("IDEMPOTENCY_CONFLICT", "同一请求键不能用于不同内容", 409)
+            result = json.loads(saved["response"])
             # Receipts identify the completed operation, never retain authority
             # over an old project list, version or visibility token.
-            conversation = self.object(principal, result['conversation']['id'])
-            return {**result, 'conversation': self.view(principal, conversation)}
+            conversation = self.object(principal, result["conversation"]["id"])
+            return {**result, "conversation": self.view(principal, conversation)}
         result = perform()
-        receipt = {**result, 'conversation': {'id': result['conversation']['id']}}
-        self.store.execute('INSERT INTO conversation_idempotency VALUES (?,?,?,?)', (identifier, fingerprint, canonical(receipt), self.c.clock()))
+        receipt = {**result, "conversation": {"id": result["conversation"]["id"]}}
+        self.store.execute(
+            "INSERT INTO conversation_idempotency VALUES (?,?,?,?)",
+            (identifier, fingerprint, canonical(receipt), self.c.clock()),
+        )
         return result
 
     def create(self, raw, principal):
@@ -278,120 +449,202 @@ class ConversationService:
             principal = refresh_principal(self.store, principal)
             self.c.owner(principal)
             # Reauthorize every supplied project before replaying an old receipt.
-            for project in args['projects']:
-                projected_project(self.c, project['project'], principal)
+            for project in args["projects"]:
+                projected_project(self.c, project["project"], principal)
+
             def save():
                 rooms = []
-                for project in args['projects']:
+                for project in args["projects"]:
                     _, room = self.c.scope(principal, project, create=True)
-                    if room['id'] in rooms:
-                        raise DevError('DUPLICATE_PROJECT', '聊天室项目不能重复', 422)
-                    rooms.append(room['id'])
+                    if room["id"] in rooms:
+                        raise DevError("DUPLICATE_PROJECT", "聊天室项目不能重复", 422)
+                    rooms.append(room["id"])
                 identifier = uuid.uuid4().hex
-                self.store.execute('INSERT INTO conversation_rooms (id,space_id,owner_user_id,title,created) VALUES (?,?,?,?,?)',
-                                   (identifier, principal.space_id, principal.user_id, args['title'].strip(), self.c.clock()))
+                self.store.execute(
+                    "INSERT INTO conversation_rooms (id,space_id,owner_user_id,title,created) VALUES (?,?,?,?,?)",
+                    (
+                        identifier,
+                        principal.space_id,
+                        principal.user_id,
+                        args["title"].strip(),
+                        self.c.clock(),
+                    ),
+                )
                 for room in rooms:
-                    self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (identifier, room, self.c.clock()))
-                return {'conversation': self.view(principal, self.object(principal, identifier))}
-            return self.mutation(principal, 'conversation_create', args, save)
+                    self.store.execute(
+                        "INSERT INTO conversation_projects VALUES (?,?,?)",
+                        (identifier, room, self.c.clock()),
+                    )
+                return {"conversation": self.view(principal, self.object(principal, identifier))}
+
+            return self.mutation(principal, "conversation_create", args, save)
 
     def add_project(self, raw, principal):
         args = validate(contracts.ConversationProject, raw)
-        if args['authorization'] is None:
-            args.pop('authorization')  # Keep legacy relationship-only retry fingerprints.
+        if args["authorization"] is None:
+            args.pop("authorization")  # Keep legacy relationship-only retry fingerprints.
         with self.store.transaction():
             self.c.guard()
             principal = refresh_principal(self.store, principal)
             self.c.owner(principal)
-            conversation = self.object(principal, args['conversation_id'])
-            project = projected_project(self.c, args['project'], principal)
+            conversation = self.object(principal, args["conversation_id"])
+            project = projected_project(self.c, args["project"], principal)
+
             def save():
-                self.c.rooms.migration.legacy_write(conversation['id'])
-                if conversation['version'] != args['expected_version']:
-                    raise DevError('STALE_VERSION', '聊天室项目列表已改变，请刷新后重新确认', 409)
-                authorization = self.project_scopes.approve(principal, conversation, project,
-                    args['environment_id'], args['authorization']) if args.get('authorization') else None
+                self.c.rooms.migration.legacy_write(conversation["id"])
+                if conversation["version"] != args["expected_version"]:
+                    raise DevError("STALE_VERSION", "聊天室项目列表已改变，请刷新后重新确认", 409)
+                authorization = (
+                    self.project_scopes.approve(
+                        principal,
+                        conversation,
+                        project,
+                        args["environment_id"],
+                        args["authorization"],
+                    )
+                    if args.get("authorization")
+                    else None
+                )
                 _, room = self.c.scope(principal, args, create=True)
-                existing = self.store.one('SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?', (conversation['id'], room['id']))
+                existing = self.store.one(
+                    "SELECT 1 FROM conversation_projects WHERE conversation_id=? AND room_id=?",
+                    (conversation["id"], room["id"]),
+                )
                 if not existing:
-                    self.store.execute('INSERT INTO conversation_projects VALUES (?,?,?)', (conversation['id'], room['id'], self.c.clock()))
-                    self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (conversation['id'],))
+                    self.store.execute(
+                        "INSERT INTO conversation_projects VALUES (?,?,?)",
+                        (conversation["id"], room["id"], self.c.clock()),
+                    )
+                    self.store.execute(
+                        "UPDATE conversation_rooms SET version=version+1 WHERE id=?",
+                        (conversation["id"],),
+                    )
                 if authorization and existing:
-                    self.store.execute('UPDATE conversation_rooms SET version=version+1 WHERE id=?', (conversation['id'],))
-                return {'conversation': self.view(principal, self.object(principal, conversation['id'])),
-                        'added': not bool(existing), **({'authorization': authorization} if authorization else {})}
-            result = self.mutation(principal, 'conversation_add_project:' + conversation['id'], args, save)
-            if result.get('authorization'):
-                dot = self.c.dots.find(args['authorization']['dot_id'])
-                room = self.store.one('SELECT * FROM collaboration_rooms WHERE id=?', (dot['room_id'],))
+                    self.store.execute(
+                        "UPDATE conversation_rooms SET version=version+1 WHERE id=?",
+                        (conversation["id"],),
+                    )
+                return {
+                    "conversation": self.view(
+                        principal, self.object(principal, conversation["id"])
+                    ),
+                    "added": not bool(existing),
+                    **({"authorization": authorization} if authorization else {}),
+                }
+
+            result = self.mutation(
+                principal, "conversation_add_project:" + conversation["id"], args, save
+            )
+            if result.get("authorization"):
+                dot = self.c.dots.find(args["authorization"]["dot_id"])
+                room = self.store.one(
+                    "SELECT * FROM collaboration_rooms WHERE id=?", (dot["room_id"],)
+                )
                 policy = self.c.dots.policy(room, dot)
-                self.project_scopes.authorize(principal, policy, result['authorization'])
-                result['execution_authorized'] = True
+                self.project_scopes.authorize(principal, policy, result["authorization"])
+                result["execution_authorized"] = True
             return result
 
     def binding(self, principal, conversation, rooms, mode):
-        return digest([conversation['id'], principal.grant_id or principal.user_id, sorted(room['id'] for room in rooms), mode])
+        return digest(
+            [
+                conversation["id"],
+                principal.grant_id or principal.user_id,
+                sorted(room["id"] for room in rooms),
+                mode,
+            ]
+        )
 
     @projection
     def read(self, args, principal, room):
         conversation = self.resolve(principal, room, args)
-        rooms = self.visible(principal, conversation) if args.get('conversation_id') else [room]
-        ids = [r['id'] for r in rooms]
+        rooms = self.visible(principal, conversation) if args.get("conversation_id") else [room]
+        ids = [r["id"] for r in rooms]
         if not ids:
-            raise DevError('CONVERSATION_NOT_FOUND', '没有可读取的项目', 404)
-        mode = args['kind']
-        params = [conversation['id'], *ids]
-        where = 'conversation_id=? AND room_id IN (' + ','.join('?' for _ in ids) + ')'
-        if mode == 'thread':
-            root = self.message(principal, room, conversation['id'], args['id'])
-            if root['conversation_id'] != conversation['id']:
-                raise DevError('THREAD_NOT_FOUND', '话题不属于这个聊天室', 404)
-            where += ' AND thread_root_id=?'
-            params.append(root['thread_root_id'])
-            mode += ':' + root['thread_root_id']
-        if mode == 'search':
-            query = args['query'].strip()
+            raise DevError("CONVERSATION_NOT_FOUND", "没有可读取的项目", 404)
+        mode = args["kind"]
+        params = [conversation["id"], *ids]
+        where = "conversation_id=? AND room_id IN (" + ",".join("?" for _ in ids) + ")"
+        if mode == "thread":
+            root = self.message(principal, room, conversation["id"], args["id"])
+            if root["conversation_id"] != conversation["id"]:
+                raise DevError("THREAD_NOT_FOUND", "话题不属于这个聊天室", 404)
+            where += " AND thread_root_id=?"
+            params.append(root["thread_root_id"])
+            mode += ":" + root["thread_root_id"]
+        if mode == "search":
+            query = args["query"].strip()
             if not query:
-                raise DevError('INVALID_QUERY', '请输入搜索内容', 422)
+                raise DevError("INVALID_QUERY", "请输入搜索内容", 422)
             where += " AND json_extract(body,'$.body_text') LIKE ? ESCAPE '\\'"
-            params.append('%' + query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
-            mode += ':' + digest(query)
+            params.append(
+                "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            )
+            mode += ":" + digest(query)
         binding = self.binding(principal, conversation, rooms, mode)
-        latest = self.store.one('SELECT COALESCE(MAX(conversation_sequence),0) AS n FROM collaboration_messages WHERE ' +
-                               'conversation_id=? AND room_id IN (' + ','.join('?' for _ in ids) + ')', (conversation['id'], *ids))['n']
-        if args['cursor'] and args['after']:
-            raise DevError('INVALID_CURSOR', '不能同时向前和向后分页', 400)
-        after = bool(args['after'])
-        value = read_cursor(self.c.secret, binding, args['after'] or args['cursor']) if args['after'] or args['cursor'] else latest + 1
+        latest = self.store.one(
+            "SELECT COALESCE(MAX(conversation_sequence),0) AS n FROM collaboration_messages WHERE "
+            + "conversation_id=? AND room_id IN ("
+            + ",".join("?" for _ in ids)
+            + ")",
+            (conversation["id"], *ids),
+        )["n"]
+        if args["cursor"] and args["after"]:
+            raise DevError("INVALID_CURSOR", "不能同时向前和向后分页", 400)
+        after = bool(args["after"])
+        value = (
+            read_cursor(self.c.secret, binding, args["after"] or args["cursor"])
+            if args["after"] or args["cursor"]
+            else latest + 1
+        )
         if type(value) is not int or value < 0:
-            raise DevError('INVALID_CURSOR', '消息游标格式不正确', 400)
-        where += ' AND conversation_sequence' + ('>?' if after else '<?')
+            raise DevError("INVALID_CURSOR", "消息游标格式不正确", 400)
+        where += " AND conversation_sequence" + (">?" if after else "<?")
         params.append(value)
-        rows = self.store.all('SELECT * FROM collaboration_messages WHERE ' + where + ' ORDER BY conversation_sequence ' +
-                             ('ASC' if after else 'DESC') + ' LIMIT ?', (*params, args['limit'] + 1))
-        selected = rows[:args['limit']]
+        rows = self.store.all(
+            "SELECT * FROM collaboration_messages WHERE "
+            + where
+            + " ORDER BY conversation_sequence "
+            + ("ASC" if after else "DESC")
+            + " LIMIT ?",
+            (*params, args["limit"] + 1),
+        )
+        selected = rows[: args["limit"]]
         if not after:
             selected.reverse()
-        high = selected[-1]['conversation_sequence'] if selected else (value if after else latest)
-        cursor = self.store.one('SELECT sequence FROM conversation_read_cursors WHERE conversation_id=? AND user_id=?',
-                                (conversation['id'], principal.user_id))
-        baseline = max(conversation['history_sequence'], room['chat_history_sequence'] if conversation['id'] == room['id'] else 0)
-        return {'items': self.c.chatroom.views(selected, principal=principal), 'conversation': self.view(principal, conversation),
-                'visibility_token': self.view(principal, conversation)['visibility_token'],
-                'next_cursor': sign_cursor(self.c.secret, binding, selected[0]['conversation_sequence']) if not after and len(rows) > args['limit'] else None,
-                'after_cursor': sign_cursor(self.c.secret, binding, high), 'has_more': len(rows) > args['limit'],
-                'latest_sequence': latest, 'read_sequence': max(baseline, cursor['sequence'] if cursor else 0)}
+        high = selected[-1]["conversation_sequence"] if selected else (value if after else latest)
+        cursor = self.store.one(
+            "SELECT sequence FROM conversation_read_cursors WHERE conversation_id=? AND user_id=?",
+            (conversation["id"], principal.user_id),
+        )
+        baseline = max(
+            conversation["history_sequence"],
+            room["chat_history_sequence"] if conversation["id"] == room["id"] else 0,
+        )
+        return {
+            "items": self.c.chatroom.views(selected, principal=principal),
+            "conversation": self.view(principal, conversation),
+            "visibility_token": self.view(principal, conversation)["visibility_token"],
+            "next_cursor": sign_cursor(self.c.secret, binding, selected[0]["conversation_sequence"])
+            if not after and len(rows) > args["limit"]
+            else None,
+            "after_cursor": sign_cursor(self.c.secret, binding, high),
+            "has_more": len(rows) > args["limit"],
+            "latest_sequence": latest,
+            "read_sequence": max(baseline, cursor["sequence"] if cursor else 0),
+        }
 
     def changes(self, args, principal, room):
         conversation = self.resolve(principal, room, args)
-        rooms = self.visible(principal, conversation) if args.get('conversation_id') else [room]
-        ids = [r['id'] for r in rooms]
-        binding = self.binding(principal, conversation, rooms, 'changes')
-        value = read_cursor(self.c.secret, binding, args['cursor']) if args['cursor'] else 0
+        rooms = self.visible(principal, conversation) if args.get("conversation_id") else [room]
+        ids = [r["id"] for r in rooms]
+        binding = self.binding(principal, conversation, rooms, "changes")
+        value = read_cursor(self.c.secret, binding, args["cursor"]) if args["cursor"] else 0
         if type(value) is not int or value < 0:
-            raise DevError('INVALID_CURSOR', '变更游标格式不正确', 400)
-        placeholders = ','.join('?' for _ in ids)
-        rows = self.store.all(f'''SELECT c.sequence,c.kind,c.object_id,c.version,c.room_id AS source_room_id FROM collaboration_room_changes c
+            raise DevError("INVALID_CURSOR", "变更游标格式不正确", 400)
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.store.all(
+            f"""SELECT c.sequence,c.kind,c.object_id,c.version,c.room_id AS source_room_id FROM collaboration_room_changes c
             WHERE c.room_id IN ({placeholders}) AND c.sequence>? AND (
                 (c.kind IN ('message','message_delivery') AND EXISTS
                     (SELECT 1 FROM collaboration_messages m WHERE m.id=c.object_id AND m.conversation_id=?))
@@ -401,15 +654,32 @@ class ConversationService:
                     WHERE j.id=c.object_id AND m.conversation_id=?))
                 OR (c.kind='goal' AND EXISTS (SELECT 1 FROM collaboration_goals g
                     JOIN collaboration_messages m ON m.id=g.source_message_id WHERE g.id=c.object_id AND m.conversation_id=?)))
-            ORDER BY c.sequence LIMIT ?''', (*ids, value, conversation['id'], conversation['id'], conversation['id'], args['limit'] + 1))
-        selected = rows[:args['limit']]
+            ORDER BY c.sequence LIMIT ?""",
+            (
+                *ids,
+                value,
+                conversation["id"],
+                conversation["id"],
+                conversation["id"],
+                args["limit"] + 1,
+            ),
+        )
+        selected = rows[: args["limit"]]
         visible = []
         for change in selected:
-            if change['kind'] in {'message', 'message_delivery'}:
-                message = self.store.one('SELECT * FROM collaboration_messages WHERE id=?', (change['object_id'],))
+            if change["kind"] in {"message", "message_delivery"}:
+                message = self.store.one(
+                    "SELECT * FROM collaboration_messages WHERE id=?", (change["object_id"],)
+                )
                 if message and not self.c.chatroom.message_visible(principal, message):
                     continue
             visible.append(change)
-        return {'items': visible, 'next_cursor': sign_cursor(self.c.secret, binding, selected[-1]['sequence'] if selected else value),
-                'has_more': len(rows) > args['limit'], 'reset_required': False,
-                'visibility_token': self.view(principal, conversation)['visibility_token']}
+        return {
+            "items": visible,
+            "next_cursor": sign_cursor(
+                self.c.secret, binding, selected[-1]["sequence"] if selected else value
+            ),
+            "has_more": len(rows) > args["limit"],
+            "reset_required": False,
+            "visibility_token": self.view(principal, conversation)["visibility_token"],
+        }

@@ -17,3 +17,16 @@ codepier text eol=lf
 *.jpg binary
 *.webp binary
 *.zip binary
+
+# Reviewed source is adjacent; updater-ready build products remain checked in.
+web/mcp-apps/changes-v1.html linguist-generated=true
+web/collaboration-room.js linguist-generated=true
+web/core/bundle.js linguist-generated=true
+web/chat.js linguist-generated=true
+web/chat.css linguist-generated=true
+web/collaboration-room.css linguist-generated=true
+web/index.html linguist-generated=true
+web/assets-manifest.json linguist-generated=true
+web/browser-extension.zip linguist-generated=true
+scripts/panel_update_source.py linguist-generated=true
+shared/source_inventory.json linguist-generated=true

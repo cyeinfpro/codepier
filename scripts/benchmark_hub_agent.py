@@ -6,6 +6,7 @@ No external endpoint, new dependency, production credential, browser or model ca
 Do not run alongside a user's latency-sensitive work. Measurements are evidence,
 not a promise: retain every error and host-load sample, alternate variant order.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,67 +30,93 @@ import uuid
 
 def percentiles(values):
     values = sorted(v for v in values if v is not None)
-    return {key: round(values[max(0, math.ceil(len(values)*p)-1)], 3) if values else None
-            for key, p in [('p50', .5), ('p95', .95), ('p99', .99)]}
+    return {
+        key: round(values[max(0, math.ceil(len(values) * p) - 1)], 3) if values else None
+        for key, p in [("p50", 0.5), ("p95", 0.95), ("p99", 0.99)]
+    }
 
 
 def fairness(samples):
     groups = {}
     for sample in samples:
-        groups.setdefault(sample['worker'], []).append(sample['latency_ms'])
-    rates = [1000/statistics.mean(values) for values in groups.values() if statistics.mean(values)>0]
-    return sum(rates)**2/(len(rates)*sum(v*v for v in rates)) if rates else None
+        groups.setdefault(sample["worker"], []).append(sample["latency_ms"])
+    rates = [
+        1000 / statistics.mean(values) for values in groups.values() if statistics.mean(values) > 0
+    ]
+    return sum(rates) ** 2 / (len(rates) * sum(v * v for v in rates)) if rates else None
 
 
 def summarize(samples, seconds, *, include_kinds=True):
-    good = [s for s in samples if s['ok']]
-    result = {'samples':len(samples), 'succeeded':len(good), 'errors':len(samples)-len(good),
-            'error_rate':(len(samples)-len(good))/len(samples) if samples else None,
-            'duration_seconds':seconds, 'throughput_success_per_second':len(good)/seconds if seconds > 0 else None,
-            'latency_ms_all':percentiles([s['latency_ms'] for s in samples]),
-            'latency_ms_success':percentiles([s['latency_ms'] for s in good]),
-            'hub_queue_ms':percentiles([s.get('hub_queue_ms') for s in samples]),
-            'agent_queue_ms':percentiles([s.get('agent_queue_ms') for s in samples]),
-            'jain_inverse_worker_mean_latency':fairness(samples),
-            'queue_sample_count':sum(s.get('hub_queue_ms') is not None for s in samples),
-            'poll_requests':sum(s.get('polls',0) for s in samples)}
+    good = [s for s in samples if s["ok"]]
+    result = {
+        "samples": len(samples),
+        "succeeded": len(good),
+        "errors": len(samples) - len(good),
+        "error_rate": (len(samples) - len(good)) / len(samples) if samples else None,
+        "duration_seconds": seconds,
+        "throughput_success_per_second": len(good) / seconds if seconds > 0 else None,
+        "latency_ms_all": percentiles([s["latency_ms"] for s in samples]),
+        "latency_ms_success": percentiles([s["latency_ms"] for s in good]),
+        "hub_queue_ms": percentiles([s.get("hub_queue_ms") for s in samples]),
+        "agent_queue_ms": percentiles([s.get("agent_queue_ms") for s in samples]),
+        "jain_inverse_worker_mean_latency": fairness(samples),
+        "queue_sample_count": sum(s.get("hub_queue_ms") is not None for s in samples),
+        "poll_requests": sum(s.get("polls", 0) for s in samples),
+    }
     if include_kinds:
-        result['by_kind'] = {kind: summarize([s for s in samples if s.get('kind', 'unspecified') == kind],
-            seconds, include_kinds=False) for kind in sorted({s.get('kind', 'unspecified') for s in samples})}
+        result["by_kind"] = {
+            kind: summarize(
+                [s for s in samples if s.get("kind", "unspecified") == kind],
+                seconds,
+                include_kinds=False,
+            )
+            for kind in sorted({s.get("kind", "unspecified") for s in samples})
+        }
     return result
 
 
 def git_identity(repository):
     """Hash all nonignored changes; never copy diff contents into the report."""
+
     def git(*args):
-        return subprocess.check_output(['git', '-C', str(repository), *args])
-    diff = git('diff', '--no-ext-diff', '--no-textconv', '--binary', 'HEAD')
-    status = git('status', '--porcelain=v1', '-z')
+        return subprocess.check_output(["git", "-C", str(repository), *args])
+
+    diff = git("diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD")
+    status = git("status", "--porcelain=v1", "-z")
     digest = hashlib.sha256(diff)
-    for raw in sorted(filter(None, git('ls-files', '--others', '--exclude-standard', '-z').split(b'\0'))):
+    for raw in sorted(
+        filter(None, git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"))
+    ):
         path = repository / os.fsdecode(raw)
         payload = os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()
-        digest.update(len(raw).to_bytes(8, 'big'))
+        digest.update(len(raw).to_bytes(8, "big"))
         digest.update(raw)
-        digest.update(len(payload).to_bytes(8, 'big'))
+        digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
-    return {'commit':git('rev-parse','HEAD').decode().strip(), 'dirty':bool(status),
-            'tracked_diff_and_untracked_source_sha256':digest.hexdigest()}
+    return {
+        "commit": git("rev-parse", "HEAD").decode().strip(),
+        "dirty": bool(status),
+        "tracked_diff_and_untracked_source_sha256": digest.hexdigest(),
+    }
 
 
-UNRESOLVED = {'queued', 'running', 'reconnecting', 'cancelling', 'unknown'}
-TERMINAL = {'succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted'}
+UNRESOLVED = {"queued", "running", "reconnecting", "cancelling", "unknown"}
+TERMINAL = {"succeeded", "failed", "cancelled", "needs_review", "interrupted"}
 
 
 def safe_code(value):
-    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,80}', value) else 'unclassified_error'
+    return (
+        value
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value)
+        else "unclassified_error"
+    )
 
 
 def lookup_original(database, key):
-    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
-        rows = db.execute('SELECT id FROM operations WHERE idem=?', (key,)).fetchall()
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as db:
+        rows = db.execute("SELECT id FROM operations WHERE idem=?", (key,)).fetchall()
     if len(rows) != 1:
-        raise ValueError('original_operation_missing_or_ambiguous')
+        raise ValueError("original_operation_missing_or_ambiguous")
     return rows[0][0]
 
 
@@ -97,11 +124,13 @@ def preflight(seconds, max_load_per_cpu):
     samples = []
     deadline = time.monotonic() + seconds
     while True:
-        samples.append({'at':time.time(), 'loadavg':list(os.getloadavg())})
+        samples.append({"at": time.time(), "loadavg": list(os.getloadavg())})
         if time.monotonic() >= deadline:
             break
-        time.sleep(min(1, max(0, deadline-time.monotonic())))
-    overloaded = any(row['loadavg'][0] / (os.cpu_count() or 1) > max_load_per_cpu for row in samples)
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    overloaded = any(
+        row["loadavg"][0] / (os.cpu_count() or 1) > max_load_per_cpu for row in samples
+    )
     return samples, overloaded
 
 
@@ -117,43 +146,61 @@ def bounded_choice(value, choices, default=None):
 def admission_snapshot(value):
     """Retain bounded diagnostics, never scheduler config, identities or paths."""
     value = value if isinstance(value, dict) else {}
-    states = {'offline', 'unsupported', 'applied', 'rejected', 'pending'}
-    reasons = {'legacy', 'unavailable', 'pressure', 'recovering', 'adaptive'}
-    reported_reasons = {'starting', 'fixed', 'metrics_unavailable', 'memory_critical',
-                        'memory_recovery', 'recovering', 'resource_pressure', 'healthy', 'cooldown'}
-    budget = value.get('durable_admission')
+    states = {"offline", "unsupported", "applied", "rejected", "pending"}
+    reasons = {"legacy", "unavailable", "pressure", "recovering", "adaptive"}
+    reported_reasons = {
+        "starting",
+        "fixed",
+        "metrics_unavailable",
+        "memory_critical",
+        "memory_recovery",
+        "recovering",
+        "resource_pressure",
+        "healthy",
+        "cooldown",
+    }
+    budget = value.get("durable_admission")
     budget = budget if isinstance(budget, dict) else {}
     result = {
-        'state': bounded_choice(value.get('state'), states, 'unknown'),
-        'revision': value.get('revision') if isinstance(value.get('revision'), str)
-                    and re.fullmatch(r'[0-9a-f]{64}', value['revision']) else None,
-        'durable_admission': {
-            'reason': bounded_choice(budget.get('reason'), reasons, 'unknown'),
-            'node_pending_limit': bounded_number(budget.get('node_pending_limit'), 1, 512, integer=True),
-            'project_pending_limit': bounded_number(budget.get('project_pending_limit'), 1, 256, integer=True),
-            'new_heavy_admission_paused': budget.get('new_heavy_admission_paused')
-                if type(budget.get('new_heavy_admission_paused')) is bool else None,
-            'overload_read_reserve': bounded_number(budget.get('overload_read_reserve'), 0, 8, integer=True),
+        "state": bounded_choice(value.get("state"), states, "unknown"),
+        "revision": value.get("revision")
+        if isinstance(value.get("revision"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["revision"])
+        else None,
+        "durable_admission": {
+            "reason": bounded_choice(budget.get("reason"), reasons, "unknown"),
+            "node_pending_limit": bounded_number(
+                budget.get("node_pending_limit"), 1, 512, integer=True
+            ),
+            "project_pending_limit": bounded_number(
+                budget.get("project_pending_limit"), 1, 256, integer=True
+            ),
+            "new_heavy_admission_paused": budget.get("new_heavy_admission_paused")
+            if type(budget.get("new_heavy_admission_paused")) is bool
+            else None,
+            "overload_read_reserve": bounded_number(
+                budget.get("overload_read_reserve"), 0, 8, integer=True
+            ),
         },
-        'reported': None,
+        "reported": None,
     }
-    reported = value.get('reported')
+    reported = value.get("reported")
     if isinstance(reported, dict):
-        lanes = reported.get('lanes')
+        lanes = reported.get("lanes")
         lanes = lanes if isinstance(lanes, dict) else {}
-        result['reported'] = {
-            'reason': bounded_choice(reported.get('reason'), reported_reasons, 'unknown'),
-            'running': bounded_number(reported.get('running'), 0, 100000, integer=True),
-            'queued': bounded_number(reported.get('queued'), 0, 100000, integer=True),
-            'lanes': {},
+        result["reported"] = {
+            "reason": bounded_choice(reported.get("reason"), reported_reasons, "unknown"),
+            "running": bounded_number(reported.get("running"), 0, 100000, integer=True),
+            "queued": bounded_number(reported.get("queued"), 0, 100000, integer=True),
+            "lanes": {},
         }
-        for name in ('execution', 'read', 'remote'):
+        for name in ("execution", "read", "remote"):
             lane = lanes.get(name)
             lane = lane if isinstance(lane, dict) else {}
-            result['reported']['lanes'][name] = {
-                'capacity': bounded_number(lane.get('capacity'), 0, 64, integer=True),
-                'running': bounded_number(lane.get('running'), 0, 100000, integer=True),
-                'queued': bounded_number(lane.get('queued'), 0, 100000, integer=True),
+            result["reported"]["lanes"][name] = {
+                "capacity": bounded_number(lane.get("capacity"), 0, 64, integer=True),
+                "running": bounded_number(lane.get("running"), 0, 100000, integer=True),
+                "queued": bounded_number(lane.get("queued"), 0, 100000, integer=True),
             }
     return result
 
@@ -162,28 +209,37 @@ def admission_ready(snapshot, required_pending):
     if type(required_pending) is not int or not 1 <= required_pending <= 256:
         return False
     snapshot = admission_snapshot(snapshot)
-    budget = snapshot['durable_admission']
-    return (snapshot['state'] == 'applied' and snapshot['revision'] is not None and budget['reason'] == 'adaptive'
-            and budget['new_heavy_admission_paused'] is False
-            and budget['node_pending_limit'] is not None and budget['node_pending_limit'] >= required_pending
-            and budget['project_pending_limit'] is not None and budget['project_pending_limit'] >= required_pending)
+    budget = snapshot["durable_admission"]
+    return (
+        snapshot["state"] == "applied"
+        and snapshot["revision"] is not None
+        and budget["reason"] == "adaptive"
+        and budget["new_heavy_admission_paused"] is False
+        and budget["node_pending_limit"] is not None
+        and budget["node_pending_limit"] >= required_pending
+        and budget["project_pending_limit"] is not None
+        and budget["project_pending_limit"] >= required_pending
+    )
 
 
 def observe_admission(stack, *, timeout=10):
     # Reuse the fixture's authenticated owner client. No preferences are written.
-    response = stack.client.get('/api/settings/scheduler', params={'device': stack.device}, timeout=timeout)
+    response = stack.client.get(
+        "/api/settings/scheduler", params={"device": stack.device}, timeout=timeout
+    )
     response.raise_for_status()
     return response.json()
 
 
 class AdmissionReadinessError(RuntimeError):
     def __init__(self, observation):
-        super().__init__('admission_readiness_not_met')
+        super().__init__("admission_readiness_not_met")
         self.observation = observation
 
 
-def prepare_admission(probe, required_pending, *, profile='cold', timeout=300,
-                      clock=time.monotonic, sleep=time.sleep):
+def prepare_admission(
+    probe, required_pending, *, profile="cold", timeout=300, clock=time.monotonic, sleep=time.sleep
+):
     """Observe once, or wait for a real applied budget under one absolute deadline.
 
     Match the real-resource acceptance helper's 3s cadence and deadline check
@@ -191,482 +247,742 @@ def prepare_admission(probe, required_pending, *, profile='cold', timeout=300,
     the budget. At most 100 observations fit the maximum 300s preparation.
     """
     import httpx
-    if (bounded_choice(profile, {'cold', 'ready'}) is None or type(required_pending) is not int
-            or not 1 <= required_pending <= 256
-            or bounded_number(timeout, 0, 300) is None or timeout <= 0):
-        raise ValueError('invalid_admission_preparation')
+
+    if (
+        bounded_choice(profile, {"cold", "ready"}) is None
+        or type(required_pending) is not int
+        or not 1 <= required_pending <= 256
+        or bounded_number(timeout, 0, 300) is None
+        or timeout <= 0
+    ):
+        raise ValueError("invalid_admission_preparation")
     started = clock()
     deadline = started + timeout
-    result = {'profile': profile, 'required_pending': required_pending,
-              'timeout_seconds': timeout, 'elapsed_seconds': 0, 'ready': False,
-              'probe_count': 0, 'observations': []}
+    result = {
+        "profile": profile,
+        "required_pending": required_pending,
+        "timeout_seconds": timeout,
+        "elapsed_seconds": 0,
+        "ready": False,
+        "probe_count": 0,
+        "observations": [],
+    }
     while clock() < deadline:
         previous = clock()
         if previous >= deadline:
             break
-        observation = {'elapsed_seconds': None, 'snapshot': None, 'error': None}
+        observation = {"elapsed_seconds": None, "snapshot": None, "error": None}
         try:
-            observation['snapshot'] = admission_snapshot(probe(timeout=min(10, deadline - previous)))
+            observation["snapshot"] = admission_snapshot(
+                probe(timeout=min(10, deadline - previous))
+            )
         except (httpx.HTTPError, OSError, AssertionError, KeyError, TypeError, ValueError) as exc:
-            observation['error'] = type(exc).__name__
+            observation["error"] = type(exc).__name__
         now = clock()
-        observation['elapsed_seconds'] = round(now - started, 3)
-        result['observations'].append(observation)
-        result['probe_count'] += 1
-        result['elapsed_seconds'] = round(now - started, 3)
+        observation["elapsed_seconds"] = round(now - started, 3)
+        result["observations"].append(observation)
+        result["probe_count"] += 1
+        result["elapsed_seconds"] = round(now - started, 3)
         # Readiness arriving at or beyond the original deadline is not success.
-        result['ready'] = (now < deadline and observation['snapshot'] is not None
-                           and admission_ready(observation['snapshot'], required_pending))
-        if profile == 'cold' or result['ready']:
+        result["ready"] = (
+            now < deadline
+            and observation["snapshot"] is not None
+            and admission_ready(observation["snapshot"], required_pending)
+        )
+        if profile == "cold" or result["ready"]:
             return result
         if now < deadline:
             sleep(min(max(0, previous + 3 - now), deadline - now))
-    result['elapsed_seconds'] = round(clock() - started, 3)
+    result["elapsed_seconds"] = round(clock() - started, 3)
     raise AdmissionReadinessError(result)
 
 
 def rejection_metadata(result):
     """Keep exact known admission diagnostics without copying an error body."""
-    error = result.get('error') if isinstance(result, dict) else None
+    error = result.get("error") if isinstance(result, dict) else None
     if not isinstance(error, dict):
         return {}
     retained = {}
-    if bounded_choice(error.get('queue_scope'), {'hub', 'node', 'project'}) is not None:
-        retained['queue_scope'] = error['queue_scope']
-    if bounded_choice(error.get('queue_reason'), {'admission_count', 'admission_bytes', 'control_reserve',
-                                                'resource_pressure', 'project_fairness'}) is not None:
-        retained['queue_reason'] = error['queue_reason']
-    retry = bounded_number(error.get('retry_after_seconds'), 0, 300)
+    if bounded_choice(error.get("queue_scope"), {"hub", "node", "project"}) is not None:
+        retained["queue_scope"] = error["queue_scope"]
+    if (
+        bounded_choice(
+            error.get("queue_reason"),
+            {
+                "admission_count",
+                "admission_bytes",
+                "control_reserve",
+                "resource_pressure",
+                "project_fairness",
+            },
+        )
+        is not None
+    ):
+        retained["queue_reason"] = error["queue_reason"]
+    retry = bounded_number(error.get("retry_after_seconds"), 0, 300)
     if retry is not None:
-        retained['retry_after_seconds'] = retry
-    if type(error.get('admitted')) is bool:
-        retained['admitted'] = error['admitted']
+        retained["retry_after_seconds"] = retry
+    if type(error.get("admitted")) is bool:
+        retained["admitted"] = error["admitted"]
     return retained
 
 
 def extract(response):
     response.raise_for_status()
     body = response.json()
-    if 'error' in body:
-        raise ValueError('JSONRPC_'+str(body['error'].get('code','unknown')))
-    result = body['result']
-    data = result.get('structuredContent')
+    if "error" in body:
+        raise ValueError("JSONRPC_" + str(body["error"].get("code", "unknown")))
+    result = body["result"]
+    data = result.get("structuredContent")
     if data is None:
-        texts = [x.get('text','') for x in result.get('content',[]) if x.get('type')=='text']
+        texts = [x.get("text", "") for x in result.get("content", []) if x.get("type") == "text"]
         data = json.loads(texts[0]) if texts else {}
-    return data, bool(result.get('isError'))
+    return data, bool(result.get("isError"))
 
 
 async def rpc(client, name, arguments):
-    return extract(await client.post('/mcp', json={'jsonrpc':'2.0','id':uuid.uuid4().hex,
-        'method':'tools/call','params':{'name':name,'arguments':arguments}}))
+    return extract(
+        await client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": uuid.uuid4().hex,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        )
+    )
 
 
 async def finish_original(client, data, failed, deadline):
     polls = 0
-    identifier = data.get('operation_id') or data.get('id')
-    while data.get('pending') or data.get('state') in UNRESOLVED:
+    identifier = data.get("operation_id") or data.get("id")
+    while data.get("pending") or data.get("state") in UNRESOLVED:
         if time.monotonic() >= deadline:
-            raise TimeoutError('original_operation_pending')
+            raise TimeoutError("original_operation_pending")
         if not identifier:
-            raise ValueError('missing_original_operation_id')
-        async with asyncio.timeout(max(.001, deadline-time.monotonic())):
-            receipt, poll_failed = await rpc(client, 'task_query', {
-                'operation':'wait', 'operation_ids':[identifier], 'wait_seconds':1,
-                'include_output':False, 'include_result':True})
+            raise ValueError("missing_original_operation_id")
+        async with asyncio.timeout(max(0.001, deadline - time.monotonic())):
+            receipt, poll_failed = await rpc(
+                client,
+                "task_query",
+                {
+                    "operation": "wait",
+                    "operation_ids": [identifier],
+                    "wait_seconds": 1,
+                    "include_output": False,
+                    "include_result": True,
+                },
+            )
         polls += 1
         if poll_failed:
-            raise RuntimeError('original_operation_poll_denied')
-        operations = receipt.get('operations')
+            raise RuntimeError("original_operation_poll_denied")
+        operations = receipt.get("operations")
         if not isinstance(operations, list) or len(operations) != 1:
-            raise ValueError('invalid_original_operation_receipt')
+            raise ValueError("invalid_original_operation_receipt")
         operation = operations[0]
-        returned_id = operation.get('operation_id') or operation.get('id')
+        returned_id = operation.get("operation_id") or operation.get("id")
         if returned_id is not None and returned_id != identifier:
-            raise ValueError('original_operation_id_changed')
-        state = operation.get('state')
-        if operation.get('pending') or state in UNRESOLVED:
+            raise ValueError("original_operation_id_changed")
+        state = operation.get("state")
+        if operation.get("pending") or state in UNRESOLVED:
             data = operation
-            await asyncio.sleep(min(.05, max(0, deadline-time.monotonic())))
+            await asyncio.sleep(min(0.05, max(0, deadline - time.monotonic())))
             continue
         if state not in TERMINAL:
-            raise ValueError('original_operation_state_missing')
-        result = operation.get('result') or {}
-        return identifier, result.get('data') or {}, not (
-            state == 'succeeded' and result.get('ok') is True), polls, state
-    state = data.get('state', 'failed' if failed else 'succeeded')
+            raise ValueError("original_operation_state_missing")
+        result = operation.get("result") or {}
+        return (
+            identifier,
+            result.get("data") or {},
+            not (state == "succeeded" and result.get("ok") is True),
+            polls,
+            state,
+        )
+    state = data.get("state", "failed" if failed else "succeeded")
     if state not in TERMINAL:
-        raise ValueError('invalid_operation_state')
-    if 'result' in data:
-        result = data['result']
+        raise ValueError("invalid_operation_state")
+    if "result" in data:
+        result = data["result"]
         if not isinstance(result, dict):
-            raise ValueError('invalid_terminal_operation_result')
-        return identifier, result.get('data') or {}, failed or not (
-            state == 'succeeded' and result.get('ok') is True), polls, state
-    return identifier, data, failed or state != 'succeeded', polls, state
+            raise ValueError("invalid_terminal_operation_result")
+        return (
+            identifier,
+            result.get("data") or {},
+            failed or not (state == "succeeded" and result.get("ok") is True),
+            polls,
+            state,
+        )
+    return identifier, data, failed or state != "succeeded", polls, state
 
 
 def enrich(database, samples):
-    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as connection:
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
         connection.row_factory = sqlite3.Row
         for sample in samples:
-            identifier = sample.get('operation_id')
+            identifier = sample.get("operation_id")
             if not identifier:
                 continue
-            row = connection.execute('SELECT created,accepted_at,updated,state,attempts FROM operations WHERE id=?',
-                                     (identifier,)).fetchone()
+            row = connection.execute(
+                "SELECT created,accepted_at,updated,state,attempts FROM operations WHERE id=?",
+                (identifier,),
+            ).fetchone()
             if row is None:
                 continue
-            events = [dict(e) for e in connection.execute(
-                'SELECT source,seq,stage,at,elapsed_ms FROM operation_events WHERE operation_id=? ORDER BY id',
-                (identifier,))]
-            sample['operation'] = dict(row)
-            sample['events'] = events
-            dispatch = [e['at'] for e in events if e['source']=='hub' and e['stage']=='dispatched']
-            sample['hub_queue_ms'] = max(0, (min(dispatch)-row['created'])*1000) if dispatch else None
-            agent = [e for e in events if e['source']=='agent' and e['elapsed_ms'] is not None]
-            starts = [e for e in agent if e['stage']=='executing']
+            events = [
+                dict(e)
+                for e in connection.execute(
+                    "SELECT source,seq,stage,at,elapsed_ms FROM operation_events WHERE operation_id=? ORDER BY id",
+                    (identifier,),
+                )
+            ]
+            sample["operation"] = dict(row)
+            sample["events"] = events
+            dispatch = [
+                e["at"] for e in events if e["source"] == "hub" and e["stage"] == "dispatched"
+            ]
+            sample["hub_queue_ms"] = (
+                max(0, (min(dispatch) - row["created"]) * 1000) if dispatch else None
+            )
+            agent = [e for e in events if e["source"] == "agent" and e["elapsed_ms"] is not None]
+            starts = [e for e in agent if e["stage"] == "executing"]
             # Elapsed times belong to one Agent handling attempt. Never subtract
             # an Agent wall clock from a Hub wall clock or merge restarted attempts.
-            if row['attempts'] != 1:
-                sample['agent_queue_unavailable'] = 'multiple_attempts'
+            if row["attempts"] != 1:
+                sample["agent_queue_unavailable"] = "multiple_attempts"
             elif starts:
-                start = min(starts, key=lambda e:e['seq'])
-                before = [e for e in agent if e['seq']<=start['seq'] and e['stage'] in
-                          {'accepted','waiting_resource','waiting_project','waiting_worker'}]
+                start = min(starts, key=lambda e: e["seq"])
+                before = [
+                    e
+                    for e in agent
+                    if e["seq"] <= start["seq"]
+                    and e["stage"]
+                    in {"accepted", "waiting_resource", "waiting_project", "waiting_worker"}
+                ]
                 if before:
-                    sample['agent_queue_ms'] = max(0, start['elapsed_ms']-min(e['elapsed_ms'] for e in before))
+                    sample["agent_queue_ms"] = max(
+                        0, start["elapsed_ms"] - min(e["elapsed_ms"] for e in before)
+                    )
 
 
 async def sample_pids(pids, stop, output):
     """Sample explicitly owned PIDs only; CPU is ps lifetime-average percent."""
     while not stop.is_set():
-        process = await asyncio.create_subprocess_exec('ps','-o','pid=,pcpu=,rss=','-p',
-            ','.join(str(pid) for pid in pids), stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL)
+        process = await asyncio.create_subprocess_exec(
+            "ps",
+            "-o",
+            "pid=,pcpu=,rss=",
+            "-p",
+            ",".join(str(pid) for pid in pids),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), 3)
         except TimeoutError:
             process.kill()
             await process.communicate()
-            output.append({'at':time.time(), 'loadavg':list(os.getloadavg()), 'error':'ps_timeout'})
+            output.append(
+                {"at": time.time(), "loadavg": list(os.getloadavg()), "error": "ps_timeout"}
+            )
             return
         entries = []
         for line in stdout.decode().splitlines():
             fields = line.split()
-            if len(fields)==3:
-                entries.append({'role':pids[int(fields[0])],
-                                'cpu_percent_lifetime':float(fields[1]),'rss_kib':int(fields[2])})
-        output.append({'at':time.time(),'loadavg':list(os.getloadavg()),'processes':entries,
-                       'complete':process.returncode == 0 and len(entries) == len(pids)})
+            if len(fields) == 3:
+                entries.append(
+                    {
+                        "role": pids[int(fields[0])],
+                        "cpu_percent_lifetime": float(fields[1]),
+                        "rss_kib": int(fields[2]),
+                    }
+                )
+        output.append(
+            {
+                "at": time.time(),
+                "loadavg": list(os.getloadavg()),
+                "processes": entries,
+                "complete": process.returncode == 0 and len(entries) == len(pids),
+            }
+        )
         try:
-            await asyncio.wait_for(stop.wait(), .5)
+            await asyncio.wait_for(stop.wait(), 0.5)
         except TimeoutError:
             pass
 
 
 async def resource_samples(stack, stop, output):
-    await sample_pids({stack.hub.pid:'hub', stack.agent.pid:'agent'}, stop, output)
+    await sample_pids({stack.hub.pid: "hub", stack.agent.pid: "agent"}, stop, output)
 
 
 async def workload(stack, output, workload_name, concurrency, operations, request_timeout):
     import httpx
-    headers = {'Authorization':'Bearer '+stack.pat, 'MCP-Protocol-Version':'2025-11-25',
-               'Accept':'application/json, text/event-stream'}
+
+    headers = {
+        "Authorization": "Bearer " + stack.pat,
+        "MCP-Protocol-Version": "2025-11-25",
+        "Accept": "application/json, text/event-stream",
+    }
     samples, resources = [], []
     stop, abort = asyncio.Event(), asyncio.Event()
-    async with httpx.AsyncClient(base_url=stack.url, headers=headers, trust_env=False,
-            timeout=request_timeout, limits=httpx.Limits(max_connections=concurrency,
-            max_keepalive_connections=concurrency)) as client:
-        warm, warm_failed = await rpc(client, 'read', {
-            'project':'ProjectAlpha', 'path':'README.md', 'idempotency_key':uuid.uuid4().hex})
+    async with httpx.AsyncClient(
+        base_url=stack.url,
+        headers=headers,
+        trust_env=False,
+        timeout=request_timeout,
+        limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
+    ) as client:
+        warm, warm_failed = await rpc(
+            client,
+            "read",
+            {"project": "ProjectAlpha", "path": "README.md", "idempotency_key": uuid.uuid4().hex},
+        )
         _, _, warm_failed, _, _ = await finish_original(
-            client, warm, warm_failed, time.monotonic()+request_timeout)
+            client, warm, warm_failed, time.monotonic() + request_timeout
+        )
         if warm_failed:
-            raise RuntimeError('warmup_failed')
+            raise RuntimeError("warmup_failed")
         monitor = asyncio.create_task(resource_samples(stack, stop, resources))
         start = time.monotonic()
+
         async def worker(index):
-            path = f'bench/worker-{index}.txt'
-            current_sha = hashlib.sha256(b'initial\n').hexdigest()
+            path = f"bench/worker-{index}.txt"
+            current_sha = hashlib.sha256(b"initial\n").hexdigest()
             for step in range(operations):
                 if abort.is_set():
                     break
                 key = uuid.uuid4().hex
-                name = 'read'
-                args = {'project':'ProjectAlpha', 'path':path}
-                kind = 'read'
-                if workload_name=='read_write' and step%4==0:
-                    name, kind = 'write', 'write'
-                    content = f'worker {index} step {step}\n'
-                    args.update(content=content,expected_sha256=current_sha,idempotency_key=key)
-                elif workload_name=='long_short' and index%8==0 and step%4==0:
-                    name, kind = 'exec', 'long'
-                    args = {'project':'ProjectAlpha','task':'bench_long',
-                            'yield_seconds':1,'idempotency_key':key}
+                name = "read"
+                args = {"project": "ProjectAlpha", "path": path}
+                kind = "read"
+                if workload_name == "read_write" and step % 4 == 0:
+                    name, kind = "write", "write"
+                    content = f"worker {index} step {step}\n"
+                    args.update(content=content, expected_sha256=current_sha, idempotency_key=key)
+                elif workload_name == "long_short" and index % 8 == 0 and step % 4 == 0:
+                    name, kind = "exec", "long"
+                    args = {
+                        "project": "ProjectAlpha",
+                        "task": "bench_long",
+                        "yield_seconds": 1,
+                        "idempotency_key": key,
+                    }
                 else:
-                    args['idempotency_key'] = key
+                    args["idempotency_key"] = key
                 began = time.monotonic()
-                sample = {'worker':index,'step':step,'kind':kind,'started_at':time.time(),
-                          'ok':False,'error':None,'polls':0}
+                sample = {
+                    "worker": index,
+                    "step": step,
+                    "kind": kind,
+                    "started_at": time.time(),
+                    "ok": False,
+                    "error": None,
+                    "polls": 0,
+                }
                 try:
                     data, failed = await rpc(client, name, args)
-                    sample['operation_id'] = data.get('operation_id') or data.get('id')
+                    sample["operation_id"] = data.get("operation_id") or data.get("id")
                     identifier, result, failed, polls, state = await finish_original(
-                        client, data, failed, began+request_timeout)
-                    if kind=='long' and (result.get('exit_code')!=0 or result.get('timed_out')):
+                        client, data, failed, began + request_timeout
+                    )
+                    if kind == "long" and (result.get("exit_code") != 0 or result.get("timed_out")):
                         failed = True
-                    sample.update(operation_id=identifier,polls=polls,state=state,ok=not failed)
-                    if not failed and kind == 'read' and result.get('sha256') != current_sha:
-                        raise ValueError('read_content_hash_mismatch')
-                    if not failed and kind == 'write':
+                    sample.update(operation_id=identifier, polls=polls, state=state, ok=not failed)
+                    if not failed and kind == "read" and result.get("sha256") != current_sha:
+                        raise ValueError("read_content_hash_mismatch")
+                    if not failed and kind == "write":
                         expected = hashlib.sha256(content.encode()).hexdigest()
-                        if result.get('sha256') != expected:
-                            raise ValueError('write_content_hash_mismatch')
-                        current_sha = result['sha256']
+                        if result.get("sha256") != expected:
+                            raise ValueError("write_content_hash_mismatch")
+                        current_sha = result["sha256"]
                     if failed:
-                        error = result.get('error')
-                        sample['error'] = safe_code(error.get('code', state) if isinstance(error, dict) else state)
+                        error = result.get("error")
+                        sample["error"] = safe_code(
+                            error.get("code", state) if isinstance(error, dict) else state
+                        )
                         admission_rejection = rejection_metadata(result)
                         if admission_rejection:
-                            sample['admission_rejection'] = admission_rejection
+                            sample["admission_rejection"] = admission_rejection
                 except Exception as exc:
                     # Stop admission for every worker. A missing HTTP response
                     # never authorizes another operation; recover this ID only.
                     abort.set()
-                    sample['unresolved'] = True
-                    sample['ok'] = False
-                    sample['error'] = type(exc).__name__
+                    sample["unresolved"] = True
+                    sample["ok"] = False
+                    sample["error"] = type(exc).__name__
                     try:
-                        identifier = sample.get('operation_id') or lookup_original(
-                            stack.hubdir/'hub.sqlite3', key)
-                        sample['operation_id'] = identifier
+                        identifier = sample.get("operation_id") or lookup_original(
+                            stack.hubdir / "hub.sqlite3", key
+                        )
+                        sample["operation_id"] = identifier
                         _, _, recovery_failed, polls, state = await finish_original(
-                            client, {'operation_id':identifier, 'pending':True}, False,
-                            time.monotonic()+request_timeout)
-                        sample.update(recovered=True, unresolved=False, polls=polls,
-                                      state=state, recovered_failed=recovery_failed)
+                            client,
+                            {"operation_id": identifier, "pending": True},
+                            False,
+                            time.monotonic() + request_timeout,
+                        )
+                        sample.update(
+                            recovered=True,
+                            unresolved=False,
+                            polls=polls,
+                            state=state,
+                            recovered_failed=recovery_failed,
+                        )
                     except Exception as recovery:
-                        sample['recovery_error'] = type(recovery).__name__
+                        sample["recovery_error"] = type(recovery).__name__
                     # Retain type only: never put bearer, URL/query, response body,
                     # file content, command text or credential in measurement data.
-                    sample['error'] = type(exc).__name__
-                sample['latency_ms'] = (time.monotonic()-began)*1000
+                    sample["error"] = type(exc).__name__
+                sample["latency_ms"] = (time.monotonic() - began) * 1000
                 samples.append(sample)
-                with (output/'samples.jsonl').open('a') as raw:
-                    raw.write(json.dumps(sample, sort_keys=True)+'\n')
+                with (output / "samples.jsonl").open("a") as raw:
+                    raw.write(json.dumps(sample, sort_keys=True) + "\n")
+
         try:
             await asyncio.gather(*(worker(index) for index in range(concurrency)))
         finally:
-            duration = time.monotonic()-start
+            duration = time.monotonic() - start
             stop.set()
             await monitor
-    enrich(stack.hubdir/'hub.sqlite3', samples)
-    for label, rows in [('samples',samples),('resources',resources)]:
-        with (output/(label+'.jsonl')).open('w') as handle:
+    enrich(stack.hubdir / "hub.sqlite3", samples)
+    for label, rows in [("samples", samples), ("resources", resources)]:
+        with (output / (label + ".jsonl")).open("w") as handle:
             for row in rows:
-                handle.write(json.dumps(row, sort_keys=True)+'\n')
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
     summary = summarize(samples, duration)
-    summary.update(workload=workload_name, concurrency=concurrency, operations_per_worker=operations,
-                   admission_stopped=abort.is_set(), expected_samples=concurrency*operations,
-                   unresolved=sum(bool(s.get('unresolved')) for s in samples),
-                   resource_sampling_complete=bool(resources) and all(r.get('complete', False) for r in resources))
-    (output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+    summary.update(
+        workload=workload_name,
+        concurrency=concurrency,
+        operations_per_worker=operations,
+        admission_stopped=abort.is_set(),
+        expected_samples=concurrency * operations,
+        unresolved=sum(bool(s.get("unresolved")) for s in samples),
+        resource_sampling_complete=bool(resources)
+        and all(r.get("complete", False) for r in resources),
+    )
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
 
 async def disconnect_check(stack):
     """Disconnect an HTTP waiter after admission; recover ONLY its original ID."""
     import httpx
+
     key = uuid.uuid4().hex
-    headers = {'Authorization':'Bearer '+stack.pat,'MCP-Protocol-Version':'2025-11-25',
-               'Accept':'application/json, text/event-stream'}
-    counter = stack.projectalpha/'bench'/'disconnect-count.txt'
-    args = {'project':'ProjectAlpha','task':'bench_disconnect','yield_seconds':10,'idempotency_key':key}
-    async with httpx.AsyncClient(base_url=stack.url,headers=headers,trust_env=False,timeout=90) as client:
-        call = asyncio.create_task(rpc(client,'exec',args))
+    headers = {
+        "Authorization": "Bearer " + stack.pat,
+        "MCP-Protocol-Version": "2025-11-25",
+        "Accept": "application/json, text/event-stream",
+    }
+    counter = stack.projectalpha / "bench" / "disconnect-count.txt"
+    args = {
+        "project": "ProjectAlpha",
+        "task": "bench_disconnect",
+        "yield_seconds": 10,
+        "idempotency_key": key,
+    }
+    async with httpx.AsyncClient(
+        base_url=stack.url, headers=headers, trust_env=False, timeout=90
+    ) as client:
+        call = asyncio.create_task(rpc(client, "exec", args))
         row = None
         try:
-            deadline = time.monotonic()+20
-            while time.monotonic()<deadline and not call.done():
-                with sqlite3.connect(f'file:{stack.hubdir/"hub.sqlite3"}?mode=ro',uri=True) as db:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not call.done():
+                with sqlite3.connect(
+                    f"file:{stack.hubdir / 'hub.sqlite3'}?mode=ro", uri=True
+                ) as db:
                     db.row_factory = sqlite3.Row
-                    row = db.execute('SELECT id,state FROM operations WHERE idem=?',(key,)).fetchone()
-                if row is not None and row['state']=='running':
+                    row = db.execute(
+                        "SELECT id,state FROM operations WHERE idem=?", (key,)
+                    ).fetchone()
+                if row is not None and row["state"] == "running":
                     break
-                await asyncio.sleep(.05)
+                await asyncio.sleep(0.05)
             if call.done():
                 # Surface a rejected initial request instead of disguising it as
                 # a timing miss; never submit a replacement operation.
                 try:
                     _, rejected = await call
                 except Exception as exc:
-                    return {'exercised':False,'passed':False,'reason':'initial_'+type(exc).__name__}
-                return {'exercised':False,'passed':False,
-                        'reason':'initial_request_rejected' if rejected else 'initial_waiter_already_returned'}
-            if row is None or row['state']!='running':
-                return {'exercised':False,'passed':False,'reason':'did_not_observe_active_waiter'}
-            identifier = row['id']
+                    return {
+                        "exercised": False,
+                        "passed": False,
+                        "reason": "initial_" + type(exc).__name__,
+                    }
+                return {
+                    "exercised": False,
+                    "passed": False,
+                    "reason": "initial_request_rejected"
+                    if rejected
+                    else "initial_waiter_already_returned",
+                }
+            if row is None or row["state"] != "running":
+                return {
+                    "exercised": False,
+                    "passed": False,
+                    "reason": "did_not_observe_active_waiter",
+                }
+            identifier = row["id"]
             call.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await call
             _, _, failed, polls, state = await finish_original(
-                client, {'pending':True,'operation_id':identifier}, False, time.monotonic()+90)
-            with sqlite3.connect(f'file:{stack.hubdir/"hub.sqlite3"}?mode=ro',uri=True) as db:
-                count = db.execute('SELECT COUNT(*) FROM operations WHERE idem=?',(key,)).fetchone()[0]
+                client, {"pending": True, "operation_id": identifier}, False, time.monotonic() + 90
+            )
+            with sqlite3.connect(f"file:{stack.hubdir / 'hub.sqlite3'}?mode=ro", uri=True) as db:
+                count = db.execute(
+                    "SELECT COUNT(*) FROM operations WHERE idem=?", (key,)
+                ).fetchone()[0]
             effects = len(counter.read_text().splitlines()) if counter.exists() else 0
-            return {'exercised':True,'original_operation_id':identifier,'state':state,'polls':polls,
-                    'operation_rows':count,'side_effect_count':effects,'passed':not failed and count==effects==1}
+            return {
+                "exercised": True,
+                "original_operation_id": identifier,
+                "state": state,
+                "polls": polls,
+                "operation_rows": count,
+                "side_effect_count": effects,
+                "passed": not failed and count == effects == 1,
+            }
         finally:
             if not call.done():
                 call.cancel()
-            with contextlib.suppress(asyncio.CancelledError,Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await call
 
 
 def task_command(seconds, filename):
     """Synthetic fixture effect uses real newlines so duplicate counts remain exact."""
-    return ('import pathlib,time; time.sleep('+str(seconds)+'); p=pathlib.Path('
-            +repr('bench/'+filename)+'); f=p.open("a"); '
-            'f.write("executed"+chr(10)); f.close(); print("done")')
+    return (
+        "import pathlib,time; time.sleep("
+        + str(seconds)
+        + "); p=pathlib.Path("
+        + repr("bench/" + filename)
+        + '); f=p.open("a"); '
+        'f.write("executed"+chr(10)); f.close(); print("done")'
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--repository',type=Path,required=True)
-    parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--variant',choices=['before','after'],required=True)
-    parser.add_argument('--concurrency',default='8,16,32,64,128')
-    parser.add_argument('--workloads',default='read,read_write,long_short')
-    parser.add_argument('--operations-per-worker',type=int,default=4)
-    parser.add_argument('--request-timeout',type=float,default=120)
-    parser.add_argument('--admission-profile',choices=['cold','ready'],default='cold',
-                        help='cold observes once; ready waits for the real applied adaptive budget')
-    parser.add_argument('--readiness-timeout',type=float,default=300,
-                        help='Absolute ready preparation budget in seconds (1..300), never a capacity override')
-    parser.add_argument('--skip-disconnect-check',action='store_true')
-    parser.add_argument('--preflight-seconds',type=float,default=5)
-    parser.add_argument('--max-load-per-cpu',type=float,default=1)
-    parser.add_argument('--allow-noisy',action='store_true',help='Record a noisy diagnostic, never a clean comparison')
-    parser.add_argument('--host-context',required=True,help='Known concurrent production/test activity, never assume quiet')
+    parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--variant", choices=["before", "after"], required=True)
+    parser.add_argument("--concurrency", default="8,16,32,64,128")
+    parser.add_argument("--workloads", default="read,read_write,long_short")
+    parser.add_argument("--operations-per-worker", type=int, default=4)
+    parser.add_argument("--request-timeout", type=float, default=120)
+    parser.add_argument(
+        "--admission-profile",
+        choices=["cold", "ready"],
+        default="cold",
+        help="cold observes once; ready waits for the real applied adaptive budget",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=300,
+        help="Absolute ready preparation budget in seconds (1..300), never a capacity override",
+    )
+    parser.add_argument("--skip-disconnect-check", action="store_true")
+    parser.add_argument("--preflight-seconds", type=float, default=5)
+    parser.add_argument("--max-load-per-cpu", type=float, default=1)
+    parser.add_argument(
+        "--allow-noisy",
+        action="store_true",
+        help="Record a noisy diagnostic, never a clean comparison",
+    )
+    parser.add_argument(
+        "--host-context",
+        required=True,
+        help="Known concurrent production/test activity, never assume quiet",
+    )
     options = parser.parse_args()
     repository = options.repository.resolve()
     output = options.output.resolve()
-    if not (repository/'.git').exists():
-        parser.error('repository must be an existing Git checkout')
-    if not output.is_relative_to(Path.cwd().resolve()/'.work') or output.exists():
-        parser.error('output must be a NEW directory under current workspace .work')
-    levels = [int(v) for v in options.concurrency.split(',')]
-    names = options.workloads.split(',')
-    if (not levels or len(set(levels))!=len(levels) or len(set(names))!=len(names)
-            or any(v not in {1,8,16,32,64,128} for v in levels)
-            or not set(names)<={'read','read_write','long_short'}):
-        parser.error('invalid workload or concurrency')
-    if (not 1<=options.operations_per_worker<=32 or not 10<=options.request_timeout<=300
-            or not 1<=options.readiness_timeout<=300
-            or not 0<=options.preflight_seconds<=60 or not .1<=options.max_load_per_cpu<=10):
-        parser.error('invalid operation count or timeout')
+    if not (repository / ".git").exists():
+        parser.error("repository must be an existing Git checkout")
+    if not output.is_relative_to(Path.cwd().resolve() / ".work") or output.exists():
+        parser.error("output must be a NEW directory under current workspace .work")
+    levels = [int(v) for v in options.concurrency.split(",")]
+    names = options.workloads.split(",")
+    if (
+        not levels
+        or len(set(levels)) != len(levels)
+        or len(set(names)) != len(names)
+        or any(v not in {1, 8, 16, 32, 64, 128} for v in levels)
+        or not set(names) <= {"read", "read_write", "long_short"}
+    ):
+        parser.error("invalid workload or concurrency")
+    if (
+        not 1 <= options.operations_per_worker <= 32
+        or not 10 <= options.request_timeout <= 300
+        or not 1 <= options.readiness_timeout <= 300
+        or not 0 <= options.preflight_seconds <= 60
+        or not 0.1 <= options.max_load_per_cpu <= 10
+    ):
+        parser.error("invalid operation count or timeout")
     # The chosen checkout owns every product import and subprocess cwd. The
     # harness remains byte-identical across variants and records its own SHA.
-    sys.path.insert(0,str(repository))
+    sys.path.insert(0, str(repository))
     from tests.support import running_stack
     from shared.util import atomic_json
+
     output.mkdir(parents=True)
-    manifest = {'variant':options.variant,'repository':git_identity(repository),
-        'harness_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        'python':sys.version,'platform':platform.platform(),'cpu_count':os.cpu_count(),
-        'host_context':options.host_context,'started_at':time.time(),'loadavg_start':list(os.getloadavg()),
-        'workloads':names,'concurrency':levels,'operations_per_worker':options.operations_per_worker,
-        'admission_profile':options.admission_profile,'readiness_timeout_seconds':options.readiness_timeout,
-        'admission_cases':[],
-        'measurement_notes':['Loopback fixture, not ChatGPT host or public WAN',
-            'cold observes admission once; ready waits only for a real authenticated adaptive budget',
-            'Ready preparation and before/after budget observations are outside measured workload time',
-            'The live admission budget may shrink during a case; every rejection remains an error',
-            'Hub queue: admission to first dispatch, Hub clock only',
-            'Agent queue: relative accepted/wait to executing within one attempt',
-            'Resource CPU is ps lifetime-average; RSS KiB only Hub+Agent, not aggregate child tree',
-            'Percentiles use nearest rank; errors remain in all-latency samples']}
-    (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    manifest = {
+        "variant": options.variant,
+        "repository": git_identity(repository),
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "python": sys.version,
+        "platform": platform.platform(),
+        "cpu_count": os.cpu_count(),
+        "host_context": options.host_context,
+        "started_at": time.time(),
+        "loadavg_start": list(os.getloadavg()),
+        "workloads": names,
+        "concurrency": levels,
+        "operations_per_worker": options.operations_per_worker,
+        "admission_profile": options.admission_profile,
+        "readiness_timeout_seconds": options.readiness_timeout,
+        "admission_cases": [],
+        "measurement_notes": [
+            "Loopback fixture, not ChatGPT host or public WAN",
+            "cold observes admission once; ready waits only for a real authenticated adaptive budget",
+            "Ready preparation and before/after budget observations are outside measured workload time",
+            "The live admission budget may shrink during a case; every rejection remains an error",
+            "Hub queue: admission to first dispatch, Hub clock only",
+            "Agent queue: relative accepted/wait to executing within one attempt",
+            "Resource CPU is ps lifetime-average; RSS KiB only Hub+Agent, not aggregate child tree",
+            "Percentiles use nearest rank; errors remain in all-latency samples",
+        ],
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     load_samples, overloaded = preflight(options.preflight_seconds, options.max_load_per_cpu)
-    manifest.update(preflight=load_samples, overloaded=overloaded,
-                    max_load_per_cpu=options.max_load_per_cpu, allow_noisy=options.allow_noisy)
+    manifest.update(
+        preflight=load_samples,
+        overloaded=overloaded,
+        max_load_per_cpu=options.max_load_per_cpu,
+        allow_noisy=options.allow_noisy,
+    )
     if overloaded and not options.allow_noisy:
-        manifest.update(result='blocked_by_host_load', ended_at=time.time())
-        (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+        manifest.update(result="blocked_by_host_load", ended_at=time.time())
+        (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         return 2
     summaries = []
     usage_start = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
-        with running_stack(output/'fixture') as stack:
-            bench = stack.projectalpha/'bench'
+        with running_stack(output / "fixture") as stack:
+            bench = stack.projectalpha / "bench"
             bench.mkdir()
             stack.stop_agent()
-            for task, seconds, filename in [('bench_long',.4,'long-count.txt'),
-                                             ('bench_disconnect',2,'disconnect-count.txt')]:
+            for task, seconds, filename in [
+                ("bench_long", 0.4, "long-count.txt"),
+                ("bench_disconnect", 2, "disconnect-count.txt"),
+            ]:
                 command = task_command(seconds, filename)
-                stack.config['tasks'][task] = {'command':[sys.executable,'-u','-c',command],
-                    'projects':['ProjectAlpha'],'timeout':30,'allow_read_concurrency':True}
-            atomic_json(stack.config_path,stack.config)
+                stack.config["tasks"][task] = {
+                    "command": [sys.executable, "-u", "-c", command],
+                    "projects": ["ProjectAlpha"],
+                    "timeout": 30,
+                    "allow_read_concurrency": True,
+                }
+            atomic_json(stack.config_path, stack.config)
             stack.start_agent()
             for name in names:
                 for concurrency in levels:
                     for index in range(concurrency):
-                        (bench/f'worker-{index}.txt').write_bytes(b'initial\n')
-                    directory = output/(name+'-'+str(concurrency))
+                        (bench / f"worker-{index}.txt").write_bytes(b"initial\n")
+                    directory = output / (name + "-" + str(concurrency))
                     directory.mkdir()
                     # One completed read is protocol warmup, not adaptive-budget
                     # readiness. Record every case's actual preparation state.
-                    admission = {'case':name+'-'+str(concurrency), 'started_at':time.time()}
-                    manifest['admission_cases'].append(admission)
+                    admission = {"case": name + "-" + str(concurrency), "started_at": time.time()}
+                    manifest["admission_cases"].append(admission)
                     try:
-                        admission['before'] = prepare_admission(
-                            lambda **kwargs: observe_admission(stack, **kwargs), concurrency,
-                            profile=options.admission_profile, timeout=options.readiness_timeout)
+                        admission["before"] = prepare_admission(
+                            lambda **kwargs: observe_admission(stack, **kwargs),
+                            concurrency,
+                            profile=options.admission_profile,
+                            timeout=options.readiness_timeout,
+                        )
                     except AdmissionReadinessError as exc:
-                        admission['before'] = exc.observation
+                        admission["before"] = exc.observation
                         raise
-                    summary = asyncio.run(workload(stack,directory,name,concurrency,
-                        options.operations_per_worker,options.request_timeout))
-                    admission['after'] = prepare_admission(
-                        lambda **kwargs: observe_admission(stack, **kwargs), concurrency,
-                        profile='cold', timeout=options.readiness_timeout)
-                    admission['ended_at'] = time.time()
-                    summary['admission'] = admission
-                    (directory/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+                    summary = asyncio.run(
+                        workload(
+                            stack,
+                            directory,
+                            name,
+                            concurrency,
+                            options.operations_per_worker,
+                            options.request_timeout,
+                        )
+                    )
+                    admission["after"] = prepare_admission(
+                        lambda **kwargs: observe_admission(stack, **kwargs),
+                        concurrency,
+                        profile="cold",
+                        timeout=options.readiness_timeout,
+                    )
+                    admission["ended_at"] = time.time()
+                    summary["admission"] = admission
+                    (directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
                     summaries.append(summary)
-                    print(json.dumps(summary),flush=True)
-                    with sqlite3.connect(f'file:{stack.hubdir/"hub.sqlite3"}?mode=ro',uri=True) as db:
-                        active = db.execute("SELECT COUNT(*) FROM operations WHERE state IN ('queued','running','reconnecting','cancelling','unknown')").fetchone()[0]
-                    if active or summary['admission_stopped']:
-                        manifest.update(result='stopped_with_unresolved_operations', active_operations=active,
-                                        ended_at=time.time())
-                        (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-                        (output/'summary.json').write_text(json.dumps(summaries,indent=2)+'\n')
-                        raise RuntimeError('Fixture operations remain unresolved; do not contaminate the next workload')
+                    print(json.dumps(summary), flush=True)
+                    with sqlite3.connect(
+                        f"file:{stack.hubdir / 'hub.sqlite3'}?mode=ro", uri=True
+                    ) as db:
+                        active = db.execute(
+                            "SELECT COUNT(*) FROM operations WHERE state IN ('queued','running','reconnecting','cancelling','unknown')"
+                        ).fetchone()[0]
+                    if active or summary["admission_stopped"]:
+                        manifest.update(
+                            result="stopped_with_unresolved_operations",
+                            active_operations=active,
+                            ended_at=time.time(),
+                        )
+                        (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+                        (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
+                        raise RuntimeError(
+                            "Fixture operations remain unresolved; do not contaminate the next workload"
+                        )
             if not options.skip_disconnect_check:
-                manifest['disconnect'] = asyncio.run(disconnect_check(stack))
+                manifest["disconnect"] = asyncio.run(disconnect_check(stack))
             else:
-                manifest['disconnect'] = {'exercised':False, 'passed':False, 'reason':'explicitly_skipped'}
+                manifest["disconnect"] = {
+                    "exercised": False,
+                    "passed": False,
+                    "reason": "explicitly_skipped",
+                }
     except Exception as exc:
-        manifest.setdefault('result', 'readiness_not_met' if isinstance(exc, AdmissionReadinessError) else 'failed')
-        manifest['error'] = type(exc).__name__
+        manifest.setdefault(
+            "result", "readiness_not_met" if isinstance(exc, AdmissionReadinessError) else "failed"
+        )
+        manifest["error"] = type(exc).__name__
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    manifest.update(ended_at=time.time(),loadavg_end=list(os.getloadavg()),
-                    child_cpu_user_seconds=usage.ru_utime-usage_start.ru_utime,
-                    child_cpu_system_seconds=usage.ru_stime-usage_start.ru_stime,
-                    child_maxrss_native_units=usage.ru_maxrss)
-    manifest.setdefault('result', 'completed_with_errors' if any(s['errors'] or not s['resource_sampling_complete'] for s in summaries)
-                    or not manifest.get('disconnect', {}).get('passed') else 'completed')
-    manifest['repository_end'] = git_identity(repository)
-    manifest['source_unchanged'] = manifest['repository'] == manifest['repository_end']
-    if not manifest['source_unchanged']:
-        manifest['result'] = 'source_changed_during_run'
-    (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    (output/'summary.json').write_text(json.dumps(summaries,indent=2)+'\n')
+    manifest.update(
+        ended_at=time.time(),
+        loadavg_end=list(os.getloadavg()),
+        child_cpu_user_seconds=usage.ru_utime - usage_start.ru_utime,
+        child_cpu_system_seconds=usage.ru_stime - usage_start.ru_stime,
+        child_maxrss_native_units=usage.ru_maxrss,
+    )
+    manifest.setdefault(
+        "result",
+        "completed_with_errors"
+        if any(s["errors"] or not s["resource_sampling_complete"] for s in summaries)
+        or not manifest.get("disconnect", {}).get("passed")
+        else "completed",
+    )
+    manifest["repository_end"] = git_identity(repository)
+    manifest["source_unchanged"] = manifest["repository"] == manifest["repository_end"]
+    if not manifest["source_unchanged"]:
+        manifest["result"] = "source_changed_during_run"
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
 
-    return 0 if manifest['result'] == 'completed' else 1
+    return 0 if manifest["result"] == "completed" else 1
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     raise SystemExit(main())

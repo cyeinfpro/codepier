@@ -24,7 +24,7 @@ env:
 jobs:
   promotion:
     name: Verify reusable image evidence (read-only)
-    if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+    if: !(github.event_name == 'push' && github.event.forced)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -93,7 +93,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: !(github.event_name == 'push' && github.event.forced)
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -102,7 +102,7 @@ jobs:
 
       - name: Revalidate read-only job proof and exact registry digest
         id: reuse
-        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: !(github.event_name == 'push' && github.event.forced)
         env:
           PROMOTION_RESULT: ${{ needs.promotion.result }}
           PROMOTION_PROOF: ${{ needs.promotion.outputs.proof }}
@@ -191,7 +191,7 @@ jobs:
           docker rm --force --volumes candidate >/dev/null 2>&1 || true
 
       - name: Do not overwrite an uncertain earlier build in the same run attempt
-        if: steps.reuse.outputs.reused != 'true' && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: steps.reuse.outputs.reused != 'true' && !(github.event_name == 'push' && github.event.forced)
         run: python3 scripts/image_promotion.py guard-build
 
       - name: Build linux/amd64 and linux/arm64 once; publish a run-specific candidate
@@ -201,7 +201,7 @@ jobs:
         with:
           context: ${{ steps.identity.outputs.context }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced) }}
+          push: ${{ !(github.event_name == 'push' && github.event.forced) }}
           tags: ${{ steps.identity.outputs.build_tag }}
           labels: |
             org.opencontainers.image.title=CodePier Hub
@@ -219,7 +219,7 @@ jobs:
           sbom: true
 
       - name: Verify both manifests and attestations bind to the real boot-tested amd64 image
-        if: steps.reuse.outputs.reused != 'true' && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: steps.reuse.outputs.reused != 'true' && !(github.event_name == 'push' && github.event.forced)
         env:
           DIGEST: ${{ steps.publish.outputs.digest }}
           TESTED_CONFIG: ${{ steps.boot.outputs.config }}
@@ -227,13 +227,13 @@ jobs:
 
       - name: Promote only the tested digest; never repoint VERSION or full-SHA tags
         id: promote
-        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: !(github.event_name == 'push' && github.event.forced)
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: python3 scripts/image_promotion.py promote
 
       - name: Record the published reference (pin deployments to the digest)
-        if: github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: !(github.event_name == 'push' && github.event.forced)
         shell: bash
         env:
           DIGEST: ${{ steps.promote.outputs.digest }}
@@ -265,7 +265,7 @@ jobs:
             --output dist/image/deployment.yaml --metadata dist/image/deployment.json
 
       - name: Retain immutable build and hardened-boot proof
-        if: steps.reuse.outputs.reused != 'true' && github.event_name != 'pull_request' && !(github.event_name == 'push' && github.event.forced)
+        if: steps.reuse.outputs.reused != 'true' && !(github.event_name == 'push' && github.event.forced)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,4 +1,5 @@
 """Explicit dependencies shared by panel API domains."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

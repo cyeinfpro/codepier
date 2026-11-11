@@ -1,5 +1,6 @@
 """Native-file interoperability without real tickets, accounts or external requests."""
 from __future__ import annotations
+from shared import file_download as download_transport
 
 import hashlib
 import io
@@ -198,7 +199,7 @@ def transport(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(incoming, 'PublicTLSConnection', Connection)
+    monkeypatch.setattr('shared.file_download.PublicTLSConnection', Connection)
     return responses, requests, connections
 
 
@@ -313,7 +314,7 @@ def test_real_http_response_framing_is_preserved(transport, raw, expected):
 def test_slow_stream_checks_deadline_between_raw_reads(workspace, transport, monkeypatch):
     engine, project, root = workspace
     clock = [0.0]
-    monkeypatch.setattr(incoming.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(download_transport.time, 'monotonic', lambda: clock[0])
     class Slow(Response):
         def read(self, size):
             pytest.fail('Do not hide slow reads inside an unbounded buffered read')

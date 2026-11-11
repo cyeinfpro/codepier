@@ -9,9 +9,11 @@ from hub.mcp_request_audit import error_headers
 from shared.util import DevError
 
 
-DEFAULT_CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-               "img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; "
-               "base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+DEFAULT_CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; "
+    "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+)
 HSTS_SECONDS = 365 * 24 * 3600
 
 
@@ -28,7 +30,9 @@ def secure_response(request, response):
         # server only applies proxy headers from FORWARDED_ALLOW_IPS.
         response.headers["Strict-Transport-Security"] = f"max-age={HSTS_SECONDS}"
     if request.url.path.startswith(("/api", "/oauth")):
-        directives = {part.strip().lower() for part in response.headers.get("Cache-Control", "").split(",")}
+        directives = {
+            part.strip().lower() for part in response.headers.get("Cache-Control", "").split(",")
+        }
         if "no-store" not in directives:
             response.headers["Cache-Control"] = "no-store"
     return response
@@ -36,23 +40,43 @@ def secure_response(request, response):
 
 class BodyLimit:
     """Bound body reads and retained bytes before any endpoint can act."""
+
     MAX_INFLIGHT = 256
     MAX_BUFFERED_BYTES = 64 * 1024 * 1024
     READ_TIMEOUT = 30
 
-    def __init__(self, app, limit=6 * 1024 * 1024, *,
-                 max_inflight=MAX_INFLIGHT, max_buffered_bytes=MAX_BUFFERED_BYTES,
-                 timeout=READ_TIMEOUT):
+    def __init__(
+        self,
+        app,
+        limit=6 * 1024 * 1024,
+        *,
+        max_inflight=MAX_INFLIGHT,
+        max_buffered_bytes=MAX_BUFFERED_BYTES,
+        timeout=READ_TIMEOUT,
+    ):
         self.app, self.limit = app, limit
-        self.max_inflight, self.max_buffered_bytes, self.timeout = max_inflight, max_buffered_bytes, timeout
+        self.max_inflight, self.max_buffered_bytes, self.timeout = (
+            max_inflight,
+            max_buffered_bytes,
+            timeout,
+        )
         self.inflight = 0
         self.buffered_bytes = 0
 
     @staticmethod
     def busy():
-        return JSONResponse({"error": {"code": "HTTP_BODY_BUSY", "message": "请求体接收繁忙，请稍后重试",
-                                       "admitted": False, "retry_after_seconds": 1}},
-                            status_code=429, headers={"Retry-After": "1"})
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "HTTP_BODY_BUSY",
+                    "message": "请求体接收繁忙，请稍后重试",
+                    "admitted": False,
+                    "retry_after_seconds": 1,
+                }
+            },
+            status_code=429,
+            headers={"Retry-After": "1"},
+        )
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -63,7 +87,9 @@ class BodyLimit:
         except ValueError:
             length = self.limit + 1
         if length < 0 or length > self.limit:
-            return await JSONResponse({"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}}, status_code=413)(scope, receive, send)
+            return await JSONResponse(
+                {"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}}, status_code=413
+            )(scope, receive, send)
         if self.inflight >= self.max_inflight:
             return await self.busy()(scope, receive, send)
         # Count the reading phase independently from handler/stream lifetime.
@@ -81,7 +107,10 @@ class BodyLimit:
                         return
                     chunk = message.get("body", b"")
                     if len(body) + len(chunk) > self.limit:
-                        error = JSONResponse({"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}}, status_code=413)
+                        error = JSONResponse(
+                            {"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}},
+                            status_code=413,
+                        )
                         break
                     if self.buffered_bytes + len(chunk) > self.max_buffered_bytes:
                         error = self.busy()
@@ -91,8 +120,16 @@ class BodyLimit:
                     if not message.get("more_body", False):
                         break
             except asyncio.TimeoutError:
-                error = JSONResponse({"error": {"code": "BODY_TIMEOUT", "message": "请求体接收超时，请重新发送",
-                                               "admitted": False}}, status_code=408)
+                error = JSONResponse(
+                    {
+                        "error": {
+                            "code": "BODY_TIMEOUT",
+                            "message": "请求体接收超时，请重新发送",
+                            "admitted": False,
+                        }
+                    },
+                    status_code=408,
+                )
             finally:
                 self.inflight -= 1
             if error is not None:
@@ -113,7 +150,6 @@ class BodyLimit:
             self.buffered_bytes -= len(body)
 
 
-
 def install_http_behaviors(app):
     @app.exception_handler(Exception)
     async def unexpected_error(request, exc):
@@ -121,7 +157,9 @@ def install_http_behaviors(app):
         # ServerErrorMiddleware sits outside user middleware, so attach the
         # already-generated ID here as well. Never expose exception text.
         headers = error_headers(request.scope) if request.url.path == "/mcp" else {}
-        return secure_response(request, PlainTextResponse("Internal Server Error", status_code=500, headers=headers))
+        return secure_response(
+            request, PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
+        )
 
     @app.exception_handler(DevError)
     async def dev_error(request, exc: DevError):
@@ -129,18 +167,35 @@ def install_http_behaviors(app):
         # Be explicit for browsers that otherwise guess a locale encoding.
         retry = exc.details.get("retry_after")
         headers = {"Retry-After": str(retry)} if type(retry) is int and 0 < retry <= 86400 else {}
-        return JSONResponse({"error": {"code": exc.code, "message": exc.message, **exc.details}},
-                            status_code=exc.status, headers=headers, media_type="application/json; charset=utf-8")
+        return JSONResponse(
+            {"error": {"code": exc.code, "message": exc.message, **exc.details}},
+            status_code=exc.status,
+            headers=headers,
+            media_type="application/json; charset=utf-8",
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         # Pydantic's default output includes raw password/token input; don't reflect it.
-        issues = [{"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()]
-        return JSONResponse({"error": {"code": "INVALID_ARGUMENTS", "message": "参数校验失败", "issues": issues}}, status_code=422)
+        issues = [
+            {"field": ".".join(map(str, x["loc"])), "message": x["msg"]} for x in exc.errors()
+        ]
+        return JSONResponse(
+            {"error": {"code": "INVALID_ARGUMENTS", "message": "参数校验失败", "issues": issues}},
+            status_code=422,
+        )
 
     @app.exception_handler(sqlite3.IntegrityError)
     async def integrity_error(request, exc):
-        return JSONResponse({"error": {"code": "CONFLICT", "message": "名称已存在，或关联记录已改变，请刷新后重试"}}, status_code=409)
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "CONFLICT",
+                    "message": "名称已存在，或关联记录已改变，请刷新后重试",
+                }
+            },
+            status_code=409,
+        )
 
     @app.middleware("http")
     async def headers(request: Request, call_next):

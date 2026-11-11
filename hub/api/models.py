@@ -57,11 +57,10 @@ class TokenInput(Model):
     days: int | None = Field(default=30, ge=1, le=365)
     profile_id: str | None = Field(default=None, min_length=1, max_length=100)
     profile_version: int | None = Field(default=None, ge=1)
-    authorization_mode: str = Field(default='fixed', pattern=r'^(fixed|role)$')
+    authorization_mode: str = Field(default="fixed", pattern=r"^(fixed|role)$")
     role_version: int | None = Field(default=None, ge=1)
     confirm_dynamic_role: bool = False
     confirm_external_mcp: bool = Field(default=False, strict=True)
-
 
 
 class PasswordInput(Model):

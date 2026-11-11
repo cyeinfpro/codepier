@@ -55,6 +55,7 @@ CREATE INDEX IF NOT EXISTS workflow_event_recent ON workflow_events(workflow_id,
 CREATE TABLE IF NOT EXISTS workflow_replays (actor TEXT NOT NULL, idem TEXT NOT NULL, fingerprint TEXT NOT NULL, workflow_id TEXT NOT NULL REFERENCES workflows(id), receipt TEXT NOT NULL, PRIMARY KEY(actor,idem));
 """
 
+
 class Store:
     def __init__(self, directory: str | Path, *, read_workers=3, initialize_host_contract=False):
         if type(read_workers) is not int or not 2 <= read_workers <= 4:
@@ -64,9 +65,11 @@ class Store:
         self._read_connections_lock = threading.Lock()
         self.directory = Path(directory).resolve()
         from hub.state_layout import state_directory
+
         self.state_directory = state_directory(self.directory)
         from hub.collaboration.delivery_compatibility import check_database as check_delivery_path
         from hub.collaboration.delivery_compatibility import raise_floor_in_transaction
+
         check_delivery_path(self.state_directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
@@ -74,7 +77,9 @@ class Store:
         from shared.util import VERSION
 
         check_path(self.state_directory, VERSION)
-        connection = sqlite3.connect(self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30)
+        connection = sqlite3.connect(
+            self.state_directory / "hub.sqlite3", check_same_thread=False, timeout=30
+        )
         connection.row_factory = sqlite3.Row
         self.lock_metrics = LockMetrics()
         self._writer_lock = OwnedRLock(on_release=self.lock_metrics.observe)
@@ -82,8 +87,12 @@ class Store:
         self.session_revision = 0
         self._event_loop = None
         self.transaction_metrics = TransactionMetrics()
-        self._writer_db = CheckedConnection(connection, self.lock, self._security_write,
-                                    on_transaction=self.transaction_metrics.observe)
+        self._writer_db = CheckedConnection(
+            connection,
+            self.lock,
+            self._security_write,
+            on_transaction=self.transaction_metrics.observe,
+        )
         self._executor = StoreWorker()
         self.worker_metrics = WorkerMetrics()
         with self.lock:
@@ -96,7 +105,10 @@ class Store:
                         self.db.execute("PRAGMA journal_mode=WAL")
                         break
                     except sqlite3.OperationalError as exc:
-                        if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                        if (
+                            getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY
+                            or time.monotonic() >= deadline
+                        ):
                             raise
                         time.sleep(0.05)
                 self.db.execute("PRAGMA foreign_keys=OFF")
@@ -105,9 +117,12 @@ class Store:
                     # are needed with all writes made by other Store instances.
                     self.db.execute("BEGIN IMMEDIATE")
                     check_database(self.db, VERSION)
-                    fresh = initialize_host_contract and not self.db.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
-                    ).fetchone()
+                    fresh = (
+                        initialize_host_contract
+                        and not self.db.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+                        ).fetchone()
+                    )
                     self._migrate()
                     if fresh:
                         initialize_fresh_contract(self.db, VERSION)
@@ -122,26 +137,32 @@ class Store:
                 self.db.close()
                 raise
 
-        self._read_executor = ThreadPoolExecutor(max_workers=read_workers, thread_name_prefix="hub-sqlite-read")
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=read_workers, thread_name_prefix="hub-sqlite-read"
+        )
         self.read_worker_metrics = WorkerMetrics()
 
     @property
     def lock(self):
-        binding = getattr(self._reader_state, 'binding', None)
+        binding = getattr(self._reader_state, "binding", None)
         return binding[0] if binding else self._writer_lock
 
     @property
     def db(self):
-        binding = getattr(self._reader_state, 'binding', None)
+        binding = getattr(self._reader_state, "binding", None)
         return binding[1] if binding else self._writer_db
 
     def _read_phase(self, call):
         # One connection belongs to each worker. No transaction, authorization
         # memo or connection binding survives this synchronous phase.
-        binding = getattr(self._reader_state, 'connection', None)
+        binding = getattr(self._reader_state, "connection", None)
         if binding is None:
-            connection = sqlite3.connect((self.state_directory / "hub.sqlite3").as_uri() + "?mode=ro",
-                                         uri=True, check_same_thread=False, timeout=30)
+            connection = sqlite3.connect(
+                (self.state_directory / "hub.sqlite3").as_uri() + "?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                timeout=30,
+            )
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only=ON")
             connection.execute("PRAGMA cache_size=-2048")
@@ -172,44 +193,67 @@ class Store:
                     if revision == self.session_revision and version == current_version:
                         return value
             from shared.util import DevError
-            raise DevError("AUTHORIZATION_CHANGED", "Authorization changed during read; retry the read request", 503, retry_after=1)
+
+            raise DevError(
+                "AUTHORIZATION_CHANGED",
+                "Authorization changed during read; retry the read request",
+                503,
+                retry_after=1,
+            )
         finally:
-            audits = getattr(self._reader_state, 'denial_audits', [])
+            audits = getattr(self._reader_state, "denial_audits", [])
             del self._reader_state.binding
             del self._reader_state.denial_audits
             # Both the reader transaction and final writer fence are released.
             # Keep this admitted worker alive until its audit write settles, so
             # cancellation and close drain the read and necessary audit together.
             if audits:
+
                 def flush():
                     for context, call in audits:
                         context.run(call)
+
                 self._executor.submit(flush).result()
 
     def defer_read_denial(self, actor, target, detail):
         """Collect role denials only; never allow arbitrary writes in readers."""
-        if getattr(self._reader_state, 'binding', None) is None:
+        if getattr(self._reader_state, "binding", None) is None:
             return False
-        self._reader_state.denial_audits.append((copy_context(), partial(
-            self.audit, actor, 'role.denied', target, 'denied', dict(detail))))
+        self._reader_state.denial_audits.append(
+            (
+                copy_context(),
+                partial(self.audit, actor, "role.denied", target, "denied", dict(detail)),
+            )
+        )
         return True
 
     def _load_cipher(self):
         key_path = self.state_directory / "master.key"
         if not key_path.exists():
             from hub.keyring import CIPHER_COLUMNS, PREFIXED_CIPHER_COLUMNS
+
             for table, column in CIPHER_COLUMNS:
                 columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
-                if column in columns and self.db.execute(
-                    f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL AND {column}!='' LIMIT 1"
-                ).fetchone():
-                    raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
+                if (
+                    column in columns
+                    and self.db.execute(
+                        f"SELECT 1 FROM {table} WHERE {column} IS NOT NULL AND {column}!='' LIMIT 1"
+                    ).fetchone()
+                ):
+                    raise RuntimeError(
+                        "master.key is missing for an encrypted Hub database; restore the matching master.key from backup"
+                    )
             for table, column, prefix in PREFIXED_CIPHER_COLUMNS:
                 columns = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
-                if column in columns and self.db.execute(
-                    f"SELECT 1 FROM {table} WHERE {column} LIKE ? LIMIT 1", (prefix + '%',)
-                ).fetchone():
-                    raise RuntimeError("master.key is missing for an encrypted Hub database; restore the matching master.key from backup")
+                if (
+                    column in columns
+                    and self.db.execute(
+                        f"SELECT 1 FROM {table} WHERE {column} LIKE ? LIMIT 1", (prefix + "%",)
+                    ).fetchone()
+                ):
+                    raise RuntimeError(
+                        "master.key is missing for an encrypted Hub database; restore the matching master.key from backup"
+                    )
             fd, temporary = tempfile.mkstemp(prefix=".master-key-", dir=self.state_directory)
             try:
                 with os.fdopen(fd, "wb") as stream:
@@ -223,7 +267,9 @@ class Store:
                 except FileExistsError:
                     pass
                 if os.name != "nt":
-                    directory_fd = os.open(self.state_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    directory_fd = os.open(
+                        self.state_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    )
                     try:
                         os.fsync(directory_fd)
                     finally:
@@ -231,6 +277,7 @@ class Store:
             finally:
                 os.unlink(temporary)
         from hub.keyring import CipherSuite, private_read
+
         return CipherSuite(self.state_directory, private_read(key_path).strip())
 
     def _migrate(self):
@@ -241,17 +288,38 @@ class Store:
                 self.db.execute(statement)
         self.db.execute("INSERT OR IGNORE INTO meta VALUES ('schema', '1')")
         version = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]
-        from hub.collaboration.delivery_compatibility import PROTECTED_SCHEMA_VERSION, assert_compatible
+        from hub.collaboration.delivery_compatibility import (
+            PROTECTED_SCHEMA_VERSION,
+            assert_compatible,
+        )
+
         assert_compatible(self.db)
-        if version not in {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", PROTECTED_SCHEMA_VERSION}:
+        if version not in {
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            PROTECTED_SCHEMA_VERSION,
+        }:
             raise RuntimeError(f"Unsupported Hub database schema version: {version}")
         # Additive migration: v1 databases and their audit history remain readable.
         columns = {r[1] for r in self.db.execute("PRAGMA table_info(operations)")}
         additions = {
-            "payload": "TEXT", "journal_id": "TEXT", "attempts": "INTEGER NOT NULL DEFAULT 0",
-            "next_attempt": "REAL NOT NULL DEFAULT 0", "deadline": "REAL",
-            "accepted_at": "REAL", "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
-            "output_seq": "INTEGER NOT NULL DEFAULT 0", "transport_error": "TEXT",
+            "payload": "TEXT",
+            "journal_id": "TEXT",
+            "attempts": "INTEGER NOT NULL DEFAULT 0",
+            "next_attempt": "REAL NOT NULL DEFAULT 0",
+            "deadline": "REAL",
+            "accepted_at": "REAL",
+            "cancel_requested": "INTEGER NOT NULL DEFAULT 0",
+            "output_seq": "INTEGER NOT NULL DEFAULT 0",
+            "transport_error": "TEXT",
         }
         for name, definition in additions.items():
             if name not in columns:
@@ -261,32 +329,48 @@ class Store:
             self.db.execute("ALTER TABLE grants ADD COLUMN resource TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS op_pending ON operations(state,next_attempt)")
         if "profile_id" not in grant_columns:
-            self.db.execute("ALTER TABLE grants ADD COLUMN profile_id TEXT REFERENCES access_profiles(id)")
+            self.db.execute(
+                "ALTER TABLE grants ADD COLUMN profile_id TEXT REFERENCES access_profiles(id)"
+            )
         self.db.execute("CREATE INDEX IF NOT EXISTS grants_profile ON grants(profile_id)")
         if "authorization_mode" not in grant_columns:
-            self.db.execute("ALTER TABLE grants ADD COLUMN authorization_mode TEXT NOT NULL DEFAULT 'fixed' CHECK(authorization_mode IN ('fixed','role'))")
+            self.db.execute(
+                "ALTER TABLE grants ADD COLUMN authorization_mode TEXT NOT NULL DEFAULT 'fixed' CHECK(authorization_mode IN ('fixed','role'))"
+            )
         if "role_id" not in grant_columns:
-            self.db.execute("ALTER TABLE grants ADD COLUMN role_id TEXT REFERENCES access_roles(id)")
+            self.db.execute(
+                "ALTER TABLE grants ADD COLUMN role_id TEXT REFERENCES access_roles(id)"
+            )
         profile_columns = {r[1] for r in self.db.execute("PRAGMA table_info(access_profiles)")}
         if "role_id" not in profile_columns:
-            self.db.execute("ALTER TABLE access_profiles ADD COLUMN role_id TEXT REFERENCES access_roles(id)")
+            self.db.execute(
+                "ALTER TABLE access_profiles ADD COLUMN role_id TEXT REFERENCES access_roles(id)"
+            )
         self.db.execute("CREATE INDEX IF NOT EXISTS profiles_role ON access_profiles(role_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS grants_role ON grants(role_id)")
         from hub.iam_schema import migrate
+
         migrate(self.db)
         from hub.gateway.schema import migrate as migrate_gateway
+
         migrate_gateway(self.db)
         from hub.mcp_tasks_schema import migrate as migrate_tasks
+
         migrate_tasks(self.db)
         from hub.collaboration.schema import migrate as migrate_collaboration
+
         migrate_collaboration(self.db)
         from hub.auth_schema import migrate as migrate_auth
+
         migrate_auth(self.db)
         from hub.operation_output import migrate as migrate_output
+
         migrate_output(self.db)
         from hub.operation_history import migrate as migrate_history
+
         migrate_history(self.db)
         from hub.grant_expiry import migrate as migrate_grant_expiry
+
         migrate_grant_expiry(self.db)
 
     @contextmanager
@@ -294,7 +378,7 @@ class Store:
         """Join the checked outer context; any nested failure is rollback-only."""
         with self.lock, self.db:
             if not self.db.in_transaction:
-                self.db.execute('BEGIN IMMEDIATE' if immediate else 'BEGIN')
+                self.db.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             yield self.db
 
     @contextmanager
@@ -307,7 +391,6 @@ class Store:
     def execute(self, sql: str, args=()):
         with self.lock, self.db:
             return self.db.execute(sql, args)
-
 
     def one(self, sql: str, args=()):
         with self.lock:
@@ -324,35 +407,69 @@ class Store:
     def decrypt(self, value: str):
         return self.cipher.decrypt(value.encode()).decode()
 
-    def audit(self, actor: str, action: str, target: str = "", status: str = "ok", detail=None, *, commit=True, target_kind=None):
+    def audit(
+        self,
+        actor: str,
+        action: str,
+        target: str = "",
+        status: str = "ok",
+        detail=None,
+        *,
+        commit=True,
+        target_kind=None,
+    ):
         from hub.iam import audit_context
+
         context = audit_context.get()
         # Context is trusted only for its originating Store AND actor. A task
         # can outlive the HTTP request, and direct callers may use another Store.
         scoped = bool(context and context[0] is self and context[1] == actor)
-        sid, uid = context[2:] if scoped else ('legacy', None)
-        if not scoped and actor.startswith('mcp:'):
-            grant = self.one('SELECT space_id,user_id FROM grants WHERE id=?', (actor.split(':', 2)[1],))
-            if grant: sid, uid = grant['space_id'], grant['user_id']
-        elif actor.startswith('panel:') and uid is None:
-            user = self.one('SELECT id FROM users WHERE username=?', (actor[6:],))
-            if user: uid = user['id']
+        sid, uid = context[2:] if scoped else ("legacy", None)
+        if not scoped and actor.startswith("mcp:"):
+            grant = self.one(
+                "SELECT space_id,user_id FROM grants WHERE id=?", (actor.split(":", 2)[1],)
+            )
+            if grant:
+                sid, uid = grant["space_id"], grant["user_id"]
+        elif actor.startswith("panel:") and uid is None:
+            user = self.one("SELECT id FROM users WHERE username=?", (actor[6:],))
+            if user:
+                uid = user["id"]
         # Do not retarget a scoped caller's audit entry using an untrusted ID
         # from a denied cross-Space request. Also avoid loading operation bodies
         # just to audit a thin status read.
-        tables = {'operation': 'operations', 'project': 'projects', 'device': 'devices',
-                  'profile': 'access_profiles', 'role': 'access_roles', 'workflow': 'workflows',
-                  'artifact': 'artifacts', 'grant': 'grants', 'vps': 'vps_connections'}
+        tables = {
+            "operation": "operations",
+            "project": "projects",
+            "device": "devices",
+            "profile": "access_profiles",
+            "role": "access_roles",
+            "workflow": "workflows",
+            "artifact": "artifacts",
+            "grant": "grants",
+            "vps": "vps_connections",
+        }
         if target_kind is not None and target_kind not in tables:
-            raise ValueError('Unknown audit target kind')
+            raise ValueError("Unknown audit target kind")
         # A verified caller scope (including MCP) takes precedence even when the
         # target is an ID in another Space. Free-form names/URLs never cause lookup.
-        if target_kind and target and not scoped and not actor.startswith('mcp:'):
-            row = self.one(f'SELECT space_id,owner_user_id FROM {tables[target_kind]} WHERE id=?', (target,))
+        if target_kind and target and not scoped and not actor.startswith("mcp:"):
+            row = self.one(
+                f"SELECT space_id,owner_user_id FROM {tables[target_kind]} WHERE id=?", (target,)
+            )
             if row:
-                sid = row['space_id']
-        sql = 'INSERT INTO audit(at,actor,action,target,status,detail,space_id,owner_user_id) VALUES(?,?,?,?,?,?,?,?)'
-        args = (time.time(), actor, action, target, status, json.dumps(detail or {}, ensure_ascii=False), sid, uid)
+                sid = row["space_id"]
+        sql = "INSERT INTO audit(at,actor,action,target,status,detail,space_id,owner_user_id) VALUES(?,?,?,?,?,?,?,?)"
+        args = (
+            time.time(),
+            actor,
+            action,
+            target,
+            status,
+            json.dumps(detail or {}, ensure_ascii=False),
+            sid,
+            uid,
+        )
         if commit:
             self.execute(sql, args)
         else:
@@ -362,7 +479,12 @@ class Store:
         # Conservative invalidation is safe even if the transaction rolls back.
         # No SQL text or bound value is retained in this process-local revision.
         import re
-        if re.search(r"\b(?:sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|external_identities|oidc_providers|access_roles|access_profiles|role_assignments|role_created_projects|grants|tokens|projects|devices|gateway_[a-z_]+)\b", sql, re.I):
+
+        if re.search(
+            r"\b(?:sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|external_identities|oidc_providers|access_roles|access_profiles|role_assignments|role_created_projects|grants|tokens|projects|devices|gateway_[a-z_]+)\b",
+            sql,
+            re.I,
+        ):
             self.session_revision += 1
 
     def after_commit(self, callback):
@@ -423,7 +545,13 @@ class Store:
                 metrics.finish(started, failed=failed)
 
         try:
-            submit = self._read_executor.submit if read_only else self._executor.submit_control if control else self._executor.submit
+            submit = (
+                self._read_executor.submit
+                if read_only
+                else self._executor.submit_control
+                if control
+                else self._executor.submit
+            )
             future = asyncio.wrap_future(submit(measured), loop=loop)
         except BaseException:
             metrics.reject()
@@ -460,11 +588,15 @@ class Store:
         Each group is consistent under its own lock. This aggregate is not a
         tenant endpoint and must not be exposed as a user's room statistics.
         """
-        return {'schema_version': 1, 'scope': 'hub_process', 'read_only': True,
-                'worker': self.worker_metrics.snapshot(),
-                'read_worker': self.read_worker_metrics.snapshot(),
-                'lock': self.lock_metrics.snapshot(),
-                'transactions': self.transaction_metrics.snapshot()}
+        return {
+            "schema_version": 1,
+            "scope": "hub_process",
+            "read_only": True,
+            "worker": self.worker_metrics.snapshot(),
+            "read_worker": self.read_worker_metrics.snapshot(),
+            "lock": self.lock_metrics.snapshot(),
+            "transactions": self.transaction_metrics.snapshot(),
+        }
 
     async def aclose(self):
         await self._settle(asyncio.create_task(asyncio.to_thread(self.close)))

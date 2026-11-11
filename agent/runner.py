@@ -1,4 +1,5 @@
 from __future__ import annotations
+from agent.run_directories import run_environment
 import asyncio
 import contextlib
 import codecs
@@ -11,21 +12,31 @@ import os
 import platform
 import random
 import signal
-import shutil
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 import websockets
+from agent.async_work import disk_call
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
 from agent import workspace_probe
-from agent.resource_queue import (Claim, ResourceQueue, claims_for, canonical_path,
-                                  PATH_READ_TOOLS, SCOPED_READ_TOOLS, BOUNDED_FILE_TOOLS)
+from agent.resource_queue import (
+    Claim,
+    ResourceQueue,
+    claims_for,
+    canonical_path,
+    PATH_READ_TOOLS,
+    SCOPED_READ_TOOLS,
+    BOUNDED_FILE_TOOLS,
+)
 from agent.scheduler import ProjectScheduler
 from agent.resource_pressure import ResourceSampler
-from shared.scheduler_config import effective_scheduler, validate_scheduler_overrides, is_metadata_observation
+from shared.scheduler_config import (
+    effective_scheduler,
+    validate_scheduler_overrides,
+    is_metadata_observation,
+)
 from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
 from agent.telemetry import AgentTelemetry
@@ -49,8 +60,16 @@ from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
 from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
 from shared.tool_protocol import advertisement, negotiate, validate_call_epoch
-from shared.execution_policy import (enforce_argv, agent_blocks_codex, agent_blocks_computer,
-    computer_denial, codex_computer_target, DENIAL_MESSAGE, COMPUTER_DENIAL_MESSAGE, COMPUTER_DENIAL_CODE)
+from shared.execution_policy import (
+    enforce_argv,
+    agent_blocks_codex,
+    agent_blocks_computer,
+    computer_denial,
+    codex_computer_target,
+    DENIAL_MESSAGE,
+    COMPUTER_DENIAL_MESSAGE,
+    COMPUTER_DENIAL_CODE,
+)
 from shared.instance_lock import InstanceLock
 
 
@@ -61,14 +80,20 @@ class Agent:
     def __init__(self, config_path: Path):
         self.config_path = config_path.expanduser().resolve()
         self.config = self.load_config()
-        self.state_dir = Path(self.config.get("state_dir", str(self.config_path.parent / "state"))).expanduser().resolve()
+        self.state_dir = (
+            Path(self.config.get("state_dir", str(self.config_path.parent / "state")))
+            .expanduser()
+            .resolve()
+        )
         self.instance_lock = InstanceLock(self.state_dir / ".agent.lock")
         try:
             self.journal = Journal(self.state_dir)
             self.engine = FileEngine(self.config, self.journal, self.config_path)
             self._read_workers = {}
-            self.telemetry = AgentTelemetry(self.journal,
-                process_diagnostics=os.environ.get('CODEPIER_TEST_PROCESS_DIAGNOSTICS') == '1')
+            self.telemetry = AgentTelemetry(
+                self.journal,
+                process_diagnostics=os.environ.get("CODEPIER_TEST_PROCESS_DIAGNOSTICS") == "1",
+            )
             self.build = BuildIdentity("agent")
             self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
             self.native = NativeCLI(self)
@@ -76,8 +101,11 @@ class Agent:
             self.artifacts = Artifacts(self.engine)
             self.searches = Searches(self.engine)
             self.computer_approvals = AgentApprovals(self.send)
-            self.computer = Computer(lambda: self.config, self.state_dir, self.journal, approvals=self.computer_approvals)
+            self.computer = Computer(
+                lambda: self.config, self.state_dir, self.journal, approvals=self.computer_approvals
+            )
             from agent.integrations import Integrations
+
             self.integrations = Integrations(self)
         except BaseException:
             if hasattr(self, "journal"):
@@ -89,9 +117,11 @@ class Agent:
         # Control receipts (accepted/started/result/heartbeat) are served before
         # queued bulk frames (native transcript backfill, artifact chunks).
         from agent.send_priority import PrioritySendLock
+
         self.send_lock = PrioritySendLock()
         # Small nodes: keep the Agent's own heap from triggering admission pause.
         from agent import memory_relief
+
         memory_relief.configure()
         self.memory_relief = memory_relief.MemoryRelief()
         self.jobs: dict[str, asyncio.Task] = {}
@@ -120,15 +150,20 @@ class Agent:
         self.lifecycle.activity_check = self.check_maintenance_idle
 
     def check_maintenance_idle(self, operation_id):
-        if getattr(self.computer, 'session', None):
-            raise DevError('COMPUTER_BUSY', '请先结束桌面控制会话，再维护 Agent', 409)
+        if getattr(self.computer, "session", None):
+            raise DevError("COMPUTER_BUSY", "请先结束桌面控制会话，再维护 Agent", 409)
         busy = [key for key, task in self.jobs.items() if key != operation_id and not task.done()]
-        if (busy or self.processes or any(not task.done() for task in self.transfer_tasks)
-                or any(not task.done() for task in self.kill_tasks)):
-            raise DevError('AGENT_BUSY', '设备仍有活动工作，维护交接尚未开始', 409)
+        if (
+            busy
+            or self.processes
+            or any(not task.done() for task in self.transfer_tasks)
+            or any(not task.done() for task in self.kill_tasks)
+        ):
+            raise DevError("AGENT_BUSY", "设备仍有活动工作，维护交接尚未开始", 409)
 
     def load_config(self):
         from agent.runtime_config import read_json
+
         try:
             value, _, _ = read_json(self.config_path)
             return validate_config(value, self.config_path)
@@ -139,6 +174,7 @@ class Agent:
 
     async def send(self, body: dict):
         from agent.send_priority import is_bulk
+
         async with self.send_lock.hold(is_bulk(body)):
             socket, channel = self.socket, self.channel
             if not socket or not channel:
@@ -170,12 +206,16 @@ class Agent:
             except asyncio.TimeoutError:
                 pass
             # Bound update rate even for tasks printing thousands of lines/second.
-            await asyncio.sleep(.2)
+            await asyncio.sleep(0.2)
 
     def phase(self, id, stage, **detail):
         if not self.telemetry.record(id, stage, **detail):
             return
-        self.pending_output['trace:'+id] = {"type": "trace", "id": id, "trace": self.telemetry.snapshot(id)}
+        self.pending_output["trace:" + id] = {
+            "type": "trace",
+            "id": id,
+            "trace": self.telemetry.snapshot(id),
+        }
         self.output_wake.set()
 
     async def report_status(self, id):
@@ -187,8 +227,13 @@ class Agent:
         else:
             await self.send({"type": "status", "id": id, "status": state["status"]})
         if state.get("output_seq"):
-            self.pending_output[id] = {"type": "output", "id": id, "snapshot": True,
-                                       "seq": state["output_seq"], "text": state["output"]}
+            self.pending_output[id] = {
+                "type": "output",
+                "id": id,
+                "snapshot": True,
+                "seq": state["output_seq"],
+                "text": state["output"],
+            }
             self.output_wake.set()
 
     async def report_outbox(self):
@@ -200,13 +245,21 @@ class Agent:
         socket = self.socket
         try:
             while not self.stop_event.is_set():
-                await self.send({"type": "heartbeat", "at": time.time(), "running": len(self.jobs),
-                                 "build": self.build.describe(), "management": self.lifecycle.describe(),
-                                 **(await self.disk_call(self.job_counts)), "scheduler": self.scheduler.snapshot(),
-                                 "admission": self.scheduler.admission_snapshot(),
-                                 "scheduler_revision": self.scheduler_revision,
-                                 "scheduler_error": self.scheduler_error,
-                                 "device_actions": self.lifecycle.actions()})
+                await self.send(
+                    {
+                        "type": "heartbeat",
+                        "at": time.time(),
+                        "running": len(self.jobs),
+                        "build": self.build.describe(),
+                        "management": self.lifecycle.describe(),
+                        **(await self.disk_call(self.job_counts)),
+                        "scheduler": self.scheduler.snapshot(),
+                        "admission": self.scheduler.admission_snapshot(),
+                        "scheduler_revision": self.scheduler_revision,
+                        "scheduler_error": self.scheduler_error,
+                        "device_actions": self.lifecycle.actions(),
+                    }
+                )
                 await self.report_outbox()
                 await asyncio.sleep(12)
         except Exception:
@@ -222,7 +275,9 @@ class Agent:
             if not isinstance(packet, dict):
                 raise ValueError("Invalid scheduler configuration packet")
             requested = validate_scheduler_overrides(packet.get("config", {}))
-            expected = hashlib.sha256(json.dumps(requested, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            expected = hashlib.sha256(
+                json.dumps(requested, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
             if packet.get("revision") != expected:
                 raise ValueError("Scheduler revision does not match configuration")
             effective = effective_scheduler(self.config.get("scheduler"), requested)
@@ -250,8 +305,9 @@ class Agent:
             await self.scheduler.update_pressure(sample)
             if sample is not None:
                 try:
-                    await asyncio.wait_for(asyncio.to_thread(
-                        self.memory_relief.observe, sample, idle=not self.jobs), 5)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self.memory_relief.observe, sample, idle=not self.jobs), 5
+                    )
                 except (TimeoutError, OSError, ValueError):
                     pass
             try:
@@ -262,8 +318,11 @@ class Agent:
     def job_counts(self):
         # Journal states distinguish accepted queue entries from admitted work.
         states = [self.journal.status(identifier)["status"] for identifier in self.jobs]
-        return {"running_jobs": states.count("running"),
-                "queued_jobs": states.count("accepted"), "jobs_total": len(self.jobs)}
+        return {
+            "running_jobs": states.count("running"),
+            "queued_jobs": states.count("accepted"),
+            "jobs_total": len(self.jobs),
+        }
 
     async def watch_config(self):
         # The file can be temporarily absent during an editor's save/replace.
@@ -275,10 +334,17 @@ class Agent:
                 current = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
                 if current != old:
                     c = self.load_config()
-                    if c.get("state_dir", str(self.config_path.parent / "state")) != self.config.get("state_dir", str(self.config_path.parent / "state")):
+                    if c.get(
+                        "state_dir", str(self.config_path.parent / "state")
+                    ) != self.config.get("state_dir", str(self.config_path.parent / "state")):
                         LOGGER.warning("state_dir 更改需要手动重启。")
-                    if c.get("device_id") != self.config["device_id"] or c.get("secret") != self.config["secret"]:
-                        LOGGER.warning("设备身份/密钥更改需要停止 Agent 后重新启动；未在运行中切换身份。")
+                    if (
+                        c.get("device_id") != self.config["device_id"]
+                        or c.get("secret") != self.config["secret"]
+                    ):
+                        LOGGER.warning(
+                            "设备身份/密钥更改需要停止 Agent 后重新启动；未在运行中切换身份。"
+                        )
                         old = current
                         continue
                     # Do not pretend a hot-reloaded state_dir changed the open journal.
@@ -286,7 +352,9 @@ class Agent:
                     if c == self.config:
                         old = current
                         continue
-                    await self.scheduler.reconfigure(effective_scheduler(c.get("scheduler"), self.scheduler_requested))
+                    await self.scheduler.reconfigure(
+                        effective_scheduler(c.get("scheduler"), self.scheduler_requested)
+                    )
                     # A loaded profile is not yet an available control channel.
                     self.runtime_reload_pending = True
                     self.config = c
@@ -300,38 +368,85 @@ class Agent:
 
     async def connect_once(self):
         from agent.project_runtime import advertised_profiles
+
         config = self.config
         base = config["hub_url"]
-        ws_url = ("wss://" if base.startswith("https://") else "ws://") + base.split("://", 1)[1] + "/agent/ws/" + config["device_id"]
-        async with websockets.connect(ws_url, open_timeout=15, ping_interval=20, ping_timeout=25,
-                                      max_size=16 * 1024 * 1024, compression=None, proxy=None, close_timeout=3) as socket:
+        ws_url = (
+            ("wss://" if base.startswith("https://") else "ws://")
+            + base.split("://", 1)[1]
+            + "/agent/ws/"
+            + config["device_id"]
+        )
+        async with websockets.connect(
+            ws_url,
+            open_timeout=15,
+            ping_interval=20,
+            ping_timeout=25,
+            max_size=16 * 1024 * 1024,
+            compression=None,
+            proxy=None,
+            close_timeout=3,
+        ) as socket:
             challenge = json.loads(await asyncio.wait_for(socket.recv(), 10))
             if not isinstance(challenge, dict) or challenge.get("type") != "challenge":
                 raise ValueError("面板握手无效")
-            channel = SecureChannel(config["secret"], challenge["challenge"], config["device_id"], "agent")
+            channel = SecureChannel(
+                config["secret"], challenge["challenge"], config["device_id"], "agent"
+            )
             from agent.channel_binding import new_binding, verify_binding
+
             binding = new_binding()
-            await socket.send(channel.pack({"type": "hello", "channel_binding": binding, "name": config.get("name", platform.node()),
-                          "version": VERSION, "build": self.build.describe(), "platform": platform.system(), "hostname": platform.node(),
-                          "python": platform.python_version(), "roots": config["allowed_roots"], "capabilities": list(TOOLS),
-                          "computer_enabled": config.get("computer", {}).get("enabled") is True,
-                          "management": self.lifecycle.describe(), "device_actions": self.lifecycle.actions(),
-                          "scheduler_protocol": 1, "resource_semantics_protocol": 2, "snapshot_execution_protocol": 1, "bounded_execution_protocol": 1,
-                          "project_runtime_protocol": 1, "project_runtime_profiles": advertised_profiles(config),
-                          "journal_id": self.journal.journal_id, "delivery_protocol": 2, "cancel_pending_protocol": 1, "native_security_protocol": 1, "native_protocol": 1, "native_chat_protocol": 3, **advertisement(self.build.catalog_sha256)}))
+            await socket.send(
+                channel.pack(
+                    {
+                        "type": "hello",
+                        "channel_binding": binding,
+                        "name": config.get("name", platform.node()),
+                        "version": VERSION,
+                        "build": self.build.describe(),
+                        "platform": platform.system(),
+                        "hostname": platform.node(),
+                        "python": platform.python_version(),
+                        "roots": config["allowed_roots"],
+                        "capabilities": list(TOOLS),
+                        "computer_enabled": config.get("computer", {}).get("enabled") is True,
+                        "management": self.lifecycle.describe(),
+                        "device_actions": self.lifecycle.actions(),
+                        "scheduler_protocol": 1,
+                        "resource_semantics_protocol": 2,
+                        "snapshot_execution_protocol": 1,
+                        "bounded_execution_protocol": 1,
+                        "project_runtime_protocol": 1,
+                        "project_runtime_profiles": advertised_profiles(config),
+                        "journal_id": self.journal.journal_id,
+                        "delivery_protocol": 2,
+                        "cancel_pending_protocol": 1,
+                        "native_security_protocol": 1,
+                        "native_protocol": 1,
+                        "native_chat_protocol": 3,
+                        **advertisement(self.build.catalog_sha256),
+                    }
+                )
+            )
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
             if reply.get("type") != "ready":
                 raise ValueError("面板未确认 Agent 身份")
             await self.disk_call(verify_binding, self.journal, binding, reply)
             self.hub_protocol = negotiate(reply)
             empty_revision = hashlib.sha256(b"{}").hexdigest()
-            await self.apply_scheduler_config(reply.get("scheduler_config", {"config": {}, "revision": empty_revision}))
+            await self.apply_scheduler_config(
+                reply.get("scheduler_config", {"config": {}, "revision": empty_revision})
+            )
             if self.stop_event.is_set() or self.config is not config:
                 return
             self.socket, self.channel = socket, channel
             self.runtime_reload_pending = False
             self.connection_number += 1
-            LOGGER.info("已连接面板；设备 %s；授权目录 %s 个。", self.config["device_id"], len(self.config["allowed_roots"]))
+            LOGGER.info(
+                "已连接面板；设备 %s；授权目录 %s 个。",
+                self.config["device_id"],
+                len(self.config["allowed_roots"]),
+            )
             self.output_wake.set()
             # heartbeat sends the outbox concurrently with the socket reader,
             # so result ACKs are processed during backlog recovery.
@@ -355,9 +470,30 @@ class Agent:
                         continue
                     if kind == "native_request":
                         if self.lifecycle.handoff_pending:
-                            await self.send({"type":"native_reply", "request_id":data.get("request_id"), "result":{"ok":False,"error":{"code":"AGENT_MAINTENANCE","message":"CodePier 正在交接更新，请稍后重试"}}})
+                            await self.send(
+                                {
+                                    "type": "native_reply",
+                                    "request_id": data.get("request_id"),
+                                    "result": {
+                                        "ok": False,
+                                        "error": {
+                                            "code": "AGENT_MAINTENANCE",
+                                            "message": "CodePier 正在交接更新，请稍后重试",
+                                        },
+                                    },
+                                }
+                            )
                         elif len(self.transfer_tasks) >= 8:
-                            await self.send({"type":"native_reply", "request_id":data.get("request_id"), "result":{"ok":False,"error":{"code":"CLI_BUSY","message":"控制通道繁忙"}}})
+                            await self.send(
+                                {
+                                    "type": "native_reply",
+                                    "request_id": data.get("request_id"),
+                                    "result": {
+                                        "ok": False,
+                                        "error": {"code": "CLI_BUSY", "message": "控制通道繁忙"},
+                                    },
+                                }
+                            )
                         else:
                             task = asyncio.create_task(self.native.handle(data, socket))
                             self.transfer_tasks.add(task)
@@ -367,16 +503,40 @@ class Agent:
                         self.computer_approvals.decide(data)
                         continue
                     if kind == "artifact_read":
-                        request_id=data.get("request_id")
+                        request_id = data.get("request_id")
                         if self.lifecycle.handoff_pending:
-                            await self.send({"type":"artifact_chunk","request_id":request_id,"result":{"ok":False,"error":{"code":"AGENT_MAINTENANCE","message":"CodePier 正在安全切换，请稍后重试"}}})
+                            await self.send(
+                                {
+                                    "type": "artifact_chunk",
+                                    "request_id": request_id,
+                                    "result": {
+                                        "ok": False,
+                                        "error": {
+                                            "code": "AGENT_MAINTENANCE",
+                                            "message": "CodePier 正在安全切换，请稍后重试",
+                                        },
+                                    },
+                                }
+                            )
                             continue
-                        if not isinstance(request_id,str) or len(request_id)!=32:
+                        if not isinstance(request_id, str) or len(request_id) != 32:
                             raise ValueError("Invalid artifact request ID")
-                        if len(self.transfer_tasks)>=4:
-                            await self.send({"type":"artifact_chunk","request_id":request_id,"result":{"ok":False,"error":{"code":"ARTIFACT_BUSY","message":"产物通道繁忙"}}})
+                        if len(self.transfer_tasks) >= 4:
+                            await self.send(
+                                {
+                                    "type": "artifact_chunk",
+                                    "request_id": request_id,
+                                    "result": {
+                                        "ok": False,
+                                        "error": {
+                                            "code": "ARTIFACT_BUSY",
+                                            "message": "产物通道繁忙",
+                                        },
+                                    },
+                                }
+                            )
                         else:
-                            task=asyncio.create_task(self.send_artifact(data,socket))
+                            task = asyncio.create_task(self.send_artifact(data, socket))
                             self.transfer_tasks.add(task)
                             task.add_done_callback(self.transfer_done)
                         continue
@@ -397,7 +557,9 @@ class Agent:
                             except Exception as exc:
                                 # Keep the durable result in the outbox. A repeated Hub ACK
                                 # will retry the handoff without creating another operation.
-                                LOGGER.warning("生命周期操作交接失败，将等待重试（%s）", type(exc).__name__)
+                                LOGGER.warning(
+                                    "生命周期操作交接失败，将等待重试（%s）", type(exc).__name__
+                                )
                                 continue
                         await self.disk_call(self.journal.ack, data["id"])
                         if lifecycle_started:
@@ -428,7 +590,11 @@ class Agent:
         await between the journal check and cancellation, so a start cannot race
         through this decision. Missing/retryable IDs retain a durable fence.
         """
-        if id in self.finishing or self.journal.status(id)['status'] not in {'accepted', 'missing', 'retryable'}:
+        if id in self.finishing or self.journal.status(id)["status"] not in {
+            "accepted",
+            "missing",
+            "retryable",
+        }:
             return False
         self.cancel_call(id)
         return True
@@ -476,14 +642,18 @@ class Agent:
             self._waiting_writes.append((token, root))
 
         def admitted():
-            self._waiting_writes[:] = [item for item in self._waiting_writes if item[0] is not token]
+            self._waiting_writes[:] = [
+                item for item in self._waiting_writes if item[0] is not token
+            ]
             self._active_slots[token] = (root, write)
             self.active_roots.add(root)
 
         try:
             yield admitted
         finally:
-            self._waiting_writes[:] = [item for item in self._waiting_writes if item[0] is not token]
+            self._waiting_writes[:] = [
+                item for item in self._waiting_writes if item[0] is not token
+            ]
             self._active_slots.pop(token, None)
             self.slot_owners.pop(token, None)
             if not any(active_root == root for active_root, _ in self._active_slots.values()):
@@ -493,20 +663,38 @@ class Agent:
     async def project_slot(self, root, write=True, operation_id=None):
         def resolve_claim():
             resolved = Path(root).expanduser().resolve()
-            return resolved, Claim('agent', 'path', canonical_path(resolved), write)
+            return resolved, Claim("agent", "path", canonical_path(resolved), write)
 
         # A network volume can stall path resolution. Keep heartbeat/cancel and
         # unrelated projects live; all queue/tracking changes stay on this loop.
         root, claim = await self.disk_call(resolve_claim)
         with self._project_tracking(root, write, operation_id) as admitted:
-            async with self.resources.slot(operation_id or 'local', [claim],
-                    lambda blockers: self.phase(operation_id, 'waiting_resource', blocked_by=blockers) if operation_id else None):
+            async with self.resources.slot(
+                operation_id or "local",
+                [claim],
+                lambda blockers: (
+                    self.phase(operation_id, "waiting_resource", blocked_by=blockers)
+                    if operation_id
+                    else None
+                ),
+            ):
                 admitted()
                 yield
 
     @contextlib.asynccontextmanager
-    async def execution_slot(self, identifier, tool, project, args, root, write, deadline,
-                             *, read_admission=None, reserved=False):
+    async def execution_slot(
+        self,
+        identifier,
+        tool,
+        project,
+        args,
+        root,
+        write,
+        deadline,
+        *,
+        read_admission=None,
+        reserved=False,
+    ):
         if reserved:
             yield
             return
@@ -516,7 +704,7 @@ class Agent:
         async with contextlib.AsyncExitStack() as stack:
             try:
                 async with asyncio.timeout(timeout) as timer:
-                    if tool == 'exec' and args.get('isolation') == 'snapshot':
+                    if tool == "exec" and args.get("isolation") == "snapshot":
                         await self.prepare_snapshot(identifier, project, args, root, deadline)
                         stack.push_async_callback(self.finish_snapshot, identifier)
                     # Imports publish one destination. A project-wide writer
@@ -525,22 +713,51 @@ class Agent:
                         if read_admission is None:
                             async with self._read_preflight_slot(identifier, project):
                                 read_admission = await workspace_probe.probe(
-                                    self.engine, tool, project, args, phase='claims', expected_root=root)
-                        claims = [Claim(**item) for item in read_admission['claims']]
-                    elif (tool in CORE_REMOTE or tool == 'download_artifact' or tool in PATH_READ_TOOLS
-                          or tool in SCOPED_READ_TOOLS or tool in {'project_checkpoint', 'worktrees_create'}):
-                        claims = claims_for(self.engine, tool, project, args, root, operation_id=identifier)
+                                    self.engine,
+                                    tool,
+                                    project,
+                                    args,
+                                    phase="claims",
+                                    expected_root=root,
+                                )
+                        claims = [Claim(**item) for item in read_admission["claims"]]
+                    elif (
+                        tool in CORE_REMOTE
+                        or tool == "download_artifact"
+                        or tool in PATH_READ_TOOLS
+                        or tool in SCOPED_READ_TOOLS
+                        or tool in {"project_checkpoint", "worktrees_create"}
+                    ):
+                        claims = claims_for(
+                            self.engine, tool, project, args, root, operation_id=identifier
+                        )
                     else:
-                        claims = [Claim('agent', 'path', canonical_path(root), write,
-                                        'process' if tool in {'shell_exec', 'tasks_run', 'ssh_exec', 'validation_run'} else 'file',
-                                        tool == 'tasks_run')]
-                    if tool == 'exec' and args.get('target', 'agent') == 'agent':
-                        if args.get('isolation') == 'snapshot':
+                        claims = [
+                            Claim(
+                                "agent",
+                                "path",
+                                canonical_path(root),
+                                write,
+                                "process"
+                                if tool in {"shell_exec", "tasks_run", "ssh_exec", "validation_run"}
+                                else "file",
+                                tool == "tasks_run",
+                            )
+                        ]
+                    if tool == "exec" and args.get("target", "agent") == "agent":
+                        if args.get("isolation") == "snapshot":
                             # File paths refer to the private cloned tree. Service
                             # resources still name shared external dependencies.
-                            claims = [claim for claim in claims if claim.kind == 'service']
-                        claims.append(Claim('agent', 'path', canonical_path(root / '.codepier' / 'runs' / identifier),
-                                            True, 'process'))
+                            claims = [claim for claim in claims if claim.kind == "service"]
+                        claims.append(
+                            Claim(
+                                "agent",
+                                "path",
+                                canonical_path(root / ".codepier" / "runs" / identifier),
+                                True,
+                                "process",
+                            )
+                        )
                     metadata = is_metadata_observation(tool, args)
                     if metadata:
                         # The index is a bounded observation with per-file
@@ -552,7 +769,11 @@ class Agent:
                     # the existing file-I/O lane, just like core read, so long
                     # commands cannot starve directory navigation. Resource locks
                     # still exclude conflicting writes; searches stay heavy.
-                    lane = "read" if metadata or tool in BOUNDED_FILE_TOOLS and tool != 'fs_search' else "execution"
+                    lane = (
+                        "read"
+                        if metadata or tool in BOUNDED_FILE_TOOLS and tool != "fs_search"
+                        else "execution"
+                    )
                     # Match the typed execution dispatcher, including the panel's
                     # legacy SSH entry. Never infer remote work from shell text.
                     remote = args if tool == "ssh_exec" else None
@@ -569,30 +790,60 @@ class Agent:
                         target = host + ":" + str(remote["port"])
                     # Managed worktrees retain the authenticated parent project
                     # ID; a new workspace cannot manufacture a new quota.
-                    project_id = (read_admission['project_key'] if read_admission is not None
-                                  else project.get("id") or canonical_path(project.get("_original_root", root)))
+                    project_id = (
+                        read_admission["project_key"]
+                        if read_admission is not None
+                        else project.get("id")
+                        or canonical_path(project.get("_original_root", root))
+                    )
                     admitted = None
-                    if not metadata and tool not in CORE_REMOTE and tool not in PATH_READ_TOOLS and tool != 'download_artifact':
-                        admitted = stack.enter_context(self._project_tracking(root, write, identifier))
+                    if (
+                        not metadata
+                        and tool not in CORE_REMOTE
+                        and tool not in PATH_READ_TOOLS
+                        and tool != "download_artifact"
+                    ):
+                        admitted = stack.enter_context(
+                            self._project_tracking(root, write, identifier)
+                        )
                     queued_at = time.monotonic()
-                    await stack.enter_async_context(self.scheduler.slot(
-                        identifier, project_id, lane, target,
-                        lambda reason: self.phase(identifier, "waiting_worker", queue_reason=reason, lane=lane,
-                            queue_age_ms=round((time.monotonic()-queued_at)*1000)),
-                        claims=claims,
-                        strict_order=args.get('options', {}).get('order') == 'strict',
-                        wait_policy=args.get('options', {}).get('wait_policy', 'queue'),
-                        initial_wait_seconds=max(.01, args.get('yield_seconds', 1)),
-                        on_bypass=lambda count: self.phase(identifier, 'bypassed', bypassed_count=count, lane=lane),
-                        on_resource_wait=lambda blockers: self.phase(identifier, 'waiting_resource',
-                            blocked_by=blockers, queue_reason='resource_conflict', lane=lane,
-                            blocked_count=len(blockers), resource_kinds=sorted({claim.kind for claim in claims}),
-                            queue_age_ms=round((time.monotonic()-queued_at)*1000))))
+                    await stack.enter_async_context(
+                        self.scheduler.slot(
+                            identifier,
+                            project_id,
+                            lane,
+                            target,
+                            lambda reason: self.phase(
+                                identifier,
+                                "waiting_worker",
+                                queue_reason=reason,
+                                lane=lane,
+                                queue_age_ms=round((time.monotonic() - queued_at) * 1000),
+                            ),
+                            claims=claims,
+                            strict_order=args.get("options", {}).get("order") == "strict",
+                            wait_policy=args.get("options", {}).get("wait_policy", "queue"),
+                            initial_wait_seconds=max(0.01, args.get("yield_seconds", 1)),
+                            on_bypass=lambda count: self.phase(
+                                identifier, "bypassed", bypassed_count=count, lane=lane
+                            ),
+                            on_resource_wait=lambda blockers: self.phase(
+                                identifier,
+                                "waiting_resource",
+                                blocked_by=blockers,
+                                queue_reason="resource_conflict",
+                                lane=lane,
+                                blocked_count=len(blockers),
+                                resource_kinds=sorted({claim.kind for claim in claims}),
+                                queue_age_ms=round((time.monotonic() - queued_at) * 1000),
+                            ),
+                        )
+                    )
                     if admitted is not None:
                         admitted()
                     timer.reschedule(None)
             except TimeoutError as exc:
-                raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+                raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
             yield
 
     @contextlib.asynccontextmanager
@@ -601,12 +852,17 @@ class Agent:
         # fair read lane, but release BEFORE waiting on any filesystem resource.
         # Unresolved legacy roots share a conservative key: resolving a path here
         # would defeat isolation, and caller aliases must not mint new quotas.
-        project_id = project.get('id')
+        project_id = project.get("id")
         if not isinstance(project_id, str) or not project_id:
-            project_id = '__unresolved_read_preflight__'
-        async with self.scheduler.slot(identifier, project_id, 'read',
-                on_wait=lambda reason: self.phase(identifier, 'waiting_worker',
-                    queue_reason=reason, lane='read')) as ticket:
+            project_id = "__unresolved_read_preflight__"
+        async with self.scheduler.slot(
+            identifier,
+            project_id,
+            "read",
+            on_wait=lambda reason: self.phase(
+                identifier, "waiting_worker", queue_reason=reason, lane="read"
+            ),
+        ) as ticket:
             yield ticket
 
     async def _read_admission(self, identifier, tool, project, args, deadline):
@@ -615,9 +871,10 @@ class Agent:
             async with asyncio.timeout(remaining):
                 async with self._read_preflight_slot(identifier, project):
                     return await workspace_probe.probe(
-                        self.engine, tool, project, args, phase='admission')
+                        self.engine, tool, project, args, phase="admission"
+                    )
         except TimeoutError as exc:
-            raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
 
     @contextlib.asynccontextmanager
     async def _read_admission_context(self, identifier, tool, project, args, deadline):
@@ -625,7 +882,7 @@ class Agent:
             yield None, None, False
             return
         metadata = is_metadata_observation(tool, args)
-        if tool != 'read' and tool not in PATH_READ_TOOLS and not metadata:
+        if tool != "read" and tool not in PATH_READ_TOOLS and not metadata:
             yield await self._read_admission(identifier, tool, project, args, deadline), None, False
             return
         remaining = max(0, deadline - time.time()) if deadline is not None else None
@@ -634,18 +891,29 @@ class Agent:
                 async with self._read_preflight_slot(identifier, project) as ticket:
                     async with workspace_probe.ReadWorker(admission=True) as worker:
                         admission = await workspace_probe.probe(
-                            self.engine, tool, project, args, phase='admission', worker=worker)
-                        claims = [] if metadata else [Claim(**item) for item in admission['claims']]
+                            self.engine, tool, project, args, phase="admission", worker=worker
+                        )
+                        claims = [] if metadata else [Claim(**item) for item in admission["claims"]]
                         # Recursive content search retains execution pressure
                         # accounting even though its path claim is read-only.
-                        lane = 'execution' if tool == 'fs_search' else 'read'
+                        lane = "execution" if tool == "fs_search" else "read"
                         # One synchronous decision converts the preflight ticket
                         # and reserves resources. Failure leaves neither a path
                         # reservation nor a fairness turn behind while reaping.
-                        reserved = self.scheduler.try_reserve(identifier,
-                            admission['project_key'], lane, replace=ticket, claims=claims,
-                            strict_order=args.get('options', {}).get('order') == 'strict',
-                            on_bypass=lambda count: self.phase(identifier, 'bypassed', bypassed_count=count, lane=lane)) is not None
+                        reserved = (
+                            self.scheduler.try_reserve(
+                                identifier,
+                                admission["project_key"],
+                                lane,
+                                replace=ticket,
+                                claims=claims,
+                                strict_order=args.get("options", {}).get("order") == "strict",
+                                on_bypass=lambda count: self.phase(
+                                    identifier, "bypassed", bypassed_count=count, lane=lane
+                                ),
+                            )
+                            is not None
+                        )
                         if reserved:
                             timer.reschedule(None)
                             yield admission, worker, True
@@ -655,7 +923,7 @@ class Agent:
         except TimeoutError as exc:
             if not timer.expired():
                 raise
-            raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
         # Contended paths use the unchanged blocking queues, without a resident
         # child; execution will open a fresh worker and recheck current authority.
         yield admission, None, False
@@ -679,23 +947,36 @@ class Agent:
             finally:
                 self._read_workers.pop(identifier, None)
 
-    async def _operation_root(self, tool, project, args, *, preflight_id=None,
-                              preflight_deadline=None, worker=None, expected_root=None):
+    async def _operation_root(
+        self,
+        tool,
+        project,
+        args,
+        *,
+        preflight_id=None,
+        preflight_deadline=None,
+        worker=None,
+        expected_root=None,
+    ):
         if workspace_probe.eligible(tool, args):
             if preflight_id is not None:
-                remaining = (max(0, preflight_deadline - time.time())
-                             if preflight_deadline is not None else None)
+                remaining = (
+                    max(0, preflight_deadline - time.time())
+                    if preflight_deadline is not None
+                    else None
+                )
                 try:
                     async with asyncio.timeout(remaining):
                         async with self._read_preflight_slot(preflight_id, project):
                             return await workspace_probe.root(self.engine, tool, project, args)
                 except TimeoutError as exc:
-                    raise DevError('QUEUE_EXPIRED', '超过首次执行期限，未开始操作') from exc
+                    raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
             # These rechecks already hold the execution slot. Re-entering the
             # lane here could deadlock when all slots are occupied by readers.
-            return await workspace_probe.root(self.engine, tool, project, args,
-                                               worker=worker, expected_root=expected_root)
-        return self.engine.root(project, tool in MUTATING)
+            return await workspace_probe.root(
+                self.engine, tool, project, args, worker=worker, expected_root=expected_root
+            )
+        return await self.disk_call(self.engine.root, project, tool in MUTATING)
 
     async def handle(self, request):
         id = request["id"]
@@ -704,17 +985,17 @@ class Agent:
         # Hub-authenticated delivery metadata is not part of the journal request
         # fingerprint: tightening policy must not break receipt recovery.
         execution_policy = request.get("execution_policy")
-        integration_context = request.get('integration_context')
-        core_ssh = request.get('core_ssh')
-        bounded_execution = request.get('bounded_execution')
-        runtime_requirement = request.get('project_runtime_requirement')
+        integration_context = request.get("integration_context")
+        core_ssh = request.get("core_ssh")
+        bounded_execution = request.get("bounded_execution")
+        runtime_requirement = request.get("project_runtime_requirement")
         request = {k: request.get(k) for k in ("tool", "project", "args")}
         if bounded_execution is not None:
             # Unlike mutable transport policy, a time budget is immutable work
             # identity: changing it under the same operation ID is a conflict.
-            request['bounded_execution'] = bounded_execution
+            request["bounded_execution"] = bounded_execution
         if runtime_requirement is not None:
-            request['project_runtime_requirement'] = runtime_requirement
+            request["project_runtime_requirement"] = runtime_requirement
         try:
             previous = self.journal.start(id, request)
             if previous is not None:
@@ -724,59 +1005,137 @@ class Agent:
             if exc.code == "ALREADY_RUNNING":
                 await self.report_status(id)
             else:
-                await self.send({"type": "result", "id": id, "result": {"ok": False, "error": {"code": exc.code, "message": exc.message}}})
+                await self.send(
+                    {
+                        "type": "result",
+                        "id": id,
+                        "result": {
+                            "ok": False,
+                            "error": {"code": exc.code, "message": exc.message},
+                        },
+                    }
+                )
             return
         try:
-            if self.lifecycle.handoff_pending or self.lifecycle.base and (self.lifecycle.base / ".install.lock").exists():
-                raise DevError("AGENT_MAINTENANCE", "Agent 正在本机安装、升级或卸载，请完成后重试", 409)
+            if (
+                self.lifecycle.handoff_pending
+                or self.lifecycle.base
+                and (self.lifecycle.base / ".install.lock").exists()
+            ):
+                raise DevError(
+                    "AGENT_MAINTENANCE", "Agent 正在本机安装、升级或卸载，请完成后重试", 409
+                )
             if bounded_execution is not None:
                 from shared.bounded_execution import validate_budget
+
                 bounded_execution = validate_budget(bounded_execution)
-                if (request.get('tool') != 'exec' or not isinstance(request.get('project'), dict)
-                        or request['project'].get('id') != bounded_execution['project_id']
-                        or not isinstance(request.get('args'), dict) or request['args'].get('task')
-                        or request['args'].get('timeout_seconds') != bounded_execution['timeout_seconds']
-                        or type(not_after) not in (int, float) or not math.isfinite(not_after)
-                        or not_after > min(bounded_execution['consumer_lease_until'], bounded_execution['hard_until'])):
-                    raise DevError('BOUNDED_EXECUTION_MISMATCH', '原命令预算和首次执行身份不匹配', 409)
+                if (
+                    request.get("tool") != "exec"
+                    or not isinstance(request.get("project"), dict)
+                    or request["project"].get("id") != bounded_execution["project_id"]
+                    or not isinstance(request.get("args"), dict)
+                    or request["args"].get("task")
+                    or request["args"].get("timeout_seconds")
+                    != bounded_execution["timeout_seconds"]
+                    or type(not_after) not in (int, float)
+                    or not math.isfinite(not_after)
+                    or not_after
+                    > min(
+                        bounded_execution["consumer_lease_until"], bounded_execution["hard_until"]
+                    )
+                ):
+                    raise DevError(
+                        "BOUNDED_EXECUTION_MISMATCH", "原命令预算和首次执行身份不匹配", 409
+                    )
             self.phase(id, "accepted")
-            await self.send({"type": "accepted", "id": id,
-                             **({'bounded_execution': bounded_execution} if bounded_execution else {})})
+            await self.send(
+                {
+                    "type": "accepted",
+                    "id": id,
+                    **({"bounded_execution": bounded_execution} if bounded_execution else {}),
+                }
+            )
             tool, project, args = request["tool"], request["project"], request["args"]
-            if not isinstance(tool, str) or not isinstance(project, dict) or not isinstance(args, dict):
+            if (
+                not isinstance(tool, str)
+                or not isinstance(project, dict)
+                or not isinstance(args, dict)
+            ):
                 raise DevError("INVALID_REQUEST", "操作必须包含 tool、project 和 args 对象")
             validate_call_epoch(tool, tool_contract_version)
             # Never accept a project/argument-supplied exemption. Legacy frames
             # without metadata still obey the independently configured local floor.
-            project = {**project, "_execution_policy": execution_policy, "_core_ssh": core_ssh,
-                       '_bounded_execution': bounded_execution, '_runtime_requirement': None,
-                       '_integration_admin': False, '_roots_admin': False, '_integration_owner': None, '_computer_scopes': []}
+            project = {
+                **project,
+                "_execution_policy": execution_policy,
+                "_core_ssh": core_ssh,
+                "_bounded_execution": bounded_execution,
+                "_runtime_requirement": None,
+                "_integration_admin": False,
+                "_roots_admin": False,
+                "_integration_owner": None,
+                "_computer_scopes": [],
+            }
             if isinstance(integration_context, dict):
-                owner = integration_context.get('owner')
-                if not isinstance(owner, str) or not 1 <= len(owner) <= 600 or integration_context.get('device_id') != self.config['device_id']:
-                    raise DevError('INTEGRATION_IDENTITY', '经过认证的执行身份无效', 403)
-                admin = integration_context.get('admin') is True and isinstance(execution_policy, dict) and execution_policy.get('origin') == 'panel'
-                project.update(_integration_owner=owner, _integration_admin=admin,
-                    _roots_admin=bool(admin and tool in PANEL_ROOTS_TOOLS and project.get('id') is None), _coding_owner=owner,
-                    _coding_device=integration_context['device_id'], device_id=integration_context['device_id'],
-                    _coding_scopes=integration_context.get('scopes', []), _computer_scopes=integration_context.get('scopes', []),
-                    _authority_revision=integration_context.get('authority_revision'),
-                    _runtime_requirement=integration_context.get('runtime_requirement'))
+                owner = integration_context.get("owner")
+                if (
+                    not isinstance(owner, str)
+                    or not 1 <= len(owner) <= 600
+                    or integration_context.get("device_id") != self.config["device_id"]
+                ):
+                    raise DevError("INTEGRATION_IDENTITY", "经过认证的执行身份无效", 403)
+                admin = (
+                    integration_context.get("admin") is True
+                    and isinstance(execution_policy, dict)
+                    and execution_policy.get("origin") == "panel"
+                )
+                project.update(
+                    _integration_owner=owner,
+                    _integration_admin=admin,
+                    _roots_admin=bool(
+                        admin and tool in PANEL_ROOTS_TOOLS and project.get("id") is None
+                    ),
+                    _coding_owner=owner,
+                    _coding_device=integration_context["device_id"],
+                    device_id=integration_context["device_id"],
+                    _coding_scopes=integration_context.get("scopes", []),
+                    _computer_scopes=integration_context.get("scopes", []),
+                    _authority_revision=integration_context.get("authority_revision"),
+                    _runtime_requirement=integration_context.get("runtime_requirement"),
+                )
                 self.integrations.remember_project(project)
             if runtime_requirement is not None:
                 from shared.runtime_requirements import valid_requirement
-                if not valid_requirement(runtime_requirement, project.get('id')) or project.get('_runtime_requirement') != runtime_requirement:
-                    raise DevError('RUNTIME_REQUIREMENT_INVALID', 'Runtime requirement lacks matching authenticated delivery metadata', 403)
-            elif project.get('_runtime_requirement') is not None:
-                raise DevError('RUNTIME_REQUIREMENT_INVALID', 'Runtime requirement is missing from original operation identity', 403)
-            if args.get('workspace_id'):
-                project = self.integrations.project(project, args)
+
+                if (
+                    not valid_requirement(runtime_requirement, project.get("id"))
+                    or project.get("_runtime_requirement") != runtime_requirement
+                ):
+                    raise DevError(
+                        "RUNTIME_REQUIREMENT_INVALID",
+                        "Runtime requirement lacks matching authenticated delivery metadata",
+                        403,
+                    )
+            elif project.get("_runtime_requirement") is not None:
+                raise DevError(
+                    "RUNTIME_REQUIREMENT_INVALID",
+                    "Runtime requirement is missing from original operation identity",
+                    403,
+                )
+            if args.get("workspace_id"):
+                project = await self.disk_call(self.integrations.project, project, args)
             self.integration_projects[id] = project
             self.integration_tool_names[id] = tool
             self.integrations.control.guard(tool, project)
-            if not_after is not None and (type(not_after) not in {int, float} or not math.isfinite(not_after)):
+            if not_after is not None and (
+                type(not_after) not in {int, float} or not math.isfinite(not_after)
+            ):
                 raise DevError("INVALID_REQUEST", "操作期限必须是有限时间戳")
-            if self.stop_event.is_set() and id not in self.cancelled and not self.journal.is_cancelled(id):
+            if (
+                self.stop_event.is_set()
+                and id not in self.cancelled
+                and not self.journal.is_cancelled(id)
+            ):
                 raise asyncio.CancelledError
             if id in self.cancelled or self.journal.is_cancelled(id):
                 raise DevError("CANCELLED", "操作开始前已取消")
@@ -785,13 +1144,24 @@ class Agent:
             if tool == "system_validate":
                 root, spec = self.engine.root(project)
                 self.journal.mark_running(id)
-                result = {"root": str(root), "writable": spec.get("writable", True), "allow_tasks": spec.get("allow_tasks", False)}
+                result = {
+                    "root": str(root),
+                    "writable": spec.get("writable", True),
+                    "allow_tasks": spec.get("allow_tasks", False),
+                }
             elif tool in DEVICE_ACTIONS:
-                if getattr(self.computer, 'session', None):
-                    raise DevError("COMPUTER_BUSY", "请先结束桌面控制会话，再更新、重启或卸载 Agent", 409)
+                if getattr(self.computer, "session", None):
+                    raise DevError(
+                        "COMPUTER_BUSY", "请先结束桌面控制会话，再更新、重启或卸载 Agent", 409
+                    )
                 live_cli = self.native.live()
                 if live_cli:
-                    raise DevError("CLI_BUSY", "先显式停止原生会话，再更新、重启或卸载 Agent", 409, sessions=[{"id":r["id"],"project_id":r["project_id"]} for r in live_cli])
+                    raise DevError(
+                        "CLI_BUSY",
+                        "先显式停止原生会话，再更新、重启或卸载 Agent",
+                        409,
+                        sessions=[{"id": r["id"], "project_id": r["project_id"]} for r in live_cli],
+                    )
                 if any(job_id != id for job_id in self.jobs) or self.processes:
                     raise DevError("AGENT_BUSY", "设备仍有本机操作在执行；等待完成后再管理 Agent")
                 self.journal.mark_running(id)
@@ -803,13 +1173,15 @@ class Agent:
                 raise DevError("UNKNOWN_TOOL", "该操作不能由 Agent 执行")
             elif tool in PANEL_ROOTS_TOOLS:
                 from agent.roots_panel import call as roots_settings_call
+
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.journal.mark_running(id)
-                await self.send({'type': 'started', 'id': id})
-                self.phase(id, 'directory_grants')
+                await self.send({"type": "started", "id": id})
+                self.phase(id, "directory_grants")
                 result = await self._committed_io(roots_settings_call, self, tool, project, args)
             elif tool in PANEL_RUNTIME_TOOLS:
                 from agent.runtime_panel import call as runtime_settings_call
+
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
@@ -819,30 +1191,62 @@ class Agent:
                 TOOLS[tool].model.model_validate(args)
                 root, spec = self.engine.root(project)
                 self.journal.mark_running(id)
-                result = ({"build": self.build.describe(), **self.job_counts(),
-                           "scheduler": self.scheduler.snapshot(project.get("id") or canonical_path(root)),
-                           "telemetry_errors": self.telemetry.errors}
-                          if tool == "agent_diagnostics" else execution_info(self.config, project, spec, root))
+                result = (
+                    {
+                        "build": self.build.describe(),
+                        **self.job_counts(),
+                        "scheduler": self.scheduler.snapshot(
+                            project.get("id") or canonical_path(root)
+                        ),
+                        "telemetry_errors": self.telemetry.errors,
+                    }
+                    if tool == "agent_diagnostics"
+                    else execution_info(self.config, project, spec, root)
+                )
             elif tool in COMPUTER_TOOLS:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.engine.root(project, tool in MUTATING and tool != "computer_session_close")
-                if agent_blocks_codex(self.config, project) and codex_computer_target(tool, args, self.computer.session):
+                if agent_blocks_codex(self.config, project) and codex_computer_target(
+                    tool, args, self.computer.session
+                ):
                     raise DevError("CODEX_REMOTE_DISABLED", DENIAL_MESSAGE, 403)
                 if agent_blocks_computer(self.config, project) and computer_denial(tool, args):
                     raise DevError(COMPUTER_DENIAL_CODE, COMPUTER_DENIAL_MESSAGE, 403)
-                scopes = project.get('_computer_scopes')
-                if required_scope(tool, args) == 'computer' and (not isinstance(scopes, list) or 'computer' not in scopes):
-                    raise DevError('INSUFFICIENT_SCOPE', '原生 computer 调用需要当前已认证的 computer 权限', 403)
+                scopes = project.get("_computer_scopes")
+                if required_scope(tool, args) == "computer" and (
+                    not isinstance(scopes, list) or "computer" not in scopes
+                ):
+                    raise DevError(
+                        "INSUFFICIENT_SCOPE",
+                        "原生 computer 调用需要当前已认证的 computer 权限",
+                        403,
+                    )
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "executing")
-                result = await self.computer.execute(tool, project, args, not_after=not_after, operation_id=id,
-                    phase=lambda stage, **detail: self.phase(id, stage, **detail))
-            elif tool in {"tasks_list", "searches_get", "searches_cancel", 'readiness_get', 'lsp_status', 'browser_status', 'integration_control', 'validations_list', 'browser_close'}:
+                result = await self.computer.execute(
+                    tool,
+                    project,
+                    args,
+                    not_after=not_after,
+                    operation_id=id,
+                    phase=lambda stage, **detail: self.phase(id, stage, **detail),
+                )
+            elif tool in {
+                "tasks_list",
+                "searches_get",
+                "searches_cancel",
+                "readiness_get",
+                "lsp_status",
+                "browser_status",
+                "integration_control",
+                "validations_list",
+                "browser_close",
+            }:
                 # Config/status queries do not read project contents. Keep them
                 # available while a shell owns the project and all workers are busy.
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                if tool != 'readiness_get' or not args.get('operation_kind'):
+                if tool != "readiness_get" or not args.get("operation_kind"):
                     self.engine.root(project)
                 self.journal.mark_running(id)
                 await self.send({"type": "started", "id": id})
@@ -850,10 +1254,13 @@ class Agent:
                 result = await self.execute(id, tool, project, args)
             else:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                async with self._read_admission_context(
-                        id, tool, project, args, not_after) as (admission, admission_worker, reserved):
+                async with self._read_admission_context(id, tool, project, args, not_after) as (
+                    admission,
+                    admission_worker,
+                    reserved,
+                ):
                     if admission is not None:
-                        root = Path(admission['root'])
+                        root = Path(admission["root"])
                     else:
                         root, _ = await self._operation_root(tool, project, args)
                     # Resource ownership and execution capacity are one grant;
@@ -862,41 +1269,79 @@ class Agent:
                     if tool == "tasks_run":
                         task_config = self.config.get("tasks", {}).get(args["task"], {})
                         slot_write = not task_config.get("allow_read_concurrency", False)
-                    async with self.execution_slot(id, tool, project, args, root, slot_write, not_after,
-                                                   read_admission=admission, reserved=reserved):
-                        if self.stop_event.is_set() and id not in self.cancelled and not self.journal.is_cancelled(id):
+                    async with self.execution_slot(
+                        id,
+                        tool,
+                        project,
+                        args,
+                        root,
+                        slot_write,
+                        not_after,
+                        read_admission=admission,
+                        reserved=reserved,
+                    ):
+                        if (
+                            self.stop_event.is_set()
+                            and id not in self.cancelled
+                            and not self.journal.is_cancelled(id)
+                        ):
                             raise asyncio.CancelledError
                         if id in self.cancelled or self.journal.is_cancelled(id):
                             raise DevError("CANCELLED", "操作开始前已取消")
                         if not_after is not None and time.time() > not_after:
-                            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
-                        async with self._read_execution_worker(id, tool, args, root, existing=admission_worker) as read_worker:
+                            raise DevError(
+                                "QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交"
+                            )
+                        async with self._read_execution_worker(
+                            id, tool, args, root, existing=admission_worker
+                        ) as read_worker:
                             self.integrations.control.guard(tool, project)
-                            if args.get('workspace_id'): project = self.integrations.project(project, args)
-                            current_root, _ = await self._operation_root(tool, project, args,
-                                                                           worker=read_worker, expected_root=root)
+                            if args.get("workspace_id"):
+                                project = await self.disk_call(
+                                    self.integrations.project, project, args
+                                )
+                            current_root, _ = await self._operation_root(
+                                tool, project, args, worker=read_worker, expected_root=root
+                            )
                             if current_root != root:
-                                raise DevError("ROOT_CHANGED", "排队期间项目根目录发生变化，请确认映射后重新提交")
+                                raise DevError(
+                                    "ROOT_CHANGED",
+                                    "排队期间项目根目录发生变化，请确认映射后重新提交",
+                                )
                             self.journal.mark_running(id)
                             await self.send({"type": "started", "id": id})
-                            if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+                            if (
+                                id in self.cancelled
+                                or self.journal.is_cancelled(id)
+                                or self.stop_event.is_set()
+                            ):
                                 raise DevError("CANCELLED", "操作开始前已取消")
                             self.integrations.control.guard(tool, project)
-                            if args.get('workspace_id'): project = self.integrations.project(project, args)
-                            current_root, _ = await self._operation_root(tool, project, args,
-                                                                           worker=read_worker, expected_root=root)
+                            if args.get("workspace_id"):
+                                project = await self.disk_call(
+                                    self.integrations.project, project, args
+                                )
+                            current_root, _ = await self._operation_root(
+                                tool, project, args, worker=read_worker, expected_root=root
+                            )
                             if current_root != root:
-                                raise DevError("ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交")
+                                raise DevError(
+                                    "ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交"
+                                )
                             self.phase(id, "executing")
                             result = await self.execute(id, tool, project, args)
                             concurrency = self.resources.concurrency_for(id)
                             if concurrency and isinstance(result, dict):
-                                result['concurrency'] = concurrency
+                                result["concurrency"] = concurrency
             if id in self.shutdown_interrupted:
-                raise DevError("INTERRUPTED", "Agent 停止时中断了执行中的进程；请核对本机结果，不自动重跑")
+                raise DevError(
+                    "INTERRUPTED", "Agent 停止时中断了执行中的进程；请核对本机结果，不自动重跑"
+                )
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
-            if self.journal.status(id)["status"] == "accepted" and not self.journal.is_cancelled(id):
+            if self.journal.status(id)["status"] == "accepted" and not self.journal.is_cancelled(
+                id
+            ):
                 # No side effect began. Leave the durable accepted receipt for
                 # startup's accepted -> retryable recovery, never finish it.
                 self.telemetry.starts.pop(id, None)
@@ -904,10 +1349,21 @@ class Agent:
                 self.integration_projects.pop(id, None)
                 self.integration_tool_names.pop(id, None)
                 raise
-            result = {"ok": False, "error": {"code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED", "message": "操作已取消" if self.journal.is_cancelled(id) else "Agent 进程被停止；检查本机结果后再决定是否重做"}}
+            result = {
+                "ok": False,
+                "error": {
+                    "code": "CANCELLED" if self.journal.is_cancelled(id) else "INTERRUPTED",
+                    "message": "操作已取消"
+                    if self.journal.is_cancelled(id)
+                    else "Agent 进程被停止；检查本机结果后再决定是否重做",
+                },
+            }
         except DevError as exc:
-            if (exc.code == "AGENT_STOPPING" and self.journal.status(id)["status"] == "accepted"
-                    and not self.journal.is_cancelled(id)):
+            if (
+                exc.code == "AGENT_STOPPING"
+                and self.journal.status(id)["status"] == "accepted"
+                and not self.journal.is_cancelled(id)
+            ):
                 # Scheduler.close may wake the waiter before shutdown cancels
                 # its task. It has exactly the same never-started receipt.
                 self.telemetry.starts.pop(id, None)
@@ -916,26 +1372,40 @@ class Agent:
                 self.integration_tool_names.pop(id, None)
                 raise asyncio.CancelledError from exc
             result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
-            result['error'].update(safe_filesystem_error_detail(request.get('tool'), exc.code, exc.details))
-            result['error'].update(safe_review_error_detail(exc.code, exc.details))
-            if exc.code == 'RESOURCE_BUSY':
-                result['error']['blocked_by'] = [value for value in exc.details.get('blocked_by', [])[:64]
-                                                if isinstance(value, str) and len(value) <= 100]
-            if request.get('tool') == 'download_artifact':
-                result['error'].update(safe_import_error_detail(exc.details))
-            if isinstance(request.get('tool'), str) and request['tool'] in COMPUTER_TOOLS:
-                result['error'].update(safe_detail(exc.details))
-                if exc.details.get('next') == 'computer_observe':
-                    result['error']['next'] = 'computer_observe'
-                if exc.details.get('input_sent') is False:
-                    result['error']['input_sent'] = False
+            result["error"].update(
+                safe_filesystem_error_detail(request.get("tool"), exc.code, exc.details)
+            )
+            result["error"].update(safe_review_error_detail(exc.code, exc.details))
+            if exc.code == "RESOURCE_BUSY":
+                result["error"]["blocked_by"] = [
+                    value
+                    for value in exc.details.get("blocked_by", [])[:64]
+                    if isinstance(value, str) and len(value) <= 100
+                ]
+            if request.get("tool") == "download_artifact":
+                result["error"].update(safe_import_error_detail(exc.details))
+            if isinstance(request.get("tool"), str) and request["tool"] in COMPUTER_TOOLS:
+                result["error"].update(safe_detail(exc.details))
+                if exc.details.get("next") == "computer_observe":
+                    result["error"]["next"] = "computer_observe"
+                if exc.details.get("input_sent") is False:
+                    result["error"]["input_sent"] = False
         except Exception as exc:
             # Pydantic model errors may include raw input (including passwords).
             from pydantic import ValidationError
+
             if isinstance(exc, ValidationError):
-                issues = [{"field": '.'.join(map(str, e['loc'])), "message": e['msg']}
-                          for e in exc.errors()]
-                result = {"ok": False, "error": {"code": "INVALID_ARGUMENTS", "message": json.dumps(issues, ensure_ascii=False)[:1500]}}
+                issues = [
+                    {"field": ".".join(map(str, e["loc"])), "message": e["msg"]}
+                    for e in exc.errors()
+                ]
+                result = {
+                    "ok": False,
+                    "error": {
+                        "code": "INVALID_ARGUMENTS",
+                        "message": json.dumps(issues, ensure_ascii=False)[:1500],
+                    },
+                }
             else:
                 result = {"ok": False, "error": {"code": "AGENT_ERROR", "message": str(exc)[:1500]}}
         finally:
@@ -969,33 +1439,52 @@ class Agent:
         self.integration_tool_names.pop(id, None)
         await self.send({"type": "result", "id": id, "result": result})
 
-    def transfer_done(self,task):
+    def transfer_done(self, task):
         self.transfer_tasks.discard(task)
-        if not task.cancelled():task.exception()
+        if not task.cancelled():
+            task.exception()
 
-    async def send_artifact(self,request,socket):
+    async def send_artifact(self, request, socket):
         try:
-            work=asyncio.create_task(asyncio.to_thread(self.artifacts.chunk,request["project"],request["artifact_id"],request["offset"]))
-            try:data=await asyncio.shield(work)
+            work = asyncio.create_task(
+                asyncio.to_thread(
+                    self.artifacts.chunk,
+                    request["project"],
+                    request["artifact_id"],
+                    request["offset"],
+                )
+            )
+            try:
+                data = await asyncio.shield(work)
             except asyncio.CancelledError:
                 await work
                 raise
-            result={"ok":True,"data":data}
+            result = {"ok": True, "data": data}
         except DevError as exc:
-            result={"ok":False,"error":{"code":exc.code,"message":exc.message}}
-        except (OSError,KeyError,TypeError):
-            result={"ok":False,"error":{"code":"ARTIFACT_UNAVAILABLE","message":"产物快照不可读取"}}
+            result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+        except (OSError, KeyError, TypeError):
+            result = {
+                "ok": False,
+                "error": {"code": "ARTIFACT_UNAVAILABLE", "message": "产物快照不可读取"},
+            }
         if self.socket is socket:
-            await self.send({"type":"artifact_chunk","request_id":request["request_id"],"result":result})
+            await self.send(
+                {"type": "artifact_chunk", "request_id": request["request_id"], "result": result}
+            )
 
     @staticmethod
     def bounded_timeout(project, local_timeout):
-        budget = project.get('_bounded_execution')
+        budget = project.get("_bounded_execution")
         if budget is None:
             return local_timeout
         from shared.bounded_execution import execution_timeout
-        remaining = execution_timeout(budget, project_id=project.get('id'),
-                                      requested_seconds=budget['timeout_seconds'], now=time.time())
+
+        remaining = execution_timeout(
+            budget,
+            project_id=project.get("id"),
+            requested_seconds=budget["timeout_seconds"],
+            now=time.time(),
+        )
         return min(local_timeout, remaining)
 
     @staticmethod
@@ -1031,33 +1520,42 @@ class Agent:
 
     def _preflight_local_execution(self, project, args, root):
         from agent.project_runtime import prepare, selected, legacy_environment
+
         current_root, spec = self.engine.root(project, True)
         if current_root != root:
-            raise DevError('ROOT_CHANGED', 'Workspace mapping changed before preparation', 409)
-        if args.get('task'):
-            task = self.config.get('tasks', {}).get(args['task'])
-            if not project.get('allow_tasks') or not spec.get('allow_tasks'):
-                raise DevError('TASKS_DISABLED', 'Project execution is disabled', 403)
+            raise DevError("ROOT_CHANGED", "Workspace mapping changed before preparation", 409)
+        if args.get("task"):
+            task = self.config.get("tasks", {}).get(args["task"])
+            if not project.get("allow_tasks") or not spec.get("allow_tasks"):
+                raise DevError("TASKS_DISABLED", "Project execution is disabled", 403)
             if not task or not self.task_allowed(task, project):
-                raise DevError('TASK_NOT_ALLOWED', 'Task is not authorized for this project', 403)
-            command = task.get('command')
-            if not isinstance(command, list) or not command or any(not isinstance(x, str) or '\x00' in x for x in command):
-                raise DevError('TASK_CONFIG', 'Task command must be an argument array')
-            cwd = self.engine.path(root, task.get('cwd', '.'))
-            env = task.get('env', {})
+                raise DevError("TASK_NOT_ALLOWED", "Task is not authorized for this project", 403)
+            command = task.get("command")
+            if (
+                not isinstance(command, list)
+                or not command
+                or any(not isinstance(x, str) or "\x00" in x for x in command)
+            ):
+                raise DevError("TASK_CONFIG", "Task command must be an argument array")
+            cwd = self.engine.path(root, task.get("cwd", "."))
+            env = task.get("env", {})
         else:
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)
-        env = {key: value for key, value in env.items() if key != 'CODEPIER_RUN_DIR'}
+        env = {key: value for key, value in env.items() if key != "CODEPIER_RUN_DIR"}
         profile = selected(self.config, project)
-        if profile['mode'] == 'native_compat':
-            environment = legacy_environment(self.config['shell']['inherit_env'] if not args.get('task') else False,
-                                             env, full_access=not args.get('task'))
+        if profile["mode"] == "native_compat":
+            environment = legacy_environment(
+                self.config["shell"]["inherit_env"] if not args.get("task") else False,
+                env,
+                full_access=not args.get("task"),
+            )
             enforce_argv(self.config, project, command, cwd, environment)
-        elif args.get('task'):
+        elif args.get("task"):
             # Named tasks keep one executable-resolution point: run_process.
             # Preflight validates authorization/environment without duplicating
             # runtime preparation or changing the configured-task dispatcher.
             from agent.project_runtime import build_environment
+
             environment = build_environment(self.config, project, root, env, create=False)
             enforce_argv(self.config, project, command, cwd, environment)
         else:
@@ -1068,73 +1566,118 @@ class Agent:
     async def prepare_snapshot(self, id, project, args, root, deadline):
         from agent.project_runtime import selected, descriptor
         from agent.snapshots import SnapshotManager
-        if args.get('target', 'agent') != 'agent':
-            raise DevError('SNAPSHOT_RUNTIME_UNSUPPORTED', 'Snapshot execution is local only')
-        if args.get('options', {}).get('wait_policy') == 'fail_fast':
-            raise DevError('INVALID_ARGUMENT', 'Snapshot preparation cannot be combined with fail_fast')
+
+        if args.get("target", "agent") != "agent":
+            raise DevError("SNAPSHOT_RUNTIME_UNSUPPORTED", "Snapshot execution is local only")
+        if args.get("options", {}).get("wait_policy") == "fail_fast":
+            raise DevError(
+                "INVALID_ARGUMENT", "Snapshot preparation cannot be combined with fail_fast"
+            )
         command, cwd, env = self._preflight_local_execution(project, args, root)
-        if selected(self.config, project)['mode'] != 'project_clean_v1' or project.get('_runtime_requirement'):
-            raise DevError('SNAPSHOT_RUNTIME_UNSUPPORTED', 'Snapshots require project_clean_v1; native and container runtimes must use worktrees')
+        if selected(self.config, project)["mode"] != "project_clean_v1" or project.get(
+            "_runtime_requirement"
+        ):
+            raise DevError(
+                "SNAPSHOT_RUNTIME_UNSUPPORTED",
+                "Snapshots require project_clean_v1; native and container runtimes must use worktrees",
+            )
         if not cwd.is_relative_to(root):
-            raise DevError('SNAPSHOT_UNSAFE', 'Snapshot cwd must remain inside the source workspace')
-        for resource in args.get('resources', []):
-            if resource.get('kind', 'path') != 'path':
+            raise DevError(
+                "SNAPSHOT_UNSAFE", "Snapshot cwd must remain inside the source workspace"
+            )
+        for resource in args.get("resources", []):
+            if resource.get("kind", "path") != "path":
                 continue
-            path = Path(resource['name'])
+            path = Path(resource["name"])
             path = (path if path.is_absolute() else cwd / path).resolve()
             if not path.is_relative_to(root):
-                raise DevError('SNAPSHOT_UNSAFE', 'Snapshot resource paths must remain inside the source workspace')
-        if not hasattr(self, '_execution_snapshots'):
+                raise DevError(
+                    "SNAPSHOT_UNSAFE",
+                    "Snapshot resource paths must remain inside the source workspace",
+                )
+        if not hasattr(self, "_execution_snapshots"):
             self._execution_snapshots = {}
         if id in self._execution_snapshots:
-            raise DevError('SNAPSHOT_EXISTS', 'This operation already owns a snapshot', 409)
-        project_id = project.get('id') or canonical_path(project.get('_original_root', root))
-        claim = Claim('agent', 'path', canonical_path(root), False, 'process', True)
-        async with self.scheduler.slot(id, project_id, 'execution', claims=[claim], strict_order=True,
-                on_resource_wait=lambda blockers: self.phase(id, 'waiting_resource', blocked_by=blockers,
-                                                            queue_reason='resource_conflict', lane='execution')):
+            raise DevError("SNAPSHOT_EXISTS", "This operation already owns a snapshot", 409)
+        project_id = project.get("id") or canonical_path(project.get("_original_root", root))
+        claim = Claim("agent", "path", canonical_path(root), False, "process", True)
+        async with self.scheduler.slot(
+            id,
+            project_id,
+            "execution",
+            claims=[claim],
+            strict_order=True,
+            on_resource_wait=lambda blockers: self.phase(
+                id,
+                "waiting_resource",
+                blocked_by=blockers,
+                queue_reason="resource_conflict",
+                lane="execution",
+            ),
+        ):
             if deadline is not None and time.time() >= deadline:
-                raise DevError('QUEUE_EXPIRED', 'Snapshot preparation deadline expired')
+                raise DevError("QUEUE_EXPIRED", "Snapshot preparation deadline expired")
             self._preflight_local_execution(project, args, root)
             runtime = descriptor(self.config, project, root)
             holder = {}
+
             def clone():
                 manager = SnapshotManager(self.state_dir)
                 manager.cleanup()
                 snapshot = manager.create(root, id, str(cwd.relative_to(root)))
-                holder.update(manager=manager, snapshot=snapshot, root=root,
-                              revision=runtime['revision'], success=False)
+                holder.update(
+                    manager=manager,
+                    snapshot=snapshot,
+                    root=root,
+                    revision=runtime["revision"],
+                    success=False,
+                )
+
             try:
                 await self._snapshot_io(clone)
             except BaseException:
                 if holder:
-                    await self._snapshot_io(holder['manager'].finish, holder['snapshot'], success=False)
+                    await self._snapshot_io(
+                        holder["manager"].finish, holder["snapshot"], success=False
+                    )
                 raise
             self._execution_snapshots[id] = holder
 
     async def finish_snapshot(self, id):
-        holder = getattr(self, '_execution_snapshots', {}).pop(id, None)
+        holder = getattr(self, "_execution_snapshots", {}).pop(id, None)
         if holder:
-            await self._snapshot_io(holder['manager'].finish, holder['snapshot'], success=holder['success'])
+            await self._snapshot_io(
+                holder["manager"].finish, holder["snapshot"], success=holder["success"]
+            )
 
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
             worker, root = self._read_workers.get(id, (None, None))
-            return await workspace_probe.probe(self.engine, tool, project, args,
-                                               worker=worker, expected_root=root)
+            return await workspace_probe.probe(
+                self.engine, tool, project, args, worker=worker, expected_root=root
+            )
         from shared.integration_contracts import REMOTE_TOOLS
-        if tool == 'exec':
-            from agent.run_directories import prepare_run_directory, finish_run_directory, cleanup_run_directories
-            local = args.get('target', 'agent') == 'agent'
+
+        if tool == "exec":
+            from agent.run_directories import (
+                prepare_run_directory,
+                finish_run_directory,
+                cleanup_run_directories,
+            )
+
+            local = args.get("target", "agent") == "agent"
             run_dir = None
-            holder = getattr(self, '_execution_snapshots', {}).get(id)
-            if args.get('isolation') == 'snapshot' and holder is None:
-                raise DevError('SNAPSHOT_UNPREPARED', 'Snapshot execution requires admitted preparation', 409)
+            holder = getattr(self, "_execution_snapshots", {}).get(id)
+            if args.get("isolation") == "snapshot" and holder is None:
+                raise DevError(
+                    "SNAPSHOT_UNPREPARED", "Snapshot execution requires admitted preparation", 409
+                )
             if local:
                 root, _ = self.engine.root(project, True)
                 self._preflight_local_execution(project, args, root)
-                if not hasattr(self, '_execution_run_dirs'):
+                if not hasattr(self, "_execution_run_dirs"):
                     self._execution_run_dirs = {}
+
                 # Allocation only after admission and permission preflight.
                 # Track it inside the worker so cancellation cannot orphan an active marker.
                 def allocate():
@@ -1142,55 +1685,117 @@ class Agent:
                     path = prepare_run_directory(root, id)
                     self._execution_run_dirs[id] = path
                     return path
+
             try:
                 if local:
                     run_dir = await self._snapshot_io(allocate)
-                if args['task']:
+                if args["task"]:
                     from shared.contracts import Task
-                    forwarded = Task.model_validate({k: v for k, v in args.items() if k in Task.model_fields}).model_dump()
-                    result = await self.execute(id, 'tasks_run', project, forwarded)
+
+                    forwarded = Task.model_validate(
+                        {k: v for k, v in args.items() if k in Task.model_fields}
+                    ).model_dump()
+                    result = await self.execute(id, "tasks_run", project, forwarded)
                 elif local:
                     from shared.contracts import ShellExec
-                    forwarded = ShellExec.model_validate({k: v for k, v in args.items() if k in ShellExec.model_fields}).model_dump()
-                    result = await self.execute(id, 'shell_exec', project, forwarded)
+
+                    forwarded = ShellExec.model_validate(
+                        {k: v for k, v in args.items() if k in ShellExec.model_fields}
+                    ).model_dump()
+                    result = await self.execute(id, "shell_exec", project, forwarded)
                 else:
                     from shared.contracts import SSHExec
-                    if not isinstance(project.get('_core_ssh'), dict):
-                        raise DevError('VPS_TRANSPORT_MISSING', '缺少 Hub 验证的 VPS 连接，未执行命令', 409)
-                    forwarded = SSHExec.model_validate(project['_core_ssh']).model_dump()
-                    result = await self.execute(id, 'ssh_exec', project, forwarded, saved_vps_target=args['target'])
+
+                    if not isinstance(project.get("_core_ssh"), dict):
+                        raise DevError(
+                            "VPS_TRANSPORT_MISSING", "缺少 Hub 验证的 VPS 连接，未执行命令", 409
+                        )
+                    forwarded = SSHExec.model_validate(project["_core_ssh"]).model_dump()
+                    result = await self.execute(
+                        id, "ssh_exec", project, forwarded, saved_vps_target=args["target"]
+                    )
                 if holder:
-                    artifacts = await self._snapshot_io(holder['manager'].extract_artifacts,
-                        holder['snapshot'], args.get('snapshot_artifacts', []), run_dir)
-                    holder['success'] = result.get('exit_code') == 0 and not result.get('timed_out') and not result.get('cancelled')
-                    result.update(snapshot_artifacts=artifacts, snapshot_execution={
-                        'mode': 'copy_on_write', 'os_sandbox': False,
-                        'excluded': ['.git', '.codepier'], 'retained': not holder['success']})
+                    artifacts = await self._snapshot_io(
+                        holder["manager"].extract_artifacts,
+                        holder["snapshot"],
+                        args.get("snapshot_artifacts", []),
+                        run_dir,
+                    )
+                    holder["success"] = (
+                        result.get("exit_code") == 0
+                        and not result.get("timed_out")
+                        and not result.get("cancelled")
+                    )
+                    result.update(
+                        snapshot_artifacts=artifacts,
+                        snapshot_execution={
+                            "mode": "copy_on_write",
+                            "os_sandbox": False,
+                            "excluded": [".git", ".codepier"],
+                            "retained": not holder["success"],
+                        },
+                    )
                 if run_dir is not None:
-                    result['run_directory'] = '.codepier/runs/' + id
-                    if any(resource.get('kind', 'path') == 'path' and resource.get('mode') == 'write'
-                           and (Path(resource['name']) if Path(resource['name']).is_absolute()
-                                else root / args.get('cwd', '.') / resource['name']).resolve() == root
-                           for resource in args.get('resources', [])):
-                        result.setdefault('warnings', []).append('根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。')
+                    result["run_directory"] = ".codepier/runs/" + id
+                    if any(
+                        resource.get("kind", "path") == "path"
+                        and resource.get("mode") == "write"
+                        and (
+                            Path(resource["name"])
+                            if Path(resource["name"]).is_absolute()
+                            else root / args.get("cwd", ".") / resource["name"]
+                        ).resolve()
+                        == root
+                        for resource in args.get("resources", [])
+                    ):
+                        result.setdefault("warnings", []).append(
+                            "根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。"
+                        )
                 elif not local:
-                    result.setdefault('warnings', []).append('Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory.')
-                output = result.get('output', '')
-                tail = '\n'.join(output.split('\n')[-2000:]).encode('utf-8')[-50 * 1024:].decode('utf-8', errors='ignore')
-                return {**result, 'output': tail, 'output_truncated': bool(result.get('output_truncated') or tail != output),
-                        **({'execution_budget': project['_bounded_execution'], 'execution_budget_enforced': True}
-                           if project.get('_bounded_execution') else {}),
-                        'target': args['target'], 'resource_coordination': 'configured_task' if args['task'] else 'declared' if args['resources'] else 'independent'}
+                    result.setdefault("warnings", []).append(
+                        "Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory."
+                    )
+                output = result.get("output", "")
+                tail = (
+                    "\n".join(output.split("\n")[-2000:])
+                    .encode("utf-8")[-50 * 1024 :]
+                    .decode("utf-8", errors="ignore")
+                )
+                return {
+                    **result,
+                    "output": tail,
+                    "output_truncated": bool(result.get("output_truncated") or tail != output),
+                    **(
+                        {
+                            "execution_budget": project["_bounded_execution"],
+                            "execution_budget_enforced": True,
+                        }
+                        if project.get("_bounded_execution")
+                        else {}
+                    ),
+                    "target": args["target"],
+                    "resource_coordination": "configured_task"
+                    if args["task"]
+                    else "declared"
+                    if args["resources"]
+                    else "independent",
+                }
             finally:
-                owned_run = getattr(self, '_execution_run_dirs', {}).pop(id, None)
+                owned_run = getattr(self, "_execution_run_dirs", {}).pop(id, None)
                 if owned_run is not None:
                     await self._snapshot_io(finish_run_directory, owned_run)
-        if tool in {'read', 'write', 'edit'}:
+        if tool in {"read", "write", "edit"}:
             return await self._committed_io(CoreFiles(self.engine).call, tool, project, args)
         if tool in REMOTE_TOOLS:
             return await self.integrations.execute(id, tool, project, args)
         if tool in {"searches_start", "searches_get", "searches_cancel"}:
-            method = self.searches.start if tool == "searches_start" else self.searches.get if tool == "searches_get" else self.searches.cancel
+            method = (
+                self.searches.start
+                if tool == "searches_start"
+                else self.searches.get
+                if tool == "searches_get"
+                else self.searches.cancel
+            )
             params = (id, project, args) if tool == "searches_start" else (project, args)
             return await self._committed_io(method, *params)
         if tool == "artifacts_register":
@@ -1201,67 +1806,146 @@ class Agent:
             # diagnostics; a disabled permission must not look like a request
             # to select a broader execution mode.
             from agent.shell import shell_denial
+
             denial = shell_denial(self.config, project, spec)
             if denial:
                 raise DevError(*denial, 403)
             from agent.project_runtime import selected
-            mode = selected(self.config, project)['mode']
+
+            mode = selected(self.config, project)["mode"]
             # A saved VPS is an explicit, separately authorized remote target,
             # never a fallback for a failed local runtime. Only this internal
             # call path receives the transport prepared from the bound VPS.
-            saved_transport = (isinstance(saved_vps_target, str) and saved_vps_target.startswith('vps:')
-                and isinstance(project.get('_core_ssh'), dict)
-                and TOOLS['ssh_exec'].model.model_validate(project['_core_ssh']).model_dump() == args)
-            if project.get('_runtime_requirement') or mode == 'container_v1' or (mode != 'native_compat' and not saved_transport):
-                raise DevError('RUNTIME_REMOTE_TARGET_UNSUPPORTED', 'This project runtime does not support native SSH transport; choose a separately authorized compatible target', 403)
+            saved_transport = (
+                isinstance(saved_vps_target, str)
+                and saved_vps_target.startswith("vps:")
+                and isinstance(project.get("_core_ssh"), dict)
+                and TOOLS["ssh_exec"].model.model_validate(project["_core_ssh"]).model_dump()
+                == args
+            )
+            if (
+                project.get("_runtime_requirement")
+                or mode == "container_v1"
+                or (mode != "native_compat" and not saved_transport)
+            ):
+                raise DevError(
+                    "RUNTIME_REMOTE_TARGET_UNSUPPORTED",
+                    "This project runtime does not support native SSH transport; choose a separately authorized compatible target",
+                    403,
+                )
             from agent.ssh import prepare_ssh, SSHDiagnostics, run_ssh_attempts
             from agent.project_runtime import legacy_environment
-            timeout = self.bounded_timeout(project, args['timeout_seconds'])
+
+            timeout = self.bounded_timeout(project, args["timeout_seconds"])
             # SSH launches a native transport to the selected remote target;
             # it must not be described as the local clean/container workload.
             runner = self._run_process_account if saved_transport else self.run_process
+
             async def attempt(remaining):
                 async with SSHDiagnostics(self.state_dir) as diagnostics:
-                    command, env = prepare_ssh(self.config, project, spec, args, diagnostic_path=diagnostics.path)
-                    result = await runner(id, command, root, remaining, stream=True,
-                                          task_env=env, full_access=True,
-                                          inherit_env=self.config['shell']['inherit_env'], execution_project=project)
-                    return diagnostics.complete(result,
-                        environment=legacy_environment(self.config['shell']['inherit_env'], env, full_access=True),
-                        credential_source='saved_vps' if saved_transport else 'explicit_password')
-            result = await run_ssh_attempts(attempt, timeout=timeout,
+                    command, env = prepare_ssh(
+                        self.config, project, spec, args, diagnostic_path=diagnostics.path
+                    )
+                    result = await runner(
+                        id,
+                        command,
+                        root,
+                        remaining,
+                        stream=True,
+                        task_env=env,
+                        full_access=True,
+                        inherit_env=self.config["shell"]["inherit_env"],
+                        execution_project=project,
+                    )
+                    return diagnostics.complete(
+                        result,
+                        environment=legacy_environment(
+                            self.config["shell"]["inherit_env"], env, full_access=True
+                        ),
+                        credential_source="saved_vps" if saved_transport else "explicit_password",
+                    )
+
+            result = await run_ssh_attempts(
+                attempt,
+                timeout=timeout,
                 cancelled=lambda: id in self.cancelled or self.journal.is_cancelled(id),
-                stopping=self.stop_event.is_set, record=lambda stage, **detail: self.phase(id, stage, **detail))
+                stopping=self.stop_event.is_set,
+                record=lambda stage, **detail: self.phase(id, stage, **detail),
+            )
             if saved_transport:
-                result['transport_runtime'] = {'mode': 'native_ssh_transport',
-                    'target': saved_vps_target, 'isolation': 'none', 'grants_authority': False}
-            return {**result, 'host': args['host'], 'port': args['port'], 'username': args['username']}
+                result["transport_runtime"] = {
+                    "mode": "native_ssh_transport",
+                    "target": saved_vps_target,
+                    "isolation": "none",
+                    "grants_authority": False,
+                }
+            return {
+                **result,
+                "host": args["host"],
+                "port": args["port"],
+                "username": args["username"],
+            }
         if tool == "shell_exec":
             root, spec = self.engine.root(project, True)
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)
-            timeout = self.bounded_timeout(project, args['timeout_seconds'])
-            result = await self.run_process(id, command, cwd, timeout, stream=True,
-                                            task_env=env, full_access=True,
-                                            inherit_env=self.config["shell"]["inherit_env"], execution_project=project)
+            timeout = self.bounded_timeout(project, args["timeout_seconds"])
+            result = await self.run_process(
+                id,
+                command,
+                cwd,
+                timeout,
+                stream=True,
+                task_env=env,
+                full_access=True,
+                inherit_env=self.config["shell"]["inherit_env"],
+                execution_project=project,
+            )
             return {**result, "cwd": str(cwd), "shell": command[:-1]}
         if tool == "tasks_list":
             root, spec = self.engine.root(project)
-            from agent.project_runtime import build_environment, descriptor, resolve_executable, legacy_environment
+            from agent.project_runtime import (
+                build_environment,
+                descriptor,
+                resolve_executable,
+                legacy_environment,
+            )
+
             runtime = descriptor(self.config, project, root)
+
             def available(task):
-                if runtime['mode'] == 'container_v1':
+                if runtime["mode"] == "container_v1":
                     return None
                 try:
-                    environment = (legacy_environment(False, task.get('env', {})) if runtime['mode'] == 'native_compat' else
-                        build_environment(self.config, project, root, task.get('env', {})))
-                    resolve_executable(task['command'], environment, root / task.get('cwd', '.'))
+                    environment = (
+                        legacy_environment(False, task.get("env", {}))
+                        if runtime["mode"] == "native_compat"
+                        else build_environment(self.config, project, root, task.get("env", {}))
+                    )
+                    resolve_executable(task["command"], environment, root / task.get("cwd", "."))
                     return True
                 except DevError:
                     return False
+
             enabled = project.get("allow_tasks", False) and spec.get("allow_tasks", False)
-            return {"enabled": enabled, "runtime": runtime, "tasks": [{"name": name, "description": t.get("description", ""), "command": t.get("command"), "timeout": t.get("timeout", 300), "cwd": t.get("cwd", "."), "executable_available": available(t), "environment_keys": sorted(t.get("env", {})), "allow_read_concurrency": bool(t.get("allow_read_concurrency", False))}
-                    for name, t in self.config.get("tasks", {}).items() if enabled and self.task_allowed(t, project)],
-                    "warning": "Tasks execute project code with the Agent user's OS permissions. Not an OS sandbox."}
+            return {
+                "enabled": enabled,
+                "runtime": runtime,
+                "tasks": [
+                    {
+                        "name": name,
+                        "description": t.get("description", ""),
+                        "command": t.get("command"),
+                        "timeout": t.get("timeout", 300),
+                        "cwd": t.get("cwd", "."),
+                        "executable_available": available(t),
+                        "environment_keys": sorted(t.get("env", {})),
+                        "allow_read_concurrency": bool(t.get("allow_read_concurrency", False)),
+                    }
+                    for name, t in self.config.get("tasks", {}).items()
+                    if enabled and self.task_allowed(t, project)
+                ],
+                "warning": "Tasks execute project code with the Agent user's OS permissions. Not an OS sandbox.",
+            }
         if tool == "tasks_run":
             root, spec = self.engine.root(project, True)
             if not project.get("allow_tasks") or not spec.get("allow_tasks"):
@@ -1270,26 +1954,81 @@ class Agent:
             if not task or not self.task_allowed(task, project):
                 raise DevError("TASK_NOT_ALLOWED", "任务未在本机为此项目授权", 403)
             command = task.get("command")
-            if not isinstance(command, list) or not command or any(not isinstance(x, str) or "\x00" in x for x in command):
+            if (
+                not isinstance(command, list)
+                or not command
+                or any(not isinstance(x, str) or "\x00" in x for x in command)
+            ):
                 raise DevError("TASK_CONFIG", "本机 command 必须是命令参数数组")
             cwd = self.engine.path(root, task.get("cwd", "."))
             timeout = max(1, min(int(task.get("timeout", 300)), 3600))
             from copy import deepcopy
-            task_project = {**project, '_runtime_task_binding': {'name': args['task'], 'definition': deepcopy(task)}}
-            return await self.run_process(id, command, cwd, timeout, stream=True,
-                                          task_env=task.get("env", {}), execution_project=task_project)
+
+            task_project = {
+                **project,
+                "_runtime_task_binding": {"name": args["task"], "definition": deepcopy(task)},
+            }
+            return await self.run_process(
+                id,
+                command,
+                cwd,
+                timeout,
+                stream=True,
+                task_env=task.get("env", {}),
+                execution_project=task_project,
+            )
         if tool.startswith("git_"):
             root, _ = self.engine.root(project)
             # Git is only used for fixed read operations. Disable external helpers and hooks.
-            flags = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + str(self.state_dir / "no-hooks"), "-c", "diff.external=", "-c", "core.pager=cat"]
+            flags = [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=" + str(self.state_dir / "no-hooks"),
+                "-c",
+                "diff.external=",
+                "-c",
+                "core.pager=cat",
+            ]
             if tool == "git_status":
                 cmd = flags + ["status", "--porcelain=v1", "--untracked-files=normal"]
             elif tool == "git_diff":
-                cmd = flags + ["diff", "--no-ext-diff", "--no-textconv", "--no-color"] + (["--cached"] if args["staged"] else [])
+                cmd = (
+                    flags
+                    + ["diff", "--no-ext-diff", "--no-textconv", "--no-color"]
+                    + (["--cached"] if args["staged"] else [])
+                )
                 # Pathspec exclusions keep common credential files out of diffs.
-                cmd += ["--", ".", ":(glob,exclude)**/.env", ":(glob,exclude)**/.env.*", ":(glob,exclude)**/*.pem", ":(glob,exclude)**/*.key", ":(glob,exclude)**/.npmrc", ":(glob,exclude)**/.ssh/**", ":(glob,exclude)**/.aws/**", ":(glob,exclude)**/.kube/**", ":(glob,exclude)**/*.p12", ":(glob,exclude)**/*.pfx", ":(glob,exclude)**/id_rsa", ":(glob,exclude)**/id_ed25519", ":(glob,exclude)**/.netrc", ":(glob,exclude)**/.pypirc", ":(glob,exclude)**/.azure/**", ":(glob,exclude)**/.remote-dev*/**", ":(glob,exclude)**/.codepier*/**"]
+                cmd += [
+                    "--",
+                    ".",
+                    ":(glob,exclude)**/.env",
+                    ":(glob,exclude)**/.env.*",
+                    ":(glob,exclude)**/*.pem",
+                    ":(glob,exclude)**/*.key",
+                    ":(glob,exclude)**/.npmrc",
+                    ":(glob,exclude)**/.ssh/**",
+                    ":(glob,exclude)**/.aws/**",
+                    ":(glob,exclude)**/.kube/**",
+                    ":(glob,exclude)**/*.p12",
+                    ":(glob,exclude)**/*.pfx",
+                    ":(glob,exclude)**/id_rsa",
+                    ":(glob,exclude)**/id_ed25519",
+                    ":(glob,exclude)**/.netrc",
+                    ":(glob,exclude)**/.pypirc",
+                    ":(glob,exclude)**/.azure/**",
+                    ":(glob,exclude)**/.remote-dev*/**",
+                    ":(glob,exclude)**/.codepier*/**",
+                ]
             else:
-                cmd = flags + ["log", f"-{args['limit']}", "--format=%h %ad %an %s", "--date=iso-strict", "--no-show-signature"]
+                cmd = flags + [
+                    "log",
+                    f"-{args['limit']}",
+                    "--format=%h %ad %an %s",
+                    "--date=iso-strict",
+                    "--no-show-signature",
+                ]
             result = await self.run_process(id, cmd, root, 20)
             if result["exit_code"] != 0:
                 raise DevError("GIT_ERROR", result["output"][-1500:] or "Git 命令失败")
@@ -1301,125 +2040,228 @@ class Agent:
         allowed = task.get("projects", [])
         return "*" in allowed or project.get("alias") in allowed or project.get("id") in allowed
 
-    async def run_process(self, id, command, cwd, timeout, stream=False, task_env=None,
-                          full_access=False, inherit_env=False, execution_project=None):
+    async def run_process(
+        self,
+        id,
+        command,
+        cwd,
+        timeout,  # noqa: ASYNC109 -- External transport/process lifecycle owns this bounded wait.
+        stream=False,
+        task_env=None,  # noqa: ASYNC109 - Caller budget is enforced by the owned transport/process lifecycle.
+        full_access=False,
+        inherit_env=False,
+        execution_project=None,
+    ):
         from copy import deepcopy
         from agent.project_runtime import selected, prepare, descriptor
         from shared.runtime_results import decorate_result
         from shared.secret_output import credential_output_values
+
         if execution_project is None:
-            return await self._run_process_account(id, command, cwd, timeout, stream, task_env,
-                full_access, inherit_env, execution_project)
+            return await self._run_process_account(
+                id,
+                command,
+                cwd,
+                timeout,
+                stream,
+                task_env,
+                full_access,
+                inherit_env,
+                execution_project,
+            )
         config = deepcopy(self.config)
         profile = selected(config, execution_project)
         root, _ = self.engine.root(execution_project)
         runtime = descriptor(config, execution_project, root)
-        holder = getattr(self, '_execution_snapshots', {}).get(id)
-        run_dir = getattr(self, '_execution_run_dirs', {}).get(id)
+        holder = getattr(self, "_execution_snapshots", {}).get(id)
+        run_dir = getattr(self, "_execution_run_dirs", {}).get(id)
         task_env = dict(task_env or {})
         if run_dir is not None:
-            task_env.pop('CODEPIER_RUN_DIR', None)
+            task_env.pop("CODEPIER_RUN_DIR", None)
         execution_root = root
         if holder:
-            if root != holder['root']:
-                raise DevError('ROOT_CHANGED', 'Workspace mapping changed after snapshot creation', 409)
-            if profile['mode'] != 'project_clean_v1' or runtime['revision'] != holder['revision']:
-                raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'Snapshot runtime changed before launch', 409)
-            execution_root = holder['snapshot'].root
+            if root != holder["root"]:
+                raise DevError(
+                    "ROOT_CHANGED", "Workspace mapping changed after snapshot creation", 409
+                )
+            if profile["mode"] != "project_clean_v1" or runtime["revision"] != holder["revision"]:
+                raise DevError(
+                    "RUNTIME_CONFIGURATION_CHANGED", "Snapshot runtime changed before launch", 409
+                )
+            execution_root = holder["snapshot"].root
             try:
                 cwd = execution_root / Path(cwd).relative_to(root)
             except ValueError as exc:
-                raise DevError('SNAPSHOT_UNSAFE', 'Command cwd escapes the snapshot') from exc
+                raise DevError("SNAPSHOT_UNSAFE", "Command cwd escapes the snapshot") from exc
             command = list(command)
             executable = Path(command[0])
             if executable.is_absolute() and executable.is_relative_to(root):
                 command[0] = str(execution_root / executable.relative_to(root))
-        if profile['mode'] == 'native_compat':
-            if execution_project.get('_runtime_requirement'):
-                raise DevError('RUNTIME_ISOLATION_REQUIRED', 'This operation requires its approved isolated runtime', 403)
+        if profile["mode"] == "native_compat":
+            if execution_project.get("_runtime_requirement"):
+                raise DevError(
+                    "RUNTIME_ISOLATION_REQUIRED",
+                    "This operation requires its approved isolated runtime",
+                    403,
+                )
             from agent.project_runtime import legacy_environment
+
             environment = legacy_environment(inherit_env, task_env, full_access=full_access)
             if run_dir is not None:
-                environment['CODEPIER_RUN_DIR'] = str(run_dir)
-            result = await self._run_process_account(id, command, cwd, timeout, stream,
-                full_access=full_access, execution_project=execution_project, environment_override=environment)
-            return decorate_result(result, execution_project, id, runtime, root,
-                                   cwd=cwd, command=command)
+                environment.update(run_environment(run_dir))
+            result = await self._run_process_account(
+                id,
+                command,
+                cwd,
+                timeout,
+                stream,
+                full_access=full_access,
+                execution_project=execution_project,
+                environment_override=environment,
+            )
+            return decorate_result(
+                result, execution_project, id, runtime, root, cwd=cwd, command=command
+            )
         plan = prepare(config, execution_project, execution_root, command, cwd, task_env)
         if holder:
-            for key in ('PYTHONPATH', 'PYTHONHOME', 'VIRTUAL_ENV'):
+            for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
                 plan.environment.pop(key, None)
-            plan.environment['PATH'] = os.pathsep.join(
+            plan.environment["PATH"] = os.pathsep.join(
                 str(execution_root / Path(entry).relative_to(root))
-                if Path(entry).is_absolute() and Path(entry).is_relative_to(root) else entry
-                for entry in plan.environment.get('PATH', '').split(os.pathsep))
-            if any(str(root) in value for key, value in plan.environment.items()
-                   if key not in {'PATH', 'CODEPIER_RUN_DIR'}):
-                raise DevError('SNAPSHOT_UNSAFE', 'Configured environment points to the original workspace')
+                if Path(entry).is_absolute() and Path(entry).is_relative_to(root)
+                else entry
+                for entry in plan.environment.get("PATH", "").split(os.pathsep)
+            )
+            if any(
+                str(root) in value
+                for key, value in plan.environment.items()
+                if key not in {"PATH", "CODEPIER_RUN_DIR"}
+            ):
+                raise DevError(
+                    "SNAPSHOT_UNSAFE", "Configured environment points to the original workspace"
+                )
         if run_dir is not None:
-            plan.environment['CODEPIER_RUN_DIR'] = (
-                '/workspace/.codepier/runs/' + id if profile['mode'] == 'container_v1' else str(run_dir))
+            plan.environment["CODEPIER_RUN_DIR"] = (
+                "/workspace/.codepier/runs/" + id
+                if profile["mode"] == "container_v1"
+                else str(run_dir)
+            )
         # Check the exact workload before adding a trusted container transport.
         enforce_argv(config, execution_project, plan.command, plan.cwd, plan.environment)
         driver = None
         started = time.monotonic()
         try:
-            if profile['mode'] == 'container_v1':
+            if profile["mode"] == "container_v1":
                 from agent.container_runtime import ContainerRuntime
+
                 driver = ContainerRuntime(config, root, plan, id)
                 actual = await driver.prepare_async()
                 environment = driver.client_env
             else:
                 actual, environment = plan.command, plan.environment
             if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
-                raise DevError('CANCELLED', 'Operation was cancelled before workload launch', 409)
-            current_root, current_spec = self.engine.root(execution_project, write=full_access or self.integration_tool_names.get(id) in {'tasks_run', 'exec', 'validation_run'})
+                raise DevError("CANCELLED", "Operation was cancelled before workload launch", 409)
+            current_root, current_spec = self.engine.root(
+                execution_project,
+                write=full_access
+                or self.integration_tool_names.get(id) in {"tasks_run", "exec", "validation_run"},
+            )
             if current_root != root:
-                raise DevError('ROOT_CHANGED', 'Workspace mapping changed before workload launch', 409)
-            tool = self.integration_tool_names.get(id, 'shell_exec' if full_access else 'tasks_run')
+                raise DevError(
+                    "ROOT_CHANGED", "Workspace mapping changed before workload launch", 409
+                )
+            tool = self.integration_tool_names.get(id, "shell_exec" if full_access else "tasks_run")
             self.integrations.control.guard(tool, execution_project)
             if full_access:
                 from agent.shell import shell_denial
+
                 denial = shell_denial(self.config, execution_project, current_spec)
                 if denial:
                     raise DevError(*denial, 403)
-            elif not execution_project.get('allow_tasks') or not current_spec.get('allow_tasks'):
-                raise DevError('TASKS_DISABLED', 'Project execution was disabled before launch', 403)
-            task_binding = execution_project.get('_runtime_task_binding')
+            elif not execution_project.get("allow_tasks") or not current_spec.get("allow_tasks"):
+                raise DevError(
+                    "TASKS_DISABLED", "Project execution was disabled before launch", 403
+                )
+            task_binding = execution_project.get("_runtime_task_binding")
             if task_binding:
-                current_task = self.config.get('tasks', {}).get(task_binding['name'])
-                if current_task != task_binding['definition'] or not self.task_allowed(current_task, execution_project):
-                    raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'The configured task changed before workload launch', 409)
-            if descriptor(self.config, execution_project, root)['revision'] != runtime['revision']:
-                raise DevError('RUNTIME_CONFIGURATION_CHANGED', 'Runtime configuration changed before launch; no workload was started', 409)
+                current_task = self.config.get("tasks", {}).get(task_binding["name"])
+                if current_task != task_binding["definition"] or not self.task_allowed(
+                    current_task, execution_project
+                ):
+                    raise DevError(
+                        "RUNTIME_CONFIGURATION_CHANGED",
+                        "The configured task changed before workload launch",
+                        409,
+                    )
+            if descriptor(self.config, execution_project, root)["revision"] != runtime["revision"]:
+                raise DevError(
+                    "RUNTIME_CONFIGURATION_CHANGED",
+                    "Runtime configuration changed before launch; no workload was started",
+                    409,
+                )
             remaining = timeout - (time.monotonic() - started)
             if remaining <= 0:
-                raise DevError('RUNTIME_PREPARATION_TIMEOUT', 'The original command budget expired during runtime preparation', 409)
+                raise DevError(
+                    "RUNTIME_PREPARATION_TIMEOUT",
+                    "The original command budget expired during runtime preparation",
+                    409,
+                )
             remaining = min(remaining, self.bounded_timeout(execution_project, timeout))
-            result = await self._run_process_account(id, actual, plan.cwd, remaining, stream,
-                full_access=full_access, execution_project=None if driver else execution_project,
-                environment_override=environment, redaction_values=credential_output_values(plan.environment))
+            result = await self._run_process_account(
+                id,
+                actual,
+                plan.cwd,
+                remaining,
+                stream,
+                full_access=full_access,
+                execution_project=None if driver else execution_project,
+                environment_override=environment,
+                redaction_values=credential_output_values(plan.environment),
+            )
             if driver:
                 outcome = await driver.outcome_async()
-                result['runtime_outcome'] = {**outcome, 'transport_exit_code': result['exit_code']}
-                if outcome['state'] == 'confirmed':
-                    result['exit_code'] = outcome['workload_exit_code']
+                result["runtime_outcome"] = {**outcome, "transport_exit_code": result["exit_code"]}
+                if outcome["state"] == "confirmed":
+                    result["exit_code"] = outcome["workload_exit_code"]
         finally:
             if driver:
                 await driver.cleanup_async()
         if driver:
             result.update(execution_isolation=driver.evidence, runtime_cleanup=driver.cleanup_state)
-        return decorate_result(result, execution_project, id, runtime, root,
-                               cwd=plan.cwd, command=plan.command,
-                               workspace_root='/workspace' if driver else None)
+        return decorate_result(
+            result,
+            execution_project,
+            id,
+            runtime,
+            root,
+            cwd=plan.cwd,
+            command=plan.command,
+            workspace_root="/workspace" if driver else None,
+        )
 
-    async def _run_process_account(self, id, command, cwd, timeout, stream=False, task_env=None,
-                          full_access=False, inherit_env=False, execution_project=None,
-                          environment_override=None, redaction_value=None, redaction_values=None):
+    async def _run_process_account(
+        self,
+        id,
+        command,
+        cwd,
+        timeout,  # noqa: ASYNC109 -- External transport/process lifecycle owns this bounded wait.
+        stream=False,
+        task_env=None,  # noqa: ASYNC109 - Caller budget is enforced by the owned transport/process lifecycle.
+        full_access=False,
+        inherit_env=False,
+        execution_project=None,
+        environment_override=None,
+        redaction_value=None,
+        redaction_values=None,
+    ):
         from shared.secret_output import SecretOutputs, credential_output_values
         from agent.project_runtime import legacy_environment
-        environment = (dict(environment_override) if environment_override is not None else
-                       legacy_environment(inherit_env, task_env, full_access=full_access))
+
+        environment = (
+            dict(environment_override)
+            if environment_override is not None
+            else legacy_environment(inherit_env, task_env, full_access=full_access)
+        )
         protected_values = credential_output_values(environment) + list(redaction_values or [])
         if redaction_value is not None:
             protected_values.append(redaction_value)
@@ -1428,20 +2270,34 @@ class Agent:
             # Inspect the exact argv, cwd and environment used below, including
             # local task definitions, PATH overrides and resolved symlink targets.
             enforce_argv(self.config, execution_project, command, cwd, environment)
-        extra = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+        extra = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
         spawn = asyncio.create_subprocess_exec
         if os.name != "nt":
             from agent.owned_subprocess import create_owned_process
+
             spawn = create_owned_process
+
         def process_event(stage, **detail):
             # Observations must never replace a process exception or await I/O.
             with contextlib.suppress(Exception):
                 self.telemetry.process_event(id, stage, **detail)
 
-        process_event('process_spawning')
-        spawning = asyncio.create_task(spawn(*command, cwd=cwd, env=environment,
-                      stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                      stderr=asyncio.subprocess.STDOUT, **extra))
+        process_event("process_spawning")
+        spawning = asyncio.create_task(
+            spawn(
+                *command,
+                cwd=cwd,
+                env=environment,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                **extra,
+            )
+        )
         try:
             # Cancelling subprocess creation can leave a live child without a
             # Process handle. Keep creation alive until we can reap that child.
@@ -1452,9 +2308,11 @@ class Agent:
                 await self.kill_process(process, include_finished=True)
             raise
         except FileNotFoundError as exc:
-            raise DevError("COMMAND_MISSING", f"找不到本机命令 {command[0]}，请安装或使用绝对路径") from exc
+            raise DevError(
+                "COMMAND_MISSING", f"找不到本机命令 {command[0]}，请安装或使用绝对路径"
+            ) from exc
         self.processes[id] = process
-        process_event('process_spawned', pid=process.pid)
+        process_event("process_spawned", pid=process.pid)
         output_truncated = False
         start = time.monotonic()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -1464,17 +2322,23 @@ class Agent:
         last_snapshot_output = None
         last_persist = 0.0
         persisted_seq = -1
+
         async def snapshot(force=False):
             nonlocal seq, last_snapshot, last_snapshot_output, last_persist, persisted_seq
             now = time.monotonic()
-            if not stream or not force and now - last_snapshot < .25:
+            if not stream or not force and now - last_snapshot < 0.25:
                 return
             if last_snapshot_output != decoded_output:
                 seq += 1
                 last_snapshot = now
                 last_snapshot_output = decoded_output
-                self.pending_output[id] = {"type": "output", "id": id, "snapshot": True,
-                                           "seq": seq, "text": decoded_output}
+                self.pending_output[id] = {
+                    "type": "output",
+                    "id": id,
+                    "snapshot": True,
+                    "seq": seq,
+                    "text": decoded_output,
+                }
                 self.output_wake.set()
             if seq != persisted_seq and (force or now - last_persist >= 2.0):
                 # Keep FULL durability. Disk latency must not block heartbeats,
@@ -1492,7 +2356,7 @@ class Agent:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
                 if not chunk:
-                    process_event('process_stdout_eof', pid=process.pid)
+                    process_event("process_stdout_eof", pid=process.pid)
                     append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
                     await snapshot(True)
                     return
@@ -1500,13 +2364,14 @@ class Agent:
                 await snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
                 await asyncio.sleep(0)
+
         async def exited():
             # Process.wait() may wait for inherited stdout to close as well as
             # process exit. Observe the leader so its children cannot extend a
             # completed task to its full timeout by retaining the pipe.
-            while process.returncode is None:
-                await asyncio.sleep(.05)
-            process_event('process_leader_exited', pid=process.pid, returncode=process.returncode)
+            while process.returncode is None:  # noqa: ASYNC110 - Observe external process/cancellation state; bounded by the owning lifecycle.
+                await asyncio.sleep(0.05)
+            process_event("process_leader_exited", pid=process.pid, returncode=process.returncode)
 
         reader = waiter = None
         timed_out = False
@@ -1515,7 +2380,11 @@ class Agent:
             reader = asyncio.create_task(drain())
             waiter = asyncio.create_task(exited())
             if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
-                if self.stop_event.is_set() and process.returncode is None and not self.journal.is_cancelled(id):
+                if (
+                    self.stop_event.is_set()
+                    and process.returncode is None
+                    and not self.journal.is_cancelled(id)
+                ):
                     self.shutdown_interrupted.add(id)
                 await self.kill_process(process, include_finished=True)
             async with asyncio.timeout(timeout):
@@ -1532,10 +2401,14 @@ class Agent:
         except TimeoutError:
             timed_out = True
         finally:
-            process_event('process_cleanup_started', pid=process.pid, reader_done=reader is not None and reader.done())
+            process_event(
+                "process_cleanup_started",
+                pid=process.pid,
+                reader_done=reader is not None and reader.done(),
+            )
             try:
                 await self.kill_process(process, include_finished=True)
-                process_event('process_cleanup_finished', pid=process.pid)
+                process_event("process_cleanup_finished", pid=process.pid)
                 if reader is not None:
                     try:
                         await asyncio.wait_for(asyncio.shield(reader), 1)
@@ -1545,15 +2418,24 @@ class Agent:
                 for task in (reader, waiter):
                     if task is not None:
                         task.cancel()
-                await asyncio.gather(*(t for t in (reader, waiter) if t is not None), return_exceptions=True)
+                await asyncio.gather(
+                    *(t for t in (reader, waiter) if t is not None), return_exceptions=True
+                )
                 self.processes.pop(id, None)
-        return {"exit_code": process.returncode, "output": decoded_output,
-                "output_truncated": output_truncated, "timed_out": timed_out, "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
-                "duration_ms": round((time.monotonic() - start) * 1000), "command": [output_filter.redact(value) for value in command]}
+        return {
+            "exit_code": process.returncode,
+            "output": decoded_output,
+            "output_truncated": output_truncated,
+            "timed_out": timed_out,
+            "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
+            "duration_ms": round((time.monotonic() - start) * 1000),
+            "command": [output_filter.redact(value) for value in command],
+        }
 
     @staticmethod
     async def kill_process(process, include_finished=False):
         from agent.owned_subprocess import OwnedProcess
+
         if isinstance(process, OwnedProcess):
             # This adapter deliberately retains the leader until all owned
             # descendants are stopped; finished leaders still pin the PGID.
@@ -1570,7 +2452,15 @@ class Agent:
                 return
             killer = None
             try:
-                killer = await asyncio.create_subprocess_exec("taskkill", "/PID", str(process.pid), "/T", "/F", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill",
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
                 await asyncio.wait_for(killer.wait(), 3)
             except (OSError, asyncio.TimeoutError):
                 pass
@@ -1584,6 +2474,7 @@ class Agent:
                     with contextlib.suppress(ProcessLookupError):
                         process.kill()
         else:
+
             def signal_group(sig):
                 if process.returncode is not None:
                     return
@@ -1608,27 +2499,16 @@ class Agent:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), 5)
 
-    @staticmethod
-    async def disk_call(function, *args):
-        work = asyncio.create_task(asyncio.to_thread(function, *args))
-        try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            # A cancelled wrapper must not leave a writer using a closing DB.
-            settled = asyncio.gather(work, return_exceptions=True)
-            while not settled.done():
-                try:
-                    await asyncio.shield(settled)
-                except asyncio.CancelledError:
-                    continue
-            raise
+    disk_call = staticmethod(disk_call)
 
     async def maintain_journal(self):
         while not self.stop_event.is_set():
             try:
+
                 def cleanup():
                     with self.engine.mutation_lock:
                         return self.journal.prune(**self.config.get("journal_retention", {}))
+
                 await self.disk_call(cleanup)
             except (OSError, sqlite3.Error, ValueError) as exc:
                 LOGGER.warning("Agent recovery retention failed (%s)", type(exc).__name__)
@@ -1646,8 +2526,10 @@ class Agent:
         journal_maintenance = asyncio.create_task(self.maintain_journal())
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
+
         branding = asyncio.create_task(watch_brand_upgrade(self))
         from agent.coding_reviews import watch_cleanup
+
         review_cleanup = asyncio.create_task(watch_cleanup(self.engine, self.stop_event))
         connection = None
         delay = 1
@@ -1676,7 +2558,15 @@ class Agent:
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
-            background = [watcher, sender, stopping, branding, scheduler_monitor, review_cleanup, journal_maintenance] + ([connection] if connection else [])
+            background = [
+                watcher,
+                sender,
+                stopping,
+                branding,
+                scheduler_monitor,
+                review_cleanup,
+                journal_maintenance,
+            ] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
@@ -1684,12 +2574,18 @@ class Agent:
                 # Shutdown is not a user cancellation. Preserve completed
                 # successes and distinguish only processes actually interrupted.
                 self.shutdown_interrupted.update(
-                    id for id, process in self.processes.items() if process.returncode is None)
+                    id for id, process in self.processes.items() if process.returncode is None
+                )
                 for id, job in list(self.jobs.items()):
                     if id not in self.finishing and self.journal.status(id)["status"] == "accepted":
                         job.cancel()
-                await asyncio.gather(*(self.kill_process(p, include_finished=True)
-                                       for p in list(self.processes.values())), return_exceptions=True)
+                await asyncio.gather(
+                    *(
+                        self.kill_process(p, include_finished=True)
+                        for p in list(self.processes.values())
+                    ),
+                    return_exceptions=True,
+                )
                 # Finish in-flight file operations and persist outcomes before exit.
                 await asyncio.gather(*list(self.jobs.values()), return_exceptions=True)
                 await asyncio.gather(*list(self.kill_tasks), return_exceptions=True)

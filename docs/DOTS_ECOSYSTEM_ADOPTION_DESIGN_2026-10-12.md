@@ -743,7 +743,7 @@ CodePier 继续通过事件传递授权对象的引用；Dot 从原 inbox／reco
 | 尚未到 Hub、宿主也未保存的回复 | 如实报告缺少内容 | 凭空恢复原答复或拉取私人聊天 |
 | 外部通道已开始发送但无回执 | 保留 unknown 并核对 | 无条件安全重发 |
 
-仓库中的 `shared/dot_outbox.py` 是可选参考适配器，测试也明确使用合成宿主回调。它不是“安装 CodePier 后所有 Dot 自动具备持久回复队列”的证据。[B06]
+仓库中的 `docs/examples/dot_outbox.py` 是可选参考适配器，测试也明确使用合成宿主回调。它不是“安装 CodePier 后所有 Dot 自动具备持久回复队列”的证据。[B06]
 
 ### 12.4 原回复恢复顺序
 
@@ -1245,7 +1245,7 @@ UI 与后端的绝对时间目标若在目标设备达不到，应基于数据�
 | B03 | `hub/collaboration/dot_chat.py` | 80–345：enqueue、status、configuration、inbox、acknowledge、message、from_message、wake_work；原任务请求、显式消费、唯一执行对象与阶段回复 |
 | B04 | `hub/collaboration/dot_relay.py` | 完整 1–240：update、receipts、recover、sync；版本检查、收件状态、三轮有界恢复、24 条 tracked／100 条 timeline 预算 |
 | B05 | `hub/collaboration/task_liveness.py` | 完整 1–348：迁移、record_receipt、receipt、work_summary、for_messages、recovery、evidence、recover；原证据与只读恢复 |
-| B06 | `shared/dot_outbox.py`；`tests/test_dot_durable_outbox.py` | 适配器 1–210／262，测试完整 1–162；宿主自行集成、加密不可变正文、claim fence、丢回执与保留期边界。测试未运行 |
+| B06 | `docs/examples/dot_outbox.py`；`tests/test_dot_durable_outbox.py` | 适配器 1–210／262，测试完整 1–162；宿主自行集成、加密不可变正文、claim fence、丢回执与保留期边界。测试未运行 |
 | B07 | `hub/collaboration/events.py` | 1–180／524：签名、网络 semaphore、catalog、prepare、subscribe 前半段；webhook 原生回调验证、精确范围、暂停保护、事务与网络分离。其余恢复说明结合 B15／E14，不声称整文件重审 |
 | B08 | `hub/collaboration/channel_consent.py` | 完整 1–60：分目的同意模型、接入授权／输入隔离／通知表；迁移不自动授权 |
 | B09 | `hub/collaboration/channel_enrollment.py` | 完整 1–253：preview、snapshot、prepare、record_binding、validate_pending、complete、incoming、view；冻结摘要、本人证明、原事务自动完成 |
@@ -1265,7 +1265,7 @@ UI 与后端的绝对时间目标若在目标设备达不到，应基于数据�
 | `hub/collaboration/dot_chat.py` | `6e00682cc07e0be07c783142fecc8072d4d126f2f8589ae8110a1bd9ea17c327` |
 | `hub/collaboration/dot_relay.py` | `90dd0f8a48efccf43f5be2d27586daa644c4f78c127b8765958dd03539fcef7b` |
 | `hub/collaboration/task_liveness.py` | `77d46b4abb4e33591fe08a5e87301f166eafd033049e5abb62ca438bc3cef9f4` |
-| `shared/dot_outbox.py` | `13c725dbd7b89101e62ffa6da38ac00b2ee883bc2921fc785a903b3c93b0599d` |
+| `docs/examples/dot_outbox.py` | `13c725dbd7b89101e62ffa6da38ac00b2ee883bc2921fc785a903b3c93b0599d` |
 | `hub/collaboration/events.py` | `9ac741a4fbced9c377fa9cc1aaa710d06506af18058027df83812b5510a88a23` |
 | `hub/collaboration/channel_enrollment.py` | `391fca732d485454dca1e89166b01a37c48867db2d6b995f83f1fa19eba20d81` |
 | `hub/collaboration/channel_router.py` | `95e50c18c044753e21cdea25b6cabe0331878d53c57fc4bd4e1b4a6fba0406a9` |

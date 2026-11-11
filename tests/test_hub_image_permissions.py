@@ -63,8 +63,15 @@ def test_image_import_check_runs_after_switching_to_non_root():
     user = recipe.index('USER 10001:10001')
     assert recipe.index('RUN chmod -R ') < user
     assert recipe.index('RUN python -c "from hub.app import create_app"') > user
-    for path in SOURCE_PATHS:
-        assert 'COPY --chown=root:root ' + path + ' ' in recipe
+    copies = [shlex.split(line)[2:] for line in recipe.splitlines()
+              if line.startswith('COPY --chown=root:root ')]
+    destinations = {Path(parts[-1]).as_posix() for parts in copies}
+    assert {'hub', 'shared', 'web', 'agent', 'scripts', 'deploy', '.'} <= destinations
+    sources = {path for parts in copies for path in parts[:-1]}
+    assert {'scripts/install_agent.py', 'scripts/agent_lifecycle.py',
+            'scripts/mcp_stdio_bridge.py', 'deploy/install-from-hub.sh',
+            'deploy/install-from-hub.ps1', 'requirements-agent.txt', 'LICENSE'} <= sources
+    assert 'scripts' not in sources and 'deploy' not in sources
 
 def run_startup_probe(tmp_path, command=None, *, short_timeout=False, fixture_ready=False):
     with socket.socket() as listener:

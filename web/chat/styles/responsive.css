@@ -1,0 +1,67 @@
+/* On compact screens, keep actions reachable and reserve room for history. */
+@media (max-width: 760px) and (max-height: 700px) {
+  .chat-sidebar {
+    padding: 12px 10px;
+    gap: 6px;
+  }
+  .chat-sidebar-head {
+    height: 34px;
+  }
+  .chat-history-heading {
+    min-height: 24px;
+  }
+  .chat-history-filter {
+    grid-template-columns: minmax(0, 1fr) 80px;
+    align-items: center;
+  }
+  .chat-history-filter select {
+    width: 100%;
+    min-height: 40px;
+  }
+  .chat-sidebar-footer {
+    gap: 2px;
+    padding-top: 8px;
+  }
+}
+@media (max-width: 760px) and (max-height: 520px) {
+  .chat-sidebar {
+    padding: 6px 10px;
+    gap: 5px;
+  }
+  .chat-sidebar-head {
+    display: none;
+  }
+  .chat-sidebar-footer {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-top: 3px;
+  }
+  .chat-sidebar-action {
+    width: 40px;
+    padding: 8px;
+    justify-content: center;
+  }
+  .chat-sidebar-action span,
+  .chat-sidebar-action kbd {
+    display: none;
+  }
+  .chat-sidebar-preferences {
+    flex: 1;
+    padding: 0;
+    gap: 4px;
+  }
+  .chat-sidebar-preferences select {
+    max-width: 90px;
+  }
+  .chat-scroll {
+    padding-block: 4px;
+  }
+  .chat-composer textarea {
+    max-height: 44px;
+    overflow-y: auto;
+  }
+  .chat-composer {
+    padding-block: 6px;
+  }
+}

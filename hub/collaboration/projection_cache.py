@@ -4,11 +4,12 @@ Only synchronous projection entry points establish a scope. Every Store write
 invalidates memoized values, including writes rolled back within the request.
 Nested views share the same bounded cache; a later request always reauthorizes.
 """
+
 from contextvars import ContextVar
 from copy import deepcopy
 from functools import wraps
 
-_current = ContextVar('collaboration_projection_cache', default=None)
+_current = ContextVar("collaboration_projection_cache", default=None)
 
 
 def projection(function):
@@ -24,6 +25,7 @@ def projection(function):
                 return function(self, *args, **kwargs)
         finally:
             _current.reset(token)
+
     return wrapped
 
 
@@ -34,14 +36,21 @@ def memoized(function):
         if cache is None:
             return function(self, *args, **kwargs)
         store = self.store
-        key = (id(self), function.__qualname__, store.db.total_changes,
-               store.session_revision, repr(args), repr(sorted(kwargs.items())))
+        key = (
+            id(self),
+            function.__qualname__,
+            store.db.total_changes,
+            store.session_revision,
+            repr(args),
+            repr(sorted(kwargs.items())),
+        )
         if key in cache:
             return deepcopy(cache[key])
         value = function(self, *args, **kwargs)
         if len(cache) < 2048:
             cache[key] = deepcopy(value)
         return value
+
     return wrapped
 
 

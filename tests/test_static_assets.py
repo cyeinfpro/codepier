@@ -104,3 +104,21 @@ def test_retired_collaboration_ui_remains_inaccessible_when_old_install_files_su
             assert client.get('/static/' + name.upper()).status_code == 404
             assert client.head('/static/' + name).status_code == 404
         assert client.get('/static/app.js').content == original
+
+
+@pytest.mark.parametrize('name', ['mcp-apps/package.json', 'mcp-apps/node_modules/private.js', 'chat/source.js', 'index.source.html', 'browser-extension/background.test.mjs'])
+def test_unlisted_build_files_are_private_even_if_present(assets, name):
+    directory, *_ = assets
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('not a published asset')
+    with client_for(directory) as client:
+        response = client.get('/static/' + name)
+        assert response.status_code == 404
+        assert response.headers['cache-control'] == 'no-store'
+
+
+def test_missing_manifest_does_not_expose_a_source_directory(tmp_path):
+    (tmp_path / 'private.js').write_text('internal source')
+    with client_for(tmp_path) as client:
+        assert client.get('/static/private.js').status_code == 404
