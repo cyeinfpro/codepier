@@ -10,7 +10,8 @@ const check = process.argv.includes('--check');
 const generated = new Map();
 const options = await prettier.resolveConfig(resolve(web, 'collaboration-room.js'));
 const bundle = await esbuild.build({
-  entryPoints: [resolve(web, 'collaboration-room/index.mjs')],
+  absWorkingDir: web,
+  entryPoints: ['collaboration-room/index.mjs'],
   bundle: true,
   format: 'iife',
   target: 'es2020',
