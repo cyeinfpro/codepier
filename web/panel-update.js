@@ -159,7 +159,8 @@ window.CodePierPanelUpdate = (() => {
   function paintRollback(button, busy) {
     const version = data?.rollback_available?.version;
     button.hidden = !version;
-    button.disabled = !data?.enabled || busy || data.recovery_required || accessDenied || awaitingVersion();
+    button.disabled =
+      !data?.enabled || busy || data.recovery_required || accessDenied || awaitingVersion();
     if (version) button.textContent = '回滚至 v' + version;
   }
   function entryStatus() {
@@ -696,7 +697,11 @@ window.CodePierPanelUpdate = (() => {
         });
       } else if (action === 'rollback') {
         const version = data.rollback_available?.version;
-        if (!version || !confirm(`回滚 Hub 镜像至 v${version}？\n切换期间面板短暂维护，当前数据继续使用。`)) return;
+        if (
+          !version ||
+          !confirm(`回滚 Hub 镜像至 v${version}？\n切换期间面板短暂维护，当前数据继续使用。`)
+        )
+          return;
         savePending({
           action,
           body: { idempotency_key: 'panel-rollback-' + uid(), version, confirmation: version },
