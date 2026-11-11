@@ -40,7 +40,7 @@ window.CodePierPanelUpdate = (() => {
     try {
       const value = JSON.parse(sessionValue(storageKey()) || 'null');
       return value &&
-        ['check', 'apply'].includes(value.action) &&
+        ['check', 'apply', 'rollback'].includes(value.action) &&
         /^[A-Za-z0-9._:-]{8,128}$/.test(value.body?.idempotency_key) &&
         (!value.intent ||
           (/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(value.intent.version || '') &&
@@ -76,11 +76,12 @@ window.CodePierPanelUpdate = (() => {
       section.innerHTML = `<div class="panel-head"><h2 id="panel-update-float-title" tabindex="-1">面板更新</h2><button type="button" class="btn ghost" data-panel-update-close aria-label="关闭更新详情">关闭</button></div>
         <div class="panel-body"><p class="form-note">顶部快捷更新仅更新面板、Hub 和 Agent 分发文件，不自动更新已安装的 Agent。下方勾选仅用于详情中的再次确认更新。</p><p id="panel-update-float-state" role="status" aria-live="polite"></p><p id="panel-update-float-note" class="form-note"></p>
         <label class="panel-agent-consent"><input type="checkbox" id="panel-update-float-agents"> 面板更新成功后自动更新当前空间已授权的 Agent</label>
-        <div class="actions"><button type="button" class="btn primary" id="panel-update-float-apply">更新面板及已授权 Agent</button><button type="button" class="btn" id="panel-update-float-check">检查更新</button><button type="button" class="btn" id="panel-update-float-retry" hidden>重试</button><button type="button" class="btn" id="panel-update-float-reload" hidden>重新加载页面</button></div>
+        <div class="actions"><button type="button" class="btn primary" id="panel-update-float-apply">更新面板及已授权 Agent</button><button type="button" class="btn" id="panel-update-float-check">检查更新</button><button type="button" class="btn" id="panel-update-float-rollback" hidden>回滚镜像</button><button type="button" class="btn" id="panel-update-float-retry" hidden>重试</button><button type="button" class="btn" id="panel-update-float-reload" hidden>重新加载页面</button></div>
         <details><summary>版本、发布说明与更新进度</summary><pre id="panel-update-float-details"></pre></details></div>`;
       document.body.append(section);
       $('#panel-update-float-apply').onclick = () => submit('apply');
       $('#panel-update-float-check').onclick = () => submit('check');
+      $('#panel-update-float-rollback').onclick = () => submit('rollback');
       $('#panel-update-float-retry').onclick = () => submit(pending?.action, true);
       $('#panel-update-float-reload').onclick = manualReload;
       $('#panel-update-float-agents').onchange = (event) => setConsent(event.target.checked);
@@ -135,7 +136,7 @@ window.CodePierPanelUpdate = (() => {
   function awaitingVersion() {
     const job = data?.operation;
     return (
-      job?.kind === 'apply' &&
+      ['apply', 'rollback'].includes(job?.kind) &&
       job.state === 'succeeded' &&
       /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(job.target_version || '') &&
       data.running_version !== job.target_version
@@ -154,6 +155,12 @@ window.CodePierPanelUpdate = (() => {
       !accessDenied &&
       !statusFailed
     );
+  }
+  function paintRollback(button, busy) {
+    const version = data?.rollback_available?.version;
+    button.hidden = !version;
+    button.disabled = !data?.enabled || busy || data.recovery_required || accessDenied || awaitingVersion();
+    if (version) button.textContent = '回滚至 v' + version;
   }
   function entryStatus() {
     if (data?.recovery_required) return ['recovery_required', '需恢复'];
@@ -208,6 +215,7 @@ window.CodePierPanelUpdate = (() => {
     $('#panel-update-float-apply').disabled = !canApply();
     $('#panel-update-float-check').disabled =
       !d.enabled || busy || d.recovery_required || accessDenied || awaitingVersion();
+    paintRollback($('#panel-update-float-rollback'), busy);
     $('#panel-update-float-agents').disabled = busy;
     $('#panel-update-float-agents').checked = currentAgentScope();
     $('#panel-update-float-retry').hidden = !(
@@ -220,7 +228,7 @@ window.CodePierPanelUpdate = (() => {
     );
     $('#panel-update-float-retry').disabled = submitting;
     $('#panel-update-float-reload').hidden = !(
-      job?.kind === 'apply' &&
+      ['apply', 'rollback'].includes(job?.kind) &&
       job.state === 'succeeded' &&
       d.running_version === job.target_version
     );
@@ -256,7 +264,7 @@ window.CodePierPanelUpdate = (() => {
     <div class="panel-body"><p>从 GitHub 正式 Release 更新网页、Hub、Agent 安装包及安装脚本。账号、配对、项目和配置保留。面板健康检查成功后，自动更新本次确认时当前空间中已有管理权限的受管 Agent；忙节点等待任务结束，离线节点重连后继续。</p>
     <dl class="kv"><dt>运行版本</dt><dd id="panel-update-current">${esc(S.settings?.version || '—')}</dd><dt>更新来源</dt><dd id="panel-update-repo">—</dd><dt>可用版本</dt><dd id="panel-update-target">尚未检查</dd></dl>
     <label class="panel-agent-consent"><input type="checkbox" id="panel-update-agents" checked> 面板更新成功后自动更新当前空间已授权的 Agent</label>
-    <div class="actions"><button class="btn" id="panel-update-check" type="button" disabled>检查 GitHub 更新</button><button class="btn primary" id="panel-update-apply" type="button" disabled>更新面板及已授权 Agent</button><button class="btn" id="panel-update-retry" type="button" hidden>重试</button><button class="btn" id="panel-update-reload" type="button" hidden>重新加载页面</button></div>
+    <div class="actions"><button class="btn" id="panel-update-check" type="button" disabled>检查 GitHub 更新</button><button class="btn primary" id="panel-update-apply" type="button" disabled>更新面板及已授权 Agent</button><button class="btn" id="panel-update-rollback" type="button" hidden>回滚镜像</button><button class="btn" id="panel-update-retry" type="button" hidden>重试</button><button class="btn" id="panel-update-reload" type="button" hidden>重新加载页面</button></div>
     <p id="panel-update-host-notice" class="form-note" role="status" hidden></p><p id="panel-update-state" role="status" aria-live="polite">正在读取宿主机更新服务状态…</p><p class="form-note" id="panel-update-note" role="status" hidden></p>
     <section id="panel-agent-rollout" hidden aria-labelledby="panel-agent-rollout-title"><h3 id="panel-agent-rollout-title">Agent 更新进度</h3><p id="panel-agent-rollout-summary" role="status"></p><ul id="panel-agent-rollout-nodes"></ul></section>
     <details id="panel-update-release" hidden><summary>发布说明与校验值</summary><p id="panel-update-digest" class="mono"></p><pre id="panel-update-notes"></pre></details>
@@ -339,6 +347,7 @@ window.CodePierPanelUpdate = (() => {
     $('#panel-update-check').disabled =
       !enabled || busy || d.recovery_required || accessDenied || awaitingVersion();
     $('#panel-update-apply').disabled = !canApply();
+    paintRollback($('#panel-update-rollback'), busy);
     $('#panel-update-agents').disabled = busy;
     $('#panel-update-agents').checked = currentAgentScope();
     $('#panel-update-retry').hidden = !(
@@ -351,7 +360,7 @@ window.CodePierPanelUpdate = (() => {
     );
     $('#panel-update-retry').disabled = submitting;
     $('#panel-update-reload').hidden = !(
-      job?.kind === 'apply' &&
+      ['apply', 'rollback'].includes(job?.kind) &&
       job.state === 'succeeded' &&
       d.running_version === job.target_version
     );
@@ -445,7 +454,7 @@ window.CodePierPanelUpdate = (() => {
       submitting ||
       pending ||
       data.recovery_required ||
-      job?.kind !== 'apply' ||
+      !['apply', 'rollback'].includes(job?.kind) ||
       job.state !== 'succeeded' ||
       !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(job.target_version || '')
     )
@@ -661,7 +670,7 @@ window.CodePierPanelUpdate = (() => {
         if (
           !direct &&
           !confirm(
-            `从 ${data.repository} 更新到 ${c.version}？\n包含面板、Hub 和 Agent 分发文件。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent，忙节点等待任务结束，离线节点重连后继续。' : '本次不自动更新 Agent。'}权限和配置保持原样。\n切换期间面板短暂维护，原数据卷保留为备份。`,
+            `从 ${data.repository} 更新到 ${c.version}？\n包含面板、Hub 和 Agent 分发文件。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent，忙节点等待任务结束，离线节点重连后继续。' : '本次不自动更新 Agent。'}\n切换期间面板短暂维护，兼容更新直接沿用原数据卷。`,
           )
         )
           return;
@@ -684,6 +693,13 @@ window.CodePierPanelUpdate = (() => {
             confirmation: c.version,
             update_agents: updateAgents,
           },
+        });
+      } else if (action === 'rollback') {
+        const version = data.rollback_available?.version;
+        if (!version || !confirm(`回滚 Hub 镜像至 v${version}？\n切换期间面板短暂维护，当前数据继续使用。`)) return;
+        savePending({
+          action,
+          body: { idempotency_key: 'panel-rollback-' + uid(), version, confirmation: version },
         });
       } else
         savePending({
@@ -772,6 +788,7 @@ window.CodePierPanelUpdate = (() => {
     $('#panel-update-agents').onchange = (event) => setConsent(event.target.checked);
     $('#panel-update-check').onclick = () => submit('check');
     $('#panel-update-apply').onclick = () => submit('apply');
+    $('#panel-update-rollback').onclick = () => submit('rollback');
     $('#panel-update-retry').onclick = () => submit(pending?.action, true);
     $('#panel-update-reload').onclick = manualReload;
     paint();

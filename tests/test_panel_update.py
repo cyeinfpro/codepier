@@ -66,6 +66,93 @@ def release_for(raw):
             'notes': '<img src=x onerror=alert(1)>', 'published_at': '2026-09-22T00:00:00Z', 'checked_at': time.time()}
 
 
+def test_image_update_and_rollback_reuse_state(tmp_path, monkeypatch):
+    manager, release = manager_fixture(tmp_path)
+    repo = release["repository"]
+    metadata = {
+        "image": f"ghcr.io/{repo}", "version": TARGET,
+        "digest": "sha256:" + "a" * 64, "commit": "b" * 40,
+    }
+    files = {name: b"# fixture\n" for name in source.UPDATER_FILES}
+    files["shared/util.py"] = f'VERSION = "{TARGET}"\n'.encode()
+    files["RELEASE.json"] = json.dumps({"name": "CodePier", "version": TARGET}).encode()
+    files[source.IMAGE_METADATA] = json.dumps(metadata).encode()
+    archive = tmp_path / "updater.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for name, content in files.items():
+            bundle.writestr(name, content)
+        bundle.writestr("MANIFEST.sha256", "".join(
+            f"{hashlib.sha256(content).hexdigest()}  {name}\n" for name, content in files.items()
+        ))
+    raw = archive.read_bytes()
+    asset = {
+        "asset_id": 32, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+        "url": release["url"].replace("-source.zip", "-updater.zip"),
+    }
+    gh_release = github_metadata(bundle_bytes())
+    gh_release["assets"].append({
+        "id": asset["asset_id"], "size": asset["bytes"], "digest": "sha256:" + asset["sha256"],
+        "name": f"codepier-{TARGET}-updater.zip", "state": "uploaded",
+        "browser_download_url": asset["url"],
+    })
+    monkeypatch.setattr(source, "fetch", lambda *args, **kwargs: json.dumps(gh_release).encode())
+    release = source.latest_release()
+    assert release["image_bundle"] == asset
+    atomic_json(manager.home / "candidate.json", release)
+    monkeypatch.setattr(updater, "latest_release", lambda *_: release)
+
+    def download(url, *, destination, **kwargs):
+        assert url == asset["url"]
+        destination.write_bytes(raw)
+
+    monkeypatch.setattr(updater, "fetch", download)
+
+    class ImageRuntime(FakeRuntime):
+        def pull(self, job, reference, identity):
+            self.action("pull")
+            assert reference == f"{metadata['image']}@{metadata['digest']}"
+            assert identity == metadata
+            return {"image_ref": reference}
+
+        def rollback_package(self, job):
+            self.action("rollback_package")
+            assert job["rollback_image"]["version"] == VERSION
+            return {"image_ref": "fixture-old-image"}
+
+        def prepare(self, job, source_root, *, package):
+            self.action("prepare")
+            assert source_root is None
+            return {"reuse_state": True, "image": package["image_ref"]}
+
+        def commit(self, job):
+            self.action("commit")
+            current = {"version": job["target_version"]}
+            if job["kind"] == "apply":
+                current["previous_image"] = {"version": job["from_version"]}
+            atomic_json(self.home / "current.json", current)
+
+        def retire_rollback_pin(self, job):
+            self.action("retire_rollback_pin")
+
+    manager.runtime = runtime = ImageRuntime(manager.home)
+    manager.submit("apply", body_for(release))
+    manager.perform(manager.current_job())
+    assert manager.current_job()["state"] == "succeeded"
+    assert manager.status()["rollback_available"] == {"version": VERSION}
+    assert runtime.calls.index("pull") < runtime.calls.index("stop")
+    assert {"copy_data", "build"}.isdisjoint(runtime.calls)
+    runtime.calls.clear()
+    manager.submit("rollback", {
+        **body_for(key="fixture-rollback-123"), "current_version": TARGET, "version": VERSION,
+    })
+    manager.perform(manager.current_job())
+    assert manager.current_job()["state"] == "succeeded"
+    assert manager.status()["current_version"] == VERSION
+    assert manager.status()["rollback_available"] is None
+    assert runtime.calls[0] == "rollback_package"
+    assert {"copy_data", "build", "pull"}.isdisjoint(runtime.calls)
+
+
 def test_verified_bundle_and_runtime_version(tmp_path):
     raw = bundle_bytes(); archive = tmp_path / 'source.zip'; archive.write_bytes(raw)
     root = source.unpack_bundle(archive, tmp_path / 'source', release_for(raw))

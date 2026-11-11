@@ -485,6 +485,7 @@ print(json.dumps({'version':VERSION,'agent_sha256':p.sha256,'agent_bytes':len(p.
 )
 HEALTH = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=3).read().decode())"
 MANIFEST = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8765/agent/manifest.json',timeout=5).read().decode())"
+STATE_EPOCH_LABEL = "org.codepier.hub-state-epoch"
 
 
 # Executed by a pinned image using only the standard library. The deployment
@@ -512,7 +513,9 @@ mode = '?mode=ro' if wal.exists() and wal.stat().st_size else '?mode=ro&immutabl
 with closing(sqlite3.connect(db.as_uri() + mode, uri=True, timeout=3)) as con:
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone():
         raise RuntimeError('Hub database schema is missing')
-    values = dict(con.execute("SELECT key,value FROM meta WHERE key IN ('schema','collaboration_min_reader','collaboration_min_writer')"))
+    values = dict(con.execute("SELECT key,value FROM meta WHERE key IN ('schema','collaboration_min_reader','collaboration_min_writer','room_host_connections_contract')"))
+if (db.parent / 'rekey.json').exists() or (db.parent / '.rekey').exists():
+    raise RuntimeError('Hub state has a pending key rotation')
 print(json.dumps(values))
 """
 
@@ -540,7 +543,7 @@ class DockerRuntime:
         self.gate.unlink(missing_ok=True)
         sync_directory(self.run_dir)
 
-    def prepare(self, job, source):
+    def prepare(self, job, source, *, package=None):
         current = read_json(self.home / "current.json")
         for name, sha in current["files"].items():
             if fingerprint(self.root / name) != sha:
@@ -592,20 +595,60 @@ class DockerRuntime:
         if observed.get("status") != "ok" or observed.get("version") != job["from_version"]:
             raise UpdateError("VERSION_CHANGED", "运行中的 Hub 版本已变化，请重新检查", 409)
         new_volume = "codepier-update-data-" + job["id"]
-        image = "codepier-update:" + job["id"]
+        image = package["image_ref"] if package else "codepier-update:" + job["id"]
         target = copy.deepcopy(spec)
         target["services"]["hub"]["image"] = image
         # The frozen target Compose spec, not .env, starts the new container.
         # Migrate it too; otherwise committed_env would only fix the next restart.
         target_env = target["services"]["hub"]["environment"]
         if (
-            job.get("kind") != "migrate-state"
+            job.get("kind") == "apply"
             and target_env.get("OAUTH_REDIRECT_HOSTS") in OAUTH_LEGACY_DEFAULTS
         ):
             target_env["OAUTH_REDIRECT_HOSTS"] = OAUTH_CURRENT_DEFAULT
         migration = job.get("kind") == "migrate-state" or (
             job.get("kind") == "apply" and mount_path == "/app/data"
         )
+        if (
+            package
+            and (migration or mount_path == "/app/state")
+            and (package.get("state_layout") != "split-state-v1")
+        ):
+            raise UpdateError(
+                "STATE_LAYOUT_UNSUPPORTED", "目标镜像不支持独立状态卷，现有服务继续运行", 409
+            )
+        epoch = labels.get(STATE_EPOCH_LABEL, "")
+        reuse_state = bool(
+            package
+            and not migration
+            and mount_path == "/app/state"
+            and re.fullmatch(r"[1-9][0-9]{0,5}", epoch)
+            and package["state_epoch"] == epoch
+        )
+        if reuse_state:
+            probe = {
+                **job,
+                "package": package,
+                "old_image": container["Image"],
+                "old_volume": old_volume,
+                "new_volume": old_volume,
+            }
+            floor = self.check_database_floor(probe, "target")
+            if (
+                job["kind"] == "apply"
+                and target_env.get("CODEPIER_ROOM_HOST_CONNECTIONS_MODE", "auto") == "auto"
+                and package.get("host_connections_auto") is True
+                and floor.get("room_host_connections_contract") is None
+            ):
+                reuse_state = False  # First activation writes only to the isolated candidate.
+        if job.get("kind") == "rollback":
+            previous = job["rollback_image"]
+            if not reuse_state or previous["volume"] != old_volume or previous["epoch"] != epoch:
+                raise UpdateError(
+                    "ROLLBACK_INCOMPATIBLE", "旧镜像与当前状态卷不兼容，未切换服务", 409
+                )
+        if reuse_state:
+            new_volume = old_volume
         if migration:
             live_env = dict(
                 v.split("=", 1) for v in container.get("Config", {}).get("Env", []) if "=" in v
@@ -643,8 +686,10 @@ class DockerRuntime:
             "new_volume": new_volume,
             "old_image": container["Image"],
             "image": image,
-            "source": str(source.relative_to(self.root)),
+            "source": str(source.relative_to(self.root)) if source is not None else "",
             "old_container": ids[0],
+            "reuse_state": reuse_state,
+            "state_epoch": epoch if reuse_state else "",
             "state_layout": "split-state-v1"
             if migration or mount_path == "/app/state"
             else "legacy",
@@ -677,6 +722,39 @@ class DockerRuntime:
                 timeout=1800,
                 job=job,
             )
+        return self.preflight(job, job["image"])
+
+    def image_labels(self, job, image):
+        return (
+            json.loads(
+                self.command(
+                    ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
+                    job=job,
+                )
+            )
+            or {}
+        )
+
+    def pull(self, job, reference, release):
+        self.command(["docker", "pull", reference], timeout=600, job=job)
+        labels = self.image_labels(job, reference)
+        if (
+            labels.get("org.opencontainers.image.version") != job["target_version"]
+            or labels.get("org.opencontainers.image.revision") != release["commit"]
+        ):
+            raise UpdateError("IMAGE_IDENTITY", "镜像版本或源码提交与正式发布不符", 409)
+        return self.preflight(job, reference, state_epoch=labels.get(STATE_EPOCH_LABEL, ""))
+
+    def rollback_package(self, job):
+        previous = job["rollback_image"]
+        image = previous["pin"]
+        labels = self.image_labels(job, image)
+        package = self.preflight(job, image, state_epoch=labels.get(STATE_EPOCH_LABEL, ""))
+        if package["image_id"] != previous["image_id"]:
+            raise UpdateError("IMAGE_IDENTITY", "本机回滚镜像已改变，现有服务继续运行", 409)
+        return package
+
+    def preflight(self, job, image, *, state_epoch=""):
         metadata = json.loads(
             self.command(
                 [
@@ -696,7 +774,7 @@ class DockerRuntime:
                     "no-new-privileges",
                     "--entrypoint",
                     "python",
-                    job["image"],
+                    image,
                     "-c",
                     PREFLIGHT,
                 ],
@@ -709,19 +787,18 @@ class DockerRuntime:
             or not 0 < metadata.get("agent_bytes", 0) <= 8 * 1024 * 1024
         ):
             raise UpdateError("PREFLIGHT_FAILED", "候选镜像或配套 Agent 文件校验失败", 500)
-        if (
-            job.get("state_layout") == "split-state-v1"
-            and metadata.get("state_layout") != "split-state-v1"
+        if (state_epoch or job.get("state_layout") == "split-state-v1") and (
+            metadata.get("state_layout") != "split-state-v1"
         ):
             raise UpdateError(
                 "STATE_LAYOUT_UNSUPPORTED", "候选版本不支持独立状态卷；未停止旧服务", 409
             )
         image_id = self.command(
-            ["docker", "image", "inspect", job["image"], "--format", "{{.Id}}"], job=job
+            ["docker", "image", "inspect", image, "--format", "{{.Id}}"], job=job
         ).strip()
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
             raise UpdateError("PREFLIGHT_FAILED", "候选镜像固定身份无法核实", 500)
-        metadata["image_id"] = image_id
+        metadata.update(image_id=image_id, image_ref=image, state_epoch=state_epoch)
         return metadata
 
     def validate_files(self):
@@ -886,13 +963,9 @@ class DockerRuntime:
                 "DATABASE_COMPATIBILITY_UNVERIFIED", "数据库兼容校验缺少固定镜像或数据卷", 500
             )
         try:
-            labels = json.loads(
-                self.command(
-                    ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
-                    job=job,
-                )
+            capability = self.image_labels(job, image).get(
+                "org.codepier.collaboration-contract", "0"
             )
-            capability = (labels or {}).get("org.codepier.collaboration-contract", "0")
             floor = json.loads(
                 self.command(
                     [
@@ -925,6 +998,11 @@ class DockerRuntime:
             ):
                 raise ValueError("Invalid image collaboration contract")
             schema = floor["schema"]
+            contract = floor.get("room_host_connections_contract")
+            if contract is not None:
+                contract = json.loads(contract)
+                if not isinstance(contract, dict):
+                    raise ValueError("Invalid room host connection contract")
             limits = (floor.get("collaboration_min_reader"), floor.get("collaboration_min_writer"))
             if schema == "11":
                 if any(
@@ -946,6 +1024,9 @@ class DockerRuntime:
                 "目标镜像不满足当前数据库的协作读取或写入能力；未启动目标 Hub",
                 409,
             )
+        version = job["target_version"] if which == "target" else job["from_version"]
+        verify_data_contract(contract, version)
+        return floor
 
     def start(self, job, which):
         summary = job.get("copy_summary", {})
@@ -1003,7 +1084,7 @@ class DockerRuntime:
                 raise UpdateError(
                     "AGENT_PACKAGE_MISMATCH", "新 Hub 提供的 Agent 安装包与预检不一致", 500
                 )
-        if job.get("layout_migration"):
+        if job.get("layout_migration") or job.get("reuse_state"):
             actual = json.loads(self.command(["docker", "inspect", ids[0]], job=job))[0]
             selected = read_json(self.home / "jobs" / job["id"] / (which + ".spec.json"))
             expected_mounts = {
@@ -1014,18 +1095,18 @@ class DockerRuntime:
             actual_mounts = {v.get("Destination"): v.get("Name") for v in actual.get("Mounts", [])}
             if any(actual_mounts.get(path) != name for path, name in expected_mounts.items()):
                 raise UpdateError("LAYOUT_MISMATCH", "实际状态或附件卷与迁移目标不一致", 500)
-            expected_state = "/app/state" if which == "target" else None
+            expected_state = "/app/state" if which == "target" or job.get("reuse_state") else None
             actual_env = dict(
                 v.split("=", 1) for v in actual.get("Config", {}).get("Env", []) if "=" in v
             )
             if (
                 (actual_env.get("HUB_STATE_DIR") or None) != expected_state
                 or actual_env.get("HUB_DATA_DIR", "/app/data") != "/app/data"
-                or (which == "old" and "/app/state" in actual_mounts)
+                or (which == "old" and not expected_state and "/app/state" in actual_mounts)
                 or actual.get("Image")
                 != (
                     job["package"].get("image_id")
-                    if which == "target" and job.get("kind") == "apply"
+                    if which == "target" and job.get("kind") != "migrate-state"
                     else job["old_image"]
                 )
             ):
@@ -1041,10 +1122,10 @@ class DockerRuntime:
         }
         if job.get("state_layout") == "split-state-v1":
             changes["COMPOSE_FILE"] = job["layout_config"]
-        if job.get("kind") != "migrate-state":
+        if job.get("source") and job.get("kind") != "migrate-state":
             changes["CODEPIER_HUB_SOURCE"] = job["source"]
         content = updated_env(before, changes)
-        if job.get("kind") != "migrate-state":
+        if job.get("kind") == "apply":
             content, migrated = migrate_oauth_redirect_hosts(content)
             if migrated and "oauth_redirect_hosts_migrated" not in job.setdefault("notes", []):
                 job["notes"].append("oauth_redirect_hosts_migrated")
@@ -1070,8 +1151,34 @@ class DockerRuntime:
         atomic_bytes(self.root / ".env", content)
         current["compose"] = read_json(self.home / "jobs" / job["id"] / "target.spec.json")
         current["version"] = job["target_version"]
+        current.pop("previous_image", None)
+        if job.get("reuse_state") and job.get("kind") == "apply":
+            pin = self.rollback_pin(job["old_image"])
+            self.command(["docker", "image", "tag", job["old_image"], pin], job=job)
+            current["previous_image"] = {
+                "version": job["from_version"],
+                "image_id": job["old_image"],
+                "volume": job["old_volume"],
+                "epoch": job["state_epoch"],
+                "pin": pin,
+            }
         current["files"][".env"] = hashlib.sha256(content).hexdigest()
         atomic_json(self.home / "current.json", current)
+
+    def rollback_pin(self, image_id):
+        identity = hashlib.sha256(f"{self.root}\0{image_id}".encode()).hexdigest()
+        return "codepier-rollback:" + identity[:32]
+
+    def retire_rollback_pin(self, job):
+        path = self.home / "jobs" / job["id"] / "current.before.json"
+        before = read_json(path)
+        previous = before.get("previous_image", {})
+        pin = previous.get("pin")
+        if pin and pin != job["image"] and pin == self.rollback_pin(previous["image_id"]):
+            try:
+                self.command(["docker", "image", "rm", pin], job=job)
+            except UpdateError:
+                job.setdefault("notes", []).append("superseded_rollback_pin_retained")
 
     def rollback(self, job):
         # Target has NEVER accepted traffic: the host-owned gate stays closed.

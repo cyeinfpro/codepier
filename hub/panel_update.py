@@ -33,6 +33,11 @@ class ApplyUpdate(CheckUpdate):
     confirmation: str = Field(min_length=1, max_length=32)
 
 
+class RollbackUpdate(CheckUpdate):
+    version: str = Field(pattern=r"^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$")
+    confirmation: str = Field(min_length=1, max_length=32)
+
+
 class UpdaterClient:
     def __init__(self, socket_path=None):
         self.socket_path = (
@@ -222,7 +227,7 @@ def make_panel_update_router(auth, runtime, client=None):
     async def submit(request, body, action):
         principal = auth.instance(request, True)
         payload = body.model_dump(exclude={"confirmation", "update_agents"})
-        if action == "apply" and body.confirmation != body.version:
+        if action in {"apply", "rollback"} and body.confirmation != body.version:
             raise DevError("CONFIRMATION_REQUIRED", "请明确确认所检查的目标版本", 409)
         payload.update(current_version=VERSION, actor=principal.actor)
         await runtime.store.run(
@@ -278,5 +283,9 @@ def make_panel_update_router(auth, runtime, client=None):
     @router.post("/apply")
     async def apply(request: Request, body: ApplyUpdate):
         return await submit(request, body, "apply")
+
+    @router.post("/rollback")
+    async def rollback(request: Request, body: RollbackUpdate):
+        return await submit(request, body, "rollback")
 
     return router

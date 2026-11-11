@@ -74,6 +74,55 @@ class DockerBoundary:
         raise AssertionError(command)
 
 
+@pytest.mark.parametrize("new_epoch,compatible", [("1", True), ("2", False), ("", False)])
+def test_prebuilt_image_reuses_only_compatible_split_state(tmp_path, new_epoch, compatible):
+    home, config, job, spec = deployment(tmp_path)
+    hub = spec["services"]["hub"]
+    hub["environment"].update(HUB_STATE_DIR="/app/state", HUB_DATA_DIR="/app/data")
+    hub["volumes"].append({"type": "volume", "source": "hub-state", "target": "/app/state"})
+    spec["volumes"]["hub-state"] = {"external": True, "name": "original-state"}
+    current = read_json(home / "current.json")
+    atomic_json(home / "current.json", {**current, "compose": spec})
+
+    class SplitDocker(DockerBoundary):
+        def __call__(self, command, **kwargs):
+            result = super().__call__(command, **kwargs)
+            if command[:2] == ["docker", "inspect"]:
+                (container,) = json.loads(result)
+                container["Mounts"].append({"Destination": "/app/state", "Name": "original-state"})
+                container["Config"]["Labels"]["org.codepier.hub-state-epoch"] = "1"
+                return json.dumps([container])
+            return result
+
+    docker = SplitDocker(tmp_path, spec)
+    runtime = DockerRuntime(tmp_path, home, config, execute=docker)
+    job["kind"] = "apply"
+    package = {
+        "image_ref": "ghcr.io/cyeinfpro/codepier@sha256:" + "c" * 64,
+        "image_id": "sha256:" + "c" * 64,
+        "state_layout": "split-state-v1",
+        "state_epoch": new_epoch,
+    }
+    values = runtime.prepare(job, None, package=package)
+    target = read_json(home / "jobs" / job["id"] / "target.spec.json")
+    assert values["reuse_state"] is compatible
+    assert (values["new_volume"] == "original-state") is compatible
+    assert target["volumes"]["hub-state"]["name"] == values["new_volume"]
+    assert target["volumes"]["hub-data"]["name"] == "original-data"
+    assert target["services"]["proxy"] == spec["services"]["proxy"]
+    assert target["services"]["hub"]["image"] == package["image_ref"]
+    assert not any("stop" in command for command in docker.commands)
+
+    if compatible:
+        docker.floor["room_host_connections_contract"] = json.dumps({
+            "version": 1, "min_reader_version": "99.0.0", "min_writer_version": "99.0.0",
+        })
+        with pytest.raises(UpdateError) as error:
+            runtime.prepare(job, None, package=package)
+        assert error.value.code == "DATA_CONTRACT_INCOMPATIBLE"
+        assert not any("stop" in command for command in docker.commands)
+
+
 @pytest.mark.parametrize('mode,capable,activates', [
     (None, True, True), ('auto', True, True), ('off', True, False),
     ('shadow', True, False), ('on', True, False), (None, False, False),

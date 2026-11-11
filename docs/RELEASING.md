@@ -17,7 +17,7 @@ VERSION=$(.venv/bin/python -c 'from scripts.build_source_bundle import source_ve
 .venv/bin/python scripts/check_release.py --panel-update --bundle "dist/codepier-${VERSION}-source.zip"
 ```
 
-正式 Release 同时上传两种 ZIP 及各自 `.manifest.json`。`source-full.zip` 是完整开发源码，包含格式、测试配置与依赖输入；`source.zip` 是旧面板更新器识别的固定附件名，仅排除 2 个开发专用顶层文件与 requirements/ 下的 6 个依赖输入文件，所有运行代码与锁文件完全一致。排除项在 `PANEL_UPDATE_EXCLUDES` 中显式列出，不放宽更新器安全白名单。兼容检查必须用保留的 1.13.0 原始更新器及当前更新器实际解包更新 ZIP；仅验证新源码或最小测试包不能证明旧面板可升级。
+正式 Release 同时上传两种源码 ZIP、各自的 `.manifest.json`，以及 `codepier-VERSION-updater.zip`。`source-full.zip` 是完整开发源码，包含格式、测试配置与依赖输入；`source.zip` 是旧面板更新器识别的固定附件名，仅排除 2 个开发专用顶层文件与 requirements/ 下的 6 个依赖输入文件，所有运行代码与锁文件完全一致。排除项在 `PANEL_UPDATE_EXCLUDES` 中显式列出，不放宽更新器安全白名单。兼容检查必须用保留的 1.13.0 原始更新器及当前更新器实际解包更新 ZIP；仅验证新源码或最小测试包不能证明旧面板可升级。
 
 重复构建并比较两种 ZIP 的 SHA-256，确认同一源码输入产生相同归档。归档中的 `MANIFEST.sha256` 必须覆盖全部源文件；外部 `.manifest.json` 提供逐文件清单。检查公开包内没有运行状态、个人服务地址、历史部署证据或凭据。模式扫描不能替代对新增文件和截图的人工检查。
 
@@ -53,7 +53,7 @@ python3 scripts/publish_release.py --repo OWNER/REPO \
   --source-run SOURCE_RUN_ID --image-run IMAGE_RUN_ID --notes-file RELEASE_NOTES.md
 ```
 
-加 `--check-only` 可预检作业和四个附件，不需要发布说明。发布入口将本地与远端 main、源码工作流运行与尝试编号、源码清单及附件摘要绑定到同一个提交。确认后推送与 VERSION 一致的标签，再上传两种 ZIP 和对应清单。
+加 `--check-only` 可预检作业和五个附件。发布入口从同提交的已验证镜像作业取得 OCI 摘要，从已验证兼容源码包提取更新器文件，生成独立更新包，再推送正式标签并上传附件。
 
 ## 容器镜像
 
@@ -64,6 +64,8 @@ python3 scripts/publish_release.py --repo OWNER/REPO \
 通过后构建 linux/amd64 与 linux/arm64 清单并推送，附带 SBOM 与构建来源证明；依赖锁文件由 `uv pip compile --universal` 生成，两种架构都使用同一组哈希校验的 wheel。标签：正式版本 `VERSION`、`MAJOR.MINOR` 与 `latest`；`main` 及手动运行的分支使用分支名；所有构建另加 `sha-<完整 40 位提交>`。任务摘要与 `image-<run id>-<attempt>` 工件记录 `镜像@sha256 摘要`，部署应固定该摘要而不是可变标签。
 
 正式标签由发布入口在同提交的源码和镜像作业通过后创建。首次推送生成的 GHCR 包默认私有：需要在包设置中公开，或为集群配置 imagePullSecret。Compose 安装脚本仍走本地构建路径，不受影响。k3s 单文件部署模板见 `deploy/k3s/deployment.yaml`（单副本 Recreate、local-path 数据卷、非 root 只读容器、Traefik Ingress、不启用宿主机更新服务）；其版本与模板占位符由 `scripts/check_release.py` 核对，部署须使用下文生成的不可变摘要清单。
+
+面板更新器依据 Dockerfile 的 `org.codepier.hub-state-epoch` 标签决定能否在同一状态卷上切换。只有该兼容代内的镜像能双向读写彼此产生的 SQLite、密钥和其他持久状态时，才能保留同一值。引入不可逆迁移、提高旧版本无法满足的读写门槛、变更密钥或持久化协议时，递增兼容代。支持跨版本直升，故需兼顾同一代中的所有先前版本。
 
 ## 发布后
 

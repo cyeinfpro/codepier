@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -17,6 +19,8 @@ if str(ROOT) not in sys.path:
 
 from scripts.build_source_bundle import source_version
 from scripts.ci_source_artifact import source_build_record
+from scripts.render_k3s import render
+from shared.release_source import IMAGE_METADATA, MAX_UPDATER_ARCHIVE, UPDATER_FILES, image_release
 
 
 def read(*command):
@@ -75,6 +79,56 @@ def verify_main(repo, commit):
         raise ValueError("Local and GitHub main must match the verified commit")
 
 
+def make_updater_bundle(directory, source, repo, version, commit, run_id, attempt):
+    image_dir = directory / "image"
+    run(
+        "gh",
+        "run",
+        "download",
+        str(run_id),
+        "-R",
+        repo,
+        "-n",
+        f"image-{run_id}-{attempt}",
+        "-D",
+        str(image_dir),
+    )
+    image = json.loads((image_dir / "image.json").read_text())
+    metadata = {
+        "image": image["image"],
+        "digest": image["digest"],
+        "commit": commit,
+        "version": image["version"],
+    }
+    image_release(metadata, repo, version)
+    rendered, deployment = render(ROOT, metadata["image"], metadata["digest"], commit)
+    if (
+        json.loads((image_dir / "deployment.json").read_text()) != deployment
+        or (image_dir / "deployment.yaml").read_text() != rendered
+        or not {f"{metadata['image']}:sha-{commit}", f"{metadata['image']}:main"}
+        <= set(image["tags"])
+    ):
+        raise ValueError("Published image does not match the exact release commit")
+    target = directory / f"codepier-{version}-updater.zip"
+    with (
+        zipfile.ZipFile(source) as archive,
+        zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as bundle,
+    ):
+        manifest = []
+        for name in sorted(UPDATER_FILES):
+            content = (
+                json.dumps(metadata, sort_keys=True).encode()
+                if name == IMAGE_METADATA
+                else archive.read(name)
+            )
+            bundle.writestr(name, content)
+            manifest.append(f"{hashlib.sha256(content).hexdigest()}  {name}\n")
+        bundle.writestr("MANIFEST.sha256", "".join(manifest))
+    if target.stat().st_size > MAX_UPDATER_ARCHIVE:
+        raise ValueError("The standalone updater bundle exceeds its size limit")
+    return target
+
+
 def publish(args):
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", args.repo, re.ASCII):
         raise ValueError("Use an owner/repository GitHub name")
@@ -87,7 +141,7 @@ def publish(args):
         ".github/workflows/ci.yml",
         "Build verified public source",
     )
-    verify_job(
+    image_receipt = verify_job(
         args.repo,
         commit,
         args.image_run,
@@ -131,6 +185,15 @@ def publish(args):
                 "--bundle",
                 str(directory / (prefix + suffix)),
             )
+        updater_bundle = make_updater_bundle(
+            directory,
+            directory / (prefix + ".zip"),
+            args.repo,
+            version,
+            commit,
+            args.image_run,
+            image_receipt[0],
+        )
 
         # Recheck both receipts in case a new attempt started during verification.
         if verify_job(
@@ -141,14 +204,18 @@ def publish(args):
             "Build verified public source",
         ) != (attempt, event):
             raise ValueError("The source run attempt changed during verification")
-        verify_job(
-            args.repo,
-            commit,
-            args.image_run,
-            ".github/workflows/image.yml",
-            "Build, boot-test and publish",
-            publication=True,
-        )
+        if (
+            verify_job(
+                args.repo,
+                commit,
+                args.image_run,
+                ".github/workflows/image.yml",
+                "Build, boot-test and publish",
+                publication=True,
+            )
+            != image_receipt
+        ):
+            raise ValueError("The image run attempt changed during verification")
         if args.check_only:
             print(f"Publication checks passed for {tag} at {commit}")
             return
@@ -188,6 +255,7 @@ def publish(args):
             "--notes-file",
             str(args.notes_file.resolve()),
             *assets,
+            str(updater_bundle),
         )
 
 

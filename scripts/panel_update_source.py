@@ -18,6 +18,18 @@ DEFAULT_REPOSITORY = "cyeinfpro/codepier"
 MAX_ARCHIVE = 128 * 1024 * 1024
 MAX_FILE = 8 * 1024 * 1024
 MAX_FILES = 10000
+MAX_UPDATER_ARCHIVE = 512 * 1024
+IMAGE_METADATA = "scripts/panel_update_image.json"
+UPDATER_FILES = frozenset(
+    {
+        "RELEASE.json",
+        "shared/util.py",
+        "scripts/panel_updater.py",
+        "scripts/panel_update_runtime.py",
+        "scripts/panel_update_source.py",
+        IMAGE_METADATA,
+    }
+)
 REQUIRED = {
     "Dockerfile",
     "RELEASE.json",
@@ -239,7 +251,7 @@ def latest_release(repository=DEFAULT_REPOSITORY):
             or type(asset["id"]) is not int
         ):
             raise ValueError("Invalid release identity")
-        return {
+        result = {
             "repository": repository,
             "release_id": release["id"],
             "asset_id": asset["id"],
@@ -252,6 +264,30 @@ def latest_release(repository=DEFAULT_REPOSITORY):
             "published_at": str(release.get("published_at") or "")[:50],
             "checked_at": time.time(),
         }
+        bundle_name = f"codepier-{version}-updater.zip"
+        bundles = [asset for asset in release["assets"] if asset.get("name") == bundle_name]
+        if bundles:
+            bundle = bundles[0]
+            bundle_digest = bundle.get("digest", "")
+            bundle_url = f"https://github.com/{repository}/releases/download/{tag}/{bundle_name}"
+            if (
+                len(bundles) != 1
+                or bundle.get("state") != "uploaded"
+                or bundle.get("browser_download_url") != bundle_url
+                or type(bundle.get("id")) is not int
+                or type(bundle.get("size")) is not int
+                or not 0 < bundle["size"] <= MAX_UPDATER_ARCHIVE
+                or not isinstance(bundle_digest, str)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", bundle_digest)
+            ):
+                raise ValueError("Invalid image updater asset identity")
+            result["image_bundle"] = {
+                "asset_id": bundle["id"],
+                "bytes": bundle["size"],
+                "sha256": bundle_digest[7:],
+                "url": bundle_url,
+            }
+        return result
     except (KeyError, TypeError, ValueError) as exc:
         raise UpdateError(
             "INVALID_RELEASE", "GitHub 正式 Release 元数据不完整或格式不正确", 502
@@ -295,10 +331,12 @@ def safe_name(name):
     return path
 
 
-def unpack_bundle(archive_path, destination, release):
+def unpack_bundle(archive_path, destination, release, *, updater_only=False):
     """Verify the external digest AND exact manifest before writing any member."""
     archive_path, destination = Path(archive_path), Path(destination)
-    if archive_path.stat().st_size != release["bytes"] or archive_path.stat().st_size > MAX_ARCHIVE:
+    limit = MAX_UPDATER_ARCHIVE if updater_only else MAX_ARCHIVE
+    expanded_limit = MAX_UPDATER_ARCHIVE * 4 if updater_only else MAX_ARCHIVE
+    if archive_path.stat().st_size != release["bytes"] or archive_path.stat().st_size > limit:
         raise UpdateError("BUNDLE_SIZE_MISMATCH", "源码包长度与 GitHub 声明不一致")
     sha = hashlib.sha256()
     with archive_path.open("rb") as stream:
@@ -331,9 +369,11 @@ def unpack_bundle(archive_path, destination, release):
                 names.add(info.filename)
                 folded.add(info.filename.casefold())
                 total += info.file_size
-                if total > MAX_ARCHIVE:
+                if total > expanded_limit:
                     raise ValueError("Expanded limit")
-            if not REQUIRED | {"MANIFEST.sha256"} <= names:
+            if updater_only and names != UPDATER_FILES | {"MANIFEST.sha256"}:
+                raise ValueError("Unexpected updater package files")
+            if not updater_only and not REQUIRED | {"MANIFEST.sha256"} <= names:
                 raise ValueError("Required runtime files missing")
             manifest = {}
             for line in archive.read("MANIFEST.sha256").decode("utf-8").splitlines():
@@ -364,3 +404,20 @@ def unpack_bundle(archive_path, destination, release):
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, UnicodeError) as exc:
         raise UpdateError("INVALID_BUNDLE", "源码包清单、路径、版本或压缩内容校验失败") from exc
     return destination
+
+
+def image_release(metadata, repository, version):
+    """Validate the immutable OCI index identity carried by a verified release asset."""
+    image = f"ghcr.io/{repository_name(repository).lower()}"
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != {"image", "digest", "commit", "version"}
+        or metadata["image"] != image
+        or metadata["version"] != version
+        or not isinstance(metadata["digest"], str)
+        or not re.fullmatch(r"sha256:[a-f0-9]{64}", metadata["digest"])
+        or not isinstance(metadata["commit"], str)
+        or not re.fullmatch(r"[a-f0-9]{40}", metadata["commit"])
+    ):
+        raise UpdateError("INVALID_RELEASE_IMAGE", "正式镜像来源、版本或摘要无法核验")
+    return f"{image}@{metadata['digest']}"

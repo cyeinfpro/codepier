@@ -38,8 +38,10 @@ if not __package__:
 try:
     from .panel_update_source import (
         DEFAULT_REPOSITORY,
+        IMAGE_METADATA,
         UpdateError,
         fetch,
+        image_release,
         latest_release,
         repository_name,
         unpack_bundle,
@@ -58,8 +60,10 @@ try:
 except ImportError:
     from panel_update_source import (
         DEFAULT_REPOSITORY,
+        IMAGE_METADATA,
         UpdateError,
         fetch,
+        image_release,
         latest_release,
         repository_name,
         unpack_bundle,
@@ -234,6 +238,7 @@ class Manager:
             candidate = read_json(self.home / "candidate.json")
             current = read_json(self.home / "current.json", {})
             version = current.get("version", "")
+            previous = current.get("previous_image")
             available = bool(
                 candidate
                 and time.time() - candidate["checked_at"] <= 900
@@ -247,6 +252,7 @@ class Manager:
                 "current_version": version,
                 "candidate": candidate,
                 "update_available": available,
+                "rollback_available": {"version": previous["version"]} if previous else None,
                 "capabilities": {
                     "default_split_state": True,
                     "verified_engine_updates": bool(self.config.get("engine_launcher")),
@@ -281,11 +287,16 @@ class Manager:
             atomic_json(self.home / "jobs" / job["id"] / "status.json", job)
 
     def submit(self, kind, body, *, host_migration=False):
-        allowed = {"idempotency_key", "current_version", "actor"} | (
-            {"version", "release_id", "sha256"} if kind == "apply" else set()
-        )
+        allowed = {"idempotency_key", "current_version", "actor"}
+        allowed |= {
+            "apply": {"version", "release_id", "sha256"},
+            "rollback": {"version"},
+        }.get(kind, set())
         if (
-            (kind not in {"check", "apply"} and not (kind == "migrate-state" and host_migration))
+            (
+                kind not in {"check", "apply", "rollback"}
+                and not (kind == "migrate-state" and host_migration)
+            )
             or not isinstance(body, dict)
             or set(body) != allowed
         ):
@@ -359,6 +370,10 @@ class Manager:
                     raise UpdateError(
                         "NO_UPDATE", "当前没有更新版本；不自动降级或重新部署同版本", 409
                     )
+            if kind == "rollback":
+                previous = current.get("previous_image")
+                if not previous or previous["version"] != body["version"]:
+                    raise UpdateError("ROLLBACK_UNAVAILABLE", "当前没有已确认的兼容回滚版本", 409)
             job = {
                 "id": uuid.uuid4().hex,
                 "kind": kind,
@@ -372,6 +387,8 @@ class Manager:
                 "from_version": current["version"],
                 "target_version": candidate["version"]
                 if kind == "apply"
+                else body["version"]
+                if kind == "rollback"
                 else current["version"]
                 if kind == "migrate-state"
                 else "",
@@ -379,6 +396,8 @@ class Manager:
             }
             if self.engine_identity:
                 job["engine"] = self.engine_identity
+            if kind == "rollback":
+                job["rollback_image"] = previous
             path = self.home / "jobs" / job["id"]
             path.mkdir(mode=0o700)
             atomic_json(path / "current.before.json", current)
@@ -437,10 +456,15 @@ class Manager:
     def perform(self, job):
         try:
             self.verify_engine_owner(job)
-            if job["kind"] in {"apply", "migrate-state"}:
+            if job["kind"] in {"apply", "rollback", "migrate-state"}:
                 self.acquire_install_lock(job)
             self.save(
-                job, state="running", phase="checking", message="正在检查 GitHub 正式 Release"
+                job,
+                state="running",
+                phase="checking",
+                message="正在检查本机回滚镜像"
+                if job["kind"] == "rollback"
+                else "正在检查 GitHub 正式 Release",
             )
             if job["kind"] == "check":
                 cached = read_json(self.home / "candidate.json")
@@ -472,35 +496,69 @@ class Manager:
                 package = self.runtime.build(job, self.root)
                 self.cutover(job, package)
                 return
+            if job["kind"] == "rollback":
+                package = self.runtime.rollback_package(job)
+                self.save(job, **self.runtime.prepare(job, None, package=package))
+                self.cutover(job, package)
+                return
             release = read_json(self.home / "jobs" / job["id"] / "release.json")
             fresh = latest_release(self.config["repository"])
             if any(
-                fresh[key] != release[key]
-                for key in ("release_id", "asset_id", "version", "sha256", "bytes", "url")
+                fresh.get(key) != release.get(key)
+                for key in (
+                    "release_id",
+                    "asset_id",
+                    "version",
+                    "sha256",
+                    "bytes",
+                    "url",
+                    "image_bundle",
+                )
             ):
                 raise UpdateError(
                     "RELEASE_CHANGED",
                     "GitHub Release 在确认后发生变化；未安装其他版本，请重新检查",
                     409,
                 )
-            if shutil.disk_usage(self.home).free < 512 * 1024 * 1024:
+            image_bundle = release.get("image_bundle")
+            if not image_bundle and shutil.disk_usage(self.home).free < 512 * 1024 * 1024:
                 raise UpdateError("DISK_SPACE", "宿主机可用空间不足 512 MiB，拒绝开始更新", 409)
             directory = self.home / "releases" / job["id"]
             directory.mkdir(mode=0o700)
             archive = directory / "source.zip"
-            self.save(job, phase="downloading", message="正在下载源码包并核对 GitHub SHA-256")
-            fetch(release["url"], limit=release["bytes"], destination=archive, deadline_seconds=300)
-            source = unpack_bundle(archive, directory / "source", release)
-            if self.engine_helper:
-                staged = self.engine_helper.stage_engine(self.home, source, release)
-                self.save(job, staged_engine=staged)
+            asset = {**release, **image_bundle} if image_bundle else release
             self.save(
                 job,
-                phase="building",
-                message="正在构建独立候选镜像；现有面板仍正常服务",
-                **self.runtime.prepare(job, source),
+                phase="downloading",
+                message="正在校验正式镜像清单与宿主更新器"
+                if image_bundle
+                else "正在下载源码包并核对 GitHub SHA-256",
             )
-            package = self.runtime.build(job, source)
+            fetch(asset["url"], limit=asset["bytes"], destination=archive, deadline_seconds=300)
+            source = (
+                unpack_bundle(archive, directory / "source", asset, updater_only=True)
+                if image_bundle
+                else unpack_bundle(archive, directory / "source", release)
+            )
+            if self.engine_helper:
+                staged = self.engine_helper.stage_engine(self.home, source, asset)
+                self.save(job, staged_engine=staged)
+            if image_bundle:
+                metadata = read_json(source / IMAGE_METADATA)
+                reference = image_release(
+                    metadata, self.config["repository"], job["target_version"]
+                )
+                self.save(job, phase="pulling", message="正在拉取并预检正式镜像，现有面板继续服务")
+                package = self.runtime.pull(job, reference, metadata)
+                self.save(job, **self.runtime.prepare(job, None, package=package))
+            else:
+                self.save(
+                    job,
+                    phase="building",
+                    message="正在构建独立候选镜像；现有面板仍正常服务",
+                    **self.runtime.prepare(job, source),
+                )
+                package = self.runtime.build(job, source)
             self.cutover(job, package)
             self.activate_staged_engine(job)
         except Exception as exc:
@@ -516,19 +574,26 @@ class Manager:
         self.runtime.quiesce(job)
         self.save(job, phase="stopping", message="维护保护已启用，正在停止旧 Hub")
         self.runtime.stop(job)
+        copied = {}
+        if not job.get("reuse_state"):
+            self.save(
+                job,
+                phase="copying",
+                message=(
+                    "正在复制数据库与必要密钥状态；附件原卷独立保留"
+                    if job.get("state_layout") == "split-state-v1"
+                    else "正在复制并校验完整数据卷；原数据保留为回退备份"
+                ),
+                backup={"volume": job["old_volume"], "retained": True},
+            )
+            copied = self.runtime.copy_data(job)
         self.save(
             job,
-            phase="copying",
-            message=(
-                "正在复制数据库与必要密钥状态；附件原卷独立保留"
-                if job.get("state_layout") == "split-state-v1"
-                else "正在复制并校验完整数据卷；原数据保留为回退备份"
-            ),
-            backup={"volume": job["old_volume"], "retained": True},
-        )
-        copied = self.runtime.copy_data(job)
-        self.save(
-            job, phase="starting", message="数据副本校验通过，正在启动新版本", copy_summary=copied
+            phase="starting",
+            copy_summary=copied,
+            message="正在复用原状态卷和附件卷，切换 Hub 镜像"
+            if job.get("reuse_state")
+            else "数据副本校验通过，正在启动新版本",
         )
         self.runtime.start(job, "target")
         self.save(job, phase="verifying", message="正在校验新 Hub 健康状态、版本及 Agent 下载文件")
@@ -540,6 +605,8 @@ class Manager:
             job, phase="committed", message="新版本已提交，正在恢复面板连接", commit_decided=True
         )
         self.runtime.clear_gate()
+        if job.get("reuse_state"):
+            self.runtime.retire_rollback_pin(job)
         if job.get("staged_engine"):
             with self.lock:
                 self.draining = True
@@ -547,7 +614,9 @@ class Manager:
             job,
             state="succeeded",
             phase="done",
-            message="面板、Hub 和配套 Agent 文件更新成功；已连接 Agent 未被强制重启",
+            message="已回滚 Hub 镜像，当前数据继续使用"
+            if job["kind"] == "rollback"
+            else "面板、Hub 和配套 Agent 文件更新成功；已连接 Agent 未被强制重启",
         )
         self.release_install_lock(job)
 
@@ -595,7 +664,7 @@ class Manager:
                 self.save(
                     job,
                     phase="rolling_back",
-                    message="切换未完成，正在恢复原镜像和原数据卷",
+                    message="切换未完成，正在恢复原 Hub 镜像",
                     error=error,
                 )
                 self.runtime.rollback(job)
@@ -603,7 +672,7 @@ class Manager:
                     job,
                     state="rolled_back",
                     phase="rolled_back",
-                    message="更新失败，原面板及原数据卷已恢复；候选文件保留供排查",
+                    message="切换失败，原 Hub 已恢复；候选文件保留供排查",
                 )
             else:
                 if job["phase"] == "quiescing":
@@ -685,7 +754,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(
                     200, self.server.manager.status(query.get("request_key", [""])[0])
                 )
-            if write and self.path in {"/check", "/apply"}:
+            if write and self.path in {"/check", "/apply", "/rollback"}:
                 length = self.headers.get("Content-Length", "")
                 if (
                     self.headers.get("Transfer-Encoding")
