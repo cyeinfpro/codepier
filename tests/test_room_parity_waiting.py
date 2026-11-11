@@ -92,14 +92,15 @@ async def test_weixin_keeps_intake_without_lead_and_fences_old_poll_on_lead_chan
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('historical', [False, True])
-async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab, monkeypatch, historical):
+@pytest.mark.parametrize('update_delay_ms', [0, 120])
+async def test_deferred_weixin_replay_uses_first_observation_or_chat_only(collab, monkeypatch, historical, update_delay_ms):
     monkeypatch.setattr(room_weixin_native, 'MAX_PENDING_NATIVE_INPUTS', 1)
     (s, owner, worker, clock, identity, credentials), flow, _, _ = await setup_channel(collab, tasks=True)
     room_id = identity['conversation_id']
     occupied = s.room_runtime.send({'conversation_id': room_id, 'body_text': '占用一个输入位置',
         'client_message_id': key(), 'idempotency_key': key()}, owner)['message']
     created = int(clock[0] * 1000)
-    response = packet(2, '检查原项目说明', create_time_ms=created, update_time_ms=created)
+    response = packet(2, '检查原项目说明', create_time_ms=created, update_time_ms=created + update_delay_ms)
     account_id = flow['account_id']
     before = s.store.one('SELECT cursor,last_sync_at FROM weixin_accounts WHERE id=?', (account_id,))
     deferred = s.weixin.commit_updates(s.weixin.claim_poll(account_id), response)

@@ -38,8 +38,14 @@ MAX_PENDING_NATIVE_INPUTS = 200
 
 
 def _initial_provider_revision(created: str, updated: str, deleted: str) -> bool:
-    """iLink can stamp a first delivery with matching create and update times."""
-    return deleted == "0" and updated in ("0", created)
+    """Validate first-observed timestamps, not infer edits from transport latency.
+
+    iLink stamps new messages with an update time after creation (observed
+    120 ms apart). Only the persisted provider identity/version ledger can
+    distinguish a later revision; ingest additionally requires no prior row.
+    Deletions and backwards timestamps remain ineligible.
+    """
+    return deleted == "0" and (updated == "0" or int(updated) >= int(created))
 
 
 def pairing_text(value):

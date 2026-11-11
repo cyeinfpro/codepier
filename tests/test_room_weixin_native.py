@@ -56,12 +56,12 @@ async def setup_channel(collab, *, tasks=False,projects=None,scopes=None,worker_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('initial_update_stamp', [False, True])
+@pytest.mark.parametrize('initial_update_stamp', [False, True, 120, 1000])
 async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab, initial_update_stamp):
     (s,owner,worker,clock,identity,credentials),flow,provider,action=await setup_channel(collab)
     created = int(clock[0] * 1000)
     message = packet(2, '请聊聊这个想法', create_time_ms=created,
-                     **({'update_time_ms': created} if initial_update_stamp else {}))
+                     **({'update_time_ms': created + (0 if initial_update_stamp is True else initial_update_stamp)} if initial_update_stamp else {}))
     received=s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']),message)['message_ids'][0]
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(received,))
     assert source['room_id'] is None
@@ -94,7 +94,7 @@ async def test_empty_room_wechat_pair_inbox_reply_reuses_original_outbox(collab,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('field, offset', [('update_time_ms', 1), ('update_time_ms', -1), ('delete_time_ms', 0)])
+@pytest.mark.parametrize('field, offset', [('update_time_ms', -1), ('delete_time_ms', 0)])
 async def test_first_seen_changed_provider_message_stays_out_of_inbox(collab, field, offset):
     (s, _, worker, clock, identity, _), flow, _, _ = await setup_channel(collab, tasks=True)
     created = int(clock[0] * 1000)
@@ -238,12 +238,12 @@ async def test_wechat_goal_takeover_preserves_channel_origin_and_current_lead_de
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('initial_update_stamp', [False, True])
+@pytest.mark.parametrize('initial_update_stamp', [False, True, 120, 1000])
 async def test_native_owner_task_to_managed_result_same_wechat_source(collab, initial_update_stamp):
     (s,owner,worker,clock,identity,credentials),flow,provider,action=await setup_channel(collab,tasks=True)
     created = int(clock[0] * 1000)
     message = packet(2, '请检查项目 README', create_time_ms=created,
-                     **({'update_time_ms': created} if initial_update_stamp else {}))
+                     **({'update_time_ms': created + (0 if initial_update_stamp is True else initial_update_stamp)} if initial_update_stamp else {}))
     received = s.weixin.commit_updates(s.weixin.claim_poll(flow['account_id']), message)['message_ids'][0]
     source=s.store.one('SELECT * FROM collaboration_messages WHERE id=?',(received,))
     assert s.channel_owner.author(source)['authenticated']
