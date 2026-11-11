@@ -24,7 +24,7 @@ env:
 jobs:
   promotion:
     name: Verify reusable image evidence (read-only)
-    if: !(github.event_name == 'push' && github.event.forced)
+    if: ${{ !(github.event_name == 'push' && github.event.forced) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -93,7 +93,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        if: !(github.event_name == 'push' && github.event.forced)
+        if: ${{ !(github.event_name == 'push' && github.event.forced) }}
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -102,7 +102,7 @@ jobs:
 
       - name: Revalidate read-only job proof and exact registry digest
         id: reuse
-        if: !(github.event_name == 'push' && github.event.forced)
+        if: ${{ !(github.event_name == 'push' && github.event.forced) }}
         env:
           PROMOTION_RESULT: ${{ needs.promotion.result }}
           PROMOTION_PROOF: ${{ needs.promotion.outputs.proof }}
@@ -227,13 +227,13 @@ jobs:
 
       - name: Promote only the tested digest; never repoint VERSION or full-SHA tags
         id: promote
-        if: !(github.event_name == 'push' && github.event.forced)
+        if: ${{ !(github.event_name == 'push' && github.event.forced) }}
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: python3 scripts/image_promotion.py promote
 
       - name: Record the published reference (pin deployments to the digest)
-        if: !(github.event_name == 'push' && github.event.forced)
+        if: ${{ !(github.event_name == 'push' && github.event.forced) }}
         shell: bash
         env:
           DIGEST: ${{ steps.promote.outputs.digest }}
