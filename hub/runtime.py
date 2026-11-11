@@ -713,6 +713,19 @@ class Runtime:
         )
         include_output = include_output and not unchanged
         limit = options.get("output_limit", 131072)
+        offset = options.get("output_offset")
+        pending = row["state"] in ACTIVE or row["state"] == "unknown"
+        if offset is not None and (
+            pending
+            or not include_output
+            or limit <= 0
+            or options.get("after_output_seq") is not None
+        ):
+            raise DevError(
+                "INVALID_ARGUMENTS",
+                "output_offset requires terminal output; use after_output_seq while running",
+            )
+        data = None
         result["args_summary"] = json.loads(row["args_summary"]) if row["args_summary"] else None
         if include_result:
             result["result"] = self._filter_concurrency(
@@ -755,28 +768,40 @@ class Runtime:
                     self, result["args_summary"], result["result"].get("data") or {}, principal
                 )
             data = (result["result"] or {}).get("data")
-            if isinstance(data, dict) and "output" in data:
-                original = data["output"]
-                if not include_output:
-                    data.pop("output")
-                    data["output_omitted"] = True
-                elif isinstance(original, str):
-                    data["output"] = original[-limit:] if limit else ""
-                    data["output_truncated"] = bool(
-                        data.get("output_truncated") or len(original) > limit
-                    )
         else:
             result.pop("result", None)
             result["result_omitted"] = True
-        output, output_chars = self.outputs.read(row, limit=limit, include_body=include_output)
+        output, output_chars = self.outputs.read(
+            row, limit=limit, include_body=include_output, offset=offset
+        )
+        if offset is not None and offset > output_chars:
+            raise DevError("INVALID_ARGUMENTS", "output_offset exceeds the saved output length")
         result["output_chars"] = output_chars
         if include_output:
-            result["output"] = output
-            result["output_truncated"] = output_chars > limit
+            from shared.output_fidelity import output_page, output_next
+
+            start = output_chars - len(output) if offset is None else offset
+            evidence = data if include_result else (self.operation_result(row) or {}).get("data")
+            upstream = output_chars >= 131072 or bool(
+                isinstance(evidence, dict) and evidence.get("output_truncated")
+            )
+            if isinstance(evidence, dict):
+                for key in ("output_total_bytes", "output_total_sha256"):
+                    if key in evidence:
+                        result[key] = evidence[key]
+            output_page(result, output, output_chars, start=start, upstream=upstream)
+            output_next(result, operation_id=id, pending=pending)
+            if isinstance(data, dict) and "output" in data:
+                # Both receipt slots describe the same durable tail window.
+                output_page(data, output, output_chars, start=start, upstream=upstream)
+                output_next(data, operation_id=id, pending=pending)
         else:
             result.pop("output", None)
             result["output_omitted"] = True
             result["output_unchanged"] = unchanged
+            if isinstance(data, dict) and "output" in data:
+                data.pop("output")
+                data["output_omitted"] = True
         for key in ("fingerprint", "idem", "payload", "journal_id"):
             result.pop(key, None)
         result.update(self.queue_annotations(row, principal))

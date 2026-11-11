@@ -12,6 +12,15 @@ CORE_REMOTE = frozenset({"read", "write", "edit", "exec"})
 CORE_FACADES = frozenset({"workspace", "process", "browser", "computer"})
 CORE_TOOLS = CORE_REMOTE | CORE_FACADES | {"vps"}
 
+# Explicit dispatch policy. Unlisted tools preserve exact payloads; external
+# gateway routes bypass native presentation entirely.
+OUTPUT_POLICIES = dict.fromkeys(("exec", "shell_exec", "ssh_exec", "tasks_run", "vps_exec"), "log")
+
+
+def output_policy(name, *, external=False):
+    return "passthrough" if external else OUTPUT_POLICIES.get(name, "exact")
+
+
 # Domain operations are discovered via workspace.help. Their detailed schemas
 # are loaded only when needed; each invocation validates the real typed contract.
 CORE_ACTIONS = {
@@ -468,10 +477,25 @@ class Process(ComputerArgs):
     include_output: bool = True
     include_result: bool = True
     output_limit: int = Field(default=8000, ge=0, le=51200)
+    output_offset: int | None = Field(
+        default=None,
+        ge=0,
+        le=131072,
+        description="Terminal saved-tail character offset; reads raw text on this connection.",
+    )
     after_output_seq: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def operation_identity(self):
+        if self.output_offset is not None and (
+            self.operation not in {"get", "wait"}
+            or not self.include_output
+            or self.output_limit == 0
+            or self.after_output_seq is not None
+        ):
+            raise ValueError(
+                "output_offset requires get/wait, output and a positive limit; omit after_output_seq"
+            )
         if self.operation in {"get", "wait", "cancel", "trace"} and not self.operation_ids:
             raise ValueError("operation_ids is required for get/wait/cancel")
         if len(set(self.operation_ids)) != len(self.operation_ids) or any(

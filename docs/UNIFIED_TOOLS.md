@@ -58,9 +58,10 @@ call returns the same structured result as the legacy call.
   `connection_proof`, `binding_generation`, `member_id`, `conversation_id` and `dot_id` where the action accepts
   them. Explicit fields win. Credentials are still returned once at begin/join (native host subscriptions need
   them); fences, proofs and version checks are still verified by the original handlers.
-* **Lean presentation.** Unified responses drop duplicated output (`result.data.output` when equal to `output`),
-  successful-terminal `recovery`, `failure_context` and `continuation`, and rewrite next-call hints to unified
-  addresses. `?verbosity=full` keeps the complete receipt.
+* **Lean presentation.** Unified responses de-duplicate identical log output only in known execution receipts
+  (`result.data.output` points to `output`) and rewrite next-call hints to unified addresses. Recovery evidence,
+  including `recovery`, `failure_context`, `continuation` and `log_ref`, remains available after success.
+  `?verbosity=full` keeps expanded scheduling metadata and the complete receipt.
 
 ## Compatibility
 
@@ -86,8 +87,60 @@ contains a one-line JSON header and the raw body. `structuredContent` contains t
 
 Lean responses omit default fields such as `truncated: false` and `next_offset: null`. A successful
 command reports `exit_code: 0` and retains its operation ID and output sequence. Errors and pending
-or uncertain operations retain their recovery information. The default connection uses view 2 until
+or uncertain operations retain their recovery information. Successful operations retain it too, so a text-only
+client can inspect the original operation without replaying it. The default connection uses view 2 until
 the text-only body has been verified in both Claude and ChatGPT.
+
+### Output fidelity
+
+File bodies remain exact, paginated slices with their original SHA and `next_offset`.
+Native execution logs use the declared `log` policy (`exec`, `shell_exec`, `ssh_exec`,
+`tasks_run`, `vps_exec`); all other built-in tools default to `exact`. In particular,
+legacy `git_status` / `git_diff` / `git_log` receipts remain exact. External gateway
+results bypass native presentation and budget rewriting. Unknown nested payloads are
+never inferred to be logs from their field names.
+
+Complete, confirmed successful receipts omit redundant success diagnostics and recovery
+objects in lean mode. Failed, timed-out, cancelled and unfinished receipts keep their
+diagnostics. `?verbosity=full` preserves the full receipt. Native output defaults to
+`output=raw`; `text=compact` changes packaging, and `mirror=meta` avoids duplicating the
+body in structured content.
+
+Output is a bounded saved tail, not a complete stdout archive. Losses append to
+`output_truncated_by` in order: `upstream` (earlier bytes were not retained), `limit`
+(the requested page), and `budget` (the final JSON-RPC size cap). `output_chars` is the
+saved tail length and `output_range=[start,end]` addresses its Unicode character offsets,
+with an exclusive end. The response budget keeps a contiguous source window, without
+inserting omission text or joining unrelated head and tail sections. Default tail reads
+prefer complete lines; an oversized single line can use a character window to make progress.
+
+On terminal jobs, `query(action="job", project=..., ids=[...],
+args={"output_offset": 0, "output_limit": 20000})` reads an explicit saved range. The
+requested range is exact unless the response budget narrows it; always check
+`output_range`. Follow `output_next` to read older windows, prepending them until the
+start reaches zero. This works on the same connection and never reruns the command.
+Running/unknown jobs reject `output_offset`; use `after_output_seq` while they run.
+Offsets cannot be combined with `after_output_seq`, omitted output, or a zero page size.
+
+`?output=normalized` explicitly enables lossy ANSI/progress/repetition normalization.
+Only changed text receives `output_original_chars`, `output_original_bytes` and
+`output_original_sha256`, describing the raw source window in `output_range`. If the
+budget narrows a normalized page, its fingerprint is recomputed from that narrower raw
+window. `output_next` first requests that raw range; explicit `output_offset` reads
+bypass normalization even on a normalized connection. Large raw windows can require
+additional budget-limited pages. `output_original_scope` is retired.
+
+New Agents also report `output_total_bytes` and `output_total_sha256`, accumulated from
+received pipe bytes (stdout with stderr merged) before UTF-8 decoding, credential redaction
+or tail limits. These are stream evidence, not hashes of the displayed string, and do not
+recover discarded bytes. They also describe the bytes received before timeout/cancellation;
+older Agents may omit them. No database migration is needed.
+
+If `upstream` is present, earlier output was not saved. When a complete log is needed,
+explicitly redirect a new execution to a file in `$CODEPIER_RUN_DIR`, then page that file
+using the ordinary SHA-protected file reader. Full log files are opt-in and are not
+silently persisted by the Agent. The connection option `?verbosity=full&output=raw` is
+available to people configuring a client; it does not bypass authorization or storage limits.
 
 Agents with tree options list Git-visible paths by default. `args.scope="all"` includes ignored files
 that pass filesystem protection rules. `args.per_dir` increases the default 40 entries per directory.

@@ -116,6 +116,26 @@ FILE_DIFF = obj(
     },
     ("path",),
 )
+OUTPUT_EVIDENCE = {
+    "output_truncated": BOOL,
+    "output_truncated_by": array({"enum": ["upstream", "limit", "budget"]}),
+    "output_chars": {"type": "integer", "minimum": 0},
+    "output_range": {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 0},
+        "minItems": 2,
+        "maxItems": 2,
+    },
+    "output_next": CALL,
+    "output_normalized": BOOL,
+    "output_original_chars": INT,
+    "output_original_bytes": INT,
+    "output_original_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "output_budget_limited": BOOL,
+    "output_recovery": STR,
+    "output_total_bytes": {"type": "integer", "minimum": 0},
+    "output_total_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+}
 RESULT = obj({"ok": BOOL, "data": OBJ, "error": ERROR}, ("ok",))
 OPERATION = obj(
     {
@@ -133,7 +153,7 @@ OPERATION = obj(
         "output": STR,
         "output_seq": INT,
         "output_chars": INT,
-        "output_truncated": BOOL,
+        **OUTPUT_EVIDENCE,
         "output_omitted": BOOL,
         "output_unchanged": BOOL,
         "result_omitted": BOOL,
@@ -835,7 +855,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             **RECEIPT,
             "exit_code": INT,
             "output": STR,
-            "output_truncated": BOOL,
+            **OUTPUT_EVIDENCE,
             "timed_out": BOOL,
             "cancelled": BOOL,
             "duration_ms": INT,

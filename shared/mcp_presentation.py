@@ -14,6 +14,9 @@ import json
 import posixpath
 import re
 
+from shared.core_contracts import output_policy
+from shared.output_fidelity import OUTPUT_FIELDS, output_next, success_restatements
+
 
 _HOME = re.compile(
     r'(?<![\w])(?:/(?:Users|home)/[^/\r\n\'"<>:]+|[A-Za-z]:[\\/]Users[\\/][^\\/\r\n\'"<>:]+)(?=[\\/\r\n\'"<>:]|$)'
@@ -263,6 +266,8 @@ _EXEC_RESULT = _RECEIPT | frozenset(
         "runtime_outcome",
     }
 )
+_OPERATION |= OUTPUT_FIELDS
+_EXEC_RESULT |= OUTPUT_FIELDS
 _STATUS_POLICY = frozenset(
     {
         "version",
@@ -1224,30 +1229,22 @@ def token_view(name, arguments, value, *, view=2, verbosity="lean", output_mode=
     ):
         _compact_search(result)
     if output_mode == "normalized":
-        for row in output_records(result):
-            original = row["output"]
-            plain = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\\\))", "", original)
-            plain = "\n".join(
-                part.split("\r")[-1] for part in plain.replace("\r\n", "\n").split("\n")
-            )
-            lines = plain.splitlines(keepends=True)
-            collapsed, count, previous = [], 0, None
-            for line in lines + [None]:
-                if line == previous and line is not None:
-                    count += 1
-                    continue
-                if previous is not None:
-                    collapsed.append(previous)
-                    if count > 1:
-                        collapsed.append(f"[… repeated {count} times]\n")
-                previous, count = line, 1
-            row["output"] = "".join(collapsed)
-            if row["output"] != original:
-                row["output_normalized"] = True
-                row["output_original_chars"] = len(original)
-                row["output_recovery"] = (
-                    "Query the same operation_id using connection URL ?output=raw&verbosity=full; do not rerun the command."
-                )
+        for owner in log_receipts(result, name):
+            for row in output_records(owner, name):
+                original = row["output"]
+                row["output"] = normalize_output(original)
+                if row["output"] != original:
+                    row["output_normalized"] = True
+                    row.setdefault("output_range", [0, len(original)])
+                    record_output_original(row, original)
+                    output_next(
+                        row,
+                        operation_id=owner.get("operation_id") or owner.get("id"),
+                        project=arguments.get("project", ""),
+                        workspace_id=arguments.get("workspace_id", ""),
+                        raw_page=True,
+                        pending=owner.get("pending", False),
+                    )
     if name in {"workspace", "project_query"} and arguments.get("operation") == "open":
         if result.get("context_detail", "minimal") == "minimal":
             result["help"] = "project_query(help, tool, action)"
@@ -1265,53 +1262,85 @@ def token_view(name, arguments, value, *, view=2, verbosity="lean", output_mode=
     return result
 
 
-def output_records(value):
-    """Known receipt output slots only; never traverse caller documents."""
+def normalize_output(original):
+    plain = re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", original)
+    plain = "\n".join(part.split("\r")[-1] for part in plain.replace("\r\n", "\n").split("\n"))
+    lines = plain.splitlines(keepends=True)
+    collapsed, count, previous = [], 0, None
+    for line in lines + [None]:
+        if line == previous and line is not None:
+            count += 1
+            continue
+        if previous is not None:
+            collapsed.append(previous)
+            if count > 1:
+                collapsed.append(f"[… repeated {count} times]\n")
+        previous, count = line, 1
+    return "".join(collapsed)
+
+
+def record_output_original(row, original):
+    """Fingerprint exactly the raw source window described by output_range."""
+    encoded = original.encode("utf-8")
+    row.update(
+        output_original_chars=len(original),
+        output_original_bytes=len(encoded),
+        output_original_sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def log_receipts(value, tool_name=""):
+    """Dispatch identity, never payload shape, selects native log policy."""
     if not isinstance(value, dict):
         return []
-    rows = (
-        [value]
-        if isinstance(value.get("output"), str)
-        and ("operation_id" in value or {"id", "tool", "state"} <= value.keys())
-        else []
-    )
-    nested = value.get("result")
-    if isinstance(nested, dict) and isinstance(nested.get("data"), dict):
-        data = nested["data"]
-        if value.get("tool") in {
-            "exec",
-            "shell_exec",
-            "tasks_run",
-            "ssh_exec",
-            "vps_exec",
-        } and isinstance(data.get("output"), str):
+    if output_policy(value.get("tool", tool_name)) == "log":
+        return [value]
+    if "tool" not in value and isinstance(value.get("operations"), list):
+        return [row for item in value["operations"] for row in log_receipts(item)]
+    return []
+
+
+def output_records(value, tool_name=""):
+    rows = []
+    for receipt in log_receipts(value, tool_name):
+        if isinstance(receipt.get("output"), str):
+            rows.append(receipt)
+        nested = receipt.get("result")
+        data = nested.get("data") if isinstance(nested, dict) else None
+        if isinstance(data, dict) and isinstance(data.get("output"), str):
             rows.append(data)
-    for operation in value.get("operations", []):
-        rows.extend(output_records(operation))
     return rows
 
 
-def compact_output_text(value):
-    """De-duplicate only explicitly requested human text, never typed results."""
+def raw_output_sources(value, tool_name=""):
+    return [
+        (row["output"], row.get("output_range", [0, len(row["output"])]))
+        for row in output_records(value, tool_name)
+    ]
+
+
+def original_output(row, sources):
+    if not row.get("output_normalized"):
+        return row["output"]
+    for text, span in sources:
+        start, end = row.get("output_range", span)
+        if span[0] <= start <= end <= span[1]:
+            candidate = text[start - span[0] : end - span[0]]
+            if hashlib.sha256(candidate.encode()).hexdigest() == row.get("output_original_sha256"):
+                return candidate
+    return None
+
+
+def compact_output_text(value, tool_name=""):
+    """Fold success restatements and duplicate known logs in human text."""
     result = deepcopy(value)
-    rows = [result, *result.get("operations", [])] if isinstance(result, dict) else []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    for row in log_receipts(result, tool_name):
         nested = row.get("result")
         data = nested.get("data") if isinstance(nested, dict) else None
-        execution = data if isinstance(data, dict) else row
-        if (
-            execution.get("command_ok") is True
-            and execution.get("exit_code") == 0
-            and not execution.get("timed_out")
-            and not execution.get("cancelled")
-            and not row.get("pending")
-            and row.get("state", "succeeded") == "succeeded"
-            and (execution.get("failure_context") or {}).get("category") in (None, "succeeded")
-        ):
-            for key in ("continuation", "failure_context", "log_ref"):
-                execution.pop(key, None)
+        for key in success_restatements(row, data or row):
+            row.pop(key, None)
+            if isinstance(data, dict):
+                data.pop(key, None)
         if (
             isinstance(data, dict)
             and isinstance(row.get("output"), str)

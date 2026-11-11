@@ -715,6 +715,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     "_meta": {**result.get("_meta", {}), "com.codepier/requestId": correlation},
                 }
             from hub.core_tools import bound_batch_response
+            from shared.mcp_presentation import raw_output_sources
 
             response_body = {"jsonrpc": "2.0", "id": identifier, "result": result}
             if method == "tools/call" and route and route.backend != "remote":
@@ -723,6 +724,12 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     output_budget=(view != "1" and verbosity != "full"),
                     text_mode=text_mode,
                     mirror=mirror,
+                    tool_name="exec" if plan and plan.action == "exec" else name,
+                    project=getattr(plan, "project", "") or arguments.get("project", ""),
+                    workspace_id=getattr(plan, "workspace_id", "")
+                    or arguments.get("workspace_id", ""),
+                    unified=plan is not None,
+                    sources=raw_output_sources(value, name),
                 )
             return JSONResponse(
                 response_body,

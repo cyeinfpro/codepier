@@ -22,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shared.util import DevError
 from shared.integration_contracts import NativeFile
 from shared.knowledge_contracts import KNOWLEDGE_TOOLS
+from shared.core_contracts import output_policy
+from shared.output_fidelity import OUTPUT_PAGE_FIELDS, success_restatements
 
 UNIFIED_TOOLS = frozenset({"query", "act"})
 DEFAULT_WAIT_SECONDS = 30
@@ -705,7 +707,7 @@ _STRING_HINTS = {
     "fs_read": _help_call("query", "file"),
 }
 _JOB_HINTS = {"task_query", "operations_wait", "operations_get"}
-_NEXT_KEYS = {"next", "next_call", "documents_next", "read_hint", "help"}
+_NEXT_KEYS = {"next", "next_call", "documents_next", "read_hint", "help", "output_next"}
 
 
 def _rewrite_hints(value, *, visible, project, workspace_id, convert):
@@ -816,7 +818,7 @@ def _rewrite_hints(value, *, visible, project, workspace_id, convert):
 
 
 def _slim(row):
-    """Drop presentation duplicates only; the stored receipt is unchanged."""
+    """De-duplicate known log slots without dropping recovery evidence."""
     if isinstance(row, list):
         for item in row:
             _slim(item)
@@ -826,28 +828,23 @@ def _slim(row):
     nested = row.get("result")
     data = nested.get("data") if isinstance(nested, dict) else None
     if (
-        isinstance(data, dict)
+        output_policy(row.get("tool")) == "log"
+        and isinstance(data, dict)
         and isinstance(row.get("output"), str)
         and data.get("output") == row["output"]
     ):
         data.pop("output")
         data["output_at"] = "output"
+    if output_policy(row.get("tool")) == "log":
+        for key in success_restatements(row, data or row):
+            row.pop(key, None)
+            if isinstance(data, dict):
+                data.pop(key, None)
     terminal = not row.get("pending") and not row.get("error")
-    if (
-        terminal
-        and isinstance(row.get("recovery"), dict)
-        and row["recovery"].get("task_outcome_confirmed")
-        and row["recovery"].get("task_state") == "succeeded"
-    ):
-        row.pop("recovery")
     if terminal and "next_call" in row and row["next_call"] is None:
         row.pop("next_call")
-    if isinstance(data, dict) and data.get("command_ok") is True:
-        context = data.get("failure_context")
-        if isinstance(context, dict) and context.get("category") == "succeeded":
-            data.pop("failure_context")
-        data.pop("continuation", None)
-    _slim(row.get("operations"))
+    if "tool" not in row:
+        _slim(row.get("operations"))
 
 
 _SCHEDULING_FIELDS = {
@@ -921,8 +918,12 @@ def _present_exec(row, *, project, workspace_id, visible, lean, view):
     if type(data.get("exit_code")) is not int:
         return row
     result = {**data, **row}
-    if data.get("output_truncated"):
-        result["output_truncated"] = True
+    if data is not row and isinstance(row.get("output"), str):
+        # The live output page wins over nested saved output. Its fingerprint
+        # and presentation markers must come from the same page, not the other.
+        for key in OUTPUT_PAGE_FIELDS:
+            if key not in row:
+                result.pop(key, None)
     result.pop("result", None)
     result.pop("output_at", None)
     identifier = result.get("operation_id") or result.get("id")
@@ -930,26 +931,32 @@ def _present_exec(row, *, project, workspace_id, visible, lean, view):
         result["operation_id"] = identifier
         result.pop("id", None)
     result.setdefault("state", "failed" if result.get("error") else "succeeded")
-    if result["state"] == "succeeded":
+    for key in success_restatements(result, result):
+        result.pop(key, None)
+    if (
+        result["state"] == "succeeded"
+        and not result.get("error")
+        and result.get("command_ok") is True
+        and result["exit_code"] == 0
+        and not result.get("timed_out")
+        and not result.get("cancelled")
+    ):
         for key in _SCHEDULING_FIELDS | {
             "args_summary",
             "project_id",
             "tool",
-            "output_chars",
             "next",
             "next_call",
             "retry_after_seconds",
             "elapsed_seconds",
-            "log_ref",
             "resource_coordination",
-            "continuation",
         }:
             result.pop(key, None)
+        if not result.get("output_truncated_by"):
+            result.pop("output_chars", None)
         for key in ("cancelled", "timed_out"):
             if result.get(key) is False:
                 result.pop(key)
-        if (result.get("failure_context") or {}).get("category") == "succeeded":
-            result.pop("failure_context")
         runtime = result.get("runtime")
         if isinstance(runtime, dict) and runtime.get("runtime_ref"):
             result["runtime"] = {
@@ -1260,7 +1267,7 @@ _GUIDANCE = {
         "file": "Read by path or batch up to 8 args.items. Follow next_offset and use the returned SHA for edits.",
         "tree": "Tree is compact by default. Use args.format=structured for structured entries.",
         "search": "Search defaults to sync. Use view=start for paginated text/symbol/reference search.",
-        "job": "Read original ids. Pass args.after_output_seq for incremental output; use view=diagnostics or trace for details.",
+        "job": "Read original ids. Use args.after_output_seq while running; terminal args.output_offset returns raw ranges. Follow output_next for older saved output.",
     },
     "act": {
         "exec": "Exec takes command or args.task, with project and idempotency_key. wait is response time (default 30s).",

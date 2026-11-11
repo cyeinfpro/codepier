@@ -210,14 +210,16 @@ def test_hints_point_to_unified_addresses():
 
 
 def test_presentation_drops_duplicates_only():
-    receipt = {'operation_id': 'x', 'state': 'succeeded', 'pending': False, 'output': 'hello',
+    receipt = {'operation_id': 'x', 'tool': 'shell_exec', 'state': 'succeeded', 'pending': False, 'output': 'hello',
                'next_call': None, 'recovery': {'task_state': 'succeeded', 'task_outcome_confirmed': True},
                'result': {'ok': True, 'data': {'exit_code': 0, 'output': 'hello', 'command_ok': True,
                                                'failure_context': {'category': 'succeeded'}, 'continuation': {'a': 1}}}}
     lean = u.present_unified({'operations': [receipt]})['operations'][0]
     assert lean['output'] == 'hello' and lean['result']['data']['output_at'] == 'output'
-    assert 'output' not in lean['result']['data'] and 'recovery' not in lean and 'next_call' not in lean
-    assert 'failure_context' not in lean['result']['data'] and 'continuation' not in lean['result']['data']
+    assert 'output' not in lean['result']['data'] and 'next_call' not in lean
+    assert 'recovery' not in lean
+    for key in ('failure_context', 'continuation'):
+        assert key not in lean['result']['data']
     full = u.present_unified(receipt, verbosity='full')
     assert full['result']['data']['output'] == 'hello' and 'recovery' in full
     failed = u.present_unified({**receipt, 'state': 'failed', 'error': 'boom'})

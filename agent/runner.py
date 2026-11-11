@@ -2314,6 +2314,8 @@ class Agent:
         self.processes[id] = process
         process_event("process_spawned", pid=process.pid)
         output_truncated = False
+        output_total_bytes = 0
+        output_total_hash = hashlib.sha256()
         start = time.monotonic()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         decoded_output = ""
@@ -2352,6 +2354,7 @@ class Agent:
             decoded_output = (decoded_output + text)[-131072:]
 
         async def drain():
+            nonlocal output_total_bytes
             while True:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
@@ -2360,6 +2363,10 @@ class Agent:
                     append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
                     await snapshot(True)
                     return
+                # Fingerprint received pipe bytes before decoding/redaction/tail
+                # limits. No full log or credential-bearing byte buffer is kept.
+                output_total_bytes += len(chunk)
+                output_total_hash.update(chunk)
                 append_output(output_filter.feed(decoder.decode(chunk)))
                 await snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
@@ -2426,6 +2433,8 @@ class Agent:
             "exit_code": process.returncode,
             "output": decoded_output,
             "output_truncated": output_truncated,
+            "output_total_bytes": output_total_bytes,
+            "output_total_sha256": output_total_hash.hexdigest(),
             "timed_out": timed_out,
             "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
             "duration_ms": round((time.monotonic() - start) * 1000),

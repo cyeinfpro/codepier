@@ -133,13 +133,13 @@ def configured(gw, **kwargs):
     return app, b, backend, c, a, binding, r, p, g
 
 
-def rpc(b, token, method, params, modern=False):
+def rpc(b, token, method, params, modern=False, query=""):
     body = {'jsonrpc': '2.0', 'id': 7, 'method': method, 'params': params}
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json, text/event-stream'}
     if modern:
         params = body['params'] = {**params, '_meta': {PREFIX + 'protocolVersion': MODERN, PREFIX + 'clientCapabilities': {}}}
         headers.update(request_headers(body))
-    return b.post('/mcp', json=body, headers=headers)
+    return b.post('/mcp' + query, json=body, headers=headers)
 
 
 def result(response):
@@ -194,6 +194,36 @@ def test_native_schema_namespaced_routing_and_distinct_backend_token(gw, modern)
     assert str(req.url.host) == '93.184.216.34' and req.headers['host'] == 'mcp.example'
     assert req.extensions['sni_hostname'] == 'mcp.example'
     assert 'cookie' not in req.headers and g['token'] not in str(req.headers)
+
+
+@pytest.mark.parametrize('modern', [False, True])
+@pytest.mark.parametrize('query', [
+    '?text=compact',
+    '?view=3&output=normalized',
+    '?verbosity=full&output=raw',
+])
+def test_external_mcp_payload_bypasses_native_output_compaction(gw, modern, query):
+    _, b, backend, _, _, _, _, _, g = configured(gw)
+    output = '\x1b[31mexternal exact line\x1b[0m\n' * 4000
+    upstream = {
+        'content': [{'type': 'text', 'text': output}],
+        'structuredContent': {
+            'operation_id': 'e' * 32, 'output': output, 'exit_code': 0,
+            'command_ok': True, 'sha256': 'f' * 64,
+            'continuation': {'operation_id': 'e' * 32},
+            'result': {'data': {'output': output}},
+        },
+        'isError': False,
+    }
+    backend.result_override = copy.deepcopy(upstream)
+    shown = result(rpc(b['alice'], g['token'], 'tools/call',
+                       {'name': 'kiln__run', 'arguments': {}}, modern, query))
+    assert shown['content'][:len(upstream['content'])] == upstream['content']
+    assert len(shown['content']) == len(upstream['content']) + 1
+    assert 'CodePier gateway call_id:' in shown['content'][-1]['text']
+    for key in ('structuredContent', 'isError'):
+        assert shown[key] == upstream[key]
+    assert backend.result_override == upstream
 
 
 def test_validation_happens_before_backend_dispatch(gw):

@@ -1,5 +1,6 @@
 """Authentication values are removed before process output is journaled."""
 import json
+import hashlib
 import sys
 import uuid
 
@@ -64,6 +65,9 @@ async def test_clean_task_redacts_inherited_tokens_in_stream_and_original_receip
         data = receipt['result']['data']
         assert data['exit_code'] == 0
         assert data['output'] == '<redacted>\n' * len(names)
+        received = ''.join(value + '\n' for value in values).encode()
+        assert data['output_total_bytes'] == len(received)
+        assert data['output_total_sha256'] == hashlib.sha256(received).hexdigest()
         captured = json.dumps([receipt, agent.pending_output.get(operation)])
         assert all(value not in captured for value in values)
         await agent.handle(request)

@@ -321,6 +321,7 @@ async def invoke(runtime, name, raw, principal):
                             "include_output",
                             "include_result",
                             "output_limit",
+                            "output_offset",
                             "after_output_seq",
                         )
                     }
@@ -391,7 +392,7 @@ def failed(value):
 
 
 def compact_receipt(value):
-    for key in ("next", "next_call"):
+    for key in ("next", "next_call", "output_next"):
         call = value.get(key)
         if isinstance(call, dict) and isinstance(call.get("arguments"), dict):
             field = "name" if "name" in call else "tool"
@@ -435,7 +436,7 @@ def _batch_reads(public):
     ]
 
 
-def _render_text(rendered, public, *, text_mode, body_key, mirror):
+def _render_text(rendered, public, *, text_mode, body_key, mirror, tool_name="", fold=True):
     from shared.mcp_presentation import compact_output_text
 
     rendered["structuredContent"] = public
@@ -447,7 +448,9 @@ def _render_text(rendered, public, *, text_mode, body_key, mirror):
         if mirror == "meta":
             rendered["structuredContent"] = {**header, body_key + "_in": "text"}
     else:
-        value = compact_output_text(public) if text_mode == "compact" else public
+        value = (
+            compact_output_text(public, tool_name) if text_mode == "compact" and fold else public
+        )
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     rendered["content"][0]["text"] = text
 
@@ -464,11 +467,28 @@ def _fit_prefix(count, measure, budget):
 
 
 def bound_batch_response(
-    payload, *, output_budget=False, text_mode="json", body_key=None, mirror="full"
+    payload,
+    *,
+    output_budget=False,
+    text_mode="json",
+    body_key=None,
+    mirror="full",
+    tool_name="",
+    project="",
+    workspace_id="",
+    unified=False,
+    sources=(),
 ):
     """Bound final JSON-RPC bytes without changing the authorized stored result."""
     from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
-    from shared.mcp_presentation import output_records
+    from shared.mcp_presentation import (
+        output_records,
+        record_output_original,
+        normalize_output,
+        original_output,
+        log_receipts,
+    )
+    from shared.output_fidelity import add_output_loss, output_next, OUTPUT_PAGE_FIELDS
 
     rendered = payload.get("result", {})
     public = rendered.get("structuredContent")
@@ -494,7 +514,7 @@ def bound_batch_response(
                 ):
                     body_key = key
                     break
-    if not _batch_reads(public) and not (output_budget and output_records(public)):
+    if not _batch_reads(public) and not (output_budget and output_records(public, tool_name)):
         return payload
 
     payload = copy.deepcopy(payload)
@@ -511,12 +531,70 @@ def bound_batch_response(
         )
 
     def render():
-        _render_text(rendered, public, text_mode=text_mode, body_key=body_key, mirror=mirror)
+        _render_text(
+            rendered,
+            public,
+            text_mode=text_mode,
+            body_key=body_key,
+            mirror=mirror,
+            tool_name=tool_name,
+            fold=output_budget,
+        )
         return size()
 
-    if size() <= budget:
-        return payload
-    while size() > budget:
+    def pressure():
+        if size() > budget:
+            return True
+        if not output_budget:
+            return False
+        # Restoring a parent receipt replaces nested dictionaries; refresh
+        # each slot so later candidates still belong to the rendered payload.
+        for index in range(len(output_records(public, tool_name))):
+            candidate = output_records(public, tool_name)[index]
+            if not candidate.get("output") or candidate.get("output_budget_limited"):
+                continue
+            saved = copy.deepcopy(candidate)
+            raw = original_output(candidate, sources)
+            if raw is None:
+                continue
+            owner = next(
+                (
+                    item
+                    for item in log_receipts(public, tool_name)
+                    if item is candidate or (item.get("result") or {}).get("data") is candidate
+                ),
+                candidate,
+            )
+            span = candidate.get("output_range", [0, len(raw)])
+            add_output_loss(candidate, "budget")
+            candidate.update(
+                output_budget_limited=True,
+                output_range=span,
+                output_chars=candidate.get("output_chars", span[1]),
+            )
+            output_next(
+                candidate,
+                operation_id=owner.get("operation_id") or owner.get("id"),
+                project=project,
+                workspace_id=workspace_id,
+                unified=unified,
+                pending=owner.get("pending", False),
+                raw_page=candidate.get("output_normalized", False),
+            )
+            linked = (candidate.get("result") or {}).get("data")
+            if isinstance(linked, dict) and linked.get("output_at") == "output":
+                for key in OUTPUT_PAGE_FIELDS:
+                    if key in candidate:
+                        linked[key] = copy.deepcopy(candidate[key])
+            exceeds = render() > budget
+            candidate.clear()
+            candidate.update(saved)
+            render()
+            if exceeds:
+                return True
+        return False
+
+    while pressure():
         candidates = [
             (batch, item)
             for batch in batches
@@ -524,7 +602,9 @@ def bound_batch_response(
             if item.get("ok", True) is True and item.get("content")
         ]
         outputs = (
-            [row for row in output_records(public) if row.get("output")] if output_budget else []
+            [row for row in output_records(public, tool_name) if row.get("output")]
+            if output_budget
+            else []
         )
         if outputs and (
             not candidates
@@ -532,24 +612,75 @@ def bound_batch_response(
             > max(len(pair[1]["content"].encode("utf-8")) for pair in candidates)
         ):
             row = max(outputs, key=lambda item: len(item["output"].encode("utf-8")))
-            original = row["output"]
-            row.setdefault("output_original_chars", len(original))
-            keep = len(original) // 2
-            head = keep // 5
-            row["output"] = (
+            original = original_output(row, sources)
+            if original is None:
+                return payload  # Never invent offsets for unavailable normalized source.
+            owner = next(
                 (
-                    original[:head]
-                    + "\n[… output omitted for response budget …]\n"
-                    + original[-(keep - head) :]
+                    item
+                    for item in log_receipts(public, tool_name)
+                    if item is row or (item.get("result") or {}).get("data") is row
+                ),
+                row,
+            )
+            span = row.get("output_range", [0, len(original)])
+            total = row.get("output_chars", span[1])
+            if span[1] < total and not original.endswith("\n"):
+                boundary = original.rfind("\n") + 1
+                if boundary:
+                    original = original[:boundary]
+                    span = [span[0], span[0] + boundary]
+            # A budget window contains contiguous complete lines. A single very
+            # long line still makes progress via a character window.
+            ends = [0]
+            for line in original.splitlines(keepends=True):
+                ends.append(ends[-1] + len(line))
+            normalized = row.get("output_normalized", False)
+            if row.get("output_truncated") and not row.get("output_truncated_by"):
+                add_output_loss(row, "upstream")
+            add_output_loss(row, "budget")
+            row["output_budget_limited"] = True
+            row["output_chars"] = total
+
+            def measure(
+                count,
+                *,
+                ends=ends,
+                original=original,
+                row=row,
+                normalized=normalized,
+                span=span,
+                owner=owner,
+            ):
+                start = ends[-1 - count] if len(ends) > 2 else len(original) - count
+                raw = original[start:]
+                row["output"] = normalize_output(raw) if normalized else raw
+                row["output_range"] = [span[0] + start, span[1]]
+                if normalized:
+                    record_output_original(row, raw)
+                output_next(
+                    row,
+                    operation_id=owner.get("operation_id") or owner.get("id"),
+                    project=project,
+                    workspace_id=workspace_id,
+                    unified=unified,
+                    pending=owner.get("pending", False),
+                    raw_page=normalized,
                 )
-                if keep > 100
-                else ""
-            )
-            row["output_truncated"] = row["output_budget_limited"] = True
-            row["output_recovery"] = (
-                "Query the same operation_id using connection URL ?verbosity=full&output=raw and a larger output_limit; do not rerun the command. output_seq is not a byte cursor."
-            )
-            render()
+                linked = (row.get("result") or {}).get("data")
+                if isinstance(linked, dict) and linked.get("output_at") == "output":
+                    for key in OUTPUT_PAGE_FIELDS:
+                        if key in row:
+                            linked[key] = copy.deepcopy(row[key])
+                        else:
+                            linked.pop(key, None)
+                return render()
+
+            count = len(ends) - 1 if len(ends) > 2 else len(original)
+            fit = _fit_prefix(max(0, count - 1), measure, budget)
+            # If other bodies alone exceed the cap, share the reduction before
+            # emptying one operation. Each pass strictly narrows a source window.
+            measure(max(fit, count // 2) if len(outputs) > 1 else fit)
             continue
         if not candidates:
             if output_budget and not batches:
@@ -648,7 +779,7 @@ def result(
     unified_views=None,
     mirror="full",
 ):
-    from shared.mcp_presentation import token_view
+    from shared.mcp_presentation import token_view, raw_output_sources
 
     if view >= 3 and verbosity != "full" and unified and unified is not True and name == "process":
         from shared.unified_contracts import unwrap_waited
@@ -657,6 +788,10 @@ def result(
         if unwrapped is not value and not failed(unwrapped):
             name, arguments, value = unified.tool, unified.args, unwrapped
     rendered = _result(name, arguments, value, scopes=scopes)
+    sources = raw_output_sources(rendered["structuredContent"], name)
+    # Stable range reads are a raw escape hatch available on this connection.
+    if arguments.get("output_offset") is not None:
+        output_mode = "raw"
     presentation_args = arguments
     if getattr(unified, "action", "") == "tree":
         options = {"format": "compact", **unified.args.get("options", {})}
@@ -714,11 +849,24 @@ def result(
             and isinstance(public.get("output"), str)
         ):
             body_key = "output"
-    _render_text(rendered, public, text_mode=text_mode, body_key=body_key, mirror=mirror)
+    _render_text(
+        rendered,
+        public,
+        text_mode=text_mode,
+        body_key=body_key,
+        mirror=mirror,
+        tool_name=name,
+        fold=verbosity != "full",
+    )
     return bound_batch_response(
         {"jsonrpc": "2.0", "id": None, "result": rendered},
         output_budget=view >= 2 and verbosity != "full",
         text_mode=text_mode,
         body_key=body_key,
         mirror=mirror,
+        tool_name=name,
+        project=getattr(unified, "project", "") or arguments.get("project", ""),
+        workspace_id=getattr(unified, "workspace_id", "") or arguments.get("workspace_id", ""),
+        unified=bool(unified),
+        sources=sources,
     )["result"]

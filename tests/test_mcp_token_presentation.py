@@ -62,8 +62,9 @@ def test_success_savings_preserve_isolation_evidence_and_failure_details():
     assert shown['continuation']['operation_id'] == OP
     assert shown['failure_context']['category'] == 'succeeded'
     from shared.mcp_presentation import compact_output_text
-    compact = compact_output_text(shown)
-    assert 'log_ref' not in compact and 'continuation' not in compact
+    compact = compact_output_text(shown, "exec")
+    for key in ('log_ref', 'continuation', 'failure_context'):
+        assert key not in compact
     assert compact['runtime_cleanup'] == shown['runtime_cleanup']
     assert compact['execution_isolation'] == shown['execution_isolation']
     value.update(exit_code=1, command_ok=False)
@@ -130,7 +131,7 @@ def test_minimal_open_is_versioned_and_source_not_pruned():
     assert legacy['mcp_view_version'] == 1 and 'capability_index' in legacy
 
 
-def test_large_exec_budget_keeps_head_tail_and_recovery_without_false_cursor():
+def test_large_exec_budget_keeps_contiguous_tail_and_executable_cursor():
     from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
     output = 'HEAD\n' + 'synthetic filler\n' * 20000 + 'TAIL\n'
     raw = {'operation_id': OP, 'exit_code': 0, 'output': output, 'command_ok': True}
@@ -138,10 +139,13 @@ def test_large_exec_budget_keeps_head_tail_and_recovery_without_false_cursor():
     assert len(json.dumps({'jsonrpc': '2.0', 'id': None, 'result': shown},
                          ensure_ascii=False, separators=(',', ':')).encode()) <= READ_BATCH_PAYLOAD_BYTES
     public = shown['structuredContent']
-    assert public['output'].startswith('HEAD\n') and public['output'].endswith('TAIL\n')
+    assert public['output'].endswith('TAIL\n')
+    start, end = public['output_range']
+    assert public['output'] == output[start:end]
     assert public['output_budget_limited'] and public['output_truncated']
-    assert public['output_original_chars'] == len(output)
-    assert 'after_output_seq' not in public and 'do not rerun' in public['output_recovery']
+    assert 'output_original_sha256' not in public
+    assert public['output_truncated_by'] == ['budget']
+    assert public['output_next']['arguments']['operation_ids'] == [OP]
     assert result('exec', {}, raw, verbosity='full')['structuredContent']['output'] == output
     assert raw['output'] == output
 
@@ -153,7 +157,7 @@ def test_normalized_output_is_opt_in_and_original_recoverable():
     shown = result('exec', {}, raw, output_mode='normalized')['structuredContent']
     assert shown['output'] == 'red\n100%\nrepeat\n[… repeated 3 times]\n'
     assert shown['output_normalized'] and shown['output_original_chars'] == len(output)
-    assert '?output=raw&verbosity=full' in shown['output_recovery']
+    assert shown['output_next']['arguments']['output_offset'] == 0
     assert result('exec', {}, raw, output_mode='normalized', verbosity='full')['structuredContent']['output'] == output
 
 

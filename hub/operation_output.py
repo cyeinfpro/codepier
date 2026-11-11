@@ -37,17 +37,39 @@ def migrate(db):
         ON operations(device_id,state)""")
 
 
+def output_window(text, limit, offset=None):
+    """Exact explicit ranges; default tails prefer complete lines when available."""
+    if not limit:
+        return ""
+    if offset is not None:
+        return text[offset : offset + limit]
+    start = max(0, len(text) - limit)
+    if start and text[start - 1] != "\n":
+        boundary = text.find("\n", start) + 1
+        if start < boundary < len(text):
+            start = boundary
+    return text[start:]
+
+
 class OperationOutput:
     def __init__(self, store):
         self.store = store
 
-    def read(self, row, *, limit=OUTPUT_LIMIT, include_body=True):
+    def read(self, row, *, limit=OUTPUT_LIMIT, include_body=True, offset=None):
         """Read only after the caller authorized this operation.
 
         The parent sequence is authoritative. A legacy writer which changes the
         operation row cannot accidentally expose a stale side-table snapshot.
         Compact status reads select only a character count from the live row.
         """
+
+        def window(text):
+            if not include_body:
+                return None
+            if not limit:
+                return ""
+            return output_window(text, limit, offset)
+
         columns = "COALESCE(output_chars,length(output)) AS chars"
         args = [row["id"], row["output_seq"]]
         if include_body and limit:
@@ -64,7 +86,7 @@ class OperationOutput:
                 if include_body and limit
                 else ""
             )
-            return (text[-limit:] if limit else "") if include_body else None, live["chars"]
+            return window(text), live["chars"]
         from hub.operation_archive import POINTER
 
         if not include_body and str(row.get("output") or "").startswith(POINTER):
@@ -76,7 +98,7 @@ class OperationOutput:
                 raise RuntimeError("Archived output is missing")
             return None, archived["output_chars"]
         legacy = unseal(self.store, row.get("output") or "")
-        return (legacy[-limit:] if limit else "") if include_body else None, len(legacy)
+        return window(legacy), len(legacy)
 
     def receive(self, identifier, data):
         """Commit each accepted output before publishing its availability.

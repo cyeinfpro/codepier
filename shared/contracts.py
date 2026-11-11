@@ -356,6 +356,12 @@ class OperationView(Operation):
         le=131072,
         description="Maximum trailing output characters, also applied inside result.data.",
     )
+    output_offset: int | None = Field(
+        default=None,
+        ge=0,
+        le=131072,
+        description="Terminal output character offset; range reads return raw text on every connection.",
+    )
     after_output_seq: int | None = Field(
         default=None,
         ge=0,
@@ -1537,6 +1543,11 @@ for _name in ("operations_get", "operations_wait"):
     # These optional fields have the same meaning in every result variant.
     # Declare them once at the root rather than duplicating the continuation.
     OUTPUT_SCHEMAS[_name]["properties"].update(elapsed_seconds=_NUM, next_call=_NEXT_CALL)
+
+from shared.core_output_schemas import OUTPUT_EVIDENCE
+
+for _name in ("operations_get", "operations_wait", "shell_exec", "ssh_exec", "tasks_run"):
+    OUTPUT_SCHEMAS[_name]["properties"].update(OUTPUT_EVIDENCE)
 
 INSTRUCTIONS = CORE_INSTRUCTIONS
 

@@ -199,6 +199,7 @@ def _operation_schema(legacy, operation):
             for key in (
                 "include_trace",
                 "output_limit",
+                "output_offset",
                 "include_output",
                 "include_result",
                 "after_output_seq",
