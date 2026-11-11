@@ -151,7 +151,8 @@ def test_disable_then_enable_does_not_replay_queued_or_unknown_sends(collab):
     assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?', (part['id'],))['state'] == 'unknown'
 
 
-def test_disable_after_prepare_prevents_external_send(collab):
+@pytest.mark.parametrize('reenable', [False, True])
+def test_disable_after_prepare_prevents_external_send(collab, reenable):
     c, w, account, binding, scope = fixture_channel(collab)
     _, _, delivery = reply(c, w, account)
     part = c.s.store.one('SELECT id FROM weixin_parts WHERE delivery_id=?', (delivery['id'],))
@@ -159,6 +160,8 @@ def test_disable_after_prepare_prevents_external_send(collab):
     def pause_after_preparing(*args):
         wire = original(*args)
         switch(c, 'weixin', False)
+        if reenable:
+            switch(c, 'weixin', True)
         return wire
     w.delivery.mark_sending = pause_after_preparing
     class Provider:
@@ -167,6 +170,32 @@ def test_disable_after_prepare_prevents_external_send(collab):
     w.client_factory = lambda *args: Provider()
     asyncio.run(w.delivery.send_once(part['id']))
     assert c.s.store.one('SELECT state FROM weixin_parts WHERE id=?', (part['id'],))['state'] == 'unknown'
+
+
+@pytest.mark.parametrize('reenable', [False, True])
+def test_channel_toggle_after_mirror_preparation_fences_old_sender(collab, reenable):
+    c, t, account, binding, scope = telegram_setup(duplex(collab))
+    source = t.commit_updates(t.claim_poll(account['account_id']), [update(2)])['message_ids'][0]
+    c.s.invoke('collaboration', {'action': 'dot_message_v2', **c.scope,
+        'dot_id': c.slot['id'], 'body_text': 'Synthetic mirror reply',
+        'reply_to_id': source, 'complete': True, 'idempotency_key': key()}, c.actor)
+    part = c.s.store.one('SELECT id FROM channel_mirror_parts')
+    original = c.s.channels.begin_send
+
+    def pause_after_preparing(claim):
+        reference = original(claim)
+        switch(c, 'telegram', False)
+        if reenable:
+            switch(c, 'telegram', True)
+        return reference
+
+    c.s.channels.begin_send = pause_after_preparing
+    class Provider:
+        async def send(self, *args, **kwargs):
+            pytest.fail('A channel toggle invalidated this prepared mirror')
+    t.client_factory = lambda *args: Provider()
+    asyncio.run(c.s.channels.send_once(part['id']))
+    assert c.s.store.one('SELECT state FROM channel_mirror_parts WHERE id=?', (part['id'],))['state'] == 'unknown'
 
 
 def test_switch_cancels_pending_qr_without_affecting_terminal_history(collab):

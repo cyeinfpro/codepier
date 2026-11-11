@@ -43,9 +43,9 @@ def migrate(db):
     # A detached partition is historical data, not an instruction to recreate
     # a default user room on the next process start. Migrate each partition once.
     db.execute('CREATE TABLE IF NOT EXISTS conversation_partition_migrations (room_id TEXT PRIMARY KEY)')
-    for room in db.execute('SELECT id,space_id,owner_user_id,project_id,environment_id,title,created,chat_history_sequence FROM collaboration_rooms').fetchall():
-        if db.execute('SELECT 1 FROM conversation_partition_migrations WHERE room_id=?', (room[0],)).fetchone():
-            continue
+    for room in db.execute('''SELECT r.id,r.space_id,r.owner_user_id,r.project_id,r.environment_id,
+        r.title,r.created,r.chat_history_sequence FROM collaboration_rooms r
+        WHERE NOT EXISTS (SELECT 1 FROM conversation_partition_migrations m WHERE m.room_id=r.id)''').fetchall():
         db.execute('INSERT INTO conversation_partition_migrations VALUES (?)', (room[0],))
         archived = db.execute('SELECT archived_at FROM conversation_rooms WHERE id=?', (room[0],)).fetchone()
         if archived and archived[0] is not None:
@@ -69,9 +69,14 @@ def migrate(db):
             FROM collaboration_message_writers WHERE room_id=?''', (room[0],))
         db.execute('''INSERT OR IGNORE INTO conversation_read_cursors
             SELECT room_id,user_id,MAX(sequence,?),updated FROM collaboration_read_cursors WHERE room_id=?''', (room[7], room[0]))
+    # Keep restart work proportional to unfinished backfill, including after a
+    # rolled-back upgrade. Completed conversation history is not loaded again.
+    db.execute('''CREATE INDEX IF NOT EXISTS conversation_message_backfill_pending
+        ON collaboration_messages(conversation_id) WHERE conversation_sequence=0''')
     db.execute('''UPDATE collaboration_messages SET conversation_sequence=server_sequence
         WHERE conversation_sequence=0 AND conversation_id=room_id''')
-    for conversation in db.execute('SELECT id FROM conversation_rooms').fetchall():
+    for conversation in db.execute('''SELECT DISTINCT m.conversation_id FROM collaboration_messages m
+        JOIN conversation_rooms c ON c.id=m.conversation_id WHERE m.conversation_sequence=0''').fetchall():
         cid = conversation[0]
         maximum = db.execute('SELECT COALESCE(MAX(conversation_sequence),0) FROM collaboration_messages WHERE conversation_id=?', (cid,)).fetchone()[0]
         for message in db.execute('SELECT id FROM collaboration_messages WHERE conversation_id=? AND conversation_sequence=0 ORDER BY server_sequence,created,id', (cid,)).fetchall():

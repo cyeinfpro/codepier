@@ -555,6 +555,18 @@ class ChannelRouter:
             )
             return reference["external_id"].split(":", 1)[-1] if reference else ""
 
+    def check_send(self, claim):
+        # A disable/re-enable cycle can leave the switch enabled while the
+        # prepared worker's lease is already revoked. Check both immediately
+        # before entering the provider call, including current binding scope.
+        with self.store.transaction(immediate=False):
+            self.c.channel_settings.require_enabled(claim["delivery"]["channel"], claim["account"])
+            row = self.store.one("SELECT * FROM channel_mirror_parts WHERE id=?", (claim["id"],))
+            if (not row or row["state"] != "sending" or row["lease_fence"] != claim["lease_fence"]
+                    or row["lease_until"] <= self.c.clock()):
+                raise DevError("CHANNEL_SEND_FENCE_LOST", "原发送准备世代已失效", 409)
+            self.validate(claim["delivery"])
+
     def finish(self, claim, external_id="", error=None):
         with self.store.transaction():
             row = self.store.one(
@@ -653,8 +665,7 @@ class ChannelRouter:
             await self.store.run(reject)
             return
         try:
-            await self.store.run(self.c.channel_settings.require_enabled,
-                                 claim["delivery"]["channel"], claim["account"])
+            await self.store.run(self.check_send, claim)
             value = json.loads(claim["body"]).get("text", "")
             if claim["delivery"]["channel"] == "telegram":
                 client = self.c.telegram.client_factory(

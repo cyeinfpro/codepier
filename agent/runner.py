@@ -491,9 +491,15 @@ class Agent:
 
     @contextlib.asynccontextmanager
     async def project_slot(self, root, write=True, operation_id=None):
-        root = Path(root).expanduser().resolve()
+        def resolve_claim():
+            resolved = Path(root).expanduser().resolve()
+            return resolved, Claim('agent', 'path', canonical_path(resolved), write)
+
+        # A network volume can stall path resolution. Keep heartbeat/cancel and
+        # unrelated projects live; all queue/tracking changes stay on this loop.
+        root, claim = await self.disk_call(resolve_claim)
         with self._project_tracking(root, write, operation_id) as admitted:
-            async with self.resources.slot(operation_id or 'local', [Claim('agent', 'path', canonical_path(root), write)],
+            async with self.resources.slot(operation_id or 'local', [claim],
                     lambda blockers: self.phase(operation_id, 'waiting_resource', blocked_by=blockers) if operation_id else None):
                 admitted()
                 yield

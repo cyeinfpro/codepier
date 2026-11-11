@@ -306,8 +306,15 @@ def migrate_chatroom(db):
     writers = {row[1] for row in db.execute('PRAGMA table_info(collaboration_message_writers)')}
     if 'version' not in writers:
         db.execute('ALTER TABLE collaboration_message_writers ADD COLUMN version INTEGER NOT NULL DEFAULT 1')
+    # Keep the normal restart path independent of retained chat history. The
+    # partial index is empty after backfill, while interrupted/legacy rows stay
+    # discoverable without a permanent marker that could hide unfinished work.
+    db.execute("""CREATE INDEX IF NOT EXISTS collaboration_chatroom_backfill_pending
+        ON collaboration_messages(room_id) WHERE server_sequence=0 OR thread_root_id=''""")
+    pending_rooms = ('SELECT id FROM collaboration_rooms' if 'chat_history_sequence' not in rooms else
+                     "SELECT DISTINCT room_id FROM collaboration_messages WHERE server_sequence=0 OR thread_root_id=''")
     mapped, unresolved = 0, 0
-    for room in db.execute('SELECT id FROM collaboration_rooms').fetchall():
+    for room in db.execute(pending_rooms).fetchall():
         rid = room[0]
         rows = db.execute('SELECT id,thread_id,kind,body FROM collaboration_messages WHERE room_id=? ORDER BY created,id', (rid,)).fetchall()
         known = {row[0]: row for row in rows}

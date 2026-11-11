@@ -1637,8 +1637,7 @@ class Rooms:
             'room_connection_rebind_batch': self.host_rebinds.create,
             'room_connection_rebind_status': self.host_rebinds.status,
             'room_connection_control': self.host_proofs.control,
-            'room_connection_route_prepare': self.routes.prepare,
-            'room_turn_policy': self.turn_policy, 'room_turn_policy_update': self.update_turn_policy}
+            'room_connection_route_prepare': self.routes.prepare}
         if action not in handlers:
             raise DevError('ROOM_ACTION_UNKNOWN', '未知的房间操作', 404)
         return handlers[action](raw, principal)

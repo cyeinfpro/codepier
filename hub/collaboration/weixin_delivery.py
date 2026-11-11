@@ -545,6 +545,15 @@ class WeixinDelivery:
             raise DevError('WEIXIN_BINDING_CHANGED', '发送准备期间原绑定版本已变化，旧工作者不能继续发送', 409)
         return part
 
+    def check_send(self, claim):
+        # mark_sending yields back to the event loop before network I/O. A
+        # channel toggle or binding change may have invalidated that frozen
+        # claim meanwhile, even when the channel was immediately re-enabled.
+        with self.store.transaction(immediate=False):
+            self.w.require_enabled(claim['account'])
+            if self.current(claim)['state'] != 'sending':
+                raise DevError('WEIXIN_SEND_FENCE_LOST', '原微信投递世代已失效，不重发同一分项', 409)
+
     def upload_identity(self, claim):
         with self.store.transaction():
             part = self.current(claim)
@@ -788,6 +797,7 @@ class WeixinDelivery:
             wire = await self.store.run(self.mark_sending, claim, items)
             if wire is None:
                 return
+            await self.store.run(self.check_send, claim)
             transport.record_metric(Stage.DISPATCHED)
             result = await client.send(wire['peer'], wire['context'], wire['client_id'], wire['items'])
             await self.store.run(self.finish, claim, result)

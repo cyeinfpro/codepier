@@ -315,7 +315,7 @@ def test_lifespan_failure_closes_store_and_releases_instance_lock(tmp_path, monk
 
 
 def test_initialization_failure_releases_instance_lock(tmp_path, monkeypatch):
-    def fail(store):
+    def fail(store, *, collaboration_config=None):
         raise ValueError("invalid runtime configuration")
     with monkeypatch.context() as patch:
         patch.setattr(app_module, "Runtime", fail)

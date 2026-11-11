@@ -19,6 +19,10 @@ class Records:
             journal.db.execute('CREATE TABLE IF NOT EXISTS integration_records (kind TEXT NOT NULL,id TEXT NOT NULL,binding TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(kind,id))')
             journal.db.execute('CREATE INDEX IF NOT EXISTS integration_record_time ON integration_records(kind,created)')
             journal.db.execute('CREATE INDEX IF NOT EXISTS integration_record_binding ON integration_records(kind,binding)')
+            journal.db.execute('''CREATE INDEX IF NOT EXISTS integration_record_scope ON integration_records(
+                kind,json_extract(binding,'$.project'),json_extract(binding,'$.root'),
+                json_extract(binding,'$.workspace'),json_extract(binding,'$.device'),json_extract(binding,'$.owner'))
+                WHERE json_valid(binding)''')
 
     def save(self,kind,identifier,project,body,*,replace=False):
         if not re.fullmatch('[a-f0-9]{32}',identifier):raise DevError('INVALID_RECORD','无效记录编号')
@@ -78,14 +82,23 @@ class Records:
                     'validation': ('passed', 'failed', 'stale', 'unverified', 'interrupted')}.get(kind, ())
         placeholders = ','.join('?' for _ in terminal) or "''"
         order = f"CASE WHEN json_extract(body,'$.state') IN ({placeholders}) THEN 1 ELSE 0 END"
-        with j.lock:
-            rows=j.db.execute(f'SELECT * FROM integration_records WHERE kind=? ORDER BY {order},created DESC,id DESC',
-                              (kind, *terminal)).fetchall()
+        fields = ('project', 'root', 'workspace', 'device') + (() if project.get('_integration_admin') else ('owner',))
+        predicates = ' AND '.join(f"json_extract(binding,'$.{field}') IS ?" for field in fields)
         result=[]
-        for row in rows:
-            actual=json.loads(row['binding'])
-            same=actual==bound or project.get('_integration_admin') and {k:v for k,v in actual.items() if k!='owner'}=={k:v for k,v in bound.items() if k!='owner'}
-            if same:
-                result.append(json.loads(row['body']))
-                if len(result)>=limit:break
+        with j.lock:
+            # JSON predicates preserve legacy key ordering. Keep the complete
+            # binding comparison below authoritative, including unknown fields.
+            # Invalid identities remain stored but cannot expose a payload.
+            rows=j.db.execute(f'SELECT * FROM integration_records WHERE kind=? AND json_valid(binding) '
+                              f'AND {predicates} ORDER BY {order},created DESC,id DESC',
+                              (kind, *(bound[field] for field in fields), *terminal))
+            try:
+                for row in rows:
+                    actual=json.loads(row['binding'])
+                    same=actual==bound or project.get('_integration_admin') and {k:v for k,v in actual.items() if k!='owner'}=={k:v for k,v in bound.items() if k!='owner'}
+                    if same:
+                        result.append(json.loads(row['body']))
+                        if len(result)>=limit:break
+            finally:
+                rows.close()
         return result

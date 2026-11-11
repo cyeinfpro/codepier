@@ -73,6 +73,51 @@ def test_real_v1_forward_migration_threads_and_stable_order():
     db.close()
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_chatroom_backfill_only_reads_history_for_pending_rooms(pending):
+    from hub.collaboration.schema import migrate_chatroom
+
+    db = sqlite3.connect(':memory:')
+    try:
+        db.execute('CREATE TABLE meta (key TEXT PRIMARY KEY,value TEXT)')
+        db.executescript(SCHEMA)
+        for room in ('complete', 'repair'):
+            db.execute('''INSERT INTO collaboration_rooms
+                (id,space_id,owner_user_id,project_id,environment_id,created)
+                VALUES (?,'space','owner',?,'production',1)''', (room, room))
+        migrate_chatroom(db)
+        for room in ('complete', 'repair'):
+            for index in range(128):
+                identifier = f'{room}-{index}'
+                db.execute('''INSERT INTO collaboration_messages
+                    (id,room_id,thread_id,author,origin,source_id,kind,body,state,created)
+                    VALUES (?,?,?,'owner','panel',?,'text','{}','saved',1)''',
+                    (identifier, room, f'{room}-0', identifier))
+        db.execute('UPDATE collaboration_rooms SET chat_history_sequence=23')
+        db.execute("INSERT INTO collaboration_read_cursors VALUES ('complete','owner',17,1)")
+        if pending:
+            db.execute("UPDATE collaboration_messages SET server_sequence=0,thread_root_id='' WHERE id='repair-127'")
+        before = db.execute("SELECT * FROM collaboration_messages WHERE room_id='complete' ORDER BY id").fetchall()
+        statements = []
+        db.set_trace_callback(statements.append)
+        migrate_chatroom(db)
+        db.set_trace_callback(None)
+        history_reads = [sql for sql in statements if sql.startswith('SELECT id,thread_id,kind,body FROM collaboration_messages')]
+        assert len(history_reads) == int(pending)
+        if pending:
+            assert "room_id='repair'" in history_reads[0]
+            assert db.execute("SELECT server_sequence,thread_root_id FROM collaboration_messages WHERE id='repair-127'").fetchone() == (128, 'repair-0')
+        assert db.execute("SELECT * FROM collaboration_messages WHERE room_id='complete' ORDER BY id").fetchall() == before
+        assert db.execute("SELECT sequence FROM collaboration_read_cursors WHERE room_id='complete'").fetchone() == (17,)
+        assert db.execute('SELECT DISTINCT chat_history_sequence FROM collaboration_rooms').fetchall() == [(23,)]
+        # The steady-state check must not replace N+1 reads with a full table scan.
+        plan = db.execute("EXPLAIN QUERY PLAN SELECT DISTINCT room_id FROM collaboration_messages WHERE server_sequence=0 OR thread_root_id=''").fetchall()
+        assert any('collaboration_chatroom_backfill_pending' in row[3] for row in plan)
+        assert db.execute("SELECT 1 FROM collaboration_messages WHERE server_sequence=0 OR thread_root_id=''").fetchone() is None
+    finally:
+        db.close()
+
+
 def test_real_v2_sequence_and_read_position_survive_clock_ties():
     from hub.collaboration.schema import migrate_chatroom
     db = sqlite3.connect(':memory:')

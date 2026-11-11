@@ -59,7 +59,7 @@ CSS 覆盖报告只是保守候选，不是自动删除授权。合并样式必�
 ## 分层测试
 
 ```bash
-# 20 个真实 Hub/Agent 黄金路径，不需要浏览器或真实模型。
+# 真实 Hub/Agent 黄金路径，不需要浏览器或真实模型。
 .venv/bin/python -m pytest -q -m smoke
 # 最短反馈：排除浏览器及多进程慢验收。
 .venv/bin/python -m pytest -q -m 'not browser and not slow'
@@ -71,6 +71,8 @@ CSS 覆盖报告只是保守候选，不是自动删除授权。合并样式必�
 ```
 
 browser/integration/slow 由实际导入及 fixture 依赖分类，smoke 和独立 matrix case 显式标记。新增重型 fixture 时同步分类并验证收集。类型检查当前覆盖配置与回归规划模块，不声称全部历史业务代码已严格类型化。共享浏览器、登录和证据工具放在 tests/browser_support.py 等支持模块，不从 test_*.py 导入 fixture。
+
+通过 CodePier 清洁模式运行这些测试时，默认临时目录可能位于 Agent 私有状态目录中；测试创建的合成项目会因此触发 `PROTECTED_ROOT`。应为本次测试命令选择私有状态目录之外的临时位置，保留产品路径保护。macOS / Linux 可使用 `TMPDIR=/tmp .venv/bin/python -m pytest -q -m smoke`；Windows 应在本次测试进程中将 `TEMP` / `TMP` 指向专用测试临时目录。不要修改 Agent 的全局环境或把状态目录加入项目授权。
 
 完整回归使用全新目录；workers 不超过可用 CPU，资源受限时可更低：
 
