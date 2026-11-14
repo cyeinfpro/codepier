@@ -14,3 +14,6 @@ jsonschema==4.26.0
 
 # OIDC ID-token verification (fork IAM extension).
 PyJWT[crypto]==2.15.1
+
+# Security pin: CVE-2026-126360 fixed in 1.45.2.
+opentelemetry-api==1.45.2

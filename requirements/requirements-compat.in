@@ -10,3 +10,6 @@ pycparser==3.1 ; implementation_name != 'PyPy' and platform_python_implementatio
 sse-starlette==3.6.0
 starlette==1.9.0
 truststore==0.10.4 ; sys_platform != 'emscripten'
+
+# Security pin: CVE-2026-126360 fixed in 1.45.2.
+opentelemetry-api==1.45.2
