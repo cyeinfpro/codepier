@@ -94,7 +94,7 @@ export async function addMemberPanel() {
   openPanel(
     'add-member',
     '添加 dot',
-    `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">加入后使用房间的项目权限。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-connect-summary" aria-label="接入范围"><p class="cr-muted">dot 加入「${E(roomName(state.room))}」并使用房间已批准的项目权限。读取和回复探测通过后就可在房间收发消息。</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>在房间授权有效期间保持连接<small>自动处理可恢复的连接故障。订阅由 dot 宿主续订。</small></span></label></section><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
+    `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">选择连接方式</legend><label><input type="radio" name="connection_mode" value="existing"><span>已有 dot</span></label><label><input type="radio" name="connection_mode" value="new" checked><span>新 dot</span></label></fieldset><section data-cr-connections hidden>${field('已验证的连接', '<select name="reuse_member_id" disabled><option value="">选择已验证的 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '读取已有连接', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">加入后使用房间的项目权限。</p></section>${field('成员名称', '<input name="name" required maxlength="80" placeholder="给这个 dot 起个名字" autofocus>')}<section class="cr-connect-summary" aria-label="接入范围"><p class="cr-muted">dot 加入「${E(roomName(state.room))}」并使用房间已批准的项目权限。读取和回复探测通过后就可在房间收发消息。</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>在房间授权有效期间保持连接<small>自动处理可恢复的连接故障。订阅由 dot 宿主续订。</small></span></label></section><button class="cr-button cr-primary" type="submit">添加并连接</button></form>`,
     {
       version: state.room.version,
       connections: [],
@@ -178,6 +178,16 @@ export async function loadConnections(more = false) {
       const existing = modes.find((input) => input.value === 'existing');
       existing.checked = true;
       existing.dispatchEvent(new Event('change', { bubbles: true }));
+      // Prefer an online verified connection, but never join without submit.
+      const preferred = current.connections.find((item) =>
+        ['connected', 'ready', 'ready_chat', 'ready_work'].includes(
+          item.display_state || item.state,
+        ),
+      );
+      if (!selected && preferred) {
+        select.value = connectionChoice(preferred);
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     }
     status.textContent = current.connections.length
       ? ''

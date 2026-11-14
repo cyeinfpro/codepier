@@ -197,8 +197,32 @@ window.CodePierPanelUpdate = (() => {
       return ['latest', '已是最新'];
     return ['unknown', '尚未检查'];
   }
-  function manualReload() {
-    if (!dirty() || confirm('刷新将丢弃当前页面的未保存输入，继续？')) reloadPage(data?.operation);
+  let confirming = false;
+  async function manualReload() {
+    if (confirming) return;
+    const gen = generation,
+      login = S.session,
+      space = S.space_id;
+    if (dirty()) {
+      confirming = true;
+      try {
+        if (
+          !(await CP.ui.confirmSheet({
+            title: '刷新页面？',
+            body: '刷新将丢弃当前页面的未保存输入，是否继续？',
+            confirmLabel: '刷新页面',
+            danger: true,
+          }))
+        )
+          return;
+      } finally {
+        confirming = false;
+      }
+    }
+    // Consent belongs to the session and workspace that opened the sheet.
+    // A late answer must not discard another account's or space's drafts.
+    if (gen !== generation || S.session !== login || S.space_id !== space) return;
+    reloadPage(data?.operation);
   }
   function paintDetails() {
     if (!document.getElementById('panel-update-popover')) return;
@@ -262,7 +286,7 @@ window.CodePierPanelUpdate = (() => {
   function html() {
     return `<section class="panel panel-update" id="panel-update" aria-labelledby="panel-update-title">
     <div class="panel-head"><h2 id="panel-update-title" tabindex="-1">${icon('refresh')}面板更新</h2><span class="badge" id="panel-update-badge">读取中</span></div>
-    <div class="panel-body"><p>从 GitHub 正式 Release 更新网页、Hub、Agent 安装包及安装脚本。账号、配对、项目和配置保留。面板健康检查成功后，自动更新本次确认时当前空间中已有管理权限的受管 Agent；忙节点等待任务结束，离线节点重连后继续。</p>
+    <div class="panel-body"><p>从 GitHub 正式 Release 更新网页、Hub、Agent 安装包及安装脚本。账号、配对、项目和配置保留。面板健康检查成功后，自动更新本次确认时当前空间中已有管理权限的受管 Agent；忙碌的电脑等待任务结束，离线的电脑重连后继续。</p>
     <dl class="kv"><dt>运行版本</dt><dd id="panel-update-current">${esc(S.settings?.version || '—')}</dd><dt>更新来源</dt><dd id="panel-update-repo">—</dd><dt>可用版本</dt><dd id="panel-update-target">尚未检查</dd></dl>
     <label class="panel-agent-consent"><input type="checkbox" id="panel-update-agents" checked> 面板更新成功后自动更新当前空间已授权的 Agent</label>
     <div class="actions"><button class="btn" id="panel-update-check" type="button" disabled>检查 GitHub 更新</button><button class="btn primary" id="panel-update-apply" type="button" disabled>更新面板及已授权 Agent</button><button class="btn" id="panel-update-rollback" type="button" hidden>回滚镜像</button><button class="btn" id="panel-update-retry" type="button" hidden>重试</button><button class="btn" id="panel-update-reload" type="button" hidden>重新加载页面</button></div>
@@ -271,7 +295,7 @@ window.CodePierPanelUpdate = (() => {
     <details id="panel-update-release" hidden><summary>发布说明与校验值</summary><p id="panel-update-digest" class="mono"></p><pre id="panel-update-notes"></pre></details>
     <details id="panel-update-history" hidden><summary>更新阶段记录</summary><pre id="panel-update-events"></pre></details>
     <details id="panel-update-setup" hidden><summary>首次启用更新服务</summary><p>需要 Linux、systemd 与 Docker Compose。先在服务器部署包含本功能的新版源码，再在该部署目录运行一次：</p><div class="code-box"><pre>sudo python3 scripts/panel_updater.py install --root "$PWD"</pre></div><p>宿主机更新服务独立运行，网页进程没有 Docker 管理权限。安装或更新面板时也可使用 <code>sudo bash install.sh --enable-panel-update</code>。未完成的更新须先在宿主机核查，不能靠重新安装服务覆盖。</p></details>
-    <p class="form-note">从旧版面板首次升级没有自动更新 Agent 的授权记录，请在设备节点页按原流程确认更新。具备新版宿主能力时默认分离数据库快照与附件原件；旧宿主仍按完整卷复制。更新期间短暂进入维护状态；关闭页面不取消更新。原数据卷、镜像和更新记录不会自动删除，请定期在宿主机归档。</p></div></section>`;
+    <p class="form-note">从旧版面板首次升级没有自动更新 Agent 的授权记录，请在电脑页按原流程确认更新。具备新版宿主能力时默认分离数据库快照与附件原件；旧宿主仍按完整卷复制。更新期间短暂进入维护状态；关闭页面不取消更新。原数据卷、镜像和更新记录不会自动删除，请定期在宿主机归档。</p></div></section>`;
   }
   function text(id, value) {
     const node = document.getElementById(id);
@@ -654,13 +678,16 @@ window.CodePierPanelUpdate = (() => {
       !S.session?.instance_admin ||
       accessDenied ||
       submitting ||
+      confirming ||
       (!reuse && pending) ||
       !data?.enabled ||
       data.busy ||
       data.recovery_required
     )
       return;
-    const gen = generation;
+    const gen = generation,
+      login = S.session,
+      space = S.space_id;
     if (!reuse) {
       intentNote = '';
       if (action === 'apply') {
@@ -668,13 +695,33 @@ window.CodePierPanelUpdate = (() => {
         const c = intent || availableCandidate();
         if (!c) return;
         const updateAgents = direct ? intent?.update_agents === true : agentConsent;
-        if (
-          !direct &&
-          !confirm(
-            `从 ${data.repository} 更新到 ${c.version}？\n包含面板、Hub 和 Agent 分发文件。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent，忙节点等待任务结束，离线节点重连后继续。' : '本次不自动更新 Agent。'}\n切换期间面板短暂维护，兼容更新直接沿用原数据卷。`,
+        if (!direct) {
+          confirming = true;
+          let approved = false;
+          try {
+            approved = await CP.ui.confirmSheet({
+              title: `更新至 ${c.version}？`,
+              body: `包含面板、Hub 和 Agent 分发文件（来源 ${data.repository}）。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent。' : '本次不自动更新 Agent。'}切换期间面板短暂维护，数据卷保留。`,
+              confirmLabel: '确认更新',
+            });
+          } finally {
+            confirming = false;
+          }
+          if (
+            !approved ||
+            gen !== generation ||
+            S.session !== login ||
+            S.space_id !== space ||
+            accessDenied ||
+            !S.session?.instance_admin ||
+            submitting ||
+            pending ||
+            !data?.enabled ||
+            data.busy ||
+            data.recovery_required
           )
-        )
-          return;
+            return;
+        }
         if (!hostMatches(c)) {
           await submit('check', false, false, false, {
             version: c.version,
@@ -697,9 +744,31 @@ window.CodePierPanelUpdate = (() => {
         });
       } else if (action === 'rollback') {
         const version = data.rollback_available?.version;
+        if (!version) return;
+        confirming = true;
+        let approved = false;
+        try {
+          approved = await CP.ui.confirmSheet({
+            title: `回滚至 v${version}？`,
+            body: '切换期间面板短暂维护，当前数据继续使用。',
+            confirmLabel: '确认回滚',
+            danger: true,
+          });
+        } finally {
+          confirming = false;
+        }
         if (
-          !version ||
-          !confirm(`回滚 Hub 镜像至 v${version}？\n切换期间面板短暂维护，当前数据继续使用。`)
+          !approved ||
+          gen !== generation ||
+          S.session !== login ||
+          S.space_id !== space ||
+          accessDenied ||
+          !S.session?.instance_admin ||
+          submitting ||
+          pending ||
+          !data?.enabled ||
+          data.busy ||
+          data.recovery_required
         )
           return;
         savePending({

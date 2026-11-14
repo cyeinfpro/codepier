@@ -1,13 +1,9 @@
 /* Shared controls and touch targets; keep the standalone conversation usable. */
 .chat-text-button,
-.chat-primary-button,
 .chat-secondary-button,
 .chat-danger-button {
   font-size: var(--ui-text-sm, 13px);
   font-weight: var(--ui-weight-semibold, 600);
-}
-.chat-primary-button {
-  font-weight: var(--ui-weight-bold, 700);
 }
 @media (max-width: 760px), (pointer: coarse) {
   #chat-catalog-retry,
@@ -21,8 +17,7 @@
   min-width: 0;
   max-width: min(50vw, 420px);
 }
-.chat-history-chips,
-.chat-segmented {
+.chat-history-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -47,13 +42,41 @@
   font-size: var(--ui-text-sm);
 }
 .chat-segmented {
-  padding: 6px 0;
-  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-surface);
 }
 .chat-segmented label {
-  padding: 6px 10px;
-  border: 1px solid var(--chat-line);
-  border-radius: var(--ui-radius-md);
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--ui-radius-small, 8px);
+  color: var(--chat-muted);
+  font-weight: var(--ui-weight-medium, 500);
+}
+.chat-segmented input {
+  flex: none;
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+}
+.chat-segmented label:has(input:checked) {
+  background: var(--chat-bg);
+  color: var(--chat-fg);
+  font-weight: var(--ui-weight-semibold, 600);
+  box-shadow: var(--ui-elev-1);
 }
 .chat-history-filter {
   grid-template-columns: minmax(0, 1fr);

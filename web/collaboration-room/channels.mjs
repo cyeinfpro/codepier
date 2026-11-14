@@ -96,7 +96,7 @@ export function inboundHealthMarkup(accounts) {
       .filter((item) => ['deferred', 'quarantined'].includes(item.state) && Number(item.count) > 0)
       .map(
         (item) =>
-          `<li><strong>${E(account.label || account.bot_id || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`,
+          `<li><strong>${E(channelIdentity(account.label, account.bot_id) || '当前账号')}</strong> · ${item.state === 'deferred' ? '等待积压消化' : '已隔离'} ${E(item.count)} 条 · <code>${E(item.reason_code || 'unknown')}</code></li>`,
       ),
   );
   return items.length
@@ -140,8 +140,10 @@ export function channelLiveParts(box, flow) {
 }
 
 export function channelIdentity(nickname, id) {
-  if (nickname) return nickname;
-  const value = String(id || '');
+  const label = String(nickname || '').trim();
+  // Provider-generated labels can themselves be raw account identifiers.
+  if (label && label !== String(id || '') && !/^(wxid_|peer_id[:_])/i.test(label)) return label;
+  const value = String(id || label || '');
   return value.length > 8
     ? value.slice(0, 4) + '…' + value.slice(-4)
     : value
@@ -250,7 +252,7 @@ export function renderChannel(result) {
     parts.push(`<p class="cr-info">${E(readOnlyReason())} 此处仅保留安全暂停或撤销操作。</p>`);
   if (accounts.length)
     parts.push(
-      `<section class="cr-wx-option cr-channel-existing"><h4>沿用已登记的微信</h4>${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || channelIdentity(null, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section><p class="cr-or"><span>或者扫码登录新的微信</span></p>`,
+      `<section class="cr-wx-option cr-channel-existing"><h4>沿用已登记的微信</h4>${field('已连接的微信', `<select name="existing_account_id"><option value="">选择账号</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(channelIdentity(account.label, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '使用此账号', '', 'cr-full')}</section><p class="cr-or"><span>或者扫码登录新的微信</span></p>`,
     );
   parts.push(inboundHealthMarkup(flow.account ? [flow.account] : accounts));
   const qr = flow.qr || {};
@@ -262,7 +264,7 @@ export function renderChannel(result) {
     parts.push(
       facts([
         ['微信', channelIdentity(qr.scanner_nickname, qr.scanner_id)],
-        ['已登记账号', qr.existing_account?.label],
+        ['已登记账号', channelIdentity(qr.existing_account?.label, qr.existing_account?.bot_id)],
       ]) +
         (qr.re_pair_required
           ? '<p class="cr-info">这个微信之前登记过。确认后沿用原账号；它在其他房间的连接需要重新确认。</p>'
@@ -291,7 +293,7 @@ export function renderChannel(result) {
       facts([
         ['房间', roomName(state.room)],
         ['接收消息的 dot', flow.member?.name],
-        ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+        ['微信', channelIdentity(flow.account?.label, flow.account?.bot_id)],
       ]),
     );
   if (stage === 'waiting_member' && writable)
@@ -318,7 +320,7 @@ export function renderChannel(result) {
   if (stage === 'ready')
     parts.push(
       facts([
-        ['微信', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+        ['微信', channelIdentity(flow.account?.label, flow.account?.bot_id)],
         ['房间', roomName(state.room)],
         ['本人配对', '已验证'],
         [

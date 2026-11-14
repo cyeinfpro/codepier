@@ -178,7 +178,7 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         details = page.locator('[data-cr-work-view] [data-delivery-id="original-delivery"]')
         expect(details).to_contain_text('微信接口已受理 1 段，1 段待核对')
         details.locator('summary').click()
-        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('发送结果待核对')
+        expect(details.locator('[data-delivery-part="unknown-part"]')).to_contain_text('发送结果待确认')
         expect(details.locator('[data-delivery-part="accepted-part"]')).to_contain_text('已受理')
         expect(details).not_to_contain_text('已送达')
         expect(page.locator('[data-cr-work-view] [data-cr-action="work-control"]')).to_have_count(0)
@@ -209,4 +209,8 @@ def test_owner_restores_original_participant_and_selects_original_goal_successor
         expect(page.locator('.cr-message').filter(has_text='最后为什么这样处理？')).to_be_visible()
         assert len(writes) == 2
     finally:
+        # Drain projection route.fetch()/response.json() before closing their
+        # request context. Otherwise a poll can race teardown in WebKit and
+        # surface Response has been disposed from the event listener.
+        page.unroute_all(behavior="wait")
         context.close()

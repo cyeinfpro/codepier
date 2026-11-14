@@ -105,7 +105,18 @@ window.CodePierIdentity = (() => {
     if (id === prior) return;
     if (
       hasUnsavedChanges() &&
-      !confirm('切换空间将清除当前标签页的草稿、附件和待确认请求。其他标签页不受影响。继续？')
+      !(await uiConfirmAction(
+        {
+          title: '切换空间？',
+          body: '切换空间将清除当前标签页的草稿、附件和待确认请求，其他标签页不受影响。',
+          confirmLabel: '切换空间',
+          danger: true,
+        },
+        {
+          owner: $('#iam-active-space'),
+          current: () => login === S.session && prior === S.space_id,
+        },
+      ))
     ) {
       const choice = $('#iam-active-space');
       if (choice) choice.value = prior;

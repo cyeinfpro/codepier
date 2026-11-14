@@ -31,11 +31,11 @@ window.CodePierSchedulerSettings = (() => {
     recovering: '逐步恢复',
   };
   const statusLabels = {
-    offline: '节点离线，设置已保留',
+    offline: '电脑离线，设置已保留',
     unsupported: '升级 Agent 后生效',
-    pending: '等待节点确认',
+    pending: '等待电脑确认',
     applied: '已生效',
-    rejected: '节点未接受，保留原设置',
+    rejected: '电脑未接受，保留原设置',
   };
 
   function detach() {
@@ -59,7 +59,7 @@ window.CodePierSchedulerSettings = (() => {
       esc(title) +
       '<input type="number" min="1" max="64" step="1" name="' +
       name +
-      '" placeholder="继承节点" value="' +
+      '" placeholder="继承电脑设置" value="' +
       esc(value ?? '') +
       '"></label>'
     );
@@ -68,13 +68,13 @@ window.CodePierSchedulerSettings = (() => {
     const info = data.reported,
       semantics = data.resource_semantics || {};
     const effective =
-      { strict: '严格互斥', relaxed: '放宽文件/进程互斥' }[semantics.effective] || '等待节点报告';
+      { strict: '严格互斥', relaxed: '放宽文件/进程互斥' }[semantics.effective] || '等待电脑报告';
     const semanticNote =
       '<p class="form-note" data-scheduler-semantics>资源语义实际生效：' +
       esc(effective) +
-      (semantics.supported ? '' : ' · 旧节点保持严格规则，升级后才能启用放宽模式') +
+      (semantics.supported ? '' : ' · 旧电脑保持严格规则，升级后才能启用放宽模式') +
       '</p>';
-    if (!info) return semanticNote + '<p class="form-note">等待节点报告运行情况</p>';
+    if (!info) return semanticNote + '<p class="form-note">等待电脑报告运行情况</p>';
     return (
       semanticNote +
       '<div class="settings-tags"><span>运行 ' +
@@ -132,7 +132,7 @@ window.CodePierSchedulerSettings = (() => {
       '<span class="settings-mode" data-scheduler-state>' +
       esc(statusLabels[data.state] || '待核对') +
       '</span></div><div class="panel-body">' +
-      '<label class="field">节点<select id="scheduler-device">' +
+      '<label class="field">电脑<select id="scheduler-device">' +
       devices
         .map(
           (device) =>
@@ -149,19 +149,19 @@ window.CodePierSchedulerSettings = (() => {
       '<div data-scheduler-metrics>' +
       metrics(data) +
       '</div><form id="scheduler-settings-form"><div class="settings-import-fields">' +
-      '<label class="field">调节方式<select name="adaptive"><option value="">继承节点</option><option value="true"' +
+      '<label class="field">调节方式<select name="adaptive"><option value="">继承电脑设置</option><option value="true"' +
       (draft.adaptive === true ? ' selected' : '') +
       '>自动调节</option><option value="false"' +
       (draft.adaptive === false ? ' selected' : '') +
       '>固定上限</option></select></label>' +
       number('maximum', '执行并发上限', draft.maximum) +
-      '<label class="field">资源互斥语义<select name="resource_semantics"><option value="">继承节点（首次默认严格）</option><option value="strict"' +
+      '<label class="field">资源互斥语义<select name="resource_semantics"><option value="">继承电脑设置（首次默认严格）</option><option value="strict"' +
       (draft.resource_semantics === 'strict' ? ' selected' : '') +
       '>严格互斥</option><option value="relaxed"' +
       (draft.resource_semantics === 'relaxed' ? ' selected' : '') +
-      '>放宽文件与进程互斥</option></select><small>放宽模式允许读取运行中命令写出的内容，进程普通 read 不再冻结文件编辑。门禁需声明 read_stable 或使用快照；仅协议 2 节点支持。</small></label>' +
+      '>放宽文件与进程互斥</option></select><small>放宽模式允许读取运行中命令写出的内容，进程普通 read 不再冻结文件编辑。门禁需声明 read_stable 或使用快照；仅协议 2 的电脑支持。</small></label>' +
       '</div>' +
-      '<details class="settings-details"><summary>项目配额与高级设置</summary><p>新设置只影响后续准入。节点本机上限和资源保护仍生效。</p>' +
+      '<details class="settings-details"><summary>项目配额与高级设置</summary><p>新设置只影响后续准入。电脑本机上限和资源保护仍生效。</p>' +
       '<div class="settings-import-fields">' +
       number('minimum', '执行最低容量', draft.minimum) +
       number('initial', '初始 / 固定容量', draft.initial) +
@@ -192,7 +192,7 @@ window.CodePierSchedulerSettings = (() => {
             esc(id) +
             '" value="' +
             esc(draft.project_limits[id]) +
-            '"><span class="form-note">项目已删除或移离当前节点；移除后保存。</span>' +
+            '"><span class="form-note">项目已删除或移离当前电脑；移除后保存。</span>' +
             '<button class="btn ghost" type="button" data-scheduler-remove-project="' +
             esc(id) +
             '">移除此配额</button></label>',
@@ -314,7 +314,19 @@ window.CodePierSchedulerSettings = (() => {
     listen(form, 'input', editDraft);
     listen(form, 'change', editDraft);
     listen($('#scheduler-device', mounted), 'change', async (event) => {
-      if (state.pending || (dirty() && !confirm('放弃这个节点未保存的并发设置？'))) {
+      if (
+        state.pending ||
+        (dirty() &&
+          !(await uiConfirmAction(
+            {
+              title: '放弃未保存的并发设置？',
+              body: '切换电脑将放弃当前未保存的修改。',
+              confirmLabel: '放弃并切换',
+              danger: true,
+            },
+            { owner: $('#scheduler-device', mounted) },
+          )))
+      ) {
         event.target.value = state.device;
         return;
       }

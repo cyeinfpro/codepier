@@ -14,7 +14,7 @@ window.CodePierQueue = (() => {
   const reasons = {
     resource_conflict: '资源冲突',
     hub_delivery: '等待 Hub 投递',
-    agent_pending: '节点已接收，等待执行',
+    agent_pending: '电脑已接收，等待执行',
     lane_capacity: '通道容量',
     project_limit: '项目配额',
     waiting_resource: '等待资源',
@@ -141,7 +141,7 @@ window.CodePierQueue = (() => {
       '</strong><code class="queue-tool">' +
       esc(item.tool) +
       '</code><span class="queue-device">' +
-      esc(item.device_name || '未记录节点') +
+      esc(item.device_name || '未记录电脑') +
       '</span></div>' +
       badge(item.state) +
       '</div>' +
@@ -331,7 +331,7 @@ window.CodePierQueue = (() => {
         (item.tool || '操作') +
         ' #' +
         id.slice(0, 12) +
-        '？已发生的副作用不会回滚；运行中的命令需等待节点确认。';
+        '？已发生的副作用不会回滚；运行中的命令需等待电脑确认。';
       if (typeof CP.ui?.confirmSheet !== 'function')
         throw new Error('确认组件未就绪，请刷新页面后重试。');
       const yes = await CP.ui.confirmSheet({

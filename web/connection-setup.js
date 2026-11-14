@@ -15,14 +15,13 @@ window.CodePierConnectionSetup = (() => {
       (g) => !g.revoked && (g.status === 'active' || (!g.status && g.expires > Date.now() / 1000)),
     );
     const latest = active.find((g) => g.client_id) || active[0];
-    return `<section class="panel" id="connection-setup"><div class="panel-head"><h2>连接检查</h2></div><div class="panel-body">
-      <p>在 ChatGPT 新建对话，启用 CodePier，让它列出你的项目。</p>
-      <form id="connection-check-form">
-        <label class="field">连接<select name="grant_id" required><option value="">请选择连接</option>${S.grants.map((g) => `<option value="${esc(g.id)}" ${g.id === latest?.id ? 'selected' : ''}>${esc(g.label)}${g.client_id ? '' : ' · 访问令牌'}</option>`).join('')}</select></label>
+    return `<section class="panel connection-check-card" id="connection-setup"><div class="panel-head"><h2>连接检查</h2><small class="muted">在 ChatGPT 新建对话并启用 CodePier 后测试</small></div><div class="panel-body">
+      <form id="connection-check-form" class="connection-check-inline">
+        <label class="field">要测试的连接<select name="grant_id" required><option value="">请选择连接</option>${S.grants.map((g) => `<option value="${esc(g.id)}" ${g.id === latest?.id ? 'selected' : ''}>${esc(g.label)}${g.client_id ? '' : ' · 访问令牌'}</option>`).join('')}</select></label>
         <details class="form-advanced"><summary>排查选项</summary>
           <label class="field">项目<select name="project_id"><option value="">仅检查连接</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></label>
           <label class="field">工具目录版本<input name="catalog" maxlength="64" pattern="[a-f0-9]{64}" autocomplete="off"></label>
-        </details><button type="submit" class="btn">测试连接</button></form>
+        </details><button type="submit" class="btn primary">测试连接</button></form>
       <div id="connection-check-result" role="status" aria-live="polite"></div></div></section>`;
   }
   function tunnelHTML() {

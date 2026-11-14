@@ -76,7 +76,8 @@ export function permissionRows(policy, scope, section) {
         const env = project.environment_id || 'production';
         return `<div class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(env)}" data-project-label="${E(label)}">
           <div class="cr-permission-row-main">
-            <label class="cr-choice cr-permission-project"><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}><span>${E(label)}${env === 'production' ? '' : ' · ' + E(env)}</span></label>
+            <span class="cr-permission-project">${E(label)}${env === 'production' ? '' : ' · ' + E(env)}</span>
+            <input type="checkbox" data-permission-project hidden tabindex="-1" aria-hidden="true" ${selected.length ? 'checked' : ''}>
             <select data-permission-level aria-label="${E(label)}的权限" title="可选权限受项目和电脑的设置限制">${permissionOptions(permissionLevel(selected))}</select>
           </div>
           <div hidden>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
@@ -89,10 +90,13 @@ export function permissionRows(policy, scope, section) {
 }
 
 export function permissionSection(policy, scope, section) {
+  // One dropdown per project decides whether it joins and at which level. The
+  // bulk control sets every project the user can grant; nothing is saved until
+  // 「保存权限」.
   return `<section data-permission-section="${section}"><div class="cr-permission-bulk">
-    <label class="cr-choice cr-permission-select-all"><input type="checkbox" data-permission-select-all><span>全选</span><span class="cr-muted" data-permission-count aria-live="polite"></span></label>
-    <label>所选权限 <select data-permission-bulk-level><option value="-" selected>选择权限</option>${permissionOptions('-', true)}</select></label>
-    ${section === 'room' ? '<label>所选项目有效期 <select data-permission-global-expiry><option value="">各项目设置</option><option value="until_revoked">直到撤销</option><option value="timed">指定时间</option></select></label><label data-permission-global-date hidden>截止时间 <input type="datetime-local"></label>' : ''}
+    <span class="cr-muted" data-permission-count aria-live="polite"></span>
+    <label>全部项目设为 <select data-permission-bulk-level><option value="-" selected>选择档位</option>${permissionOptions('-', true)}</select></label>
+    ${section === 'room' ? '<label>已加入项目有效期 <select data-permission-global-expiry><option value="">各项目设置</option><option value="until_revoked">直到撤销</option><option value="timed">指定时间</option></select></label><label data-permission-global-date hidden>截止时间 <input type="datetime-local"></label>' : ''}
     </div>${permissionRows(policy, scope, section)}</section>`;
 }
 
@@ -190,6 +194,8 @@ export function updatePermissionControls() {
     const enabled = project.checked && !project.disabled;
     const lifetimeMode = group.querySelector('[data-permission-lifetime-mode]');
     const lifetimeUntil = group.querySelector('[data-permission-lifetime-until]');
+    const expiryBox = group.querySelector('.cr-permission-expiry');
+    if (expiryBox) expiryBox.hidden = !enabled;
     lifetimeMode.disabled = !enabled;
     lifetimeUntil.disabled = !enabled || lifetimeMode.value !== 'timed';
     lifetimeUntil.closest('label').hidden = lifetimeMode.value !== 'timed';
@@ -251,14 +257,11 @@ export function updatePermissionControls() {
   for (const section of form.querySelectorAll('[data-permission-section]')) {
     const projects = [...section.querySelectorAll('[data-permission-project]:not(:disabled)')];
     const selected = projects.filter((project) => project.checked).length;
-    const all = section.querySelector('[data-permission-select-all]');
-    all.disabled = !projects.length;
-    all.checked = selected > 0 && selected === projects.length;
-    all.indeterminate = selected > 0 && selected < projects.length;
     section.querySelector('[data-permission-count]').textContent =
-      '已选 ' + selected + ' / ' + projects.length;
+      '已加入 ' + selected + ' / ' + projects.length;
+    section.querySelector('[data-permission-bulk-level]').disabled = !projects.length;
     for (const control of section.querySelectorAll(
-      '[data-permission-bulk-level], [data-permission-global-expiry], [data-permission-global-date] input',
+      '[data-permission-global-expiry], [data-permission-global-date] input',
     ))
       control.disabled = !selected;
   }
@@ -546,7 +549,7 @@ export async function previewContinuation(form, current) {
     submit.disabled = !activeRoom() || current.busy;
   } catch (error) {
     if (!visible()) return;
-    box.innerHTML = `<p role="status">${E(error.message || '暂时无法核对续办清单。')}</p>${btn('refresh-continuation-preview', '重新核对', '', 'cr-text-button')}`;
+    box.innerHTML = `<p role="status">${E(error.message || '暂时无法核对续办清单。')}</p>${btn('refresh-continuation-preview', '重试', 'title="沿用原请求，不会重复执行"', 'cr-text-button')}`;
   }
   patchRoomPermissions();
 }

@@ -104,7 +104,7 @@ def test_actual_claude_questions_approvals_models_and_resume(claude_stack, brows
 def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
     page = chat_page
     open_chat_settings(page);page.select_option('#chat-provider', 'claude')
-    expect(page.locator('#chat-empty strong')).to_contain_text('Claude')
+    expect(page.locator('#chat-empty-title')).to_contain_text('Claude')
     page.evaluate('''() => {
       const v=chatView();v.mode='steer';
       v.catalog={models:[],capabilities:{steer:false,effort_runtime:false}};
@@ -113,7 +113,7 @@ def test_claude_provider_label_and_capability_switch_no_stale_steer(chat_page):
     assert page.evaluate('chatView().mode') == 'followup'
     expect(page.locator('#chat-send-mode option[value="steer"]')).to_be_disabled()
     open_chat_settings(page);page.select_option('#chat-provider', 'codex')
-    expect(page.locator('#chat-empty strong')).to_contain_text('Codex')
+    expect(page.locator('#chat-empty-title')).to_contain_text('Codex')
     page.wait_for_function('() => !chatView().catalogLoading')
     expect(page.locator('#chat-send-mode option[value="steer"]')).to_be_enabled()
 

@@ -14,6 +14,8 @@ from playwright.sync_api import expect
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture
 from tests.screenshot_support import capture_route_screenshot
 
+# Compact navigation labels are intentionally shorter than these page headings.
+TITLE_OVERRIDES = {'workbench': '远程工作台', 'roles': '访问角色', 'members': '空间成员'}
 ROUTES = (
     'overview','devices','projects','vps','workbench','workflows','audit','connect',
     'profiles','roles','mcp-gateway','diagnostics','integrations','artifacts',
@@ -38,7 +40,8 @@ def test_all_nineteen_routes_reflow_in_each_theme(stack, chat_browser_pool, tmp_
                 expect(page.locator('#chat-root')).to_be_visible()
                 expect(page.locator('#chat-compose')).to_be_visible()
             else:
-                title=page.evaluate('route=>nav.find(item=>item[0]===route)[2]',route)
+                # The workbench keeps its longer page title (see test_ui_redesign.PAGES).
+                title=TITLE_OVERRIDES.get(route) or page.evaluate('route=>nav.find(item=>item[0]===route)[2]',route)
                 expect(page.locator('#page h1')).to_have_text(title)
             layout = page.evaluate("""() => ({
                 width: document.documentElement.scrollWidth,
@@ -85,12 +88,12 @@ def test_editor_back_after_resize_keeps_dirty_input_until_confirmed(stack,chat_b
         page.set_viewport_size({'width':390,'height':844})
         expect(page.get_by_role('button',name='返回上一页')).to_be_visible()
         assert page.locator('.editor-back-label').evaluate('el=>el.getBoundingClientRect().height') < 30
-        page.once('dialog',lambda dialog:dialog.dismiss())
         page.go_back()
+        page.locator('dialog.ui-sheet .ghost').click()
         expect(page.locator('#role-form [name=label]')).to_have_value('Unsaved isolated role')
         assert page.evaluate("history.state?.codepierEditor != null")
-        page.once('dialog',lambda dialog:dialog.accept())
         page.go_back()
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#role-form')).to_have_count(0)
         assert not page.evaluate("document.querySelector('#app').inert")
         expect(page.locator('#page h1')).to_have_text('访问角色')
@@ -202,6 +205,11 @@ def test_management_filter_and_focus_survive_refresh(stack,chat_browser_pool):
 def test_extension_small_pages_reflow_and_failed_status_has_retry(stack,chat_browser_pool,scheme):
     context=chat_browser_pool('chromium').new_context(viewport={'width':390,'height':844},color_scheme=scheme)
     page=context.new_page()
+    # The Hub serves only manifest assets; the extension ships separately, so
+    # its pages are served straight from the repository for this check.
+    extension=Path(__file__).resolve().parents[1]/'web/browser-extension'
+    page.route(stack.url+'/static/browser-extension/*',lambda route:route.fulfill(
+        path=str(extension/route.request.url.split('?')[0].rsplit('/',1)[1])))
     page.add_init_script("""window.chrome ||= {};window.fixtureStatusCalls=0;
       chrome.runtime={sendMessage:async()=>{fixtureStatusCalls++;
         if(fixtureStatusCalls===1)return {ok:false,message:'Synthetic disconnected state'};
@@ -326,10 +334,10 @@ def test_remove_only_rule_and_node_name_both_guard_unsaved_leave(stack,chat_brow
         page.locator('[data-remove-rule]').click()
         expect(page.locator('[data-project-rule]')).to_have_count(0)
         expect(page.locator('#role-add-project-rule')).to_be_focused()
-        page.once('dialog',lambda dialog:dialog.dismiss());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet .ghost').click()
         expect(page.locator('#role-form')).to_be_visible()
         expect(page.locator('[data-project-rule]')).to_have_count(0)
-        page.once('dialog',lambda dialog:dialog.accept());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#role-form')).to_have_count(0)
         saved=stack.must(stack.client.get('/api/access-roles/'+role['id']))
         assert len(saved['project_rules'])==1
@@ -337,17 +345,17 @@ def test_remove_only_rule_and_node_name_both_guard_unsaved_leave(stack,chat_brow
         page.evaluate('deviceDetail(S.devices[0].id)')
         expect(page.locator('.modal')).to_have_attribute('data-presentation','editor')
         page.fill('#device-rename','Unsaved synthetic node')
-        page.once('dialog',lambda dialog:dialog.dismiss());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet .ghost').click()
         expect(page.locator('#device-rename')).to_have_value('Unsaved synthetic node')
-        page.once('dialog',lambda dialog:dialog.accept());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('.modal')).to_have_count(0)
         assert not page.evaluate("document.querySelector('#app').inert")
         page.evaluate('showAgentMaintenanceCommands(S.devices[0])')
         expect(page.locator('.modal')).to_have_attribute('data-presentation','editor')
         page.fill('#agent-command-form [name=install_dir]','/tmp/synthetic-agent-draft')
-        page.once('dialog',lambda dialog:dialog.dismiss());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet .ghost').click()
         expect(page.locator('#agent-command-form [name=install_dir]')).to_have_value('/tmp/synthetic-agent-draft')
-        page.once('dialog',lambda dialog:dialog.accept());page.go_back()
+        page.go_back();page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('.modal')).to_have_count(0)
         page.evaluate('computerPanel(S.projects[0].id)')
         expect(page.locator('.modal')).to_have_attribute('data-presentation','tool')

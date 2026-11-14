@@ -134,12 +134,18 @@ function chatInspectorRender() {
       meter.setAttribute('aria-label', '上下文使用比例');
       section.append(meter);
     }
+    // Show whatever the CLI reported: a percentage alone is still data.
+    const percent =
+      usage.percent != null ? Math.round(Math.min(100, Math.max(0, usage.percent))) + '%' : '';
     chatInfoRow(
       section,
       '上下文',
       usage.tokens != null
-        ? chatNumber(usage.tokens) + ' / ' + chatNumber(usage.contextWindow)
-        : '暂无数据',
+        ? chatNumber(usage.tokens) +
+            ' / ' +
+            chatNumber(usage.contextWindow) +
+            (percent ? ' · ' + percent : '')
+        : percent || '暂无数据',
     );
     chatInfoRow(
       section,
@@ -743,7 +749,7 @@ async function chatReviewRequest(item, args) {
   )
     return null;
   if (data.review_ref !== item.data.review_ref || data.immutable !== true)
-    throw new Error('未收到有效的固定快照，请检查节点版本');
+    throw new Error('未收到有效的固定快照，请检查电脑版本');
   return data;
 }
 async function chatLoadReview(item) {

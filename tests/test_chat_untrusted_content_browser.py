@@ -53,7 +53,8 @@ def test_chat_project_draft_and_markdown_render_untrusted_text_safely(engine):
                     text:item.body.textContent,
                 };
             }""")
-            assert result["projects"] == [result["payload"]] * 3
+            # Project cards now carry one 「对话」 launcher instead of one per CLI.
+            assert result["projects"] == [result["payload"]]
             assert result["draft"] == result["payload"]
             assert result["text"] == result["payload"]
             assert page.locator("#buttons img, #transcript img, #markdown img").count() == 0

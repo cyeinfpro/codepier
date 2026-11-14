@@ -82,9 +82,11 @@ def test_sheet_preserves_editor_notices_escape_and_focus(layer_page):
     expect(page.locator("#approve")).to_be_focused()
     page.keyboard.press("Shift+Tab")
     expect(page.locator("#save")).to_be_focused()
-    # The editor's synchronous unsaved-input guard remains intact.
-    page.once("dialog", lambda dialog: dialog.dismiss())
+    # The editor's unsaved-input guard uses the branded confirmation sheet.
     page.keyboard.press("Escape")
+    expect(page.locator("dialog.ui-sheet")).to_have_count(1)
+    page.locator("dialog.ui-sheet .ghost").click()
+    expect(page.locator("dialog.ui-sheet")).to_have_count(0)
     expect(page.locator(".modal")).to_have_count(1)
 
 

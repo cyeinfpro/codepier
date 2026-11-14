@@ -298,7 +298,7 @@
 }
 .chat-message-user {
   width: fit-content;
-  max-width: 88%;
+  max-width: min(78%, 620px);
   margin-left: auto;
 }
 .chat-message-user .chat-message-head {
@@ -314,6 +314,7 @@
 }
 .chat-message-assistant .chat-message-body {
   white-space: normal;
+  max-width: var(--ui-reading-width, 76ch);
 }
 .chat-message-body p {
   margin: 0 0 14px;
@@ -396,18 +397,22 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   font: var(--ui-text-xs, 12px)/1.75 var(--chat-mono);
 }
 .chat-code {
-  overflow: hidden;
+  overflow: clip;
   margin: 18px 0;
   border: 1px solid var(--chat-line);
   border-radius: var(--ui-radius-lg, 16px);
   background: var(--chat-surface);
 }
 .chat-code-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 9px 15px;
   border-bottom: 1px solid var(--chat-line);
+  background: var(--chat-surface);
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
 }

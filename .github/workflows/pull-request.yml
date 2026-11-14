@@ -51,7 +51,7 @@ jobs:
           python -m mypy
           python scripts/check_dependencies.py
           python scripts/check_repository_contracts.py
-          node --test tests/test_lazy_assets.mjs
+          node --test tests/test_lazy_assets.mjs tests/test_diff_html.mjs
           python scripts/sync_standalone_helpers.py --check
           python scripts/update_source_inventory.py --check
           npm --prefix web/mcp-apps run build

@@ -49,7 +49,7 @@
     }
     if (!meta) return;
     const token = getComputedStyle(document.documentElement).getPropertyValue('--ui-bg').trim();
-    meta.content = token || (scheme === 'dark' ? '#191919' : '#f4f4f4');
+    meta.content = token || (scheme === 'dark' ? '#141413' : '#f5f5f4');
   }
   function apply(emit) {
     scheme = resolve(preference);

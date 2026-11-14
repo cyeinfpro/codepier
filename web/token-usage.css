@@ -6,12 +6,10 @@
   border-color: color-mix(in srgb, currentColor 18%, transparent);
 }
 .token-dashboard-head,
-.token-dashboard-metrics,
 .token-dashboard-filters,
 .token-dashboard-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem 1.5rem;
   align-items: center;
 }
 .token-dashboard-head {
@@ -42,6 +40,7 @@
 .token-dashboard-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem 1.5rem;
   margin: 0.65rem 0 0.3rem;
   align-items: start;
 }
@@ -135,6 +134,7 @@
   padding-bottom: 0.25rem;
 }
 .token-dashboard-filters {
+  gap: 0.75rem 1.5rem;
   align-items: end;
   margin: 1rem 0;
 }
@@ -271,16 +271,107 @@
 }
 /* Keep short desktop overviews within their existing screen-height budget.
    Reclaim whitespace only; figures, context limits and controls keep their size. */
-@media (min-width: 901px) and (max-height: 800px) {
+@media (min-width: 901px) {
   .overview-summary .token-dashboard {
-    margin-top: 0.5rem;
-    padding-top: 0.5rem;
+    margin-top: 12px;
+    padding-top: 10px;
   }
   .overview-summary .token-dashboard-metrics {
-    margin-block: 0.35rem 0.15rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 28px;
+    margin-block: 6px 2px;
+  }
+  .overview-summary .token-dashboard-metric {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex: 0 1 auto;
+  }
+  .overview-summary .token-dashboard-metric strong {
+    margin: 0;
+    font-size: var(--ui-text-h2);
+    line-height: 1.2;
+  }
+  .overview-summary .token-dashboard-metric.is-total strong {
+    font-size: var(--ui-text-h2);
+  }
+  .overview-summary .token-dashboard-metric.is-cost {
+    margin-left: auto;
+    text-align: right;
+  }
+  .overview-summary .token-dashboard-metric.is-cost strong {
+    font-size: var(--ui-text-title);
   }
   .overview-summary .token-dashboard-note,
   .overview-summary .token-dashboard-limit {
-    margin-block: 0.25rem;
+    display: inline-block;
+    margin: 4px 14px 2px 0;
   }
+  .overview-summary [data-token-filters] {
+    margin-top: 2px;
+  }
+  /* Collapsed: one summary strip — title, figures and "查看详情" on the first
+     row, the estimate notes truncated to a single muted row beneath. */
+  .overview-summary .token-dashboard:has(> [data-token-filters]:not([open])) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 24px;
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > .token-dashboard-head {
+    flex: 0 0 auto;
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    .token-dashboard-freshness {
+    margin-left: 0;
+    font-size: var(--ui-text-xs);
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > .token-dashboard-metrics {
+    flex: 1 1 auto;
+    margin: 0;
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > [data-token-filters] {
+    order: 3;
+    flex: 0 0 auto;
+    margin: 0 0 0 auto;
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > .token-dashboard-note,
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > .token-dashboard-limit {
+    order: 4;
+    /* A real basis pushes both lines onto their own row beneath the figures. */
+    flex: 1 1 40%;
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    font-size: var(--ui-text-xs);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .overview-summary
+    .token-dashboard:has(> [data-token-filters]:not([open]))
+    > :is([role='status'], .token-dashboard-status) {
+    order: 5;
+    flex-basis: 100%;
+  }
+}
+.token-summary-hint {
+  margin-left: 8px;
+  color: var(--ui-soft);
+  font-size: var(--ui-text-xs);
+}
+[data-token-filters][open] > summary .token-summary-hint {
+  display: none;
 }

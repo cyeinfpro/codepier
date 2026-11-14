@@ -605,7 +605,7 @@ window.CodePierTokenUsage = (() => {
       '</div>' +
       headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
-      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情</summary>` +
+      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情<span class="token-summary-hint">趋势、筛选与明细</span></summary>` +
       panel('settings', '筛选与估价设置') +
       '<div class="token-dashboard-filters">' +
       select(
@@ -724,6 +724,10 @@ window.CodePierTokenUsage = (() => {
     const generation = ++bindingGeneration;
     const bind = () => {
       root._codepierTokenGeneration = generation;
+      // The collapsed overview strip truncates these lines; keep the full text on hover.
+      root
+        .querySelectorAll(':scope > .token-dashboard-note, :scope > .token-dashboard-limit')
+        .forEach((line) => (line.title = line.textContent.trim()));
       root.querySelectorAll('[data-token-filters], [data-token-panel]').forEach((details) => {
         details.ontoggle = () => {
           const key = details.dataset.tokenPanel;

@@ -433,17 +433,17 @@ var CP = (() => {
       label.append(input);
       form.append(label);
     }
-    const actions = document.createElement("div"), cancel = document.createElement("button"), confirm2 = document.createElement("button");
+    const actions = document.createElement("div"), cancel = document.createElement("button"), confirm = document.createElement("button");
     actions.className = "ui-sheet-actions";
     cancel.type = "button";
     cancel.className = "btn ghost";
     cancel.textContent = cancelLabel;
-    confirm2.type = "submit";
-    confirm2.className = "btn " + (danger ? "danger" : "primary");
-    confirm2.textContent = confirmLabel;
-    if (submitId) confirm2.id = submitId;
-    confirm2.disabled = !!typed;
-    actions.append(cancel, confirm2);
+    confirm.type = "submit";
+    confirm.className = "btn " + (danger ? "danger" : "primary");
+    confirm.textContent = confirmLabel;
+    if (submitId) confirm.id = submitId;
+    confirm.disabled = !!typed;
+    actions.append(cancel, confirm);
     form.append(actions);
     dialog.append(form);
     const origin = document.activeElement;
@@ -470,7 +470,7 @@ var CP = (() => {
       dialog.addEventListener("ui-layer-dismiss", abort);
       signal?.addEventListener("abort", abort, { once: true });
       input?.addEventListener("input", () => {
-        confirm2.disabled = input.value !== typed;
+        confirm.disabled = input.value !== typed;
       });
       form.addEventListener("compositionstart", () => {
         composing = true;
@@ -484,12 +484,12 @@ var CP = (() => {
       });
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        if (settled || composing || confirm2.disabled || input && input.value !== typed) return;
+        if (settled || composing || confirm.disabled || input && input.value !== typed) return;
         finish(true);
       });
       try {
         showModalLayer(dialog);
-        (input || (danger ? cancel : confirm2)).focus({ preventScroll: true });
+        (input || (danger ? cancel : confirm)).focus({ preventScroll: true });
       } catch {
         finish(false);
       }
@@ -515,29 +515,47 @@ var CP = (() => {
         return;
       }
       if (editorRoute && history.state?.codepierEditor !== editorRoute.id) {
-        if (!canClose($(".modal"))) {
-          history.pushState({ ...history.state, codepierEditor: editorRoute.id }, "", location.href);
-          return;
-        }
-        editorRoute = null;
-        closeModal(null, true);
+        const dialog = $(".modal"), routeId = editorRoute.id;
+        void (async () => {
+          if (!await canClose(dialog)) {
+            if (dialog?.isConnected && editorRoute?.id === routeId)
+              history.pushState({ ...history.state, codepierEditor: routeId }, "", location.href);
+            return;
+          }
+          if (editorRoute?.id === routeId) {
+            editorRoute = null;
+            closeModal(dialog, true);
+          }
+        })();
       }
     });
-    function canClose(dialog) {
+    async function canClose(dialog) {
       if (!dialog) return true;
       if (!dialog.classList.contains("modal-editor") && !dialog.querySelector('[data-submission="uncertain"]'))
         return true;
       const busy2 = !!dialog.querySelector('[aria-busy="true"]');
       if (!busy2 && dialog.dataset.editorDirty !== "true" && !dialog.querySelector('[data-submission="uncertain"]'))
         return true;
-      return confirm(
-        busy2 ? "\u4ECD\u5728\u63D0\u4EA4\u5F53\u524D\u64CD\u4F5C\u3002\u79BB\u5F00\u4E0D\u4F1A\u53D6\u6D88\u5DF2\u63D0\u4EA4\u7684\u8BF7\u6C42\uFF1B\u8BF7\u7A0D\u540E\u6838\u5BF9\u7ED3\u679C\u3002\u7EE7\u7EED\u79BB\u5F00\uFF1F" : "\u8F93\u5165\u5C1A\u672A\u4FDD\u5B58\uFF0C\u6216\u4FDD\u5B58\u7ED3\u679C\u672A\u786E\u8BA4\u3002\u79BB\u5F00\u5C06\u4E22\u5F03\u672C\u9875\u8F93\u5165\uFF1B\u5DF2\u63D0\u4EA4\u7684\u64CD\u4F5C\u4E0D\u4F1A\u53D6\u6D88\u3002\u7EE7\u7EED\u79BB\u5F00\uFF1F"
-      );
+      if (dialog.dataset.confirmingClose === "true") return false;
+      dialog.dataset.confirmingClose = "true";
+      try {
+        const ok = await confirmSheet({
+          title: busy2 ? "\u64CD\u4F5C\u4ECD\u5728\u63D0\u4EA4\uFF0C\u786E\u5B9A\u79BB\u5F00\uFF1F" : "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u6539\u52A8\uFF1F",
+          body: busy2 ? "\u79BB\u5F00\u4E0D\u4F1A\u53D6\u6D88\u5DF2\u63D0\u4EA4\u7684\u8BF7\u6C42\uFF0C\u8BF7\u7A0D\u540E\u67E5\u770B\u64CD\u4F5C\u7ED3\u679C\u3002" : "\u8F93\u5165\u5C1A\u672A\u4FDD\u5B58\uFF0C\u6216\u4FDD\u5B58\u7ED3\u679C\u672A\u786E\u8BA4\u3002\u79BB\u5F00\u5C06\u4E22\u5F03\u672C\u9875\u8F93\u5165\u3002",
+          confirmLabel: "\u7EE7\u7EED\u79BB\u5F00",
+          cancelLabel: "\u7559\u5728\u6B64\u9875",
+          danger: true
+        });
+        return ok && dialog.isConnected && $(".modal") === dialog;
+      } finally {
+        if (dialog.isConnected) delete dialog.dataset.confirmingClose;
+      }
     }
-    function requestClose(expected = null, { navigation = false } = {}) {
+    async function requestClose(expected = null, { navigation = false } = {}) {
       const dialog = $(".modal");
       if (expected && expected !== dialog) return false;
-      if (!canClose(dialog)) return false;
+      if (!await canClose(dialog)) return false;
+      if ($(".modal") !== dialog) return false;
       if (navigation && editorRoute) {
         if (history.state?.codepierEditor === editorRoute.id) {
           const state = { ...history.state };
@@ -546,7 +564,7 @@ var CP = (() => {
         }
         editorRoute = null;
       }
-      closeModal(expected);
+      closeModal(dialog);
       return true;
     }
     function closeModal(expected = null, preserveRoute = false) {
@@ -620,7 +638,7 @@ var CP = (() => {
           return;
         if (e.key === "Escape" && closable) {
           e.preventDefault();
-          requestClose(dialog);
+          void requestClose(dialog);
           return;
         }
         uiTrapTab(e, dialog, [document.getElementById("computer-approval-inbox")]);

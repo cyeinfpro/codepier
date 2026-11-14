@@ -152,7 +152,7 @@ function chatStateName(s) {
       error: '失败',
       cancelled: '已取消',
       cleared: '已清理',
-      orphaned: '需检查节点',
+      orphaned: '需检查电脑',
       uncertain: '待核实',
     }[s] ||
     s ||

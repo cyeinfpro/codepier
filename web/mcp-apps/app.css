@@ -1,5 +1,33 @@
-:root{color-scheme:light;--bg:#fff;--fg:#272727;--muted:#606060;--line:#e3e3e3;--soft:#f0f0f0;--accent:#746018;--warn:#845a16;--warn-bg:#faf2df;--error:#a6372b;--error-bg:#fceee9}
-[data-theme=dark]{color-scheme:dark;--bg:#222222;--fg:#e5e5e5;--muted:#b9b9b9;--line:#515151;--soft:#2b2b2b;--accent:#d1bd75;--warn:#edcf8f;--warn-bg:#3d3524;--error:#ffb6a9;--error-bg:#442f2b}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{padding:24px;max-width:100%;min-width:0}p{margin:8px 0;overflow-wrap:anywhere}h2{line-height:1.3;overflow-wrap:anywhere;font-size:22px;margin:10px 0 12px}.eyebrow{font-size:10px;letter-spacing:.16em;color:var(--muted);font-weight:650}.muted,small{color:var(--muted)}small{font-size:12px}.path{font:11px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.bottom-note{font-size:11px;color:var(--muted);margin:12px 0}.facts{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0}.chip{display:inline-block;max-width:100%;font-size:11px;line-height:1.6;padding:4px 9px;border-radius:8px;background:var(--soft);color:var(--muted);font-weight:600}.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}.notice{padding:11px 13px;border-left:3px solid var(--warn);background:var(--warn-bg);border-radius:2px 8px 8px 2px;margin:12px 0;font-size:12px;overflow-wrap:anywhere}.notice.error{border-left-color:var(--error);background:var(--error-bg)}button{font:inherit;min-height:44px;padding:8px 13px;border:1px solid var(--line);border-radius:12px;background:var(--soft);color:var(--fg);cursor:pointer;max-width:100%;overflow-wrap:anywhere}button:hover:not(:disabled){border-color:var(--muted)}button:disabled{opacity:.5;cursor:not-allowed}.primary{background:var(--fg);color:var(--bg)}button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}details{border-bottom:1px solid var(--line)}summary{padding:12px 0;cursor:pointer;overflow-wrap:anywhere;min-height:44px;font-size:13px;font-weight:550}summary>small{margin-left:8px;font-weight:400}.disclosure-body{padding:0 0 12px}.files{border-top:1px solid var(--line);margin-top:14px}.compact-list{padding-left:20px;font-size:12px;overflow-wrap:anywhere}pre{font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;overflow:auto;max-height:340px;max-width:100%;background:var(--soft);border:1px solid var(--line);padding:12px;border-radius:8px;tab-size:4}
-@media(max-width:540px){main{padding:16px}h2{font-size:20px}.chip{font-size:10px}}
-@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+:root{color-scheme:light;--bg:#ffffff;--surface:#fafaf9;--soft:#f0f0f0;--fg:#272727;--muted:#606060;--line:#e6e5e3;--border:#d6d5d2;--accent:#746018;--primary:#f3d970;--primary-text:#29261c;--primary-hover:#e8ce63;--warn:#785b22;--warn-bg:#f7f3e9;--error:#a13c35;--error-bg:#f8efed}
+[data-theme=dark]{color-scheme:dark;--bg:#1c1c1b;--surface:#181817;--soft:#2b2b2b;--fg:#e5e5e5;--muted:#b9b9b9;--line:#2c2c2a;--border:#3d3d3a;--accent:#d1bd75;--primary:#d1bd75;--primary-text:#27241b;--primary-hover:#ddcb89;--warn:#d5b77e;--warn-bg:#322e27;--error:#e3a39b;--error-bg:#352b2a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}
+main{padding:24px;max-width:100%;min-width:0}
+p{margin:8px 0;overflow-wrap:anywhere}
+h2{font-size:22px;font-weight:600;line-height:1.3;letter-spacing:-.02em;margin:10px 0 12px;overflow-wrap:anywhere}
+.eyebrow{display:inline-block;font-size:12px;letter-spacing:.08em;color:var(--muted);font-weight:600}
+.muted,small{color:var(--muted)}
+small{font-size:12px}
+.path{font:12px/1.6 ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.bottom-note{font-size:12px;color:var(--muted);margin:14px 0 0;line-height:1.6}
+.facts{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.chip{display:inline-flex;align-items:center;max-width:100%;font-size:12px;line-height:1.5;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--muted);font-weight:500;font-variant-numeric:tabular-nums}
+.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0}
+.notice{padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);background:var(--warn-bg);border-radius:8px;margin:12px 0;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.notice.error{border-left-color:var(--error);background:var(--error-bg);color:var(--error)}
+button{font:inherit;font-size:13px;font-weight:600;min-height:44px;padding:8px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;max-width:100%;overflow-wrap:anywhere;transition:background-color 120ms ease,border-color 120ms ease}
+button:hover:not(:disabled){border-color:var(--muted);background:var(--soft)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.primary{background:var(--primary);border-color:var(--primary);color:var(--primary-text);font-weight:700;box-shadow:inset 0 1px 0 rgb(255 255 255 / 35%)}
+.primary:hover:not(:disabled){background:var(--primary-hover);border-color:var(--primary-hover)}
+button:focus-visible,summary:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 35%,transparent);outline-offset:2px}
+details{border-bottom:1px solid var(--line)}
+summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 4px;cursor:pointer;overflow-wrap:anywhere;min-height:44px;font-size:13px;font-weight:600;border-radius:6px}
+summary:hover{background:var(--surface)}
+summary>small{margin-left:auto;font-weight:500;flex-shrink:0}
+.disclosure-body{padding:4px 0 14px}
+.files{border-top:1px solid var(--line);margin-top:16px}
+.compact-list{padding-left:20px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}
+pre{font:12px/1.65 ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;white-space:pre;overflow:auto;max-height:360px;max-width:100%;background:var(--surface);border:1px solid var(--line);padding:12px 14px;border-radius:8px;margin:8px 0 12px;tab-size:4}
+@media(max-width:540px){main{padding:16px}h2{font-size:20px}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}

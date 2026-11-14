@@ -265,7 +265,7 @@ def test_uninstall_requires_exact_node_name_and_explains_preserved_files(install
     page.locator('[data-action="device-detail"]').first.click()
     page.locator('[data-action="agent-uninstall"]').click()
     expect(page.locator('#agent-lifecycle-form')).to_contain_text('不会删除授权目录中的项目文件')
-    expect(page.locator('#agent-lifecycle-form')).to_contain_text('项目映射和审计记录也会保留')
+    expect(page.locator('#agent-lifecycle-form')).to_contain_text('项目和审计记录也会保留')
     page.fill('#agent-uninstall-confirm', device['name'].lower())
     page.click('#agent-lifecycle-submit')
     page.wait_for_timeout(100)

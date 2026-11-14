@@ -27,13 +27,13 @@ def test_chat_aliases_every_shared_design_token_with_standalone_fallbacks(styles
     CHAT = styles[0]
     css = compact(CHAT)
     light = {'bg': ('panel', '#ffffff'),
- 'side': ('side', '#fafafa'),
+ 'side': ('side', '#fafaf9'),
  'surface': ('surface', '#f0f0f0'),
  'raised': ('raised', '#ffffff'),
  'hover': ('hover', '#e8e8e8'),
  'selected': ('selected', '#e3e3e3'),
- 'line': ('line', '#e3e3e3'),
- 'border': ('border', '#cccccc'),
+ 'line': ('line', '#e6e5e3'),
+ 'border': ('border', '#d6d5d2'),
  'fg': ('text', '#272727'),
  'muted': ('muted', '#606060'),
  'soft': ('soft', '#626262'),
@@ -60,14 +60,14 @@ def test_chat_dark_fallbacks_match_the_shared_contract(styles):
     css = compact(CHAT)
     selector = '.chat-workspace[data-appearance="dark"],html[data-appearance="dark"].chat-workspace'
     assert selector in css
-    dark = {'bg': ('panel', '#222222'),
- 'side': ('side', '#1e1e1e'),
+    dark = {'bg': ('panel', '#1c1c1b'),
+ 'side': ('side', '#181817'),
  'surface': ('surface', '#2b2b2b'),
  'raised': ('raised', '#2b2b2b'),
  'hover': ('hover', '#343434'),
  'selected': ('selected', '#393939'),
- 'line': ('line', '#3a3a3a'),
- 'border': ('border', '#515151'),
+ 'line': ('line', '#2c2c2a'),
+ 'border': ('border', '#3d3d3a'),
  'fg': ('text', '#e5e5e5'),
  'accent': ('accent', '#d1bd75'),
  'primary': ('primary', '#d1bd75'),

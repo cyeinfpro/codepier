@@ -111,6 +111,25 @@
   color: var(--chat-danger);
   font-size: var(--ui-text-sm, 13px);
 }
+.chat-approval-kv {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-bg);
+  border: 1px solid var(--chat-line);
+  font-size: var(--ui-text-xs, 12px);
+}
+.chat-approval-kv dt {
+  color: var(--chat-muted);
+}
+.chat-approval-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--chat-mono);
+}
 .chat-approval-actions {
   display: flex;
   flex-wrap: wrap;

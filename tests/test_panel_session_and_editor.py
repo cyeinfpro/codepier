@@ -53,6 +53,11 @@ def app_page(chat_browser_pool):
         if(path==='/api/devices/node-one/roots'&&method==='GET')return response({
           device_id:'node-one',state:'applied',config_sha256:'a'.repeat(64),
           roots:[{path:'/fixture/one',writable:false,allow_tasks:false}]});
+        if(path==='/api/devices/node-one/roots/preview'&&method==='POST')return response({
+          device_id:'node-one',valid:true,config_sha256:body.expected_sha256});
+        if(path==='/api/devices/node-one/roots'&&method==='POST')return response({
+          device_id:'node-one',state:'applied',config_sha256:'b'.repeat(64),
+          roots:[{path:body.path,writable:body.writable,allow_tasks:body.allow_tasks}]});
         if(path.startsWith('/api/projects')&&method!=='GET'){
           if(window.saveHandler)return saveHandler({path,method,body},response);
           return response(fixtureProjects[0]);
@@ -78,6 +83,51 @@ def app_page(chat_browser_pool):
         assert not errors, errors
     finally:
         page.context.close()
+
+
+def test_async_close_never_closes_a_replacement_modal(app_page):
+    result = app_page.evaluate('''async () => {
+      modal('Original', '<p>read-only</p>');
+      const pending = panelDialogs.requestClose(null, {navigation:true});
+      const replacement = modal('Replacement', '<input name="draft" value="keep me">');
+      const closed = await pending;
+      return {closed, retained:replacement.isConnected,
+        title:document.querySelector('#modal-title')?.textContent};
+    }''')
+    assert result == {'closed': False, 'retained': True, 'title': 'Replacement'}
+
+
+def test_activity_seed_reconciles_after_running_then_terminal_event(app_page):
+    page = app_page
+    page.evaluate('''() => {
+      window.savedFetch = fetch;
+      window.fetch = async (path, options) => path.startsWith('/api/overview')
+        ? new Response(JSON.stringify({active_operations:0,recent_operations:[]}),
+          {headers:{'Content-Type':'application/json'}}) : savedFetch(path, options);
+      navActivitySeed(1);
+      navActivityOperation({id:'seeded-operation',state:'running'});
+      navActivityOperation({id:'seeded-operation',state:'succeeded'});
+    }''')
+    page.wait_for_function('S.activeOpsSeed === 0 && S.activeOps.size === 0')
+
+
+def test_activity_ignores_duplicate_unrelated_terminal_and_old_space_snapshot(app_page):
+    page = app_page
+    page.evaluate('''() => {
+      window.savedFetch = fetch;
+      window.fetch = (path, options) => path.startsWith('/api/overview')
+        ? new Promise(resolve => {window.releaseOverview = () => resolve(new Response(
+          JSON.stringify({active_operations:5,recent_operations:[]}),
+          {headers:{'Content-Type':'application/json'}}));}) : savedFetch(path, options);
+      navActivitySeed(1);
+      navActivityOperation({id:'unrelated',state:'succeeded'});
+      navActivityOperation({id:'unrelated',state:'succeeded'});
+    }''')
+    assert page.evaluate('S.activeOpsSeed') == 1
+    page.wait_for_function('typeof releaseOverview === "function"')
+    page.evaluate('''() => {clearSpaceSnapshots(); S.space_id='new-space'; releaseOverview();}''')
+    page.wait_for_timeout(150)
+    assert page.evaluate('[S.activeOpsSeed,S.activeOps.size]') == [0, 0]
 
 
 def expire(page):
@@ -133,11 +183,12 @@ def test_chat_draft_warns_before_unload_and_explicit_logout_discards(app_page):
     page = app_page
     page.fill('#chat-compose','intentionally discard this draft')
     assert page.evaluate("() => {const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;}")
-    page.on('dialog',lambda dialog:dialog.accept())
     # The focused CLI layout hides the global sidebar; leave through navigation
     # first, retaining the draft, then use the visible account action.
     page.evaluate("navigate('projects')")
+    # uiConfirmAction uses a modal sheet instead of native browser dialogs.
     page.locator('[data-action=logout]').click()
+    page.locator('dialog.ui-sheet button[type="submit"]').click()
     expect(page.locator('#login-form')).to_be_visible()
     expect(page.locator('#username')).to_have_value('')
     assert page.evaluate('ChatUI.views.size') == 0
@@ -148,6 +199,7 @@ def test_chat_draft_warns_before_unload_and_explicit_logout_discards(app_page):
 
 def open_project(page):
     page.evaluate("navigate('projects')")
+    page.locator('.workspace-project-row .tool-menu > summary').first.click()
     page.locator('[data-action=edit-project]').first.click()
     expect(page.locator('#project-form')).to_be_visible()
 
@@ -162,8 +214,8 @@ def test_old_project_save_cannot_close_or_replace_new_dialog(app_page):
     page.click('#save-project')
     page.wait_for_function('!!window.finishOldSave')
     # Explicitly leave an in-flight editor; the late save still must not replace the next view.
-    page.once('dialog', lambda dialog: dialog.accept())
     page.locator('.modal-header [data-action=close-modal]').click()
+    page.locator('dialog.ui-sheet button[type="submit"]').click()
     page.locator('[data-action=add-project]').first.click()
     page.fill('#project-form [name=alias]','SecondUnsavedMapping')
     page.fill('#project-form [name=root]','/fixture/second')
@@ -219,7 +271,7 @@ def test_pending_project_validation_reuses_same_save_receipt(app_page, confirmat
     page.click('#save-project')
     page.wait_for_function("typeof window.finishPendingProjectSave==='function'")
     assert page.evaluate('initialPendingState') == {
-        'text': '正在等待节点完成目录验证，完成后自动保存映射…',
+        'text': '正在等待电脑检查目录…',
         'enabled': True,
     }
     expect(page.locator('#project-form')).to_be_visible()
@@ -240,7 +292,7 @@ def test_unknown_project_save_does_not_send_changed_configuration(app_page):
     expect(page.locator('#save-project')).to_be_enabled()
     page.fill('#project-form [name=alias]','DoNotReplayDifferentConfig')
     page.click('#save-project')
-    expect(page.locator('#project-form > [role=status]')).to_contain_text('原保存结果尚未核实')
+    expect(page.locator('#project-form > [role=status]')).to_contain_text('上次保存结果待确认')
     assert page.evaluate("calls.filter(call=>call.method==='PUT').length") == 1
 
 
@@ -255,10 +307,18 @@ def test_definite_project_rejection_allows_a_fresh_explicit_validation(app_page)
     open_project(page)
     page.click('#save-project')
     expect(page.locator('#project-form > [role=status]')).to_contain_text('permission rejected')
-    expect(page.locator('#project-roots-manager .agent-roots')).to_be_visible()
-    expect(page.locator('#project-roots-manager [data-roots-state]')).to_have_text('已生效')
-    page.click('#save-project')
+    page.locator('dialog.ui-sheet button[type="submit"]').click()
+    # Explicit approval validates and saves roots, then automatically resumes
+    # the rejected mapping with a new receipt. An empty save response would
+    # correctly remain uncertain rather than claim that permission was applied.
     expect(page.locator('#project-form')).to_have_count(0)
+    roots_requests = page.evaluate("calls.filter(call=>call.path.startsWith('/api/devices/node-one/roots')&&call.method==='POST')")
+    assert [request['path'] for request in roots_requests] == [
+        '/api/devices/node-one/roots/preview', '/api/devices/node-one/roots']
+    assert all(request['body']['path'] == '/fixture/one' for request in roots_requests)
+    assert all(request['body']['expected_sha256'] == 'a' * 64 for request in roots_requests)
+    assert roots_requests[0]['body']['idempotency_key'].startswith('roots-preview-')
+    assert roots_requests[1]['body']['idempotency_key'].startswith('roots-save-')
     requests = page.evaluate("calls.filter(call=>call.method==='PUT').map(call=>call.body)")
     assert len(requests) == 2
     assert requests[0]['idempotency_key'] != requests[1]['idempotency_key']
@@ -333,3 +393,27 @@ def test_network_failure_keeps_suspended_draft_hidden_until_authority_recheck(ap
     page.locator('[data-action=retry-identity]').click()
     expect(page.locator('#chat-compose')).to_have_value('PRIVATE_NETWORK_SUSPENDED')
     assert not page.evaluate("calls.some(c=>c.path.endsWith('/start')||c.path.endsWith('/chat_prompt'))")
+
+
+def test_editor_breadcrumbs_keep_cumulative_paths_and_unsaved_source(app_page):
+    page = app_page
+    path = 'src/nested<safe>/file.py'
+    source = 'unsaved = "<keep & preserve>"\n'
+    page.evaluate('''([path,source]) => {
+      S.work.project='project-one'; S.work.path=path;
+      S.work.content=source; S.work.original='old source'; S.work.dirty=true;
+      S.work.sha='a'.repeat(64); S.work.truncated=false;
+      document.querySelector('#page').innerHTML=editorHTML();
+    }''', [path, source])
+    links = page.locator('.editor-path-directory')
+    expect(links).to_have_count(2)
+    expect(links.nth(0)).to_have_attribute('data-path', 'src')
+    expect(links.nth(1)).to_have_attribute('data-path', 'src/nested<safe>')
+    expect(links.nth(1)).to_have_attribute('data-action', 'tree-dir')
+    expect(links.nth(1)).to_have_text('nested<safe>')
+    expect(page.locator('.editor-path-leaf')).to_have_text('file.py')
+    expect(page.locator('.editor-path safe')).to_have_count(0)
+    expect(page.locator('#code-editor')).to_have_value(source)
+    expect(page.locator('#dirty-state')).to_have_attribute('data-dirty', 'true')
+    assert page.evaluate('S.work.content') == source
+    assert page.evaluate('S.work.original') == 'old source'

@@ -30,6 +30,60 @@
   font-size: var(--ui-text-xs, 12px);
   font-weight: var(--ui-weight-semibold, 600);
 }
+/* CLI choice for a new chat, next to the project. Same look as the panel's
+   segmented control, but on --chat-* tokens: the standalone chat page does
+   not load the panel stylesheet. */
+.chat-new-context .chat-cli-segmented {
+  display: flex;
+  gap: 3px;
+  justify-self: end;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-small, 8px);
+  background: var(--chat-surface);
+}
+.chat-new-context .chat-cli-segmented button {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--ui-radius-xs, 6px);
+  background: transparent;
+  color: var(--chat-muted);
+  font: inherit;
+  font-size: var(--ui-text-xs, 12px);
+  font-weight: var(--ui-weight-medium, 500);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chat-new-context .chat-cli-segmented button:hover {
+  color: var(--chat-fg);
+}
+.chat-new-context .chat-cli-segmented button[aria-pressed='true'] {
+  background: var(--chat-raised);
+  color: var(--chat-fg);
+  font-weight: var(--ui-weight-semibold, 600);
+  box-shadow: var(--ui-elev-1, none);
+}
+.chat-new-context .chat-cli-segmented button:focus-visible {
+  outline: 2px solid var(--chat-accent);
+  outline-offset: 1px;
+}
+@media (pointer: coarse) {
+  .chat-new-context .chat-cli-segmented button {
+    min-height: var(--ui-touch-target, 44px);
+  }
+}
+@media (max-width: 520px) {
+  .chat-new-context .chat-cli-segmented {
+    grid-column: 1/-1;
+    justify-self: stretch;
+    width: 100%;
+  }
+  .chat-new-context .chat-cli-segmented button {
+    flex: 1;
+  }
+}
 #chat-target-info {
   grid-column: 1/-1;
   overflow: hidden;

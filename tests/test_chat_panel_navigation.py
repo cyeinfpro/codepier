@@ -22,7 +22,8 @@ def test_panel_return_is_visible_with_history_hidden_or_open(chat_page, width, h
     back = page.get_by_role('button', name='返回面板', exact=True)
     expect(back).to_be_visible()
     box = back.bounding_box()
-    assert box['width'] >= 100 and box['height'] >= 44
+    # At 360px and below the button is icon-only (still a 44px target, still named).
+    assert box['width'] >= (44 if width <= 360 else 100) and box['height'] >= 44
     assert 0 <= box['y'] < 30
     page.click('#chat-history-toggle')
     back.click(trial=True)

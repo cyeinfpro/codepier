@@ -7,11 +7,14 @@
 .roots-heading,
 .roots-toolbar,
 .roots-row,
-.roots-row-actions,
 .roots-editor-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+.roots-row-actions {
+  display: flex;
+  align-items: center;
 }
 
 .roots-heading,

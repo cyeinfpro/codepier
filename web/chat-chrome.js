@@ -105,7 +105,15 @@ function chatMountChrome() {
       signal.addEventListener('abort', () => media.removeListener(listener), { once: true });
     }
   }
-  $('#chat-command-menu').addEventListener('click', chatPalette, { signal });
+  $('#chat-command-menu').addEventListener(
+    'click',
+    () => {
+      if (typeof uiCommand === 'function')
+        uiCommand().catch((err) => chatStatus(err.message, true));
+      else chatPalette();
+    },
+    { signal },
+  );
   c.resizeObserver = new ResizeObserver(() => chatScheduleLayout());
   for (const el of [root, $('.chat-composer-wrap'), $('.chat-header')])
     if (el) c.resizeObserver.observe(el);
@@ -145,6 +153,13 @@ function chatMountChrome() {
   c.mobileMedia.addEventListener(
     'change',
     () => {
+      // A queued breakpoint event can arrive after /model opens. Keep its
+      // settings anchor visible and its search focused while CSS adapts.
+      if (!$('#chat-popover').hidden && c.popoverAnchor === 'chat-model-picker') {
+        chatResizeComposer();
+        chatScheduleLayout();
+        return;
+      }
       const panel = $('#chat-options'),
         directoryOpen = !$('#chat-popover').hidden && c.popoverAnchor === 'chat-cwd-button',
         restore =
@@ -167,7 +182,6 @@ function chatMountChrome() {
 function chatOptions(open, restoreFocus = false) {
   const panel = $('#chat-options');
   if (!panel) return;
-  const mobile = innerWidth <= 760;
   open = !!open;
   if (open) {
     chatClosePopover();
@@ -177,7 +191,8 @@ function chatOptions(open, restoreFocus = false) {
     $('.chat-overflow').open = false;
   }
   panel.classList.toggle('is-open', open);
-  panel.setAttribute('role', mobile ? 'dialog' : 'region');
+  panel.setAttribute('role', 'dialog');
+  panel.inert = !open;
   panel.setAttribute('aria-hidden', String(!open));
   $('#chat-options-toggle').setAttribute('aria-expanded', String(open));
   $('#chat-options-shade').hidden = !open;
@@ -264,7 +279,7 @@ function chatSyncChrome() {
     draftLimit = chatDraftLimit(v);
   const processBlocked = {
     stopping: '正在等待会话进程退出',
-    orphaned: '会话进程状态待核实，请先检查节点',
+    orphaned: '会话进程状态待核实，请先检查电脑',
   }[c.selected?.status];
   const blocked =
     (v.resumeBusy && '正在恢复会话') ||
@@ -381,7 +396,8 @@ function chatInteractionKey(e) {
     root = $('#chat-root'),
     box = $('#chat-popover'),
     key = e.key.toLowerCase();
-  if ((e.metaKey || e.ctrlKey) && key === 'k') {
+  // The panel owns Cmd/Ctrl+K. Keep only a standalone-chat fallback.
+  if ((e.metaKey || e.ctrlKey) && key === 'k' && typeof uiCommand !== 'function') {
     e.preventDefault();
     e.stopPropagation();
     chatPalette();
@@ -587,6 +603,16 @@ function chatPalette() {
     { label: '搜索当前对话', hint: modifier + ' F', action: () => chatFindToggle(true) },
     { label: '消息队列', hint: '会话', action: () => chatInspector('queue') },
     { label: '文件与图片', hint: '会话', action: () => chatInspector('files') },
+    // After the built-in actions (keeps their order): start a new chat directly on a given CLI, in the current project.
+    ...[
+      ['pi', 'Pi'],
+      ['codex', 'Codex'],
+      ['claude', 'Claude Code'],
+    ].map(([provider, name]) => ({
+      label: '用 ' + name + ' 新建对话',
+      hint: 'CLI',
+      action: () => chatNewSession(ChatUI.project, provider),
+    })),
     ...ChatUI.rows.map((row) => ({
       label: row.title || '新对话',
       hint: chatProjectInfo(row.project_id || ChatUI.project, row).alias + ' · ' + row.provider,
@@ -594,7 +620,11 @@ function chatPalette() {
     })),
     ...(typeof nav !== 'undefined'
       ? nav
-          .filter((n) => n[0] !== 'native')
+          .filter(
+            (n) =>
+              n[0] !== 'native' &&
+              (typeof CodePierIdentity === 'undefined' || CodePierIdentity.canNavigate(n[0])),
+          )
           .map(([id, ico, label]) => ({ label, hint: '控制台', action: () => navigate(id) }))
       : []),
   ];
@@ -640,7 +670,7 @@ function chatPalette() {
   });
   dialog.addEventListener('keydown', (e) => {
     if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) {
       e.preventDefault();
       e.stopPropagation();
       close();

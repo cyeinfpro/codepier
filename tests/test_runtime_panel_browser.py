@@ -22,7 +22,10 @@ def runtime_page(request, chat_browser_pool, stack):
     page.on('pageerror', lambda error: errors.append(error.stack or str(error)))
     login(page, stack)
     page.evaluate("navigate('projects')")
-    page.locator('[data-runtime-project="' + stack.project['id'] + '"]').click()
+    # 「执行环境」 sits in the project card's 「更多」 menu.
+    button = page.locator('[data-runtime-project="' + stack.project['id'] + '"]')
+    page.locator('details.tool-menu').filter(has=button).locator('> summary').click()
+    button.click()
     expect(page.locator('#project-runtime-form')).to_be_visible()
     expect(page.locator('[data-runtime-state]')).to_have_text('已生效', timeout=25000)
     yield page, engine, width
@@ -64,8 +67,8 @@ def test_container_requirements_and_cancel_do_not_change_mode(runtime_page, stac
     page.on('request', lambda req: writes.append(req) if req.method == 'PUT' and req.url.endswith(endpoint(stack)) else None)
     page.locator('[data-runtime-save]').click()
     assert len(writes) == 0  # Required fields are enforced before submission.
-    page.once('dialog', lambda dialog: dialog.accept())
     page.locator('[data-runtime-cancel]').click()
+    page.locator('dialog.ui-sheet button[type="submit"]').click()
     expect(form).to_have_count(0)
     assert snapshot(stack)['revision'] == before
 
@@ -140,7 +143,9 @@ def test_page_reload_recovers_only_original_opaque_save_receipt(runtime_page, st
     assert project_id == stack.project['id']
     assert set(record) == {'idempotency_key', 'created_at'}
     page.reload()
-    page.locator('[data-runtime-project="' + stack.project['id'] + '"]').click(timeout=25000)
+    button = page.locator('[data-runtime-project="' + stack.project['id'] + '"]')
+    page.locator('details.tool-menu').filter(has=button).locator('> summary').click(timeout=25000)
+    button.click(timeout=25000)
     expect(page.locator('[data-runtime-state]')).to_have_text('已生效', timeout=35000)
     expect(page.locator('[data-runtime-current]')).to_contain_text('兼容模式')
     assert len(writes) == 1
@@ -222,7 +227,7 @@ def test_initial_offline_observation_recovers_without_any_write(runtime_page, st
     page.route('**' + endpoint(stack), temporary_offline)
     with page.expect_response(lambda response: response.request.method == 'GET' and response.url.endswith(endpoint(stack))):
         page.locator('[data-runtime-refresh]').click()
-    expect(page.locator('[data-runtime-state]')).to_have_text('节点离线')
+    expect(page.locator('[data-runtime-state]')).to_have_text('电脑离线')
     expect(page.locator('[data-runtime-state]')).to_have_text('已生效', timeout=20000)
     expect(page.locator('[data-runtime-current]')).to_contain_text('清洁模式')
     assert len(reads) >= 2 and not writes

@@ -1,8 +1,30 @@
 function chatApproval(item) {
   if (!item.node) return;
-  item.node.querySelectorAll('.chat-approval-actions').forEach((node) => node.remove());
-  const data = item.data,
-    box = document.createElement('div');
+  item.node
+    .querySelectorAll('.chat-approval-actions, .chat-approval-kv')
+    .forEach((node) => node.remove());
+  const data = item.data;
+  const cmd = data.details?.command || data.command;
+  const cwd = data.details?.cwd || data.cwd;
+  const risk = data.details?.risk || data.details?.reason;
+  if (cmd || cwd || risk) {
+    const kv = document.createElement('dl');
+    kv.className = 'chat-approval-kv';
+    for (const [label, val] of [
+      ['执行命令', cmd],
+      ['作用目录', cwd],
+      ['风险提示', risk],
+    ]) {
+      if (!val) continue;
+      const dt = document.createElement('dt'),
+        dd = document.createElement('dd');
+      dt.textContent = label;
+      dd.textContent = typeof val === 'string' ? val : JSON.stringify(val);
+      kv.append(dt, dd);
+    }
+    if (kv.childElementCount) item.node.append(kv);
+  }
+  const box = document.createElement('div');
   box.className = 'chat-approval-actions';
   if (data.resolved || item.answered) {
     box.textContent = data.resolution === 'closed' ? '此请求已结束' : '回答已提交，等待原生处理';
@@ -177,7 +199,7 @@ function chatApproval(item) {
     }
     if (!choices.length) {
       const note = document.createElement('p');
-      note.textContent = '此原生请求没有可用选项。可中断当前任务后，在节点本机 CLI 处理此操作。';
+      note.textContent = '此原生请求没有可用选项。可中断当前任务后，在电脑本机 CLI 处理此操作。';
       box.append(note);
     }
   }

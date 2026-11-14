@@ -104,7 +104,7 @@ async function chatUploadEntry(
   const valid = () => {
     if (S.session !== identity || entry.removed) return false;
     if (entry.mapping !== mapping())
-      throw new Error('项目映射已改变，上传已停止。请核对工作项目后移除并重新添加附件。');
+      throw new Error('项目已改变，上传已停止。请核对工作项目后移除并重新添加附件。');
     return true;
   };
   entry.uploading = true;

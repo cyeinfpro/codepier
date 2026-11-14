@@ -7,6 +7,7 @@ Neither the production index nor the static router exposes the old UI. No test
 assertion is skipped: historical journeys keep exercising their original wire
 semantics while the default room journeys cover the new single write surface.
 """
+import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -46,8 +47,28 @@ LEGACY_ASSETS = '''
 '''.replace('/static/', LEGACY_PREFIX)
 
 
+ROOM_ASSET = re.compile(r'^/static/collaboration-room(?:-store)?\.(?:js|css)(?:\?.*)?$')
+ROUTE_ASSETS = re.compile(
+    r'(<script id="codepier-route-assets" type="application/json">)(.*?)(</script>)', re.S)
+
+
+def _drop_room_route_group(source):
+    """Remove the lazily loaded room group; return (source, assets removed)."""
+    match = ROUTE_ASSETS.search(source)
+    if not match:
+        return source, []
+    groups = json.loads(match.group(2))
+    room = groups.pop('collaboration', [])
+    if not room or not all(ROOM_ASSET.match(url) for url in room):
+        return source, []
+    body = json.dumps(groups, ensure_ascii=False, separators=(',', ':')).replace('</', '<\\/')
+    return source[:match.start(2)] + body + source[match.end(2):], room
+
+
 def legacy_document(source):
     """Use the unmodified old bytes; do not synthesize app or API behavior."""
+    # The room UI used to be three entry tags; it is now a lazy route group in
+    # the codepier-route-assets manifest. Either way it must not load here.
     source, scripts = re.subn(
         r'<script\b[^>]*src="/static/collaboration-room(?:-store)?\.js(?:\?[^" ]*)?"[^>]*>\s*</script>',
         '', source,
@@ -56,6 +77,9 @@ def legacy_document(source):
         r'<link\b[^>]*href="/static/collaboration-room\.css(?:\?[^" ]*)?"[^>]*>',
         '', source,
     )
+    source, routed = _drop_room_route_group(source)
+    scripts += sum(1 for url in routed if '.js' in url)
+    styles += sum(1 for url in routed if '.css' in url)
     assert scripts == 2 and styles == 1, 'Expected the default room entry assets'
     marker = '<script src="/static/app.js'
     assert marker in source, 'Expected the real app entry point'

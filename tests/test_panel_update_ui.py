@@ -115,9 +115,11 @@ def test_update_confirmation_single_submission_restart_recovery_and_escaping(upd
         page.click('#panel-update-release summary')
         expect(page.locator('#panel-update-notes')).to_have_text('<img src=x onerror=alert(1)>\nRelease notes')
         expect(page.locator('#panel-update-notes img')).to_have_count(0)
-        page.once('dialog',lambda dialog:dialog.dismiss());page.click('#panel-update-apply')
+        page.click('#panel-update-apply')
+        page.locator('dialog.ui-sheet .ghost').click()
         assert calls==[]
-        page.once('dialog',lambda dialog:dialog.accept());page.click('#panel-update-apply',delay=150)
+        page.click('#panel-update-apply',delay=150)
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#panel-update-state')).to_contain_text('正在构建')
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         assert len(calls)==1 and calls[0]['body']['confirmation']=='1.11.0'
@@ -254,8 +256,8 @@ def test_agent_auto_update_opt_out_is_preserved_in_original_request(update_brows
     page,calls,errors=open_settings(browser,stack,state,post_handler=post)
     try:
         page.uncheck('#panel-update-agents')
-        page.once('dialog',lambda dialog:dialog.accept())
         page.click('#panel-update-apply')
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#panel-update-agents')).to_be_disabled()
         assert len(calls)==1 and calls[0]['body']['update_agents'] is False
         page.reload();show_update_controls(page)
@@ -295,13 +297,14 @@ def test_top_entry_direct_apply_double_click_and_original_receipt(update_browser
         page.evaluate("navigate('overview')")
         expect(page.locator('#page h1')).to_have_text('总览')
         entry=page.locator('[data-panel-update-open]')
-        page.on('dialog',lambda dialog:(dialogs.append(dialog.message),dialog.accept()))
         entry.dblclick()
         assert not calls
         page.uncheck('#panel-update-float-agents')
         page.locator('#panel-update-float-apply').dblclick()
+        expect(page.locator('dialog.ui-sheet')).to_have_count(1)
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#panel-update-float-state')).to_contain_text('正在构建')
-        assert len(calls)==1 and len(dialogs)==1
+        assert len(calls)==1
         original=copy.deepcopy(calls[0]['body'])
         assert calls[0]['path']=='/api/panel-update/apply'
         assert original['confirmation']=='1.11.0' and original['update_agents'] is False
@@ -419,8 +422,8 @@ def test_top_entry_lost_response_recovers_without_post_replay(update_browser,sta
     try:
         page.evaluate("navigate('overview')")
         page.locator('[data-panel-update-open]').click()
-        page.once('dialog', lambda dialog: dialog.accept())
         page.click('#panel-update-float-apply')
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#panel-update-float-state')).to_contain_text('原更新处理中')
         key=calls[0]['body']['idempotency_key']
         offline=True
@@ -631,8 +634,9 @@ def test_top_discovery_click_checks_exact_release_then_applies_once(update_brows
         entry.dblclick()
         assert not calls
         page.uncheck('#panel-update-float-agents')
-        page.once('dialog', lambda dialog: dialog.accept())
         page.locator('#panel-update-float-apply').dblclick()
+        expect(page.locator('dialog.ui-sheet')).to_have_count(1)
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         expect(page.locator('#panel-update-float-state')).to_contain_text('核验所选发布')
         assert len(calls)==1 and calls[0]['path'].endswith('/check')
         check_key=calls[0]['body']['idempotency_key']
@@ -711,5 +715,51 @@ def test_legacy_host_notice_and_engine_activation_are_not_hidden(update_browser,
         expect(page.locator('#panel-update-state')).to_contain_text('请等待就绪回执')
         expect(page.locator('#panel-update-apply')).to_be_disabled()
         assert not calls and not errors
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("context_change", ["session", "space"])
+def test_reload_confirmation_cannot_discard_a_new_session_draft(update_browser, stack, context_change):
+    browser, _ = update_browser
+    page, calls, errors = open_settings(browser, stack, ready())
+    try:
+        initial_url = page.url
+        page.evaluate('''() => {
+          S.work.dirty=true;
+          window.reloadConsentDone=document.querySelector('#panel-update-reload').onclick();
+        }''')
+        expect(page.locator('dialog.ui-sheet')).to_be_visible()
+        page.evaluate('''change => {
+          if(change==='session') {
+            CodePierPanelUpdate.detach(true);
+            S.session={...S.session,user_id:'new-owner'};
+          } else S.space_id='new-space';
+          S.work.content='NEW_SESSION_UNSAVED_SOURCE';
+        }''', context_change)
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
+        page.wait_for_timeout(250)
+        assert page.url == initial_url
+        assert page.evaluate('S.work.content') == 'NEW_SESSION_UNSAVED_SOURCE'
+        assert calls == []
+        assert errors == []
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize('action', ['apply', 'rollback'])
+def test_update_confirmation_stays_bound_to_original_space(update_browser, stack, action):
+    browser, _ = update_browser
+    state = ready()
+    state['rollback_available'] = {'version': '1.9.0'}
+    page, calls, errors = open_settings(browser, stack, state)
+    try:
+        page.locator('#panel-update-' + action).click()
+        expect(page.locator('dialog.ui-sheet')).to_be_visible()
+        page.evaluate("S.space_id='different-space'")
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
+        page.wait_for_timeout(250)
+        assert calls == []
+        assert errors == []
     finally:
         page.close()

@@ -760,19 +760,22 @@ const wakeEvidenceLabels = {
 const channelSteps = [
   ['扫码', ['choose_account', 'scan', 'confirm_account', 'needs_reconnect']],
   [
-    '确认范围',
+    '确认范围与绑定',
+    ['choose_member', 'waiting_member', 'waiting_project', 'route_conflict', 'confirm_binding'],
+  ],
+  [
+    '发送配对码',
     [
-      'choose_member',
-      'waiting_member',
-      'waiting_project',
-      'route_conflict',
-      'confirm_binding',
       'pairing',
       'pairing_expired',
       'confirm_owner',
+      'ready',
+      'paused',
+      'disconnected',
+      'closed',
+      'cancelled',
     ],
   ],
-  ['完成', ['ready', 'paused', 'disconnected', 'closed', 'cancelled']],
 ];
 const channelCopy = {
   choose_account: ['连接你的微信', '用手机微信扫码登录，或选择已登记的微信。'],
@@ -1196,27 +1199,14 @@ function bind() {
         applyPermissionLevel(event.target, event.target.value);
         updatePermissionControls();
       }
-      if (event.target.matches('[data-permission-project], [data-permission-select-all]')) {
-        const { target } = event;
-        const section = target.closest('[data-permission-section]');
-        const projects = target.matches('[data-permission-project]')
-          ? [target]
-          : section.querySelectorAll('[data-permission-project]:not(:disabled)');
-        for (const project of projects) {
-          const select = project
-            .closest('[data-permission-row]')
-            .querySelector('[data-permission-level]');
-          if (!target.checked || !select.value)
-            applyPermissionLevel(select, target.checked ? 'read' : '');
-        }
-        updatePermissionControls();
-      }
       if (event.target.matches('[data-permission-bulk-level]')) {
+        // 「全部项目设为」: every grantable project gets the highest level it
+        // allows within the requested one; 「不加入」 removes them all.
         const section = event.target.closest('[data-permission-section]');
         const requested = permissionLevels[event.target.value]?.[1];
         if (!requested) return;
         for (const project of section.querySelectorAll(
-          '[data-permission-project]:checked:not(:disabled)',
+          '[data-permission-project]:not(:disabled)',
         )) {
           const select = project
             .closest('[data-permission-row]')

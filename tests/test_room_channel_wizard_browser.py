@@ -181,7 +181,6 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         assert initial['configured'] and initial['version'] == 0
         assert not initial['scope']['project_scopes']
         room_section = page.locator('[data-permission-section="room"]')
-        room_section.locator('[data-permission-select-all]').check()
         room_section.locator('[data-permission-bulk-level]').select_option('execute')
         # "All" respects each project's upper bound, including read-only rows.
         for project in initial['available_projects']:
@@ -205,7 +204,7 @@ def test_unified_room_permissions_bulk_channel_modes_and_return(
         first_id, second_id = [project['id'] for project in stack.projects[:2]]
         first = room_section.locator(f'[data-permission-row][data-project-id="{first_id}"]')
         second = room_section.locator(f'[data-permission-row][data-project-id="{second_id}"]')
-        first.locator('[data-permission-project]').check()
+        first.locator('[data-permission-level]').select_option('read')
         expect(first.locator('[data-permission-level]')).to_have_value('read')
         expect(first.locator('[data-permission-level]')).to_have_value('read')
         expect(second.locator('[data-permission-level]')).to_have_value('')

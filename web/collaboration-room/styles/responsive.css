@@ -264,12 +264,54 @@
 }
 
 .cr-work-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: min(820px, calc(100% - 56px));
+  margin: 4px auto 0;
+  padding: 6px 12px;
+  border: 1px solid var(--cr-line);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-side);
   flex: 0 0 auto;
-  padding: 4px 16px;
-  border-top: 1px solid var(--cr-line);
 }
 .cr-work-bar .cr-button {
   justify-content: flex-start;
+  min-height: 28px;
+}
+.cr-work-bar > span:last-child {
+  display: inline-flex;
+  flex: none;
+}
+.cr-work-bar-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cr-work-bar-summary small {
+  flex: none;
+}
+.cr-work-bar-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .cr-work-bar .cr-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .cr-work-bar {
+    width: auto;
+    margin: 4px 10px 0;
+  }
 }
 .cr-create-projects,
 .cr-permission-bulk {

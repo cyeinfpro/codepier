@@ -78,6 +78,9 @@ const S = {
     task: '',
     operation: null,
     console: '',
+    terminalSize: 'compact',
+    explorerWidth: 240,
+    explorerCollapsed: false,
   },
   poll: null,
   modalCleanup: null,
@@ -122,6 +125,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function networkState(text, online = false) {
   if ($('#event-state')) $('#event-state').textContent = text;
   if ($('#event-dot')) $('#event-dot').className = 'dot ' + (online ? 'online' : 'offline');
+  if ($('.transport')) $('.transport').dataset.online = String(!!online);
   if ($('#topbar-refresh')) $('#topbar-refresh').hidden = online;
 }
 function sessionChanged() {
@@ -169,6 +173,10 @@ function discardLocalWork(owner = sessionOwner(S.session) || S.suspendedUser) {
   taskSessionValue('codepier-task-submission', null, owner);
 }
 function clearSpaceSnapshots() {
+  clearTimeout(S.activityTimer);
+  S.activityRevision = (S.activityRevision || 0) + 1;
+  S.activeOps = new Set();
+  S.activeOpsSeed = 0;
   window.CodePierProjectRuntime?.reset();
   window.CodePierSettings?.reset();
   invalidateBasics();
@@ -452,7 +460,7 @@ function renderLogin(configured = true) {
   closeModal();
   document.title = '登录 · CodePier';
   $('#app').innerHTML =
-    `<main class="login-screen"><section class="login-panel">${brand}<h1>登录</h1><div id="oidc-login-buttons" aria-label="外部身份登录"></div>${appearanceControl()}${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">登录 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : ''}</section></main>`;
+    `<main class="login-screen"><section class="login-panel"><div class="login-head">${brand}${appearanceControl()}</div><h1>登录工作区</h1><div id="oidc-login-buttons" aria-label="外部身份登录"></div>${!configured ? notice('请先在服务器运行 <code>python -m hub init</code> 初始化账号。') : ''}<form id="login-form"><div class="field"><label for="username">账号</label><input id="username" name="username" autocomplete="username" placeholder="输入账号" required maxlength="80"></div><div class="field"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入密码"></div><p id="login-error" class="error-text" role="alert"></p><button class="btn primary" type="submit">登录 ${icon('arrow')}</button></form><div class="spacer"></div>${location.protocol === 'http:' ? notice('HTTP 连接未加密，请在可信网络或 SSH 转发中使用。') : ''}</section></main>`;
   uiLabelFields($('#login-form'));
   CodePierIdentity.loginButtons();
   $('#login-form').addEventListener('submit', async (e) => {
@@ -513,7 +521,7 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><button type="button" class="avatar" data-nav="identity" aria-label="我的账号">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</button><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制" hidden>${icon('device')}</button><button class="icon-btn" data-action="refresh" id="topbar-refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport" data-online="false"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><button type="button" class="avatar" data-nav="identity" aria-label="我的账号">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</button><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-group" class="breadcrumb-group" hidden></span><span id="breadcrumb-group-sep" class="breadcrumb-group" hidden>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制" hidden>${icon('device')}</button><button class="icon-btn" data-action="refresh" id="topbar-refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   uiSetMenu(false, false);
   uiSyncNavigation();
   CodePierIdentity.bindShell();
@@ -684,6 +692,55 @@ async function bootAuthenticated() {
     await consentModal(authId);
   }
 }
+// Sidebar status dot: 「操作审计」 shows a dot only while operations are
+// running. The overview gives a count; live events then track ids.
+function navActivitySync() {
+  const busy = (S.activeOps?.size || 0) > 0 || (S.activeOpsSeed || 0) > 0;
+  $$('.nav [data-nav-group="audit"]').forEach((button) => {
+    if (busy) {
+      button.dataset.hasActivity = 'true';
+      button.title = '有进行中的操作';
+    } else {
+      delete button.dataset.hasActivity;
+      button.removeAttribute('title');
+    }
+  });
+}
+const NAV_ACTIVE_STATES = ['queued', 'running', 'reconnecting', 'cancelling'];
+function navActivitySeed(count, rows = []) {
+  clearTimeout(S.activityTimer);
+  S.activityRevision = (S.activityRevision || 0) + 1;
+  S.activeOps = new Set(
+    rows.filter((row) => NAV_ACTIVE_STATES.includes(row.state)).map((row) => row.id),
+  );
+  S.activeOpsSeed = Math.max(0, (Number(count) || 0) - S.activeOps.size);
+  navActivitySync();
+}
+function navActivityOperation(data) {
+  if (!data?.id) return;
+  S.activityRevision = (S.activityRevision || 0) + 1;
+  S.activeOps ||= new Set();
+  if (NAV_ACTIVE_STATES.includes(data.state)) S.activeOps.add(data.id);
+  else S.activeOps.delete(data.id);
+  navActivitySync();
+  // A count-only snapshot cannot identify which terminal event consumed it.
+  // Reconcile unknown ids instead of double-counting or decrementing unrelated events.
+  if (S.activeOpsSeed > 0) {
+    clearTimeout(S.activityTimer);
+    const login = S.session,
+      space = S.space_id,
+      revision = S.activityRevision;
+    S.activityTimer = setTimeout(async () => {
+      try {
+        const snapshot = await api('/api/overview?include_token_usage=false');
+        if (S.session === login && S.space_id === space && S.activityRevision === revision)
+          navActivitySeed(snapshot.active_operations, snapshot.recent_operations || []);
+      } catch {
+        /* Keep the last observed indicator when disconnected. */
+      }
+    }, 100);
+  }
+}
 function connectEvents() {
   stopEvents();
   const session = S.session,
@@ -800,6 +857,7 @@ function connectEvents() {
     } catch {
       return;
     }
+    if (m.type === 'operation') navActivityOperation(m.data);
     if (['device', 'project'].includes(m.type)) invalidateBasics();
     if (['device', 'workflow'].includes(m.type))
       window.dispatchEvent(new CustomEvent('cp:event', { detail: m }));
@@ -856,17 +914,30 @@ async function navigate(page) {
   S.vpsIntent = (S.vpsIntent || 0) + 1;
   if (page === 'terminal') page = 'native';
   if (!S.session || !$('#page') || !nav.some((x) => x[0] === page)) return;
-  if (page !== S.page && $('.modal') && !panelDialogs.requestClose(null, { navigation: true }))
+  if (
+    page !== S.page &&
+    $('.modal') &&
+    !(await panelDialogs.requestClose(null, { navigation: true }))
+  )
     return;
   if (
     S.page === 'workbench' &&
     S.work.dirty &&
-    !confirm('文件尚未保存，草稿会保留在本标签页。继续离开？')
+    !(await uiConfirmAction({
+      title: '离开当前文件？',
+      body: '文件尚未保存，草稿会保留在本标签页中。',
+      confirmLabel: '继续离开',
+      danger: true,
+    }))
   ) {
     history.replaceState(null, '', location.pathname + location.search + '#' + S.page);
     return;
   }
-  if (S.page === 'settings' && page !== S.page && !window.CodePierSettings?.requestLeave()) {
+  if (
+    S.page === 'settings' &&
+    page !== S.page &&
+    !(await window.CodePierSettings?.requestLeave())
+  ) {
     history.replaceState(null, '', location.pathname + location.search + '#settings');
     return;
   }
@@ -874,6 +945,14 @@ async function navigate(page) {
   const changed = page !== S.page;
   S.page = page;
   location.hash = page;
+  const parentGroup = tabParent[page];
+  const groupTitle =
+    parentGroup === 'connect' ? '连接' : parentGroup === 'members' ? '成员与权限' : '';
+  if ($('#breadcrumb-group')) {
+    $('#breadcrumb-group').textContent = groupTitle;
+    $('#breadcrumb-group').hidden = !groupTitle;
+  }
+  if ($('#breadcrumb-group-sep')) $('#breadcrumb-group-sep').hidden = !groupTitle;
   $('#breadcrumb-page').textContent = nav.find((x) => x[0] === page)[2];
   uiSetMenu(false, false);
   uiSyncNavigation();
@@ -918,13 +997,15 @@ async function renderPage(showLoading = true) {
     $('#page').innerHTML = uiLoadingPage(page);
   }
   try {
-    await window.CodePierAssets.load(page);
+    await window.CodePierAssets?.load(page);
     if (seq !== S.renderSeq || !S.session || page !== S.page) return;
     let html = '';
     if (['identity', 'members', 'identity-admin'].includes(page)) {
       html = await CodePierIdentity.html(page);
     } else if (page === 'overview') {
       S.overview = await api('/api/overview?include_token_usage=false');
+      if (seq === S.renderSeq && S.session && page === S.page)
+        navActivitySeed(S.overview.active_operations, S.overview.recent_operations || []);
       S.overview.token_usage = { loading: true };
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
@@ -1024,40 +1105,56 @@ function operationsTable(rows) {
   return `<div class="table-scroll" role="region" aria-label="操作记录，可滚动查看更多" tabindex="0"><table class="data-table"><thead><tr><th>操作</th><th>项目 / 范围</th><th>调用来源</th><th>时间</th><th>状态</th><th></th></tr></thead><tbody>${rows
     .map((r) => {
       const lifecycle = r.tool?.startsWith('agent_');
-      return `<tr data-cp-key="operation:${esc(r.id)}"><td><div class="table-tool">${icon(lifecycle ? 'device' : r.tool?.startsWith('fs_') ? 'file' : r.tool?.startsWith('tasks_') ? 'terminal' : 'code')}<span class="mono">${esc(r.tool)}</span></div></td><td>${esc(r.alias || (lifecycle ? '节点管理' : '目录验证'))}</td><td><span class="badge ${r.actor?.startsWith('mcp:') ? 'purple' : 'neutral'}">${r.actor?.startsWith('mcp:') ? 'MCP' : '面板'}</span></td><td class="muted mono tiny">${esc(shortTime(r.created))}</td><td>${badge(r.state)}</td><td><button class="icon-btn" data-action="operation-detail" data-id="${esc(r.id)}" aria-label="查看操作详情">${icon('arrow')}</button></td></tr>`;
+      return `<tr data-cp-key="operation:${esc(r.id)}"><td><div class="table-tool">${icon(lifecycle ? 'device' : r.tool?.startsWith('fs_') ? 'file' : r.tool?.startsWith('tasks_') ? 'terminal' : 'code')}<span class="mono">${esc(r.tool)}</span></div></td><td>${esc(r.alias || (lifecycle ? '电脑管理' : '目录验证'))}</td><td><span class="badge ${r.actor?.startsWith('mcp:') ? 'purple' : 'neutral'}">${r.actor?.startsWith('mcp:') ? 'MCP' : '面板'}</span></td><td class="muted mono tiny">${esc(shortTime(r.created))}</td><td>${badge(r.state)}</td><td><button class="icon-btn" data-action="operation-detail" data-id="${esc(r.id)}" aria-label="查看操作详情">${icon('arrow')}</button></td></tr>`;
     })
     .join('')}</tbody></table></div>`;
 }
 function onboardingHTML(o) {
   const connected = o.online_devices > 0 || o.devices.some((d) => d.last_seen);
+  const device = o.devices.find((d) => d.online) || o.devices.find((d) => d.last_seen);
+  const more = (list, label) => (list.length > 1 ? ` 等 ${list.length} ${label}` : '');
+  // [label, done, action, done summary, preview for steps not reached yet]
   const steps = [
     [
       '接入电脑',
       connected,
       '<button class="btn primary small" data-action="add-device">接入电脑</button>',
+      device ? esc(device.name) + more(o.devices, '台') : '已接入',
+      '在要使用的电脑上运行一条安装命令。',
     ],
     [
       '添加项目',
       o.projects.length > 0,
       '<button class="btn primary small" data-action="add-project">添加项目</button>',
+      o.projects.length ? esc(o.projects[0].alias) + more(o.projects, '个') : '已添加',
+      '选择电脑上的一个文件夹，并设置 AI 可以做什么。',
     ],
     [
       '在 ChatGPT 添加连接',
       o.active_grants > 0,
       `<div class="endpoint"><code>${esc(o.mcp_url)}</code><button class="icon-btn" data-action="copy-endpoint" data-url="${esc(o.mcp_url)}" aria-label="复制地址">${icon('copy')}</button></div><small>在 ChatGPT 中添加此地址并确认访问范围。</small>`,
+      o.active_grants > 1 ? `${o.active_grants} 个连接` : '已连接',
+      '复制 MCP 地址，在 ChatGPT 里添加并确认范围。',
     ],
   ];
   const next = steps.findIndex(([, done]) => !done);
   if (next === -1) return '';
-  const checklist = `<ol>${steps
-    .map(
-      ([label, done, action], index) =>
-        `<li class="${done ? 'done' : ''}" ${next === index ? 'aria-current="step"' : ''}><strong>${esc(label)}</strong>${done ? '<span>已完成</span>' : next === index ? action : ''}</li>`,
-    )
+  const doneCount = steps.filter(([, done]) => done).length;
+  const progress = `<div class="onboarding-progress"><span>${doneCount} / ${steps.length} 已完成</span><span class="onboarding-progress-bar" role="progressbar" aria-label="设置进度" aria-valuemin="0" aria-valuemax="${steps.length}" aria-valuenow="${doneCount}"><i style="width:${Math.round((doneCount / steps.length) * 100)}%"></i></span></div>`;
+  const checklist = `<ol class="onboarding-stepper">${steps
+    .map(([label, done, action, summary, preview], index) => {
+      const state = done ? 'done' : next === index ? 'current' : 'upcoming';
+      const body = done
+        ? `<span class="onboarding-step-done">${summary}</span>`
+        : next === index
+          ? action
+          : `<small class="onboarding-step-preview">${esc(preview)}</small>`;
+      return `<li class="${done ? 'done' : ''}" data-step-state="${state}" ${next === index ? 'aria-current="step"' : ''}><strong>${esc(label)}</strong>${body}</li>`;
+    })
     .join('')}</ol>`;
   if (o.devices.length)
-    return `<details id="overview-onboarding" class="panel onboarding onboarding-compact"><summary>继续设置 <strong>${esc(steps[next][0])}</strong></summary>${checklist}</details>`;
-  return `<section class="panel onboarding" aria-labelledby="onboarding-title"><h2 id="onboarding-title">开始使用</h2>${checklist}</section>`;
+    return `<details id="overview-onboarding" class="panel onboarding onboarding-compact"><summary>继续设置 <strong>${esc(steps[next][0])}</strong><span class="onboarding-summary-count">${doneCount} / ${steps.length}</span></summary>${checklist}</details>`;
+  return `<section class="panel onboarding" aria-labelledby="onboarding-title"><div class="onboarding-head"><h2 id="onboarding-title">开始使用</h2>${progress}</div>${checklist}</section>`;
 }
 function overviewHTML() {
   const o = S.overview;
@@ -1094,8 +1191,8 @@ function overviewHTML() {
           ? o.projects
               .slice(0, 4)
               .map(
-                (p, index) =>
-                  `<div class="project-mini"><span class="project-index">${String(index + 1).padStart(2, '0')}</span><div class="project-mini-main"><h3>${esc(p.alias)}</h3><p title="${esc(p.root)}">${esc(p.root)}</p><small>${esc(p.device_name)} · ${p.online ? '在线' : '离线'}</small></div><button class="icon-btn" data-action="open-project" data-id="${esc(p.id)}" aria-label="打开 ${esc(p.alias)}">${icon('arrow')}</button></div>`,
+                (p) =>
+                  `<div class="project-mini"><span class="project-index" aria-hidden="true">${icon('folder')}<i class="dot ${p.online ? 'online' : 'offline'}"></i></span><div class="project-mini-main"><h3>${esc(p.alias)}</h3><small>${esc(p.device_name)} · ${p.online ? '在线' : '离线'}</small><p title="${esc(p.root)}">${esc(p.root)}</p></div><button class="icon-btn" data-action="open-project" data-id="${esc(p.id)}" aria-label="打开 ${esc(p.alias)}">${icon('arrow')}</button></div>`,
               )
               .join('')
           : empty('添加项目，开始远程开发。', 'add-project', '添加项目')
@@ -1107,9 +1204,18 @@ function devicesHTML() {
   const cards = S.devices
     .map((d) => {
       const info = d.info || {};
+      const osRaw = String(info.platform || '').toLowerCase();
+      const osTag =
+        osRaw.includes('darwin') || osRaw.includes('mac')
+          ? 'macOS'
+          : osRaw.includes('win')
+            ? 'Win'
+            : osRaw.includes('linux')
+              ? 'Linux'
+              : '';
       const state = !d.enabled ? 'disabled' : d.online ? 'online' : 'offline';
       return `<article class="panel device-card workspace-device" data-cp-key="device:${esc(d.id)}" data-device-state="${state}">
-      <header class="workspace-device-head"><div class="device-symbol workspace-device-symbol">${icon('device')}</div><div class="workspace-device-title">${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}<h2>${esc(d.name)}</h2></div></header>
+      <header class="workspace-device-head"><div class="device-symbol workspace-device-symbol">${icon('device')}${osTag ? `<span class="workspace-device-os">${osTag}</span>` : ''}</div><div class="workspace-device-title">${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}<h2>${esc(d.name)}</h2></div></header>
       <dl class="card-meta workspace-device-facts"><div><dt>平台 / 主机</dt><dd>${esc(info.platform || '等待上线')} · ${esc(info.hostname || '—')}</dd></div><div><dt>项目</dt><dd>${esc(d.project_count)} 个</dd></div><div><dt>最近连接</dt><dd>${esc(d.last_seen ? shortTime(d.last_seen) : '未连接')}</dd></div><div><dt>可访问的目录</dt><dd>${Array.isArray(info.roots) ? info.roots.length : 0} 个</dd></div></dl>
       <div class="actions workspace-device-actions"><button class="btn primary small" data-action="add-project" data-device="${esc(d.id)}">${icon('plus')}添加项目</button><button class="btn ghost small" data-action="device-detail" data-id="${esc(d.id)}">管理</button>${d.agent?.update_available && d.agent?.can_update && !agentLifecycleBusy(d) ? `<button class="btn small" data-action="agent-update" data-id="${esc(d.id)}">更新</button>` : ''}</div>
       ${agentLifecycleSummary(d)}
@@ -1130,7 +1236,7 @@ function projectsHTML() {
   const rows = S.projects
     .map(
       (p) =>
-        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开 ${icon('arrow')}</button>${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}${uiMenu('更多', `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
+        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code><button type="button" class="icon-btn workspace-copy-path" data-copy="${esc(p.root)}" aria-label="复制本机路径" title="复制路径">${icon('copy')}</button></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开 ${icon('arrow')}</button>${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}${uiMenu('更多', `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
     )
     .join('');
   return (
@@ -1166,7 +1272,7 @@ async function deviceDetail(id) {
     : '';
   const dialog = modal(
     '管理电脑 · ' + d.name,
-    `<div class="field"><label>电脑名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>电脑编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目映射</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>有任务运行时，更新会等待任务结束。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><div id="device-roots-manager"></div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">为项目配置语言服务和后台浏览器。</p><div class="actions">${
+    `<div class="field"><label>电脑名称</label><input id="device-rename" value="${esc(d.name)}" maxlength="80"></div><dl class="kv device-kv"><dt>电脑编号</dt><dd><code>${esc(d.id)}</code></dd><dt>连接状态</dt><dd>${d.enabled ? onlineBadge(d.online) : '<span class="badge failed">已停用</span>'}</dd><dt>最近连接</dt><dd>${esc(timeText(d.last_seen))}</dd><dt>平台 / 主机</dt><dd>${esc(d.info.platform || '等待上线')} · ${esc(d.info.hostname || '—')}</dd><dt>项目</dt><dd>${d.project_count} 个</dd></dl>${agentLifecycleSummary(d)}<section class="node-manage-section"><div class="node-section-head"><div><h3>Agent 生命周期</h3><p>有任务运行时，更新会等待任务结束。</p></div></div><div class="actions">${agentLifecycleButtons(d, false)}</div></section><section class="node-manage-section"><div id="device-roots-manager"></div></section><section class="node-manage-section"><h3>开发工具配置</h3><p class="form-note">为项目配置语言服务和后台浏览器。</p><div class="actions">${
       S.projects
         .filter((p) => p.device_id === d.id)
         .map(
@@ -1175,7 +1281,7 @@ async function deviceDetail(id) {
         )
         .join('') ||
       `<button class="btn ghost small" data-action="add-project" data-device="${esc(d.id)}">先添加项目</button>`
-    }</div></section><details class="device-raw"><summary>本机声明与能力</summary><div class="code-box"><pre>${esc(json(d.info))}</pre></div></details><p class="form-note">更换 IP / 端口：在目标电脑运行 <code>python -m agent configure --hub http://新IP:新端口</code>。新增或调整授权目录可直接使用上方的目录管理。</p><section class="danger-zone"><div><h3>节点与凭据</h3><p>卸载只清理目标电脑上的 Agent；“移除面板记录”只删除 Hub 中的节点身份。两者都不会删除项目文件。</p></div><div class="actions">${uninstall}<button class="btn small" id="toggle-device">${d.enabled ? '停用节点' : '启用节点'}</button><button class="btn small" id="rotate-device">轮换连接密钥</button><button class="btn danger small" id="delete-device">仅移除面板记录</button></div></section>`,
+    }</div></section><details class="device-raw"><summary>本机声明与能力</summary><div class="code-box"><pre>${esc(json(d.info))}</pre></div></details><p class="form-note">更换 IP / 端口：在目标电脑运行 <code>python -m agent configure --hub http://新IP:新端口</code>。新增或调整授权目录可直接使用上方的目录管理。</p><section class="danger-zone"><div><h3>电脑与凭据</h3><p>卸载只清理目标电脑上的 Agent；“移除面板记录”只删除 Hub 中的电脑身份。两者都不会删除项目文件。</p></div><div class="actions">${uninstall}<button class="btn small" id="toggle-device">${d.enabled ? '停用电脑' : '启用电脑'}</button><button class="btn small" id="rotate-device">轮换连接密钥</button><button class="btn danger small" id="delete-device">仅移除面板记录</button></div></section>`,
     buttons('rename-device', '保存名称'),
     true,
   );
@@ -1194,9 +1300,9 @@ async function deviceDetail(id) {
       d.enabled &&
       !(await uiConfirmAction(
         {
-          title: '停用节点？',
-          body: '停用会断开节点；已经开始的本机操作可能仍会继续。确认停用？',
-          confirmLabel: '停用节点',
+          title: '停用电脑？',
+          body: '停用会断开电脑；已经开始的本机操作可能仍会继续。确认停用？',
+          confirmLabel: '停用电脑',
           danger: true,
         },
         { owner: dialog },
@@ -1234,8 +1340,8 @@ async function deviceDetail(id) {
     if (
       !(await uiConfirmAction(
         {
-          title: '移除节点记录？',
-          body: '仅移除面板中的节点身份？必须先移除它的项目映射；目标电脑上的 Agent 和项目文件都不会被删除。',
+          title: '移除电脑记录？',
+          body: '仅移除面板中的电脑身份？必须先移除它的项目；目标电脑上的 Agent 和项目文件都不会被删除。',
           confirmLabel: '移除记录',
           danger: true,
         },
@@ -1527,16 +1633,22 @@ function workbenchHTML() {
     p = S.projects.find((p) => p.id === w.project);
   const more = `<button class="btn ghost" data-devtools="worktrees">${icon('folder')}隔离工作目录</button><button class="btn ghost" data-devtools="handoff">${icon('history')}任务衔接</button><button class="btn ghost" data-insight="symbols">${icon('code')}代码结构</button><button class="btn ghost" data-wf-action="context">${icon('file')}项目上下文</button><button class="btn ghost" data-action="checkpoint">${icon('history')}建立源码检查点</button>`;
   return (
-    heading(
-      '远程工作台',
-      '项目开发',
-      '',
-      `<button class="btn ghost" data-devtools="validation">${icon('check')}测试验收</button><button class="btn ghost" data-insight="search">${icon('search')}项目检索</button><button class="btn ghost" data-local-skills>${icon('file')}本地技能</button>${uiMenu('工具', more)}`,
-    ) +
-    `<div class="work-controls"><select id="work-project" aria-label="选择项目"><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? 'selected' : ''}>${esc(p.alias)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select>${p ? onlineBadge(p.online) : ''}${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ''}<span class="muted tiny">${esc(p?.device_name || '')} ${p ? `/ ${p.mode === 'write' ? '可编辑' : '只读'}` : ''}</span><div class="actions">${S.work.project && !S.work.workspace_id && typeof chatProjectButtons === 'function' ? chatProjectButtons(S.work.project) : ''}<button class="btn ghost small" data-action="git-status">${icon('git')}Git 状态</button><button class="btn ghost small" data-action="git-diff">差异</button><button class="btn ghost small" data-action="history">${icon('history')}备份</button></div></div>
+    // One IDE header bar: title, project, status and every workbench tool.
+    `<header class="page-head workbench-head"><h1>远程工作台</h1><div class="work-controls ide-toolbar" role="toolbar" aria-label="工作台工具"><select id="work-project" aria-label="选择项目"${p ? ` title="${esc(p.device_name || '')} / ${p.mode === 'write' ? '可编辑' : '只读'}"` : ''}><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? 'selected' : ''}>${esc(p.alias)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select>${p ? onlineBadge(p.online) : ''}${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ''}<span class="muted tiny work-target">${esc(p?.device_name || '')} ${p ? `/ ${p.mode === 'write' ? '可编辑' : '只读'}` : ''}</span><div class="actions">${S.work.project && !S.work.workspace_id && typeof chatProjectButtons === 'function' ? chatProjectButtons(S.work.project) : ''}<button class="btn ghost small" data-action="git-status">${icon('git')}Git 状态</button><button class="btn ghost small" data-action="git-diff">差异</button><button class="btn ghost small" data-action="history">${icon('history')}备份</button><span class="work-toolbar-sep" aria-hidden="true"></span><button class="btn ghost small" data-devtools="validation" title="测试验收">${icon('check')}验收</button><button class="btn ghost small" data-insight="search" title="项目检索">${icon('search')}检索</button><button class="btn ghost small" data-local-skills title="本地技能">${icon('file')}技能</button>${uiMenu('工具', more)}</div></div></header>
     <div class="tabs mobile-work-tabs" role="group" aria-label="工作区视图"><button data-ui-pane="files">${icon('folder')} 文件</button><button data-ui-pane="editor">${icon('code')} 编辑器</button></div>
-    <section class="panel workspace" data-pane="${w.pane === 'editor' ? 'editor' : 'files'}"><aside class="explorer"><div class="explorer-top"><span>文件目录</span><div><button class="icon-btn" data-action="new-file" aria-label="新建文件">${icon('plus')}</button><button class="icon-btn" data-action="tree-refresh" aria-label="刷新目录">${icon('refresh')}</button></div></div><form id="search-form" class="explorer-tools"><input name="query" placeholder="搜索文件内容" aria-label="搜索项目"><button class="icon-btn" aria-label="执行搜索">${icon('search')}</button></form><div id="file-tree" class="file-tree">${treeHTML()}</div></aside><div class="editor-wrap" id="editor-wrap">${editorHTML()}</div></section>
-    <div class="taskbar"><select id="task-select" aria-label="选择本机任务"><option value="">选择本机任务</option></select><button class="btn ghost" data-action="load-tasks">刷新任务</button><button class="btn primary" data-action="run-task">${icon('play')}运行</button><button class="btn ghost" data-action="cancel-task">${icon('stop')}停止</button></div><section class="terminal"><div class="terminal-head"><span>${icon('terminal')}运行输出</span><span id="task-status">${w.operation ? '操作 ' + esc(w.operation.slice(0, 12)) : '等待任务'}</span></div><pre id="task-output">${esc(w.console || '运行任务后，输出将显示在这里。')}</pre></section>` +
+    <section class="panel workspace ${w.explorerCollapsed ? 'is-explorer-collapsed' : ''}" data-pane="${w.pane === 'editor' ? 'editor' : 'files'}"${w.explorerWidth ? ` style="--explorer-width:${w.explorerWidth}px"` : ''}><aside class="explorer"><div class="explorer-top"><span>文件目录</span><div><button class="icon-btn" data-action="new-file" aria-label="新建文件">${icon('plus')}</button><button class="icon-btn" data-action="tree-refresh" aria-label="刷新目录">${icon('refresh')}</button></div></div><form id="search-form" class="explorer-tools"><input name="query" placeholder="搜索文件内容" aria-label="搜索项目"><button class="icon-btn" aria-label="执行搜索">${icon('search')}</button></form><div id="file-tree" class="file-tree">${treeHTML()}</div></aside><div class="workspace-resizer" id="workspace-resizer" role="separator" aria-orientation="vertical" aria-label="调节文件树宽度，双击折叠" aria-valuemin="170" aria-valuemax="420" aria-valuenow="${w.explorerCollapsed ? 0 : w.explorerWidth || 240}" tabindex="0"></div><div class="editor-wrap" id="editor-wrap">${editorHTML()}</div></section>
+    <div class="taskbar"><select id="task-select" aria-label="选择本机任务"><option value="">选择本机任务</option></select><button class="btn ghost" data-action="load-tasks">刷新任务</button><button class="btn primary" data-action="run-task">${icon('play')}运行</button><button class="btn ghost" data-action="cancel-task">${icon('stop')}停止</button></div><section class="terminal" id="work-terminal" data-size="${esc(w.terminalSize || 'compact')}"><div class="terminal-head"><span>${icon('terminal')}运行输出</span><div class="terminal-controls" role="group" aria-label="输出高度">${[
+      ['collapsed', '折叠'],
+      ['normal', '常规'],
+      ['expanded', '展开'],
+    ]
+      .map(
+        ([size, label]) =>
+          `<button type="button" class="terminal-size-btn" data-terminal-size="${size}" aria-pressed="${terminalSizePressed(w.terminalSize, size)}">${label}</button>`,
+      )
+      .join(
+        '',
+      )}</div><span id="task-status">${w.operation ? '操作 ' + esc(w.operation.slice(0, 12)) : '等待任务'}</span></div><pre id="task-output">${esc(w.console || '运行任务后，输出将显示在这里。')}</pre></section>` +
     uiHelp(
       '编辑与执行说明',
       '文件保存前需确认差异并通过 SHA 检查，原内容自动备份。编辑器支持完整读取的 UTF-8 文本（上限 1 MiB）；分段读取的文件只读。此处运行本机具名任务；完整 Shell 通过已授权的 MCP <code>shell_exec</code> 调用。',
@@ -1545,14 +1657,22 @@ function workbenchHTML() {
 }
 function treeHTML() {
   const w = S.work;
-  return `<button class="file-node directory" data-action="tree-home">${icon('folder')}<span>${esc(w.treePath === '.' ? '项目根目录' : w.treePath)}</span></button>${w.tree.map((n) => `<button class="file-node ${n.type === 'directory' ? 'directory' : ''} ${w.path === n.path ? 'selected' : ''}" style="padding-left:${10 + Math.max(0, n.path.split('/').length - w.treePath.split('/').length - (w.treePath === '.' ? 0 : 0)) * 12}px" data-action="${n.type === 'directory' ? 'tree-dir' : 'read-file'}" data-path="${esc(n.path)}">${icon(n.type === 'directory' ? 'folder' : 'file')}<span>${esc(n.name)}</span></button>`).join('')}${w.treeNext !== null ? `<button class="btn ghost small" data-action="tree-more">加载更多文件</button>` : ''}${!w.tree.length ? '<div class="empty tiny">选择项目后加载目录</div>' : ''}`;
+  return `<button class="file-node directory" data-action="tree-home">${icon('folder')}<span>${esc(w.treePath === '.' ? '项目根目录' : w.treePath)}</span></button>${w.tree.map((n) => `<button class="file-node ${n.type === 'directory' ? 'directory' : ''} ${w.path === n.path ? 'selected' : ''}" style="--file-depth:${Math.max(0, n.path.split('/').length - (w.treePath === '.' ? 1 : w.treePath.split('/').length + 1))};padding-left:calc(10px + var(--file-depth) * 12px)" data-action="${n.type === 'directory' ? 'tree-dir' : 'read-file'}" data-path="${esc(n.path)}">${icon(n.type === 'directory' ? 'folder' : 'file')}<span>${esc(n.name)}</span></button>`).join('')}${w.treeNext !== null ? `<button class="btn ghost small" data-action="tree-more">加载更多文件</button>` : ''}${!w.tree.length ? '<div class="empty tiny">选择项目后加载目录</div>' : ''}`;
 }
 function editorHTML() {
   const w = S.work,
     p = S.projects.find((p) => p.id === w.project);
   if (!w.path)
     return `<div class="workspace-empty"><div>${icon('code')}<h3>选择一个文件</h3><p>浏览目录，或新建文件开始编辑。</p></div></div>`;
-  return `<div class="editor-top"><div><span class="editor-path">${esc(w.path)}</span><span class="editor-status" id="dirty-state">${w.dirty ? '未保存' : w.truncated ? '分段只读' : '已同步'}</span></div><div class="actions"><button class="btn ghost small" data-devtools="navigation">代码导航</button><button class="btn ghost small" data-action="reload-file">重新读取</button><button class="btn ghost small" data-action="move-file">移动</button><button class="btn danger small" data-action="delete-file">删除</button><button class="btn primary small" data-action="preview-save" ${p?.mode !== 'write' || w.truncated ? 'disabled' : ''}>${icon('save')}预览并保存</button></div></div>${w.truncated ? notice('此文件超过编辑器读取行数上限，目前只显示前 20,000 行，已禁止保存。MCP 可继续按行读取。') : ''}<div class="editor"><div class="editor-lines" id="editor-lines" aria-hidden="true">${Array.from({ length: Math.min(w.content.split('\n').length, 20001) }, (_, i) => i + 1).join('\n')}</div><textarea id="code-editor" aria-label="源码编辑器" spellcheck="false" autocapitalize="off" autocomplete="off" ${w.truncated || p?.mode !== 'write' ? 'readonly' : ''}>${esc(w.content)}</textarea></div><div class="editor-bottom"><span>UTF-8 · ${esc(p?.alias || '')} · ${w.content.split('\n').length} 行</span><span id="file-sha">SHA ${esc(w.sha === 'new' ? 'NEW FILE' : w.sha.slice(0, 16))}</span></div>`;
+  const pathCrumb = w.path
+    .split('/')
+    .map((part, i, arr) =>
+      i === arr.length - 1
+        ? `<span class="editor-path-leaf">${esc(part)}</span>`
+        : `<button type="button" class="editor-path-directory" data-action="tree-dir" data-path="${esc(arr.slice(0, i + 1).join('/'))}" aria-label="打开目录 ${esc(arr.slice(0, i + 1).join('/'))}">${esc(part)}</button><span class="editor-path-sep" aria-hidden="true">/</span>`,
+    )
+    .join('');
+  return `<div class="editor-top"><div><span class="editor-path" title="${esc(w.path)}">${pathCrumb}</span><span class="editor-status" id="dirty-state" data-dirty="${w.dirty}">${w.dirty ? '未保存' : w.truncated ? '分段只读' : '已同步'}</span></div><div class="actions"><button class="btn ghost small" data-devtools="navigation">代码导航</button><button class="btn ghost small" data-action="reload-file">重新读取</button><button class="btn ghost small" data-action="move-file">移动</button><button class="btn danger small" data-action="delete-file">删除</button><button class="btn primary small" data-action="preview-save" ${p?.mode !== 'write' || w.truncated ? 'disabled' : ''}>${icon('save')}预览并保存</button></div></div>${w.truncated ? notice('此文件超过编辑器读取行数上限，目前只显示前 20,000 行，已禁止保存。MCP 可继续按行读取。') : ''}<div class="editor"><div class="editor-lines" id="editor-lines" aria-hidden="true">${Array.from({ length: Math.min(w.content.split('\n').length, 20001) }, (_, i) => i + 1).join('\n')}</div><textarea id="code-editor" aria-label="源码编辑器" spellcheck="false" autocapitalize="off" autocomplete="off" ${w.truncated || p?.mode !== 'write' ? 'readonly' : ''}>${esc(w.content)}</textarea></div><div class="editor-bottom"><span>UTF-8 · ${esc(p?.alias || '')} · ${w.content.split('\n').length} 行</span><span id="file-sha">SHA ${esc(w.sha === 'new' ? 'NEW FILE' : w.sha.slice(0, 16))}</span></div>`;
 }
 function editorLineEndings(value, original) {
   return original.includes('\r\n') && !/(^|[^\r])\n/.test(original)
@@ -1568,6 +1688,7 @@ function bindEditor() {
     S.work.content = editorLineEndings(el.value, S.work.original);
     S.work.dirty = S.work.content !== S.work.original || S.work.sha === 'new';
     $('#dirty-state').textContent = S.work.dirty ? '未保存' : '已同步';
+    $('#dirty-state').dataset.dirty = String(S.work.dirty);
     $('#editor-lines').textContent = Array.from(
       { length: Math.min(el.value.split('\n').length, 20001) },
       (_, i) => i + 1,
@@ -1590,14 +1711,38 @@ function bindEditor() {
     }
   };
 }
+// 'compact' is the initial size and reads as "常规" for the toggle state.
+function terminalSizePressed(current, size) {
+  return (
+    (current || 'compact') === size || (size === 'normal' && (current || 'compact') === 'compact')
+  );
+}
+function setTerminalSize(size) {
+  S.work.terminalSize = size;
+  const terminal = $('#work-terminal');
+  if (!terminal) return;
+  terminal.dataset.size = size;
+  $$('[data-terminal-size]', terminal).forEach((btn) =>
+    btn.setAttribute('aria-pressed', String(terminalSizePressed(size, btn.dataset.terminalSize))),
+  );
+}
 function bindWorkbench() {
   bindEditor();
   $('#work-project').onchange = async (e) => {
-    if (S.work.dirty && !confirm('切换项目将丢弃尚未保存的草稿，继续？')) {
+    const nextProject = e.target.value;
+    if (
+      S.work.dirty &&
+      !(await uiConfirmAction({
+        title: '切换项目？',
+        body: '切换项目将丢弃尚未保存的草稿。',
+        confirmLabel: '丢弃并切换',
+        danger: true,
+      }))
+    ) {
       e.target.value = S.work.project;
       return;
     }
-    resetWork(e.target.value);
+    resetWork(nextProject);
     await renderPage(false);
   };
   $('#search-form').onsubmit = async (e) => {
@@ -1605,6 +1750,55 @@ function bindWorkbench() {
     const q = new FormData(e.target).get('query').trim();
     if (q) await searchFiles(q);
   };
+  const resizer = $('#workspace-resizer'),
+    workspace = $('.workspace');
+  if (resizer && workspace) {
+    const setWidth = (width) => {
+      const clamped = Math.max(170, Math.min(420, Math.round(width)));
+      S.work.explorerWidth = clamped;
+      S.work.explorerCollapsed = false;
+      workspace.classList.remove('is-explorer-collapsed');
+      workspace.style.setProperty('--explorer-width', clamped + 'px');
+      resizer.setAttribute('aria-valuenow', String(clamped));
+    };
+    resizer.ondblclick = () => {
+      S.work.explorerCollapsed = !S.work.explorerCollapsed;
+      workspace.classList.toggle('is-explorer-collapsed', S.work.explorerCollapsed);
+      resizer.setAttribute(
+        'aria-valuenow',
+        String(S.work.explorerCollapsed ? 0 : S.work.explorerWidth || 240),
+      );
+    };
+    // Until the user resizes, the width comes from CSS (it is narrower below 1200px).
+    const currentWidth = () =>
+      S.work.explorerWidth || $('.explorer', workspace)?.getBoundingClientRect().width || 240;
+    resizer.onkeydown = (e) => {
+      if (e.key === 'ArrowLeft') setWidth(currentWidth() - 20);
+      else if (e.key === 'ArrowRight') setWidth(currentWidth() + 20);
+      else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        resizer.ondblclick();
+      }
+    };
+    resizer.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const startX = e.clientX,
+        startWidth = S.work.explorerCollapsed ? 0 : currentWidth();
+      const move = (ev) => setWidth(startWidth + (ev.clientX - startX));
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointercancel', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
+    };
+  }
+  $$('[data-terminal-size]').forEach((btn) => {
+    btn.onclick = () => setTerminalSize(btn.dataset.terminalSize);
+  });
   if (S.work.project && !S.work.tree.length) loadTree().catch((e) => toast(e.message, true));
   if (S.work.operation) pollTask().catch(() => {});
 }
@@ -1627,7 +1821,17 @@ async function loadTree(more = false) {
 }
 async function readFile(path, force = false) {
   if (!S.work.project) throw new Error('请先选择项目');
-  if (S.work.dirty && !force && !confirm('读取其他文件将丢弃尚未保存的草稿，继续？')) return false;
+  if (
+    S.work.dirty &&
+    !force &&
+    !(await uiConfirmAction({
+      title: '读取其他文件？',
+      body: '读取其他文件将丢弃尚未保存的草稿。',
+      confirmLabel: '丢弃并读取',
+      danger: true,
+    }))
+  )
+    return false;
   const project = S.work.project,
     revision = S.editRevision || 0,
     generation = (S.readGeneration = (S.readGeneration || 0) + 1);
@@ -1710,18 +1914,113 @@ async function newFile() {
     $('#code-editor')?.focus();
   };
 }
+// Unified diff → rows. A line is a file header only outside a hunk; hunk
+// membership is decided by the remaining old/new counts from the @@ header,
+// so content lines such as "--- comment" or "+++i;" stay content.
+function diffParse(text) {
+  const rows = [];
+  let oldLn = 0,
+    newLn = 0,
+    oldLeft = 0,
+    newLeft = 0;
+  const lines = String(text || '').split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  // Bare +/- text without @@ headers: colour it, but show no line numbers.
+  const bare = !lines.some((t) => t.startsWith('@@ '));
+  if (bare) oldLeft = newLeft = Infinity;
+  for (const t of lines) {
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(t);
+    if (hunk) {
+      oldLn = Number(hunk[1]);
+      oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newLn = Number(hunk[3]);
+      newLeft = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      rows.push({ kind: 'hunk', text: t, a: '', b: '' });
+      continue;
+    }
+    if (t.startsWith('\\')) {
+      rows.push({ kind: 'note', text: t, a: '', b: '' });
+      continue;
+    }
+    if (oldLeft <= 0 && newLeft <= 0) {
+      rows.push({ kind: 'head', text: t, a: '', b: '' });
+      continue;
+    }
+    if (t.startsWith('+') && newLeft > 0) {
+      rows.push({ kind: 'plus', text: t, a: '', b: bare ? '' : newLn++ });
+      newLeft--;
+    } else if (t.startsWith('-') && oldLeft > 0) {
+      rows.push({ kind: 'minus', text: t, a: bare ? '' : oldLn++, b: '' });
+      oldLeft--;
+    } else {
+      rows.push({ kind: 'ctx', text: t, a: bare ? '' : oldLn++, b: bare ? '' : newLn++ });
+      oldLeft--;
+      newLeft--;
+    }
+  }
+  return rows;
+}
+// Highlight the changed middle of a removed/added line pair. Skipped when the
+// lines share too little to make the highlight meaningful.
+function diffWordPair(minus, plus) {
+  const a = minus.slice(1),
+    b = plus.slice(1),
+    max = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < max && a[p] === b[p]) p++;
+  while (p > 0 && /\w/.test(a[p - 1]) && (/\w/.test(a[p] || '') || /\w/.test(b[p] || ''))) p--;
+  let s = 0;
+  while (s < max - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  while (
+    s > 0 &&
+    /\w/.test(a[a.length - s]) &&
+    (/\w/.test(a[a.length - 1 - s] || '') || /\w/.test(b[b.length - 1 - s] || ''))
+  )
+    s--;
+  if ((p + s) * 2 < Math.max(a.length, b.length) || p + s === 0) return null;
+  const wrap = (sign, t) => {
+    const mid = t.slice(p, t.length - s);
+    return `${esc(sign + t.slice(0, p))}${mid ? `<mark class="diff-word">${esc(mid)}</mark>` : ''}${esc(t.slice(t.length - s))}`;
+  };
+  return [wrap(minus[0], a), wrap(plus[0], b)];
+}
+function diffRowsHTML(text) {
+  const rows = diffParse(text);
+  const html = rows.map((r) => esc(r.text));
+  for (let i = 0; i < rows.length;) {
+    if (rows[i].kind !== 'minus') {
+      i++;
+      continue;
+    }
+    let m = i;
+    while (m < rows.length && rows[m].kind === 'minus') m++;
+    let n = m;
+    while (n < rows.length && rows[n].kind === 'plus') n++;
+    for (let k = 0; k < Math.min(m - i, n - m); k++) {
+      const pair = diffWordPair(rows[i + k].text, rows[m + k].text);
+      if (pair) [html[i + k], html[m + k]] = pair;
+    }
+    i = n;
+  }
+  return rows
+    .map((r, i) => {
+      const cls = r.kind === 'head' ? 'hunk head' : r.kind === 'note' ? 'ctx note' : r.kind;
+      const a = r.kind === 'hunk' ? '…' : r.a,
+        b = r.kind === 'hunk' ? '…' : r.b;
+      return `<div class="diff-line ${cls}"><span class="diff-ln">${a}</span><span class="diff-ln">${b}</span><span class="diff-code">${html[i]}</span></div>`;
+    })
+    .join('');
+}
 function diffHTML(d) {
-  return `<div class="diff-stats"><span>+ ${d.added_lines || 0} 行</span><span>− ${d.removed_lines || 0} 行</span>${d.diff_truncated ? '<small>差异已截断，保存前请在本机核对完整内容</small>' : ''}</div><div class="code-box diff">${
-    d.diff
-      ? d.diff
-          .split('\n')
-          .map(
-            (l) =>
-              `<span class="${l.startsWith('+') ? 'plus' : l.startsWith('-') ? 'minus' : l.startsWith('@@') ? 'hunk' : ''}">${esc(l)}</span>`,
-          )
-          .join('')
-      : '<span>没有内容差异</span>'
-  }</div>`;
+  const added = d.added_lines || 0,
+    removed = d.removed_lines || 0,
+    total = Math.max(1, added + removed);
+  const plusPct = Math.round((added / total) * 100),
+    minusPct = Math.round((removed / total) * 100);
+  const rows = d.diff
+    ? diffRowsHTML(d.diff)
+    : '<div class="diff-line ctx"><span class="diff-ln"></span><span class="diff-ln"></span><span class="diff-code">没有内容差异</span></div>';
+  return `<div class="diff-stats"><span>+ ${added} 行</span><span>− ${removed} 行</span><span class="diff-bar" aria-hidden="true"><i class="diff-bar-plus" style="width:${plusPct}%"></i><i class="diff-bar-minus" style="width:${minusPct}%"></i></span>${d.diff_truncated ? '<small>差异已截断，保存前请在本机核对完整内容</small>' : ''}</div><div class="code-box diff">${rows}</div>`;
 }
 async function previewSave() {
   const w = S.work;
@@ -2227,6 +2526,8 @@ async function runTask() {
       trackTask(r.operation_id);
       clearTaskSubmission(submission);
       S.work.console = '任务已保存，等待 Agent 输出…';
+      if (S.work.terminalSize === 'collapsed' || S.work.terminalSize === 'compact')
+        setTerminalSize('normal');
       if ($('#task-output')) $('#task-output').textContent = S.work.console;
       await pollTask();
     } catch (error) {
@@ -2276,7 +2577,10 @@ async function pollTask() {
       r.result?.data?.output ||
       r.error ||
       (r.pending ? '等待本机输出；网络中断不代表任务失败…' : '任务已结束，无输出。');
-    if ($('#task-output')) $('#task-output').textContent = S.work.console;
+    if ($('#task-output')) {
+      $('#task-output').textContent = S.work.console;
+      $('#task-output').scrollTop = $('#task-output').scrollHeight;
+    }
     if ($('#task-status'))
       $('#task-status').textContent = (stateNames[r.state] || r.state) + ' · ' + r.id.slice(0, 12);
     S.taskPollFailures = 0;
@@ -2454,8 +2758,8 @@ function connectHTML() {
         <div class="actions"><button class="btn small" data-action="copy-coding-endpoint">复制核心地址</button><button class="btn small" data-action="copy-role-endpoint">复制角色地址</button><button class="btn small" data-action="new-grant">创建访问令牌</button></div>
         ${CodePierConnectionSetup.tunnelHTML()}
       </details></div></section>
-      ${CodePierConnectionSetup.html()}
-      <section class="panel" id="grant-panel">${grantListHTML()}</section>`
+      <section class="panel" id="grant-panel">${grantListHTML()}</section>
+      ${CodePierConnectionSetup.html()}`
   );
 }
 function toolCatalogHTML(tools) {
@@ -2715,7 +3019,7 @@ panelActions.register(['grant-access-preview'], async (button) => {
   await CodePierProfiles.preview(button.dataset.id);
 });
 panelActions.register(['close-modal'], async (b, e) => {
-  panelDialogs.requestClose();
+  await panelDialogs.requestClose();
   return;
 });
 panelActions.register(['toggle-menu'], async (b, e) => {
@@ -2723,7 +3027,18 @@ panelActions.register(['toggle-menu'], async (b, e) => {
   return;
 });
 panelActions.register(['logout'], async (b, e) => {
-  if (hasUnsavedChanges() && !confirm('退出会丢弃当前标签页的未保存草稿、附件和待确认请求，继续？'))
+  if (
+    hasUnsavedChanges() &&
+    !(await uiConfirmAction(
+      {
+        title: '退出登录？',
+        body: '退出会丢弃当前标签页的未保存草稿、附件和待确认请求。',
+        confirmLabel: '退出登录',
+        danger: true,
+      },
+      { owner: b },
+    ))
+  )
     return;
   await post('/api/logout');
   endSession(true);
@@ -2751,7 +3066,7 @@ panelActions.register(['agent-update', 'agent-restart', 'agent-uninstall'], asyn
       await loadBasics();
       device = S.devices.find((item) => item.id === b.dataset.id);
     }
-    if (!device) throw new Error('节点信息已变化，请刷新后重试');
+    if (!device) throw new Error('电脑信息已变化，请刷新后重试');
     agentLifecycleModal(device, b.dataset.action.replace('-', '_'));
     return;
   }
@@ -2763,7 +3078,7 @@ panelActions.register(['agent-commands'], async (b, e) => {
       await loadBasics();
       device = S.devices.find((item) => item.id === b.dataset.id);
     }
-    if (!device) throw new Error('节点信息已变化，请刷新后重试');
+    if (!device) throw new Error('电脑信息已变化，请刷新后重试');
     showAgentMaintenanceCommands(device);
     return;
   }
@@ -2775,7 +3090,7 @@ panelActions.register(['agent-repair'], async (b, e) => {
       await loadBasics();
       device = S.devices.find((item) => item.id === b.dataset.id);
     }
-    if (!device) throw new Error('节点信息已变化，请刷新后重试');
+    if (!device) throw new Error('电脑信息已变化，请刷新后重试');
     await agentInstallSetup(device);
     return;
   }
@@ -2794,7 +3109,19 @@ panelActions.register(['project-collaboration'], async (b) => {
   await CodePierCollaboration.open(b.dataset.id);
 });
 panelActions.register(['open-project'], async (b, e) => {
-  if (S.work.dirty && !confirm('打开项目将丢弃当前未保存草稿，继续？')) return;
+  if (
+    S.work.dirty &&
+    !(await uiConfirmAction(
+      {
+        title: '打开项目？',
+        body: '打开项目将丢弃当前未保存草稿。',
+        confirmLabel: '放弃草稿并打开',
+        danger: true,
+      },
+      { owner: b },
+    ))
+  )
+    return;
   resetWork(b.dataset.id);
   await navigate('workbench');
   return;
@@ -2984,6 +3311,11 @@ panelActions.register(['copy-role-endpoint'], async () => {
 });
 document.addEventListener('click', async (e) => {
   try {
+    const copyBtn = e.target.closest('[data-copy]');
+    if (copyBtn) {
+      await copy(copyBtn.dataset.copy);
+      return;
+    }
     const navButton = e.target.closest('[data-nav]');
     if (navButton) {
       await navigate(navButton.dataset.nav);

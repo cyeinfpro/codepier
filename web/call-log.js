@@ -143,7 +143,7 @@ window.CodePierCallLog = (() => {
   const summary = (r) =>
     `<code class="call-preview">${esc(r.summary || '没有可显示的参数摘要')}</code>`;
   const status = (r) =>
-    `${badge(r.state)}<span class="call-duration">${active(r) ? '已历时' : '总历时'} ${duration(r.elapsed_ms)}</span>${r.exit_code !== null && r.exit_code !== undefined ? `<span>退出码 ${esc(r.exit_code)}</span>` : ''}`;
+    `<span class="call-state-badge">${badge(r.state)}</span><span class="call-duration">${active(r) ? '已历时' : '总历时'} ${duration(r.elapsed_ms)}</span>${r.exit_code !== null && r.exit_code !== undefined ? `<span class="call-exit">退出码 ${esc(r.exit_code)}</span>` : ''}`;
   const projectKey = (r) =>
     r.project_id || projectIds.get(r.alias) || (r.alias ? 'alias:' + r.alias : '');
   function prepareProjectColors(projects, rows) {
@@ -231,7 +231,7 @@ window.CodePierCallLog = (() => {
         `<button type="button" class="btn ghost" data-call-action="export">${icon('download')}导出本页调用</button>`,
       ) +
       (window.CodePierQueue?.placeholder() || '') +
-      `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
+      `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(r.projects || [], st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(r.tools || [], st().tool, 'name')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><form id="call-search"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号" value="${esc(S.auditQuery)}"><button type="submit" class="btn small">搜索</button></form><details id="call-more-filters" class="call-more-filters"${(st().moreFilters ?? !!(S.auditSource || st().triggerSource)) ? ' open' : ''}><summary>更多筛选${[S.auditSource, st().triggerSource].filter(Boolean).length ? `<span class="call-more-count">${[S.auditSource, st().triggerSource].filter(Boolean).length}</span>` : ''}</summary><div class="call-more-body"><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
         ['system_maintenance', '自动维护'],
         ['request', '请求发起'],
         ['unknown', '未记录'],
@@ -242,7 +242,7 @@ window.CodePierCallLog = (() => {
         )
         .join(
           '',
-        )}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(r.projects || [], st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(r.tools || [], st().tool, 'name')}</select><form id="call-search"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号" value="${esc(S.auditQuery)}"><button type="submit" class="btn small">搜索</button></form></div><div class="call-controls"><button type="button" class="btn ghost small" data-call-action="live" aria-pressed="${st().live}">${st().live ? '暂停实时更新' : '恢复实时更新'}</button><button type="button" class="btn ghost small" data-call-action="refresh">${icon('refresh')}刷新</button><span id="call-sync" class="muted tiny" role="status">${st().cursor ? '正在查看历史页，不自动插入新调用' : st().live ? '实时更新已开启' : '实时更新已暂停'}</span><button type="button" id="call-new" class="btn small" data-call-action="latest" hidden>列表有更新，显示最新</button></div><section class="call-log" aria-label="工具调用流水">${r.operations.map(rowHTML).join('') || empty('当前筛选范围没有调用记录。')}</section><div class="pagination"><span id="call-count">本页 ${r.operations.length} 项 · 每页最多 40 项</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${r.next_cursor ? '' : 'disabled'}>下一页</button></div></div>${uiHelp('记录范围与隐私', '展示已保存的工具执行证据，不含完整对话；搜索仅覆盖已保存的摘要，导出仅包含当前页。参数正文仍按原有策略省略；密码、令牌、授权请求头和环境变量值默认脱敏。列表按创建时间及操作编号稳定分页；新调用不会挤动正在阅读的历史或已展开内容。触发来源与授权身份分开记录，MCP 是调用渠道，不代表模型仍在运行。旧记录缺少字段时显示未记录。')}`
+        )}</select></div></details></div><div class="call-controls"><button type="button" class="btn ghost small" data-call-action="live" aria-pressed="${st().live}">${st().live ? '暂停实时更新' : '恢复实时更新'}</button><button type="button" class="btn ghost small" data-call-action="refresh">${icon('refresh')}刷新</button><span id="call-sync" class="muted tiny" role="status">${st().cursor ? '正在查看历史页，不自动插入新调用' : st().live ? '实时更新已开启' : '实时更新已暂停'}</span><button type="button" id="call-new" class="btn small" data-call-action="latest" hidden>列表有更新，显示最新</button></div><section class="call-log" aria-label="工具调用流水">${r.operations.map(rowHTML).join('') || empty('当前筛选范围没有调用记录。')}</section><div class="pagination"><span id="call-count">本页 ${r.operations.length} 项 · 每页最多 40 项</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${r.next_cursor ? '' : 'disabled'}>下一页</button></div></div>${uiHelp('记录范围与隐私', '展示已保存的工具执行证据，不含完整对话；搜索仅覆盖已保存的摘要，导出仅包含当前页。参数正文仍按原有策略省略；密码、令牌、授权请求头和环境变量值默认脱敏。列表按创建时间及操作编号稳定分页；新调用不会挤动正在阅读的历史或已展开内容。触发来源与授权身份分开记录，MCP 是调用渠道，不代表模型仍在运行。旧记录缺少字段时显示未记录。')}`
     );
   }
   function schedule() {
@@ -492,6 +492,8 @@ window.CodePierCallLog = (() => {
     update('#call-tool', (v) => {
       st().tool = v;
     });
+    const more = root.querySelector('#call-more-filters');
+    if (more) more.ontoggle = () => (st().moreFilters = more.open);
     root.querySelector('#call-search').onsubmit = (e) => {
       e.preventDefault();
       S.auditQuery = root.querySelector('#audit-query').value.trim();

@@ -135,7 +135,7 @@ function chatRequestCatalog(
     record.alive = false;
     controller.abort();
     rejectDeadline(
-      Object.assign(new Error('读取本机模型超时。请确认节点在线后重试，无需刷新页面。'), {
+      Object.assign(new Error('读取本机模型超时。请确认电脑在线后重试，无需刷新页面。'), {
         code: 'CLI_CATALOG_TIMEOUT',
       }),
     );

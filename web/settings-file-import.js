@@ -139,7 +139,7 @@ window.CodePierFileImportSettings = (() => {
       '<form id="file-import-settings-form"><div class="settings-import-fields">' +
       Object.keys(labels).map(card).join('') +
       '</div>' +
-      '<p class="form-note">“继承”和空列表不同：明确空主机列表拒绝所有主机；空 Provider 列表不启用任何命名来源。这里不增加本机读取目录或节点权限。</p>' +
+      '<p class="form-note">“继承”和空列表不同：明确空主机列表拒绝所有主机；空 Provider 列表不启用任何命名来源。这里不增加本机读取目录或电脑权限。</p>' +
       '<div class="actions"><button type="submit" class="btn primary">预览修改</button><button type="button" class="btn ghost" data-file-import-cancel>取消改动</button></div>' +
       '<p id="file-import-status" class="form-note" role="status"></p><div id="file-import-preview"></div></form>'
     );
@@ -168,7 +168,7 @@ window.CodePierFileImportSettings = (() => {
       }
       return (
         '<section id="settings-file-import-editor" class="panel"><div class="panel-head"><h2>文件入站设置</h2><span class="settings-mode">实例管理员 · 预览后确认</span></div><div class="panel-body">' +
-        '<p>新调用的准入检查立即采用新设置。已经获准进行最后发布的上传，可能在下一次检查前完成；开始下载的文件仍沿用原逐跳来源策略。项目、连接和节点权限继续生效。</p>' +
+        '<p>新调用的准入检查立即采用新设置。已经获准进行最后发布的上传，可能在下一次检查前完成；开始下载的文件仍沿用原逐跳来源策略。项目、连接和电脑权限继续生效。</p>' +
         fieldsHTML() +
         '</div></section>'
       );
@@ -287,7 +287,7 @@ window.CodePierFileImportSettings = (() => {
                 '</li>',
             )
             .join('') +
-          '</ul><p class="form-note">保存影响整个实例。节点限制不会放宽；已获准的最后发布及原下载策略窗口见上方说明。</p>' +
+          '</ul><p class="form-note">保存影响整个实例。电脑限制不会放宽；已获准的最后发布及原下载策略窗口见上方说明。</p>' +
           '<button type="button" class="btn primary" id="file-import-confirm">确认并保存以上修改</button></section>';
         $('#file-import-confirm', form).onclick = commit;
         status('预览已就绪，尚未保存。修改任何字段会使本次预览失效。');

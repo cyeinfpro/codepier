@@ -56,14 +56,15 @@
 .vps-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
-  gap: 18px;
+  gap: 16px;
+  align-items: stretch;
 }
 .vps-card {
-  padding: 22px;
+  padding: var(--ui-panel-inset);
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 .vps-card[hidden] {
   display: none;
@@ -157,13 +158,19 @@
   overflow-wrap: anywhere;
   margin: 0;
   color: var(--ui-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .vps-card footer {
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   margin-top: auto;
-  padding-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-line);
 }
 .vps-card footer > :last-child {
   margin-left: auto;
@@ -230,10 +237,6 @@
   }
   .vps-search {
     flex-basis: 100%;
-  }
-  .vps-card {
-    padding: 18px;
-    gap: 16px;
   }
   .vps-card footer {
     gap: 6px;

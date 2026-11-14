@@ -108,11 +108,14 @@ def test_long_names_empty_states_and_colored_card_actions(stack,engine,width,hei
         }''')
         within(page,'.workspace-project-row,.workspace-project-actions,.workspace-project-path')
         row = page.locator('.workspace-project-row').first
+        copy_btn = row.locator('.workspace-copy-path')
+        copy_btn.scroll_into_view_if_needed()
+        copy_btn.click(trial=True)
         expect(row.locator('[data-action="edit-project"]')).to_be_hidden()
         row.locator('.tool-menu > summary').click()
         expect(row.locator('[data-action="edit-project"]')).to_be_visible()
         expect(page.locator('[data-action="edit-project"]').first).to_have_accessible_name(__import__('re').compile('编辑'))
-        for btn in page.locator('.workspace-project-row').first.locator('button').all():
+        for btn in row.locator('.workspace-project-actions button').all():
             btn.scroll_into_view_if_needed();btn.click(trial=True)
         page.evaluate('''() => {S.projects=[];document.querySelector('#page').innerHTML=projectsHTML();uiPageReady();}''')
         expect(page.locator('[data-action="add-project"]')).not_to_have_count(0)

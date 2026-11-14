@@ -47,18 +47,7 @@
   white-space: nowrap;
   font-size: var(--ui-text-xs);
 }
-.integration-tabs {
-  border: 1px solid var(--ui-line);
-  gap: 3px;
-}
-.integration-tabs button {
-  min-height: 40px;
-  white-space: nowrap;
-}
-.integration-tabs button[aria-selected='true'] {
-  color: var(--ui-text);
-  font-weight: var(--ui-weight-semibold);
-}
+
 .integration-hero {
   display: flex;
   align-items: center;

@@ -9,10 +9,10 @@ window.CodePierSettings = (() => {
     user_space: '我的账号 · 当前空间',
     record: '具体记录',
     project: '所选项目',
-    device: '所选节点',
-    device_project: '节点 · 项目',
+    device: '所选电脑',
+    device_project: '电脑 · 项目',
     instance: '整个实例',
-    instance_device: '实例 · 节点',
+    instance_device: '实例 · 电脑',
     instance_space: '实例 · 空间',
     space_project: '空间 · 项目',
     project_environment: '项目 · 环境',
@@ -25,7 +25,7 @@ window.CodePierSettings = (() => {
     browser_storage: '浏览器本地',
     session: '原生会话',
     running_process: '当前 Hub 进程',
-    agent_runtime: '节点运行值',
+    agent_runtime: '电脑运行值',
     environment_agent: '部署与本机',
     database_environment: '记录与部署',
     mixed: '分别继承 / 显式设置',
@@ -36,7 +36,7 @@ window.CodePierSettings = (() => {
     new_consent: '下一次授权预选',
     session_receipt: '以会话回执为准',
     new_call: '下一次调用',
-    validated: '节点验证后生效',
+    validated: '电脑验证后生效',
     operation_receipt: '以操作回执为准',
     deployment: '更新部署后核对',
     reconnect: '本机热载并重连',
@@ -108,16 +108,37 @@ window.CodePierSettings = (() => {
     'account_security',
     'spaces',
   ]);
+  // The guide remembers an explicit fold/unfold. Without one it starts folded
+  // once setup is done (computer, project and connection), so the settings
+  // themselves are in view.
+  const START_KEY = 'codepier-settings-start-collapsed';
+  function startCollapsedDefault() {
+    try {
+      const saved = window.localStorage.getItem(START_KEY);
+      if (saved === '1' || saved === '0') return saved === '1';
+    } catch {
+      // Storage can be unavailable (private mode, embedded views).
+    }
+    const o = S.overview;
+    return !!(o && o.devices?.length && o.projects?.length && o.active_grants > 0);
+  }
   function startHTML() {
+    if (state.startCollapsed === null) state.startCollapsed = startCollapsedDefault();
     const steps = [
-      ['01', '连接节点', '让电脑与面板连通', 'devices', 'devices'],
+      ['01', '接入电脑', '让电脑与面板连通', 'devices', 'devices'],
       ['02', '添加项目', '选择允许工作的目录', 'projects', 'projects'],
       ['03', '接入工具', '连接客户端并确认范围', 'connect', 'connect'],
       ['04', '派发任务', '开始工作并查看进度', 'collaboration', 'tasks'],
       ['05', '查看用量', '查看调用、Token 与费用', 'overview', 'usage'],
     ];
     return (
-      '<section id="settings-start" aria-label="设置流程"><div class="settings-flow-grid">' +
+      '<section id="settings-start" aria-label="设置流程"><div class="settings-flow-head"><span>快速导航</span><button type="button" class="btn ghost small" data-settings-start-toggle aria-expanded="' +
+      String(!state.startCollapsed) +
+      '">' +
+      (state.startCollapsed ? '展开引导' : '收起引导') +
+      '</button></div><div class="settings-flow-grid"' +
+      (state.startCollapsed ? ' hidden' : '') +
+      '>' +
       steps
         .map(
           ([number, title, description, entry, view]) =>
@@ -145,6 +166,7 @@ window.CodePierSettings = (() => {
       project: '',
       group: '',
       query: '',
+      startCollapsed: null,
       data: null,
       draft: {},
       base: {},
@@ -177,6 +199,7 @@ window.CodePierSettings = (() => {
       project: '',
       group: '',
       query: '',
+      startCollapsed: null,
       data: null,
       draft: {},
       base: {},
@@ -192,17 +215,23 @@ window.CodePierSettings = (() => {
     controller = null;
     root = null;
   }
-  function requestLeave() {
+  async function requestLeave() {
     if (
       state.pending ||
       window.CodePierFileImportSettings?.pending() ||
       window.CodePierSchedulerSettings?.pending()
     ) {
-      toast('设置保存仍在核对，请等待回执或重新读取后再离开。', true);
+      toast('设置保存仍在等待确认，请稍后再离开。', true);
       return false;
     }
     if (!dirty()) return true;
-    if (!confirm('设置有未保存的改动。放弃这些草稿并离开？')) return false;
+    const approved = await uiConfirmAction({
+      title: '放弃未保存的设置？',
+      body: '设置有未保存的改动，离开将放弃这些草稿。',
+      confirmLabel: '放弃并离开',
+      danger: true,
+    });
+    if (!approved) return false;
     state.draft = clone(state.base);
     window.CodePierFileImportSettings?.discard();
     window.CodePierSchedulerSettings?.discard();
@@ -264,7 +293,7 @@ window.CodePierSettings = (() => {
   }
   function valueText(item) {
     if (item.state === 'restricted') return '仅管理员可查看部署细节';
-    if (item.state === 'select_project') return '选择项目后检查节点';
+    if (item.state === 'select_project') return '选择项目后检查电脑';
     if (item.state === 'not_checked') return '本机配置尚未检查';
     if (item.state === 'browser') return '保存在当前浏览器';
     if (item.state === 'invalid') return '配置无效，功能保持受限';
@@ -342,11 +371,11 @@ window.CodePierSettings = (() => {
       {
         select_project: '先选择项目',
         not_checked: '尚未检查',
-        offline: '节点离线，值未知',
+        offline: '电脑离线，值未知',
         pending: '检查进行中，保留原回执',
         failed: '检查失败，值未知',
-        unknown: '节点未返回此能力',
-        checked: '已读取节点运行值',
+        unknown: '电脑未返回此能力',
+        checked: '已读取电脑运行值',
       }[node.state] || '未核对';
     return (
       '<section class="panel settings-file-chain" aria-label="文件入站分层状态"><div class="panel-head"><h2>文件能否送到项目？</h2></div><div class="panel-body"><ol class="settings-chain">' +
@@ -356,7 +385,7 @@ window.CodePierSettings = (() => {
       '<li><strong>2. 原生附件转发</strong><span>' +
       bool(rows.native_relay.effective_value) +
       '</span></li>' +
-      '<li><strong>3. 目标节点接收</strong><span>' +
+      '<li><strong>3. 目标电脑接收</strong><span>' +
       bool(node.values?.node_ingress) +
       '</span></li>' +
       '<li><strong>4. 项目写入</strong><span>' +
@@ -369,7 +398,7 @@ window.CodePierSettings = (() => {
       '<div class="actions"><button type="button" class="btn" id="settings-check-node" ' +
       (!state.project ? 'disabled' : '') +
       '>' +
-      (node.state === 'pending' ? '查询原检查' : '检查所选节点') +
+      (node.state === 'pending' ? '查询原检查' : '检查所选电脑') +
       '</button><span id="settings-node-state" role="status">' +
       esc(status) +
       '</span></div>' +
@@ -589,9 +618,23 @@ window.CodePierSettings = (() => {
         $('#settings-search', mounted).value = '';
         filter();
       });
+    const startToggle = $('[data-settings-start-toggle]', mounted);
+    if (startToggle)
+      listen(startToggle, 'click', () => {
+        state.startCollapsed = !state.startCollapsed;
+        try {
+          window.localStorage.setItem(START_KEY, state.startCollapsed ? '1' : '0');
+        } catch {
+          // Not remembered; the toggle still applies to this visit.
+        }
+        const grid = $('.settings-flow-grid', mounted);
+        if (grid) grid.hidden = state.startCollapsed;
+        startToggle.setAttribute('aria-expanded', String(!state.startCollapsed));
+        startToggle.textContent = state.startCollapsed ? '展开引导' : '收起引导';
+      });
     listen($('#settings-project', mounted), 'change', async (event) => {
       const next = event.target.value;
-      if (!requestLeave()) {
+      if (!(await requestLeave())) {
         event.target.value = state.project;
         return;
       }
@@ -603,7 +646,7 @@ window.CodePierSettings = (() => {
     for (const button of $$('[data-settings-entry]', mounted))
       listen(button, 'click', async () => {
         const destination = button.dataset.settingsEntry;
-        if (!requestLeave()) return;
+        if (!(await requestLeave())) return;
         await navigate(destination);
       });
     for (const button of $$('[data-file-import-open]', mounted))
@@ -622,10 +665,27 @@ window.CodePierSettings = (() => {
       });
     for (const button of $$('[data-devtools]', mounted))
       listen(button, 'click', (event) => {
-        if (!requestLeave()) {
-          event.preventDefault();
-          event.stopPropagation();
-        }
+        if (
+          !dirty() &&
+          !state.pending &&
+          !window.CodePierFileImportSettings?.pending() &&
+          !window.CodePierSchedulerSettings?.pending()
+        )
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        void (async () => {
+          if (!(await requestLeave())) return;
+          try {
+            await window.CodePierIntegrations?.open({
+              project: button.dataset.project || '',
+              tab: button.dataset.devtools || 'overview',
+              workflow_id: button.dataset.workflow || '',
+            });
+          } catch (error) {
+            toast(error?.message || '开发工具未能打开，请重试。', true);
+          }
+        })().catch((error) => toast(error?.message || '操作未完成，请重试。', true));
       });
     listen(mounted, 'input', refreshDraftNote);
     listen(mounted, 'change', refreshDraftNote);
@@ -742,7 +802,7 @@ window.CodePierSettings = (() => {
       const button = $('#settings-check-node', mounted);
       listen(button, 'click', async () => {
         button.disabled = true;
-        $('#settings-node-state', mounted).textContent = '正在查询当前项目的节点状态…';
+        $('#settings-node-state', mounted).textContent = '正在查询当前项目的电脑状态…';
         try {
           const result = await api(
             '/api/settings/node?project=' + encodeURIComponent(state.project),

@@ -491,15 +491,22 @@ export function createModal({
       return;
     }
     if (editorRoute && history.state?.codepierEditor !== editorRoute.id) {
-      if (!canClose($('.modal'))) {
-        history.pushState({ ...history.state, codepierEditor: editorRoute.id }, '', location.href);
-        return;
-      }
-      editorRoute = null;
-      closeModal(null, true);
+      const dialog = $('.modal'),
+        routeId = editorRoute.id;
+      void (async () => {
+        if (!(await canClose(dialog))) {
+          if (dialog?.isConnected && editorRoute?.id === routeId)
+            history.pushState({ ...history.state, codepierEditor: routeId }, '', location.href);
+          return;
+        }
+        if (editorRoute?.id === routeId) {
+          editorRoute = null;
+          closeModal(dialog, true);
+        }
+      })();
     }
   });
-  function canClose(dialog) {
+  async function canClose(dialog) {
     if (!dialog) return true;
     if (
       !dialog.classList.contains('modal-editor') &&
@@ -513,16 +520,29 @@ export function createModal({
       !dialog.querySelector('[data-submission="uncertain"]')
     )
       return true;
-    return confirm(
-      busy
-        ? '仍在提交当前操作。离开不会取消已提交的请求；请稍后核对结果。继续离开？'
-        : '输入尚未保存，或保存结果未确认。离开将丢弃本页输入；已提交的操作不会取消。继续离开？',
-    );
+    if (dialog.dataset.confirmingClose === 'true') return false;
+    dialog.dataset.confirmingClose = 'true';
+    try {
+      const ok = await confirmSheet({
+        title: busy ? '操作仍在提交，确定离开？' : '放弃未保存的改动？',
+        body: busy
+          ? '离开不会取消已提交的请求，请稍后查看操作结果。'
+          : '输入尚未保存，或保存结果未确认。离开将丢弃本页输入。',
+        confirmLabel: '继续离开',
+        cancelLabel: '留在此页',
+        danger: true,
+      });
+      return ok && dialog.isConnected && $('.modal') === dialog;
+    } finally {
+      if (dialog.isConnected) delete dialog.dataset.confirmingClose;
+    }
   }
-  function requestClose(expected = null, { navigation = false } = {}) {
+  async function requestClose(expected = null, { navigation = false } = {}) {
     const dialog = $('.modal');
     if (expected && expected !== dialog) return false;
-    if (!canClose(dialog)) return false;
+    if (!(await canClose(dialog))) return false;
+    // Even a clean close yields at await. Never apply that request to a newer dialog.
+    if ($('.modal') !== dialog) return false;
     if (navigation && editorRoute) {
       if (history.state?.codepierEditor === editorRoute.id) {
         const state = { ...history.state };
@@ -531,7 +551,7 @@ export function createModal({
       }
       editorRoute = null;
     }
-    closeModal(expected);
+    closeModal(dialog);
     return true;
   }
   function closeModal(expected = null, preserveRoute = false) {
@@ -617,7 +637,7 @@ export function createModal({
         return;
       if (e.key === 'Escape' && closable) {
         e.preventDefault();
-        requestClose(dialog);
+        void requestClose(dialog);
         return;
       }
       uiTrapTab(e, dialog, [document.getElementById('computer-approval-inbox')]);

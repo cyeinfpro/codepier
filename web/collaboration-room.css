@@ -999,7 +999,7 @@
   text-align: left;
   font: inherit;
   border: 1px solid var(--cr-line);
-  border-radius: var(--ui-radius-sm);
+  border-radius: var(--ui-radius-small);
   background: var(--ui-side);
   cursor: pointer;
 }
@@ -1795,25 +1795,24 @@
 }
 
 .cr-scope .cr-permission-project {
+  display: flex;
+  align-items: center;
   min-height: 40px;
   font-size: var(--ui-text-sm);
   font-weight: var(--ui-weight-semibold);
   overflow-wrap: anywhere;
 }
 
-.cr-permission-project input,
-.cr-permission-select-all input {
-  flex: none;
+/* Rows left out read as quieter; the dropdown carries the decision. */
+.cr-scope:has([data-permission-project]:not(:checked)) .cr-permission-project {
+  color: var(--cr-muted);
+  font-weight: var(--ui-weight-medium);
 }
 
-.cr-permission-bulk .cr-permission-select-all {
+.cr-permission-bulk [data-permission-count] {
   flex-basis: 100%;
-  min-height: 40px;
-}
-
-.cr-permission-select-all .cr-muted {
-  margin-inline-start: 6px;
-  font-weight: var(--ui-weight-regular);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .cr-scope label {
@@ -2003,7 +2002,7 @@
   display: grid;
   justify-items: center;
   gap: 10px;
-  margin: 8px auto 18px;
+  margin: 16px auto 8px;
   text-align: center;
 }
 
@@ -2086,10 +2085,6 @@
   overflow-x: auto;
   scrollbar-width: none;
   user-select: all;
-}
-
-.cr-pair-qr {
-  margin: 16px auto 8px;
 }
 
 .cr-pair-qr img {
@@ -2643,12 +2638,54 @@
 }
 
 .cr-work-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: min(820px, calc(100% - 56px));
+  margin: 4px auto 0;
+  padding: 6px 12px;
+  border: 1px solid var(--cr-line);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-side);
   flex: 0 0 auto;
-  padding: 4px 16px;
-  border-top: 1px solid var(--cr-line);
 }
 .cr-work-bar .cr-button {
   justify-content: flex-start;
+  min-height: 28px;
+}
+.cr-work-bar > span:last-child {
+  display: inline-flex;
+  flex: none;
+}
+.cr-work-bar-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cr-work-bar-summary small {
+  flex: none;
+}
+.cr-work-bar-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .cr-work-bar .cr-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .cr-work-bar {
+    width: auto;
+    margin: 4px 10px 0;
+  }
 }
 .cr-create-projects,
 .cr-permission-bulk {

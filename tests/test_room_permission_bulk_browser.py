@@ -61,7 +61,13 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
         path = open_permissions(page, stack, 'VPS bulk permission fixture')
         section = page.locator('[data-permission-section="room"]')
         first = section.locator(f'[data-project-id="{stack.project["id"]}"]')
-        section.locator('[data-permission-select-all]').check()
+        # Project membership is expressed only by the role dropdown, not a
+        # second selection state. Opening the editor grants nothing implicitly.
+        expect(section.locator('[data-permission-project]:visible')).to_have_count(0)
+        expect(section.locator('[data-permission-select-all]')).to_have_count(0)
+        expect(section.locator('[data-permission-count]')).to_contain_text('已加入 0 /')
+        expect(section.locator('[data-permission-bulk-level]')).to_have_value('-')
+        assert stack.must(stack.client.get(path))['scope']['project_ids'] == []
         section.locator('[data-permission-bulk-level]').select_option('execute')
         expect(first.locator(f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
         expect(first).to_contain_text('Synthetic room VPS')
@@ -70,7 +76,6 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
         for channel in ('weixin',):
             page.locator(f'[data-permission-mode="{channel}"]').uncheck()
             custom = page.locator(f'[data-permission-section="{channel}"]')
-            custom.locator('[data-permission-select-all]').check()
             custom.locator('[data-permission-bulk-level]').select_option('execute')
             expect(custom.locator(f'[data-project-id="{stack.project["id"]}"] '
                                   f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
@@ -99,10 +104,10 @@ def test_bulk_permissions_select_vps_and_constrain_custom_channels(
             rule = next(r for r in scope['project_scopes'] if r['project_id'] == stack.project['id'])
             assert set(rule['execution_targets']) == {'project_agent', other_remote, *extra_remotes}
         page.locator('.cr-room-actions [data-cr-action="permissions"]').click()
-        section.locator('[data-permission-select-all]').check()
-        section.locator('[data-permission-select-all]').uncheck()
+        # 「全部项目设为 · 不加入」 clears every row; then grant everything again.
+        section.locator('[data-permission-bulk-level]').select_option('')
         expect(section.locator('[data-permission-targets]:visible')).to_have_count(0)
-        section.locator('[data-permission-select-all]').check()
+        expect(section.locator('[data-permission-count]')).to_contain_text('已加入 0 /')
         section.locator('[data-permission-bulk-level]').select_option('execute')
         expect(first.locator(f'[data-permission-target-option][value="{remote}"]')).to_be_checked()
         # Merely closing never commits the newly expanded selection.
@@ -134,7 +139,7 @@ def test_mobile_bulk_save_reports_paused_project_and_applies_other_projects(
     try:
         path = open_permissions(page, stack, 'Partial room permissions')
         section = page.locator('[data-permission-section="room"]')
-        section.locator('[data-permission-select-all]').check()
+        section.locator('[data-permission-bulk-level]').select_option('read')
         with page.expect_response(lambda response: response.request.method == 'PUT'
                                   and response.url.endswith('/permissions')) as submitted:
             page.locator('[data-cr-form="permissions"] button[type="submit"]').click()
@@ -178,15 +183,12 @@ def test_bulk_projects_saves_above_old_limit_without_contract_error(
     try:
         path = open_permissions(page, stack, 'Unlimited project permissions')
         section = page.locator('[data-permission-section="room"]')
-        select_all = section.locator('[data-permission-select-all]')
-        first = section.locator('[data-permission-project]').first
-        first.check()
-        expect(select_all).to_have_js_property('indeterminate', True)
-        expect(section.locator('[data-permission-count]')).to_have_text('已选 1 / 129')
-        section.locator('[data-permission-bulk-level]').select_option('read')
+        bulk = section.locator('[data-permission-bulk-level]')
+        section.locator('[data-permission-level]').first.select_option('read')
+        expect(section.locator('[data-permission-count]')).to_have_text('已加入 1 / 129')
         expect(section.locator('[data-permission-project]:checked')).to_have_count(1)
-        select_all.check()
-        expect(select_all).to_have_js_property('indeterminate', False)
+        bulk.select_option('read')
+        expect(section.locator('[data-permission-count]')).to_have_text('已加入 129 / 129')
         expect(section.locator('[data-permission-project]:checked')).to_have_count(129)
         payload = submit_permissions(page)
         assert len(payload['scope']['project_scopes']) == 129
@@ -347,7 +349,7 @@ def test_permission_save_errors_preserve_identity_and_real_conflicts(
             recovery = page.locator('[data-cr-panel-recovery] [data-cr-action="recover-action"]')
             expect(recovery).to_be_visible()
             # Changed draft must not replace the uncertain serialized request.
-            form.locator('[data-permission-select-all]').first.check()
+            form.locator('[data-permission-bulk-level]').first.select_option('read')
             recovery.click()
             expect(page.locator('dialog.cr-panel')).not_to_be_visible()
             assert len(attempts) == 2 and attempts[0] == attempts[1]
@@ -368,7 +370,7 @@ def test_permission_save_errors_preserve_identity_and_real_conflicts(
             else:
                 expect(error).to_contain_text('Synthetic permission rejection')
                 expect(error).not_to_contain_text('权限已在其他位置更新')
-                form.locator('[data-permission-select-all]').first.check()
+                form.locator('[data-permission-bulk-level]').first.select_option('read')
             submit_permissions(page, closes=code != 'STALE_VERSION')
             assert len(attempts) == 2
             assert attempts[0]['idempotency_key'] != attempts[1]['idempotency_key']

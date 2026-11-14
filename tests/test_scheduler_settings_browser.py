@@ -44,8 +44,10 @@ def test_scheduler_save_once_readback_and_per_project_quota(scheduler_page, stac
     form.locator('[name="initial"]').fill("3")
     form.locator('[data-scheduler-project="' + stack.project["id"] + '"]').fill("2")
     assert page.evaluate("CodePierSettings.dirty()")
-    page.once("dialog", lambda dialog: dialog.dismiss())
-    page.evaluate("navigate('identity')")
+    # navigate() now awaits the leave sheet; don't await it here or the test
+    # waits on the very answer it is about to give.
+    page.evaluate("() => { navigate('identity'); }")
+    page.locator('dialog.ui-sheet .ghost').click()
     expect(form).to_be_visible()
     writes = []
     page.on("request", lambda request: writes.append(request) if request.method == "PUT"

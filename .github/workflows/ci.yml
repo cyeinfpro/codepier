@@ -65,7 +65,7 @@ jobs:
           .venv/bin/python -m ruff format --check agent hub shared scripts
           .venv/bin/python scripts/update_source_inventory.py --check
           .venv/bin/python scripts/check_repository_contracts.py
-          node --test tests/test_lazy_assets.mjs
+          node --test tests/test_lazy_assets.mjs tests/test_diff_html.mjs
           .venv/bin/python scripts/check_host_python.py
           .venv/bin/python scripts/sync_standalone_helpers.py --check
           git diff --check

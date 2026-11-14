@@ -1,15 +1,15 @@
 /* Editorial workspace: paired reading colors + bounded entity cover colors. */
 :root {
   color-scheme: light;
-  --ui-bg: #f4f4f4;
+  --ui-bg: #f5f5f4;
   --ui-panel: #ffffff;
-  --ui-side: #fafafa;
+  --ui-side: #fafaf9;
   --ui-surface: #f0f0f0;
   --ui-raised: #ffffff;
   --ui-hover: #e8e8e8;
   --ui-selected: #e3e3e3;
-  --ui-line: #e3e3e3;
-  --ui-border: #cccccc;
+  --ui-line: #e6e5e3;
+  --ui-border: #d6d5d2;
   --ui-control-border: #878787;
   --ui-text: #272727;
   --ui-muted: #606060;
@@ -39,7 +39,7 @@
   --ui-focus: #746018;
   --ui-code: #514820;
   --ui-code-bg: #f0f0f0;
-  --ui-sidebar-border: #e3e3e3;
+  --ui-sidebar-border: #e6e5e3;
   --ui-sidebar-active: #e9e7df;
   --ui-sidebar-active-text: #302d23;
   --ui-accent-line: #bbaa6a;
@@ -124,7 +124,7 @@
   --ui-radius-xl: 20px;
   --ui-radius-pill: 999px;
   --ui-elev-0: none;
-  --ui-elev-1: 0 1px 3px rgb(0 0 0 / 4%);
+  --ui-elev-1: 0 1px 2px rgb(0 0 0 / 4%), 0 0 0 1px rgb(0 0 0 / 2%);
   --ui-elev-2: 0 6px 20px rgb(0 0 0 / 8%), 0 1px 3px rgb(0 0 0 / 4%);
   --ui-elev-3: var(--ui-shadow);
   /* Global layers; component-local stacking is limited to 0–9. */
@@ -152,15 +152,15 @@
 
 html[data-appearance='dark'] {
   color-scheme: dark;
-  --ui-bg: #191919;
-  --ui-panel: #222222;
-  --ui-side: #1e1e1e;
+  --ui-bg: #141413;
+  --ui-panel: #1c1c1b;
+  --ui-side: #181817;
   --ui-surface: #2b2b2b;
   --ui-raised: #2b2b2b;
   --ui-hover: #343434;
   --ui-selected: #393939;
-  --ui-line: #3a3a3a;
-  --ui-border: #515151;
+  --ui-line: #2c2c2a;
+  --ui-border: #3d3d3a;
   --ui-control-border: #818181;
   --ui-text: #e5e5e5;
   --ui-muted: #b9b9b9;
@@ -190,7 +190,7 @@ html[data-appearance='dark'] {
   --ui-focus: #d1bd75;
   --ui-code: #cfbf87;
   --ui-code-bg: #1d1d1d;
-  --ui-sidebar-border: #363636;
+  --ui-sidebar-border: #2c2c2a;
   --ui-sidebar-active: #343229;
   --ui-sidebar-active-text: #e7dfc5;
   --ui-accent-line: #8e8151;
@@ -201,6 +201,7 @@ html[data-appearance='dark'] {
   --ui-message-bg: #343434;
   --ui-message-text: #e5e5e5;
   --ui-message-code-bg: #414141;
+  --ui-elev-1: 0 1px 2px rgb(0 0 0 / 18%), 0 0 0 1px rgb(255 255 255 / 4%);
   --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
   --ui-scrim: rgb(0 0 0 / 46%);
   --ui-cover-project: #40374f;
@@ -221,15 +222,15 @@ html[data-appearance='dark'] {
 @media (prefers-color-scheme: dark) {
   html:not([data-appearance]) {
     color-scheme: dark;
-    --ui-bg: #191919;
-    --ui-panel: #222222;
-    --ui-side: #1e1e1e;
+    --ui-bg: #141413;
+    --ui-panel: #1c1c1b;
+    --ui-side: #181817;
     --ui-surface: #2b2b2b;
     --ui-raised: #2b2b2b;
     --ui-hover: #343434;
     --ui-selected: #393939;
-    --ui-line: #3a3a3a;
-    --ui-border: #515151;
+    --ui-line: #2c2c2a;
+    --ui-border: #3d3d3a;
     --ui-control-border: #818181;
     --ui-text: #e5e5e5;
     --ui-muted: #b9b9b9;
@@ -259,7 +260,7 @@ html[data-appearance='dark'] {
     --ui-focus: #d1bd75;
     --ui-code: #cfbf87;
     --ui-code-bg: #1d1d1d;
-    --ui-sidebar-border: #363636;
+    --ui-sidebar-border: #2c2c2a;
     --ui-sidebar-active: #343229;
     --ui-sidebar-active-text: #e7dfc5;
     --ui-accent-line: #8e8151;
@@ -270,6 +271,7 @@ html[data-appearance='dark'] {
     --ui-message-bg: #343434;
     --ui-message-text: #e5e5e5;
     --ui-message-code-bg: #414141;
+    --ui-elev-1: 0 1px 2px rgb(0 0 0 / 18%), 0 0 0 1px rgb(255 255 255 / 4%);
     --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
     --ui-scrim: rgb(0 0 0 / 46%);
     --ui-cover-project: #40374f;

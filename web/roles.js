@@ -6,7 +6,7 @@ window.CodePierRoles = (() => {
     execute: '执行',
     computer: '浏览器 / 桌面',
     'devices.read': '查看设备',
-    'projects.create': '创建项目映射',
+    'projects.create': '创建项目',
   };
   const note =
     '动态角色的能力和项目范围会影响所有已同意该角色的连接，无需重新 OAuth。旧固定授权保持原状，角色设置由你管理。';
@@ -18,7 +18,7 @@ window.CodePierRoles = (() => {
       .join('、');
   function summary(role) {
     if (!role) return '<p class="form-note">角色已不存在。</p>';
-    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled ? '已启用' : '已暂停'}</p>${role.project_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(' / '))} → ${esc(rule.all_projects ? '全部现有及未来项目' : names(rule.projects, S.projects) || '')}${rule.created_projects ? ' + 本角色创建的项目' : ''}${rule.excluded_projects.length ? '；此规则排除 ' + esc(names(rule.excluded_projects, S.projects)) : ''}</p>`).join('')}${role.device_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(' / '))} → ${esc(names(rule.devices, S.devices))}${rule.actions.includes('projects.create') ? `；新映射上限 ${esc(rule.max_project_mode)}${rule.allow_tasks ? ' + 任务' : ''}；${esc(rule.root_prefixes.length ? rule.root_prefixes.join('、') : 'Agent 本机允许的目录')}` : ''}</p>`).join('')}${role.connector_rules?.length ? `<p>MCP 工具规则：${esc(role.connector_rules.map((rule) => rule.binding_id + ' → ' + rule.tools.join(', ')).join('；'))}。请在 MCP 网关管理。</p>` : ''}</div>`;
+    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled ? '已启用' : '已暂停'}</p>${role.project_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(' / '))} → ${esc(rule.all_projects ? '全部现有及未来项目' : names(rule.projects, S.projects) || '')}${rule.created_projects ? ' + 本角色创建的项目' : ''}${rule.excluded_projects.length ? '；此规则排除 ' + esc(names(rule.excluded_projects, S.projects)) : ''}</p>`).join('')}${role.device_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(' / '))} → ${esc(names(rule.devices, S.devices))}${rule.actions.includes('projects.create') ? `；新项目上限 ${esc(rule.max_project_mode)}${rule.allow_tasks ? ' + 任务' : ''}；${esc(rule.root_prefixes.length ? rule.root_prefixes.join('、') : 'Agent 本机允许的目录')}` : ''}</p>`).join('')}${role.connector_rules?.length ? `<p>MCP 工具规则：${esc(role.connector_rules.map((rule) => rule.binding_id + ' → ' + rule.tools.join(', ')).join('；'))}。请在 MCP 网关管理。</p>` : ''}</div>`;
   }
   async function html() {
     const result = await api('/api/access-roles');
@@ -63,7 +63,7 @@ window.CodePierRoles = (() => {
       allow_tasks: false,
     },
   ) {
-    return `<fieldset data-device-rule class="role-rule"><legend>设备与项目创建委派</legend><div class="actions"><button type="button" class="btn ghost small" data-remove-rule>移除此规则</button></div><div class="check-list">${['devices.read', 'projects.create'].map((a) => `<label class="check"><input type="checkbox" name="action" value="${a}" ${rule.actions.includes(a) ? 'checked' : ''} ${a === 'devices.read' ? 'disabled' : ''}>${labels[a]}</label>`).join('')}</div>${choices(S.devices, rule.devices, 'device')}<label class="field">新映射模式上限<select name="max_project_mode"><option value="read" ${rule.max_project_mode === 'read' ? 'selected' : ''}>只读</option><option value="write" ${rule.max_project_mode === 'write' ? 'selected' : ''}>可写</option></select></label><label class="check"><input type="checkbox" name="allow_tasks" ${rule.allow_tasks ? 'checked' : ''}>允许新映射启用任务（仍需 Agent 允许）</label><label class="field">可映射目录上限（每行一个绝对路径）<textarea name="root_prefixes" rows="2" placeholder="留空表示仍按该设备的 Agent 本机允许目录检查">${esc(rule.root_prefixes.join('\n'))}</textarea></label><p class="form-note">仅创建新映射，不创建磁盘目录、不改已有映射、不改角色、不扩大 Agent 权限。要让新项目可使用，另加「本角色创建的项目」或「全部项目」规则。</p></fieldset>`;
+    return `<fieldset data-device-rule class="role-rule"><legend>设备与项目创建委派</legend><div class="actions"><button type="button" class="btn ghost small" data-remove-rule>移除此规则</button></div><div class="check-list">${['devices.read', 'projects.create'].map((a) => `<label class="check"><input type="checkbox" name="action" value="${a}" ${rule.actions.includes(a) ? 'checked' : ''} ${a === 'devices.read' ? 'disabled' : ''}>${labels[a]}</label>`).join('')}</div>${choices(S.devices, rule.devices, 'device')}<label class="field">新项目权限上限<select name="max_project_mode"><option value="read" ${rule.max_project_mode === 'read' ? 'selected' : ''}>只读</option><option value="write" ${rule.max_project_mode === 'write' ? 'selected' : ''}>可写</option></select></label><label class="check"><input type="checkbox" name="allow_tasks" ${rule.allow_tasks ? 'checked' : ''}>允许新项目启用任务（仍需 Agent 允许）</label><label class="field">可映射目录上限（每行一个绝对路径）<textarea name="root_prefixes" rows="2" placeholder="留空表示仍按该设备的 Agent 本机允许目录检查">${esc(rule.root_prefixes.join('\n'))}</textarea></label><p class="form-note">仅创建新映射，不创建磁盘目录、不改已有映射、不改角色、不扩大 Agent 权限。要让新项目可使用，另加「本角色创建的项目」或「全部项目」规则。</p></fieldset>`;
   }
   const selected = (box, name) => $$(`input[name="${name}"]:checked`, box).map((x) => x.value);
   async function edit(id = null) {

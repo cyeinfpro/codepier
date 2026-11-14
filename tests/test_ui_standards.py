@@ -37,6 +37,7 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
         expect(page.locator("#project-query")).to_have_value("")
         expect(page.locator("#project-query")).to_be_focused()
         expect(page.locator("#project-no-match")).to_be_hidden()
+        page.locator('.workspace-project-row .tool-menu > summary').first.click()
         page.locator('[data-action="edit-project"]').first.click()
         expect(page.locator("#project-form")).to_be_visible()
         alias = page.locator('#project-form input[name="alias"]')
@@ -46,7 +47,7 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
         hint = root.get_attribute("aria-describedby")
         assert hint
         expect(page.locator("#" + hint)).to_have_text(
-            "保存时验证目录与权限。SMB 共享请填写节点上已挂载的路径。"
+            "网络共享请填挂载后的路径。"
         )
         page.evaluate("uiLabelFields(document.querySelector('.modal'))")
         expect(root).to_have_attribute("aria-describedby", hint)
@@ -64,8 +65,8 @@ def test_field_semantics_invalid_reset_and_clear_search(stack, engine):
           return uiFocusable(document.querySelector('.modal')).map(el=>el.id);
         }""")
         assert not set(hidden) & {"negative-tab", "invisible", "fieldset-disabled"}
-        page.once("dialog", lambda dialog: dialog.accept())
         page.keyboard.press("Escape")
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
         assert not page.locator("#app").evaluate("el=>el.inert")
         page.evaluate("newGrant()")
         groups = page.locator('.check-list[role="group"]')
@@ -89,7 +90,7 @@ def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
         page.locator("#settings-more > summary").click()
         button = page.locator('#settings-form button[type="submit"]')
         expect(button).to_be_visible()
-        expect(button).to_have_accessible_name("保存并核对")
+        expect(button).to_have_accessible_name("保存")
         original = button.bounding_box()
         assert original and original["width"] > 0 and original["height"] > 0
         page.evaluate("""() => {
@@ -101,7 +102,7 @@ def test_busy_preserves_geometry_name_nodes_and_duplicate_guard(stack, engine):
         expect(button).to_be_disabled()
         expect(button).to_have_attribute("aria-busy", "true")
         assert button.get_attribute("class").endswith("ui-busy")
-        expect(button).to_have_accessible_name("保存并核对")
+        expect(button).to_have_accessible_name("保存")
         current = button.bounding_box()
         assert abs(original["width"] - current["width"]) <= 1
         assert abs(original["height"] - current["height"]) <= 1
@@ -149,9 +150,9 @@ def test_command_first_arrow_node_identity_and_filter_reset(stack, engine):
         assert query.get_attribute("aria-activedescendant") is None
         query.press("Enter")
         expect(page.locator(".command-dialog")).to_be_visible()
-        query.fill("设置中心")
+        query.fill("设置")
         query.press("Enter")
-        expect(page.locator("#page h1")).to_have_text("设置中心")
+        expect(page.locator("#page h1")).to_have_text("设置")
         browser.close()
 
 
@@ -339,11 +340,16 @@ def test_chat_touch_contract_and_search_font(chat_page, width, height):
     # Resize events are asynchronous. Wait for the real page to settle, without
     # invoking its resize handler or relaxing the viewport geometry contract.
     page.wait_for_function("() => {const r=document.querySelector('#chat-root').getBoundingClientRect();return r.y>=0&&r.bottom<=innerHeight+1;}")
-    for selector in ["#chat-send", "#chat-attach", "#chat-model-picker"]:
+    for selector in ["#chat-send", "#chat-attach", "#chat-options-toggle"]:
         rect = page.locator(selector).bounding_box()
+        assert rect is not None, f"Selector {selector} not found"
         assert rect["height"] >= 44, (selector, rect)
         assert rect["x"] >= 0 and rect["x"] + rect["width"] <= width + 1, (selector, rect)
         assert rect["y"] >= 0 and rect["y"] + rect["height"] <= height + 1, (selector, rect)
+    page.click("#chat-options-toggle")
+    expect(page.locator("#chat-model-picker")).to_be_visible()
+    picker_rect = page.locator("#chat-model-picker").bounding_box()
+    assert picker_rect and picker_rect["height"] >= 44, picker_rect
     page.click("#chat-model-picker")
     expect(page.locator("#chat-model-search")).to_be_visible()
     assert page.locator("#chat-model-search").evaluate("el=>getComputedStyle(el).fontSize") == "16px"

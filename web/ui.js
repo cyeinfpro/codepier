@@ -187,6 +187,7 @@ function uiSyncNavigation() {
   });
   const more = $('.mobile-dock [data-action="toggle-menu"]');
   if (more) more.classList.toggle('active', !uiDockPages.has(S.page));
+  if (typeof navActivitySync === 'function') navActivitySync();
 }
 function uiSetMenu(value, restore = true, origin = null) {
   const side = $('.sidebar'),
@@ -441,6 +442,8 @@ function uiPageReady(animate = false, presentation = null) {
 }
 async function uiCommand() {
   if (!S.session || $('.modal')) return;
+  // One entry point for keyboard and buttons; chat adds session actions to global routes.
+  if ($('#chat-root') && typeof chatPalette === 'function') return chatPalette();
   uiSetMenu(false, false);
   const session = S.session;
   const dialog = modal(
@@ -511,8 +514,18 @@ async function uiCommand() {
   async function choose(index) {
     const item = filtered[index];
     if (!item || session !== S.session || !dialog.isConnected) return;
-    if (item.kind === 'project' && S.work.dirty && !confirm('打开项目将丢弃当前未保存草稿，继续？'))
+    if (
+      item.kind === 'project' &&
+      S.work.dirty &&
+      !(await CP.ui.confirmSheet({
+        title: '打开项目并放弃草稿？',
+        body: '打开项目将丢弃当前未保存草稿，是否继续？',
+        confirmLabel: '放弃草稿并打开',
+        danger: true,
+      }))
+    )
       return;
+    if (session !== S.session || !dialog.isConnected) return;
     closeModal(dialog);
     if (item.kind === 'project') resetWork(item.id);
     await navigate(item.kind === 'project' ? 'workbench' : item.id);
@@ -566,8 +579,7 @@ document.addEventListener('click', (e) => {
   const button = e.target.closest('[data-ui]');
   if (button && !button.disabled) {
     if (button.dataset.ui === 'command') {
-      if ($('#chat-root')) chatPalette();
-      else uiCommand().catch((err) => toast(err.message, true));
+      uiCommand().catch((err) => toast(err.message, true));
     }
     if (button.dataset.ui === 'close-menu') uiSetMenu(false);
     if (button.dataset.ui === 'clear-project-query') {
@@ -597,8 +609,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if ($('.command-dialog')) closeModal();
     else if (!$('.modal')) {
-      if ($('#chat-root')) chatPalette();
-      else uiCommand().catch((err) => toast(err.message, true));
+      uiCommand().catch((err) => toast(err.message, true));
     }
     return;
   }

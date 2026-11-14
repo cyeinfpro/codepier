@@ -57,12 +57,12 @@ window.CodePierRoots = (() => {
 
   function markup() {
     return `<div class="agent-roots">
-      <header class="roots-heading"><div><h3>授权目录</h3><p>为这台节点设置可访问的路径与权限。</p></div><div class="roots-toolbar"><button type="button" class="btn ghost small" data-roots="refresh">${icon('refresh')}刷新</button><button type="button" class="btn small" data-roots="add" disabled>${icon('plus')}新增路径</button></div></header>
+      <header class="roots-heading"><div><h3>授权目录</h3><p>为这台电脑设置可访问的路径与权限。</p></div><div class="roots-toolbar"><button type="button" class="btn ghost small" data-roots="refresh">${icon('refresh')}刷新</button><button type="button" class="btn small" data-roots="add" disabled>${icon('plus')}新增路径</button></div></header>
       <div class="roots-state" role="status" aria-live="polite"><span class="badge neutral" data-roots-state>正在读取</span><p class="roots-status" data-roots-status>核对 Agent 当前配置…</p></div>
       <div class="roots-list" data-roots-list></div>
       <section class="roots-editor" data-roots-editor hidden>
         <h4 data-roots-title>新增授权路径</h4>
-        <label class="field">节点上的目录路径<input data-root-field="path" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="/Volumes/CodePier/Projects 或 D:/Projects"></label>
+        <label class="field">电脑上的目录路径<input data-root-field="path" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="/Volumes/CodePier/Projects 或 D:/Projects"></label>
         <div class="roots-permissions" data-roots-permissions><label class="field">文件访问<select data-root-field="mode"><option value="write">可读取和编辑</option><option value="read">只读</option></select></label><label class="check"><input type="checkbox" data-root-field="tasks">允许任务执行</label></div>
         <div class="roots-scope" data-roots-scope></div>
         <div class="roots-editor-actions"><button type="button" class="btn ghost small" data-roots="cancel">收起</button><button type="button" class="btn primary small roots-primary" data-roots="save" disabled>验证并授权</button></div>
@@ -105,7 +105,7 @@ window.CodePierRoots = (() => {
       (!options.current || options.current());
     const checkDevice = (value) => {
       if (!value || typeof value !== 'object' || (value.device_id && value.device_id !== deviceId))
-        throw new Error('响应节点与当前节点不一致，未采用该结果。');
+        throw new Error('响应的电脑与当前电脑不一致，未采用该结果。');
     };
     const later = (fn, delay = 1800) => {
       clearTimeout(timer);
@@ -151,7 +151,7 @@ window.CodePierRoots = (() => {
       find('[data-roots-scope]').innerHTML =
         action === 'remove'
           ? `<strong>撤销此条目录授权</strong><code>${esc(path || '未填写路径')}</code><p>项目文件会保留。父目录授权仍可能覆盖此路径，具体权限以最匹配的目录为准。</p>`
-          : `<strong>${field('mode').value === 'read' ? '只读' : '读取和编辑'}${field('tasks').checked ? ' · 允许任务' : ''}</strong><code>${esc(path || '填写后显示授权范围')}</code><p>范围包含此目录及子目录；更具体的目录条目优先。项目映射与调用端权限仍分别校验。</p>`;
+          : `<strong>${field('mode').value === 'read' ? '只读' : '读取和编辑'}${field('tasks').checked ? ' · 允许任务' : ''}</strong><code>${esc(path || '填写后显示授权范围')}</code><p>范围包含此目录及子目录；更具体的目录条目优先。项目权限与调用端权限仍分别校验。</p>`;
     };
     function edit(root = {}, nextAction = 'upsert', focus = true) {
       if (saving || record || awaiting || !current()) return;
@@ -191,12 +191,12 @@ window.CodePierRoots = (() => {
         `<p class="form-note">${value.observed_config === false ? '当前目录暂无法读取。' : '尚无授权目录。'}</p>`;
       const labels = {
         applied: ['已生效', `${roots.length} 个授权目录`],
-        offline: ['节点离线', '上线后可读取当前目录并校验修改。'],
+        offline: ['电脑离线', '上线后可读取当前目录并校验修改。'],
         pending_reload: ['已保存 · 生效待核对', '正在等待 Agent 加载配置…'],
         unsupported: ['需要更新 Agent', '当前版本尚不支持面板管理授权目录。'],
-        disabled: ['节点已停用', '启用节点后可校验和修改。'],
+        disabled: ['电脑已停用', '启用电脑后可校验和修改。'],
       };
-      const message = labels[value.state] || ['暂不可编辑', value.reason || '正在核对节点状态。'];
+      const message = labels[value.state] || ['暂不可编辑', value.reason || '正在核对电脑状态。'];
       state(...message);
       if (value.reason) tell(value.reason);
       if (!initialized && !record && !awaiting && options.initial) {
@@ -225,7 +225,7 @@ window.CodePierRoots = (() => {
       let value = receipt;
       while (current()) {
         if (value.device_id && value.device_id !== deviceId)
-          throw new Error('操作回执与当前节点不一致，未采用该结果。');
+          throw new Error('操作回执与当前电脑不一致，未采用该结果。');
         if (value.result) {
           if (pendingStates.has(value.state)) {
             await pause(1200);
@@ -238,7 +238,7 @@ window.CodePierRoots = (() => {
             return value.result.data;
           } else {
             const error = Object.assign(
-              new Error(value.result?.error?.message || value.error || '节点未完成本次操作。'),
+              new Error(value.result?.error?.message || value.error || '电脑未完成本次操作。'),
               value.result?.error || {},
             );
             error.operation_id = value.operation_id || value.id;
@@ -260,7 +260,7 @@ window.CodePierRoots = (() => {
         }
         if (!current()) return null;
         const id = value.operation_id || value.id;
-        if (!id) throw new Error('节点没有返回可核对的操作编号。');
+        if (!id) throw new Error('电脑没有返回可核对的操作编号。');
         value = await api(`/api/operations/${encodeURIComponent(id)}`);
       }
       return null;
@@ -301,7 +301,7 @@ window.CodePierRoots = (() => {
         else if (awaiting || value.state === 'pending_reload') later(load);
       } catch (error) {
         if (!current()) return;
-        state(awaiting ? '已保存 · 生效待核对' : '读取失败', '可刷新核对当前节点状态。');
+        state(awaiting ? '已保存 · 生效待核对' : '读取失败', '可刷新核对当前电脑状态。');
         tell(error.message, true);
         if (awaiting && (!error.status || error.status >= 500)) later(load, 4000);
       } finally {
@@ -372,7 +372,7 @@ window.CodePierRoots = (() => {
     async function save() {
       if (!current() || loading || saving || record || awaiting || saveButton.disabled) return;
       const path = field('path').value.trim();
-      field('path').setCustomValidity(path ? '' : '请输入节点上的目录路径。');
+      field('path').setCustomValidity(path ? '' : '请输入电脑上的目录路径。');
       if (!field('path').reportValidity()) return;
       saving = true;
       lock();
@@ -501,7 +501,7 @@ window.CodePierRoots = (() => {
     )
       return;
     const device = S.devices.find((item) => item.id === deviceId);
-    if (!device) throw new Error('节点不存在或已移除，请刷新后重试。');
+    if (!device) throw new Error('电脑不存在或已移除，请刷新后重试。');
     const dialog = modal(
       '授权目录 · ' + device.name,
       '<div id="agent-roots-manager"></div>',

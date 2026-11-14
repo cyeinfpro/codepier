@@ -478,7 +478,11 @@ export function patchMutationRecovery() {
 export function patchWorks() {
   const node = root?.querySelector('[data-cr-work]');
   if (!node) return;
-  const markup = btn('work-list', '工作记录', '', 'cr-text-button');
+  const activeWorks = state.works.filter((work) => !finishedWork(work));
+  const lead = activeWorks[0];
+  const markup = lead
+    ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '进行中的工作')}</strong><small>${E(workStatus(lead))}${activeWorks.length > 1 ? ` · 共 ${activeWorks.length} 项` : ''}</small></span><span>${btn('work-detail', '查看', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '全部', '', 'cr-text-button')}</span>`
+    : `<span class="cr-work-bar-summary">${state.works.length} 项历史工作</span>${btn('work-list', '工作记录', '', 'cr-text-button')}`;
   node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
   if (node._markup !== markup) {
     node.innerHTML = markup;

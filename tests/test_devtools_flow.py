@@ -164,7 +164,7 @@ def test_pending_mutation_recovers_same_operation_without_reexecution(tools_page
     page.fill('[name=command]', 'printf second-intent')
     page.click('[data-i-form=validate] button[type=submit]')
     confirm(page)
-    expect(page.locator('.integration-form-error')).to_contain_text('待确认的原请求')
+    expect(page.locator('.integration-form-error')).to_contain_text('待确认的请求')
     page.locator('#i-receipts button').filter(has_text='查询原结果').click()
     expect(page.locator('#i-result')).to_contain_text('ORIGINAL OUTPUT')
     assert page.evaluate("toolCalls.filter(r=>r.tool==='validation_run').length") == 1
@@ -261,8 +261,9 @@ def test_code_navigation_opens_exact_line_and_keeps_dirty_buffer(tools_page, int
     expect(page.locator('#code-editor')).to_have_value('header\n😀abc xyz\nend\n')
     assert page.locator('#code-editor').evaluate('(el)=>el.selectionStart') == 10
     page.fill('#code-editor', 'unsaved local buffer')
-    page.once('dialog', lambda dialog: dialog.accept())
+    # Leaving a dirty buffer asks through the in-page sheet (no native confirm).
     page.click('[data-devtools=navigation]')
+    page.locator('dialog.ui-sheet button[type="submit"]').click()
     expect(page.locator('[name=path]')).to_have_value('unicode-flow.py')
     page.click('[data-i-form=lsp] button[type=submit]')
     page.get_by_role('button', name='打开并定位', exact=True).click()

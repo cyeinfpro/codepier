@@ -673,6 +673,16 @@ def test_repeated_lifecycle_does_not_replay_pending_message_or_erase_new_draft(
         context.close()
 
 
+def collaboration_route_scripts():
+    """Scripts of the production 'collaboration' lazy route group."""
+    import re
+    index = (Path(__file__).resolve().parents[1] / "web/index.html").read_text()
+    match = re.search(r'<script id="codepier-route-assets" type="application/json">(.*?)</script>',
+                      index, re.S)
+    return [asset for asset in json.loads(match.group(1))["collaboration"]
+            if urlsplit(asset).path.endswith(".js")]
+
+
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 @pytest.mark.parametrize("transition", ["resume", "leave"])
 def test_lifecycle_before_app_initialization_is_a_safe_noop(
@@ -694,6 +704,10 @@ def test_lifecycle_before_app_initialization_is_a_safe_noop(
         # Use the real ordered entrypoint. Only app.js is withheld: the
         # collaboration listeners exist while app.js has not declared S yet.
         page.goto(stack.url + "/#projects", wait_until="commit")
+        # Room assets are lazy route assets now; load the production group in
+        # its manifest order while app.js is still withheld.
+        for asset in collaboration_route_scripts():
+            page.add_script_tag(url=stack.url + asset)
         page.wait_for_function("() => Boolean(window.CodePierCollaboration)", timeout=5000)
         assert len(held_app) == 1
         assert page.evaluate("typeof S") == "undefined"

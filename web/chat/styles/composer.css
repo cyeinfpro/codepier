@@ -122,9 +122,9 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 13px;
-  min-height: 34px;
-  margin: 8px 4px 0;
+  gap: 6px 12px;
+  min-height: 36px;
+  margin: 0;
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
 }

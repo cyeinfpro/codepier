@@ -304,6 +304,7 @@ def test_maintenance_origin_is_separate_from_authorization(log_page):
     assert '程序输出' in entry.locator('[data-call-section="output"] > summary').inner_text()
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('#call-more-filters > summary').click()
     page.locator('#call-trigger-source').select_option('system_maintenance')
     page.wait_for_function('S.callLog.triggerSource === "system_maintenance" && document.querySelector("#call-trigger-source").value === "system_maintenance"')
     assert parse_qs(urlsplit(requests[-1]).query)['trigger_source'] == ['system_maintenance']
@@ -311,6 +312,23 @@ def test_maintenance_origin_is_separate_from_authorization(log_page):
     page.locator('#call-trigger-source').select_option('unknown')
     page.wait_for_function('document.querySelector("#call-trigger-source").value === "unknown"')
     assert parse_qs(urlsplit(requests[-1]).query)['trigger_source'] == ['unknown']
+
+
+def test_active_more_filters_stay_collapsed_after_rerender(log_page):
+    page, _, _, requests = log_page
+    page.locator('#call-more-filters > summary').click()
+    page.locator('#call-trigger-source').select_option('system_maintenance')
+    page.wait_for_function('S.callLog.triggerSource === "system_maintenance" && document.querySelector("#call-trigger-source").value === "system_maintenance"')
+    page.locator('#call-more-filters > summary').click()
+    page.wait_for_function('S.callLog.moreFilters === false')
+    page.evaluate('renderPage()')
+    assert not page.locator('#call-more-filters').evaluate('(node) => node.open')
+    assert page.locator('.call-more-count').inner_text() == '1'
+    assert parse_qs(urlsplit(requests[-1]).query)['trigger_source'] == ['system_maintenance']
+    page.locator('#call-more-filters > summary').click()
+    page.wait_for_function('S.callLog.moreFilters === true')
+    page.evaluate('renderPage()')
+    assert page.locator('#call-more-filters').evaluate('(node) => node.open')
 
 
 def test_missing_origin_and_mode_are_not_inferred_from_actor_or_request(log_page):

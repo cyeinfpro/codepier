@@ -1,13 +1,13 @@
 /* CodePier conversation workspace, sharing the panel palette and typography. */
 .chat-workspace {
   --chat-bg: var(--ui-panel, #ffffff);
-  --chat-side: var(--ui-side, #fafafa);
+  --chat-side: var(--ui-side, #fafaf9);
   --chat-surface: var(--ui-surface, #f0f0f0);
   --chat-raised: var(--ui-raised, #ffffff);
   --chat-hover: var(--ui-hover, #e8e8e8);
   --chat-selected: var(--ui-selected, #e3e3e3);
-  --chat-line: var(--ui-line, #e3e3e3);
-  --chat-border: var(--ui-border, #cccccc);
+  --chat-line: var(--ui-line, #e6e5e3);
+  --chat-border: var(--ui-border, #d6d5d2);
   --chat-fg: var(--ui-text, #272727);
   --chat-muted: var(--ui-muted, #606060);
   --chat-soft: var(--ui-soft, #626262);
@@ -86,14 +86,14 @@
 }
 .chat-workspace[data-appearance='dark'],
 html[data-appearance='dark'] .chat-workspace {
-  --chat-bg: var(--ui-panel, #222222);
-  --chat-side: var(--ui-side, #1e1e1e);
+  --chat-bg: var(--ui-panel, #1c1c1b);
+  --chat-side: var(--ui-side, #181817);
   --chat-surface: var(--ui-surface, #2b2b2b);
   --chat-raised: var(--ui-raised, #2b2b2b);
   --chat-hover: var(--ui-hover, #343434);
   --chat-selected: var(--ui-selected, #393939);
-  --chat-line: var(--ui-line, #3a3a3a);
-  --chat-border: var(--ui-border, #515151);
+  --chat-line: var(--ui-line, #2c2c2a);
+  --chat-border: var(--ui-border, #3d3d3a);
   --chat-fg: var(--ui-text, #e5e5e5);
   --chat-muted: var(--ui-muted, #b9b9b9);
   --chat-soft: var(--ui-soft, #ababab);
@@ -131,11 +131,11 @@ body.chat-mode {
   width: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--ui-bg, #f4f4f4);
+  background: var(--ui-bg, #f5f5f4);
 }
 html[data-appearance='dark'] body.chat-mode,
 body.chat-mode[data-chat-appearance='dark'] {
-  background: var(--ui-bg, #191919);
+  background: var(--ui-bg, #141413);
 }
 html:has(body.chat-mode) {
   scrollbar-gutter: auto;

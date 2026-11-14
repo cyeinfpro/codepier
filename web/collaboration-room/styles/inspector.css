@@ -328,25 +328,24 @@
 }
 
 .cr-scope .cr-permission-project {
+  display: flex;
+  align-items: center;
   min-height: 40px;
   font-size: var(--ui-text-sm);
   font-weight: var(--ui-weight-semibold);
   overflow-wrap: anywhere;
 }
 
-.cr-permission-project input,
-.cr-permission-select-all input {
-  flex: none;
+/* Rows left out read as quieter; the dropdown carries the decision. */
+.cr-scope:has([data-permission-project]:not(:checked)) .cr-permission-project {
+  color: var(--cr-muted);
+  font-weight: var(--ui-weight-medium);
 }
 
-.cr-permission-bulk .cr-permission-select-all {
+.cr-permission-bulk [data-permission-count] {
   flex-basis: 100%;
-  min-height: 40px;
-}
-
-.cr-permission-select-all .cr-muted {
-  margin-inline-start: 6px;
-  font-weight: var(--ui-weight-regular);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .cr-scope label {

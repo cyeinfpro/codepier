@@ -75,7 +75,7 @@ window.CodePierProjectRuntime = (() => {
   function markup() {
     return `<form id="project-runtime-form">
       <p class="runtime-intro">按项目选择执行环境。未单独配置的项目默认使用清洁模式；新环境用于后续命令，当前命令和文件权限保持原状。</p>
-      <div class="runtime-state" role="status" aria-live="polite"><span class="badge neutral" data-runtime-state>正在读取</span><span data-runtime-current>核对节点当前配置…</span></div>
+      <div class="runtime-state" role="status" aria-live="polite"><span class="badge neutral" data-runtime-state>正在读取</span><span data-runtime-current>核对电脑当前配置…</span></div>
       <fieldset class="runtime-controls" disabled><legend class="runtime-legend">执行方式</legend>
         <div class="runtime-options">${Object.entries(names)
           .map(
@@ -104,7 +104,7 @@ window.CodePierProjectRuntime = (() => {
         </section>
         <section class="runtime-credentials" data-runtime-credentials hidden aria-labelledby="runtime-credentials-title">
           <h3 id="runtime-credentials-title">复用已有登录</h3>
-          <p class="form-note">默认复用节点执行账号的已有登录，可对此项目逐项关闭，同时保留清洁环境。令牌与密钥不会返回面板。</p>
+          <p class="form-note">默认复用电脑执行账号的已有登录，可对此项目逐项关闭，同时保留清洁环境。令牌与密钥不会返回面板。</p>
           <div class="runtime-credential-options">${[
             ['github_cli', 'GitHub CLI', '复用 gh 已有登录与 GitHub 令牌'],
             ['git_config', 'Git 全局配置', '沿用身份、凭据助手及其他全局设置'],
@@ -247,7 +247,7 @@ window.CodePierProjectRuntime = (() => {
       note.hidden = !keys.length;
       note.textContent = keys.length
         ? value === loaded.profile?.mode
-          ? `节点已有 ${keys.length} 个环境变量值，保持原模式时会保留；页面不读取这些值。`
+          ? `电脑已有 ${keys.length} 个环境变量值，保持原模式时会保留；页面不读取这些值。`
           : `切换模式不会复制原模式的 ${keys.length} 个环境变量值，请核对项目依赖。`
         : '';
     }
@@ -281,14 +281,14 @@ window.CodePierProjectRuntime = (() => {
         applied: '已生效',
         pending_reload: '已保存 · 待生效',
         configuration_conflict: '配置冲突',
-        offline: '节点离线',
+        offline: '电脑离线',
         upgrade_required: '需要更新 Agent',
       };
       status(
         labels[value.state] || '尚未确认',
         value.runtime
           ? `当前执行：${names[value.runtime.mode] || value.runtime.mode}${value.selection_source === 'default' ? ' · 系统默认' : ''}`
-          : '尚未取得节点当前执行配置',
+          : '尚未取得电脑当前执行配置',
       );
       if (value.state === 'pending_reload')
         feedback.textContent = '配置已写入，正在核对 Agent 重新加载。运行中的命令不会重启。';
@@ -302,9 +302,9 @@ window.CodePierProjectRuntime = (() => {
           '项目 ID 与别名配置不一致。明确选择并保存后，将统一绑定到此项目 ID。';
       else if (value.state === 'upgrade_required')
         feedback.textContent =
-          '此节点尚未支持面板切换。请先更新 Agent；页面不会把推荐默认值当作实际生效配置。';
+          '此电脑尚未支持面板切换。请先更新 Agent；页面不会把推荐默认值当作实际生效配置。';
       else if (value.state === 'offline')
-        feedback.textContent = '节点离线，未发送新的配置。恢复连接后重新读取即可。';
+        feedback.textContent = '电脑离线，未发送新的配置。恢复连接后重新读取即可。';
       markDirty(false);
       groups();
       lock();
@@ -354,7 +354,7 @@ window.CodePierProjectRuntime = (() => {
       review.hidden = true;
       // A recovered save is a historical receipt, even when it said applied.
       // Always read the current Agent before displaying a current-state claim.
-      status('已保存 · 核对生效中', '原保存已完成，正在读取节点当前实际配置');
+      status('已保存 · 核对生效中', '原保存已完成，正在读取电脑当前实际配置');
       feedback.textContent = '已保留当前配置，请刷新查看最新保存结果。';
       lock();
       later(() => load());
@@ -383,7 +383,7 @@ window.CodePierProjectRuntime = (() => {
         } else if (['needs_review', 'interrupted'].includes(value.state)) {
           status('原保存需要核查', '结果未确认，不重发、不自动判定成功或失败');
           feedback.textContent =
-            (value.result?.error?.message || value.error || '请检查节点当前配置与原操作。') +
+            (value.result?.error?.message || value.error || '请检查电脑当前配置与原操作。') +
             (value.operation_id ? ' 原操作：' + value.operation_id : '');
           review.hidden = false;
         } else {
@@ -440,7 +440,7 @@ window.CodePierProjectRuntime = (() => {
         if (value.project_id !== projectId)
           throw new Error('执行环境响应与当前项目不匹配，未采用该结果。');
         if (awaitingActivation && value.state === 'offline') {
-          status('已保存 · 等待节点重连', '配置重新加载中，尚未确认新模式生效');
+          status('已保存 · 等待电脑重连', '配置重新加载中，尚未确认新模式生效');
           feedback.textContent =
             '原保存已完成，正在核对 Agent 重连后的实际配置；不会重复提交或重启命令。';
           later(() => load(reviewOnly));
@@ -453,7 +453,7 @@ window.CodePierProjectRuntime = (() => {
             '原保存仍待核查',
             value.runtime
               ? '最新观察：' + (names[value.runtime.mode] || value.runtime.mode)
-              : '尚未取得节点实际配置',
+              : '尚未取得电脑实际配置',
           );
           feedback.textContent =
             '已只读核对当前配置；这不补写或重放原保存，也不替原操作确认未知结果。';
@@ -465,7 +465,7 @@ window.CodePierProjectRuntime = (() => {
           value.runtime?.revision !== activationRevision
         )
           feedback.textContent =
-            '配置在保存后再次发生变化，页面已读取节点当前实际配置；未覆盖后续修改。';
+            '配置在保存后再次发生变化，页面已读取电脑当前实际配置；未覆盖后续修改。';
         if (['pending_reload', 'offline'].includes(value.state)) later(() => load(reviewOnly));
       } catch (error) {
         if (!current()) return;

@@ -379,9 +379,9 @@ def test_unknown_save_outcome_keeps_receipt_and_blocks_duplicate_write(editor):
 
 
 @pytest.mark.parametrize("state,label", [
-    ("offline", "节点离线"),
+    ("offline", "电脑离线"),
     ("unsupported", "需要更新 Agent"),
-    ("disabled", "节点已停用"),
+    ("disabled", "电脑已停用"),
 ])
 def test_unavailable_nodes_never_enable_authorization(editor, state, label):
     page, transport = editor

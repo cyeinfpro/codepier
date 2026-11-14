@@ -55,13 +55,18 @@ def test_connection_ui_preview_and_late_response_do_not_cross_navigation(stack, 
         expect(page.locator('#connection-setup')).to_be_visible()
         form = page.locator('#connection-check-form')
         form.locator('[name=grant_id]').select_option(stack.grant)
+        # Project and catalog live under the folded 「排查选项」.
+        form.locator('details > summary').click()
         form.locator('[name=project_id]').select_option(stack.project['id'])
-        form.locator('button').click()
+        form.locator('button[type=submit]').click()
         output = page.locator('#connection-check-result')
         expect(output).to_contain_text('ChatGPT 工具扫描 / 缓存')
-        expect(output).to_contain_text('未知 / 未观测')
-        expect(output).to_contain_text('不会自动刷新')
-        page.locator('#connection-setup summary').click()
+        # Host-side scanning and caching stay explicitly unconfirmed.
+        expect(output).to_contain_text('尚未确认')
+        expect(output).to_contain_text('不能观测 ChatGPT 是否扫描完成')
+        # The tunnel preview sits under 「其他客户端」 on the address card.
+        page.locator('#other-clients > summary').click()
+        page.locator('#other-clients details > summary').click()
         tunnel = page.locator('#connection-tunnel-form')
         tunnel.locator('[name=tunnel_id]').fill('tunnel_'+'a'*32)
         tunnel.locator('[name=install_dir]').fill('/opt/codepier')

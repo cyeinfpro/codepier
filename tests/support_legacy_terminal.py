@@ -21,6 +21,13 @@ def mount_archived_terminal(page, provider='codex'):
         body=(ROOT/'tests/fixtures/legacy-terminal'/name).read_text()
         page.route('**/static/__legacy_terminal_test__/'+name,
                    serve_asset(body, kind))
+    # The Hub now serves manifest assets only; the archived renderer's vendor
+    # files are served from the repository the same way, still same-origin.
+    for name in ['xterm-5.5.0/xterm.css','xterm-5.5.0/xterm.js',
+                 'addon-fit-0.10.0/addon-fit.js','addon-search-0.15.0/addon-search.js']:
+        kind='text/css' if name.endswith('.css') else 'application/javascript'
+        page.route('**/static/vendor/'+name,
+                   serve_asset((ROOT/'web/vendor'/name).read_text(), kind))
     # Same-origin external scripts satisfy the existing strict production CSP.
     page.add_style_tag(url=origin+'/static/vendor/xterm-5.5.0/xterm.css')
     page.add_style_tag(url=origin+'/static/__legacy_terminal_test__/native-cli.css')

@@ -927,7 +927,11 @@
   function patchWorks() {
     const node = root?.querySelector('[data-cr-work]');
     if (!node) return;
-    const markup = btn('work-list', '\u5DE5\u4F5C\u8BB0\u5F55', '', 'cr-text-button');
+    const activeWorks = state.works.filter((work) => !finishedWork(work));
+    const lead = activeWorks[0];
+    const markup = lead
+      ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C')}</strong><small>${E(workStatus(lead))}${activeWorks.length > 1 ? ` \xB7 \u5171 ${activeWorks.length} \u9879` : ''}</small></span><span>${btn('work-detail', '\u67E5\u770B', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '\u5168\u90E8', '', 'cr-text-button')}</span>`
+      : `<span class="cr-work-bar-summary">${state.works.length} \u9879\u5386\u53F2\u5DE5\u4F5C</span>${btn('work-list', '\u5DE5\u4F5C\u8BB0\u5F55', '', 'cr-text-button')}`;
     node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
     if (node._markup !== markup) {
       node.innerHTML = markup;
@@ -1230,7 +1234,8 @@
           const env = project.environment_id || 'production';
           return `<div class="cr-scope" data-permission-row data-project-id="${E(project.project_id)}" data-environment-id="${E(env)}" data-project-label="${E(label)}">
           <div class="cr-permission-row-main">
-            <label class="cr-choice cr-permission-project"><input type="checkbox" data-permission-project ${selected.length ? 'checked' : ''}><span>${E(label)}${env === 'production' ? '' : ' \xB7 ' + E(env)}</span></label>
+            <span class="cr-permission-project">${E(label)}${env === 'production' ? '' : ' \xB7 ' + E(env)}</span>
+            <input type="checkbox" data-permission-project hidden tabindex="-1" aria-hidden="true" ${selected.length ? 'checked' : ''}>
             <select data-permission-level aria-label="${E(label)}\u7684\u6743\u9650" title="\u53EF\u9009\u6743\u9650\u53D7\u9879\u76EE\u548C\u7535\u8111\u7684\u8BBE\u7F6E\u9650\u5236">${permissionOptions(permissionLevel(selected))}</select>
           </div>
           <div hidden>${permissionCaps.map((cap) => `<input type="checkbox" data-permission-cap value="${cap}" data-host-available="${available.includes(cap)}" ${selected.includes(cap) ? 'checked' : ''}>`).join('')}</div>
@@ -1243,9 +1248,9 @@
   }
   function permissionSection(policy, scope, section) {
     return `<section data-permission-section="${section}"><div class="cr-permission-bulk">
-    <label class="cr-choice cr-permission-select-all"><input type="checkbox" data-permission-select-all><span>\u5168\u9009</span><span class="cr-muted" data-permission-count aria-live="polite"></span></label>
-    <label>\u6240\u9009\u6743\u9650 <select data-permission-bulk-level><option value="-" selected>\u9009\u62E9\u6743\u9650</option>${permissionOptions('-', true)}</select></label>
-    ${section === 'room' ? '<label>\u6240\u9009\u9879\u76EE\u6709\u6548\u671F <select data-permission-global-expiry><option value="">\u5404\u9879\u76EE\u8BBE\u7F6E</option><option value="until_revoked">\u76F4\u5230\u64A4\u9500</option><option value="timed">\u6307\u5B9A\u65F6\u95F4</option></select></label><label data-permission-global-date hidden>\u622A\u6B62\u65F6\u95F4 <input type="datetime-local"></label>' : ''}
+    <span class="cr-muted" data-permission-count aria-live="polite"></span>
+    <label>\u5168\u90E8\u9879\u76EE\u8BBE\u4E3A <select data-permission-bulk-level><option value="-" selected>\u9009\u62E9\u6863\u4F4D</option>${permissionOptions('-', true)}</select></label>
+    ${section === 'room' ? '<label>\u5DF2\u52A0\u5165\u9879\u76EE\u6709\u6548\u671F <select data-permission-global-expiry><option value="">\u5404\u9879\u76EE\u8BBE\u7F6E</option><option value="until_revoked">\u76F4\u5230\u64A4\u9500</option><option value="timed">\u6307\u5B9A\u65F6\u95F4</option></select></label><label data-permission-global-date hidden>\u622A\u6B62\u65F6\u95F4 <input type="datetime-local"></label>' : ''}
     </div>${permissionRows(policy, scope, section)}</section>`;
   }
   function renderPermissions(policy) {
@@ -1340,6 +1345,8 @@
       const enabled = project.checked && !project.disabled;
       const lifetimeMode = group.querySelector('[data-permission-lifetime-mode]');
       const lifetimeUntil = group.querySelector('[data-permission-lifetime-until]');
+      const expiryBox = group.querySelector('.cr-permission-expiry');
+      if (expiryBox) expiryBox.hidden = !enabled;
       lifetimeMode.disabled = !enabled;
       lifetimeUntil.disabled = !enabled || lifetimeMode.value !== 'timed';
       lifetimeUntil.closest('label').hidden = lifetimeMode.value !== 'timed';
@@ -1406,14 +1413,11 @@
     for (const section of form.querySelectorAll('[data-permission-section]')) {
       const projects = [...section.querySelectorAll('[data-permission-project]:not(:disabled)')];
       const selected = projects.filter((project) => project.checked).length;
-      const all = section.querySelector('[data-permission-select-all]');
-      all.disabled = !projects.length;
-      all.checked = selected > 0 && selected === projects.length;
-      all.indeterminate = selected > 0 && selected < projects.length;
       section.querySelector('[data-permission-count]').textContent =
-        '\u5DF2\u9009 ' + selected + ' / ' + projects.length;
+        '\u5DF2\u52A0\u5165 ' + selected + ' / ' + projects.length;
+      section.querySelector('[data-permission-bulk-level]').disabled = !projects.length;
       for (const control of section.querySelectorAll(
-        '[data-permission-bulk-level], [data-permission-global-expiry], [data-permission-global-date] input',
+        '[data-permission-global-expiry], [data-permission-global-date] input',
       ))
         control.disabled = !selected;
     }
@@ -1711,7 +1715,7 @@
       submit.disabled = !activeRoom() || current.busy;
     } catch (error) {
       if (!visible()) return;
-      box.innerHTML = `<p role="status">${E(error.message || '\u6682\u65F6\u65E0\u6CD5\u6838\u5BF9\u7EED\u529E\u6E05\u5355\u3002')}</p>${btn('refresh-continuation-preview', '\u91CD\u65B0\u6838\u5BF9', '', 'cr-text-button')}`;
+      box.innerHTML = `<p role="status">${E(error.message || '\u6682\u65F6\u65E0\u6CD5\u6838\u5BF9\u7EED\u529E\u6E05\u5355\u3002')}</p>${btn('refresh-continuation-preview', '\u91CD\u8BD5', 'title="\u6CBF\u7528\u539F\u8BF7\u6C42\uFF0C\u4E0D\u4F1A\u91CD\u590D\u6267\u884C"', 'cr-text-button')}`;
     }
     patchRoomPermissions();
   }
@@ -1974,7 +1978,7 @@
     openPanel(
       'add-member',
       '\u6DFB\u52A0 dot',
-      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">\u9009\u62E9\u8FDE\u63A5\u65B9\u5F0F</legend><label><input type="radio" name="connection_mode" value="new" checked><span>\u65B0 dot</span></label><label><input type="radio" name="connection_mode" value="existing"><span>\u5DF2\u6709 dot</span></label></fieldset><section data-cr-connections hidden>${field('\u5DF2\u9A8C\u8BC1\u7684\u8FDE\u63A5', '<select name="reuse_member_id" disabled><option value="">\u9009\u62E9\u5DF2\u9A8C\u8BC1\u7684 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '\u8BFB\u53D6\u5DF2\u6709\u8FDE\u63A5', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">\u52A0\u5165\u540E\u4F7F\u7528\u623F\u95F4\u7684\u9879\u76EE\u6743\u9650\u3002</p></section>${field('\u6210\u5458\u540D\u79F0', '<input name="name" required maxlength="80" placeholder="\u7ED9\u8FD9\u4E2A dot \u8D77\u4E2A\u540D\u5B57" autofocus>')}<section class="cr-connect-summary" aria-label="\u63A5\u5165\u8303\u56F4"><p class="cr-muted">dot \u52A0\u5165\u300C${E(roomName(state.room))}\u300D\u5E76\u4F7F\u7528\u623F\u95F4\u5DF2\u6279\u51C6\u7684\u9879\u76EE\u6743\u9650\u3002\u8BFB\u53D6\u548C\u56DE\u590D\u63A2\u6D4B\u901A\u8FC7\u540E\u5C31\u53EF\u5728\u623F\u95F4\u6536\u53D1\u6D88\u606F\u3002</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>\u5728\u623F\u95F4\u6388\u6743\u6709\u6548\u671F\u95F4\u4FDD\u6301\u8FDE\u63A5<small>\u81EA\u52A8\u5904\u7406\u53EF\u6062\u590D\u7684\u8FDE\u63A5\u6545\u969C\u3002\u8BA2\u9605\u7531 dot \u5BBF\u4E3B\u7EED\u8BA2\u3002</small></span></label></section><button class="cr-button cr-primary" type="submit">\u6DFB\u52A0\u5E76\u8FDE\u63A5</button></form>`,
+      `<form data-cr-form="member"><fieldset class="cr-connection-mode"><legend class="sr-only">\u9009\u62E9\u8FDE\u63A5\u65B9\u5F0F</legend><label><input type="radio" name="connection_mode" value="existing"><span>\u5DF2\u6709 dot</span></label><label><input type="radio" name="connection_mode" value="new" checked><span>\u65B0 dot</span></label></fieldset><section data-cr-connections hidden>${field('\u5DF2\u9A8C\u8BC1\u7684\u8FDE\u63A5', '<select name="reuse_member_id" disabled><option value="">\u9009\u62E9\u5DF2\u9A8C\u8BC1\u7684 dot</option></select>')}<p class="cr-muted" data-cr-connection-status></p>${btn('more-connections', '\u8BFB\u53D6\u5DF2\u6709\u8FDE\u63A5', 'data-cr-more-connections', 'cr-text-button')}<p class="cr-info">\u52A0\u5165\u540E\u4F7F\u7528\u623F\u95F4\u7684\u9879\u76EE\u6743\u9650\u3002</p></section>${field('\u6210\u5458\u540D\u79F0', '<input name="name" required maxlength="80" placeholder="\u7ED9\u8FD9\u4E2A dot \u8D77\u4E2A\u540D\u5B57" autofocus>')}<section class="cr-connect-summary" aria-label="\u63A5\u5165\u8303\u56F4"><p class="cr-muted">dot \u52A0\u5165\u300C${E(roomName(state.room))}\u300D\u5E76\u4F7F\u7528\u623F\u95F4\u5DF2\u6279\u51C6\u7684\u9879\u76EE\u6743\u9650\u3002\u8BFB\u53D6\u548C\u56DE\u590D\u63A2\u6D4B\u901A\u8FC7\u540E\u5C31\u53EF\u5728\u623F\u95F4\u6536\u53D1\u6D88\u606F\u3002</p><label class="cr-choice"><input type="checkbox" name="keep_connected"><span>\u5728\u623F\u95F4\u6388\u6743\u6709\u6548\u671F\u95F4\u4FDD\u6301\u8FDE\u63A5<small>\u81EA\u52A8\u5904\u7406\u53EF\u6062\u590D\u7684\u8FDE\u63A5\u6545\u969C\u3002\u8BA2\u9605\u7531 dot \u5BBF\u4E3B\u7EED\u8BA2\u3002</small></span></label></section><button class="cr-button cr-primary" type="submit">\u6DFB\u52A0\u5E76\u8FDE\u63A5</button></form>`,
       {
         version: state.room.version,
         connections: [],
@@ -2055,6 +2059,15 @@
         const existing = modes.find((input) => input.value === 'existing');
         existing.checked = true;
         existing.dispatchEvent(new Event('change', { bubbles: true }));
+        const preferred = current.connections.find((item) =>
+          ['connected', 'ready', 'ready_chat', 'ready_work'].includes(
+            item.display_state || item.state,
+          ),
+        );
+        if (!selected && preferred) {
+          select.value = connectionChoice(preferred);
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       }
       status.textContent = current.connections.length
         ? ''
@@ -3389,7 +3402,7 @@
         )
         .map(
           (item) =>
-            `<li><strong>${E(account.label || account.bot_id || '\u5F53\u524D\u8D26\u53F7')}</strong> \xB7 ${item.state === 'deferred' ? '\u7B49\u5F85\u79EF\u538B\u6D88\u5316' : '\u5DF2\u9694\u79BB'} ${E(item.count)} \u6761 \xB7 <code>${E(item.reason_code || 'unknown')}</code></li>`,
+            `<li><strong>${E(channelIdentity(account.label, account.bot_id) || '\u5F53\u524D\u8D26\u53F7')}</strong> \xB7 ${item.state === 'deferred' ? '\u7B49\u5F85\u79EF\u538B\u6D88\u5316' : '\u5DF2\u9694\u79BB'} ${E(item.count)} \u6761 \xB7 <code>${E(item.reason_code || 'unknown')}</code></li>`,
         ),
     );
     return items.length
@@ -3431,8 +3444,9 @@
     }
   }
   function channelIdentity(nickname, id) {
-    if (nickname) return nickname;
-    const value = String(id || '');
+    const label = String(nickname || '').trim();
+    if (label && label !== String(id || '') && !/^(wxid_|peer_id[:_])/i.test(label)) return label;
+    const value = String(id || label || '');
     return value.length > 8
       ? value.slice(0, 4) + '\u2026' + value.slice(-4)
       : value
@@ -3557,7 +3571,7 @@
       );
     if (accounts.length)
       parts.push(
-        `<section class="cr-wx-option cr-channel-existing"><h4>\u6CBF\u7528\u5DF2\u767B\u8BB0\u7684\u5FAE\u4FE1</h4>${field('\u5DF2\u8FDE\u63A5\u7684\u5FAE\u4FE1', `<select name="existing_account_id"><option value="">\u9009\u62E9\u8D26\u53F7</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(account.label || channelIdentity(null, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '\u4F7F\u7528\u6B64\u8D26\u53F7', '', 'cr-full')}</section><p class="cr-or"><span>\u6216\u8005\u626B\u7801\u767B\u5F55\u65B0\u7684\u5FAE\u4FE1</span></p>`,
+        `<section class="cr-wx-option cr-channel-existing"><h4>\u6CBF\u7528\u5DF2\u767B\u8BB0\u7684\u5FAE\u4FE1</h4>${field('\u5DF2\u8FDE\u63A5\u7684\u5FAE\u4FE1', `<select name="existing_account_id"><option value="">\u9009\u62E9\u8D26\u53F7</option>${accounts.map((account) => `<option value="${E(account.id)}">${E(channelIdentity(account.label, account.bot_id))}</option>`).join('')}</select>`)}${btn('channel-existing', '\u4F7F\u7528\u6B64\u8D26\u53F7', '', 'cr-full')}</section><p class="cr-or"><span>\u6216\u8005\u626B\u7801\u767B\u5F55\u65B0\u7684\u5FAE\u4FE1</span></p>`,
       );
     parts.push(inboundHealthMarkup(flow.account ? [flow.account] : accounts));
     const qr = flow.qr || {};
@@ -3569,7 +3583,10 @@
       parts.push(
         facts([
           ['\u5FAE\u4FE1', channelIdentity(qr.scanner_nickname, qr.scanner_id)],
-          ['\u5DF2\u767B\u8BB0\u8D26\u53F7', qr.existing_account?.label],
+          [
+            '\u5DF2\u767B\u8BB0\u8D26\u53F7',
+            channelIdentity(qr.existing_account?.label, qr.existing_account?.bot_id),
+          ],
         ]) +
           (qr.re_pair_required
             ? '<p class="cr-info">\u8FD9\u4E2A\u5FAE\u4FE1\u4E4B\u524D\u767B\u8BB0\u8FC7\u3002\u786E\u8BA4\u540E\u6CBF\u7528\u539F\u8D26\u53F7\uFF1B\u5B83\u5728\u5176\u4ED6\u623F\u95F4\u7684\u8FDE\u63A5\u9700\u8981\u91CD\u65B0\u786E\u8BA4\u3002</p>'
@@ -3601,7 +3618,7 @@
         facts([
           ['\u623F\u95F4', roomName(state.room)],
           ['\u63A5\u6536\u6D88\u606F\u7684 dot', flow.member?.name],
-          ['\u5FAE\u4FE1', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+          ['\u5FAE\u4FE1', channelIdentity(flow.account?.label, flow.account?.bot_id)],
         ]),
       );
     if (stage === 'waiting_member' && writable)
@@ -3631,7 +3648,7 @@
     if (stage === 'ready')
       parts.push(
         facts([
-          ['\u5FAE\u4FE1', flow.account?.label || channelIdentity(null, flow.account?.bot_id)],
+          ['\u5FAE\u4FE1', channelIdentity(flow.account?.label, flow.account?.bot_id)],
           ['\u623F\u95F4', roomName(state.room)],
           ['\u672C\u4EBA\u914D\u5BF9', '\u5DF2\u9A8C\u8BC1'],
           [
@@ -4999,19 +5016,22 @@
   var channelSteps = [
     ['\u626B\u7801', ['choose_account', 'scan', 'confirm_account', 'needs_reconnect']],
     [
-      '\u786E\u8BA4\u8303\u56F4',
+      '\u786E\u8BA4\u8303\u56F4\u4E0E\u7ED1\u5B9A',
+      ['choose_member', 'waiting_member', 'waiting_project', 'route_conflict', 'confirm_binding'],
+    ],
+    [
+      '\u53D1\u9001\u914D\u5BF9\u7801',
       [
-        'choose_member',
-        'waiting_member',
-        'waiting_project',
-        'route_conflict',
-        'confirm_binding',
         'pairing',
         'pairing_expired',
         'confirm_owner',
+        'ready',
+        'paused',
+        'disconnected',
+        'closed',
+        'cancelled',
       ],
     ],
-    ['\u5B8C\u6210', ['ready', 'paused', 'disconnected', 'closed', 'cancelled']],
   ];
   var channelCopy = {
     choose_account: [
@@ -5485,27 +5505,12 @@
           applyPermissionLevel(event.target, event.target.value);
           updatePermissionControls();
         }
-        if (event.target.matches('[data-permission-project], [data-permission-select-all]')) {
-          const { target } = event;
-          const section = target.closest('[data-permission-section]');
-          const projects = target.matches('[data-permission-project]')
-            ? [target]
-            : section.querySelectorAll('[data-permission-project]:not(:disabled)');
-          for (const project of projects) {
-            const select = project
-              .closest('[data-permission-row]')
-              .querySelector('[data-permission-level]');
-            if (!target.checked || !select.value)
-              applyPermissionLevel(select, target.checked ? 'read' : '');
-          }
-          updatePermissionControls();
-        }
         if (event.target.matches('[data-permission-bulk-level]')) {
           const section = event.target.closest('[data-permission-section]');
           const requested = permissionLevels[event.target.value]?.[1];
           if (!requested) return;
           for (const project of section.querySelectorAll(
-            '[data-permission-project]:checked:not(:disabled)',
+            '[data-permission-project]:not(:disabled)',
           )) {
             const select = project
               .closest('[data-permission-row]')

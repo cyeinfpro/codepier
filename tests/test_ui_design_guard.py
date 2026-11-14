@@ -14,7 +14,7 @@ BASELINE = {
     'unapproved_hex': 3,
     'compatibility_hex': 149,
     'important': 15,
-    'raw_z_index': 10,
+    'raw_z_index': 7,
     'font_px_below_11': 0,
     'font_px_below_12': 0,
     'font_size_distinct': 9,
@@ -22,7 +22,7 @@ BASELINE = {
     'radius_distinct': 8,
     'radius_distinct_raw': 22,
     'weight_distinct': 4,
-    'native_confirm_calls': 12,
+    'native_confirm_calls': 0,
     'native_show_modal_calls': 1,
 }
 

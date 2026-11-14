@@ -102,7 +102,7 @@ window.CodePierIntegrations = (() => {
         workflow_id: v.workflow_id,
       };
     const p = S.projects.find((p) => p.id === options.project || p.alias === options.project);
-    if (options.project && !p) throw new Error('项目映射已变化，请重新选择项目。');
+    if (options.project && !p) throw new Error('项目已变化，请重新选择项目。');
     v.project = p?.id || v.project;
     v.workspace_id = options.workspace_id || '';
     v.tab = tabs.some((t) => t[0] === options.tab) ? options.tab : 'overview';
@@ -792,7 +792,7 @@ window.CodePierIntegrations = (() => {
       const uncertain = r.pending_or_uncertain || [],
         changed = r.mapping_changed || w.mapping_changed,
         otherWorkspace = !!w.workspace_id && w.workspace_id !== workspace_id;
-      section.innerHTML = `<div class="integration-section-head"><h2>${esc(w.title || '任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal || '未记录')}</p>${r.summary ? `<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>` : ''}${changed ? U().note('项目映射已经变化', '只能核对历史记录，请先为当前设备或目录建立新的任务。', '', 'warning') : ''}${otherWorkspace ? U().note('此任务绑定了另一隔离目录', '以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。', '', 'warning') : ''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary || '无额外摘要')}</p></article>`).join('') || '<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance || s.summary || '请先核对原任务要求')}</p></article>`).join('') || '<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length ? `<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先打开原请求，确认执行结果。</p>${uncertain.map((o) => `<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}` : ''}<div class="actions">${action('handoff-copy', '复制交接说明')}${action('handoff-chat', '带到 CLI 草稿', `${changed || otherWorkspace || workspace_id ? 'disabled' : ''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation', '核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
+      section.innerHTML = `<div class="integration-section-head"><h2>${esc(w.title || '任务交接')}</h2>${U().badge(r.state)}</div><h3>原目标</h3><p class="integration-prose">${esc(r.original_goal || '未记录')}</p>${r.summary ? `<h3>最近断点</h3><p class="integration-prose">${esc(r.summary)}</p>` : ''}${changed ? U().note('项目已经变化', '只能核对历史记录，请先为当前设备或目录建立新的任务。', '', 'warning') : ''}${otherWorkspace ? U().note('此任务绑定了另一隔离目录', '以下仅供读取交接；先核对任务目录，不会把隔离任务投递到原目录。', '', 'warning') : ''}<div class="integration-grid"><div><h3>已完成的记录</h3>${(r.completed || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.summary || '无额外摘要')}</p></article>`).join('') || '<p class="integration-help">尚无已完成步骤。</p>'}</div><div><h3>接下来需要处理</h3>${(r.remaining || []).map((s) => `<article class="integration-step"><strong>${esc(s.title)}</strong><p>${esc(s.acceptance || s.summary || '请先核对原任务要求')}</p></article>`).join('') || '<p class="integration-help">没有未完成步骤；这不代表已经部署。</p>'}</div></div>${uncertain.length ? `<h3>需核查的项目近期操作</h3><p class="integration-help">这些操作来自项目近期记录，不代表全部属于这项任务。请先打开原请求，确认执行结果。</p>${uncertain.map((o) => `<article class="integration-row"><div><strong>${esc(o.tool)}</strong><small>${esc(U().label(o.state))}</small><code>${esc(o.operation_id)}</code></div><button class="btn ghost small" data-action="operation-detail" data-id="${esc(o.operation_id)}">查询原操作</button></article>`).join('')}` : ''}<div class="actions">${action('handoff-copy', '复制交接说明')}${action('handoff-chat', '带到 CLI 草稿', `${changed || otherWorkspace || workspace_id ? 'disabled' : ''} title="只填写草稿，确认发送后才开始执行"`)}<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">打开完整任务</button>${jump('validation', '核对当前验收')}</div><p class="integration-help">不猜测它对应哪条 CLI 会话，不自动运行模型或重放命令。隔离任务请在相应工作目录处理。</p>`;
       box.append(section);
       const text = U().handoffText(r, w.title);
       $('[data-i-action=handoff-copy]', section).onclick = wire(() => copy(text));
@@ -947,8 +947,8 @@ window.CodePierIntegrations = (() => {
       if (!p) {
         body.innerHTML = U().note(
           '先选择一个工作项目',
-          '把已接入设备上的目录映射为项目，再进行读取、编辑和验收。',
-          '<button class="btn primary" data-action="add-project">添加项目映射</button>',
+          '把已接入设备上的目录添加为项目，再进行读取、编辑和验收。',
+          '<button class="btn primary" data-action="add-project">添加项目</button>',
         );
         return;
       }

@@ -1,7 +1,7 @@
 """Navigation during delivery must not lose controls or leak into another login."""
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event
+from tests.browser_support import chat_page, event, open_chat_settings
 from tests.test_chat_complete_browser import send
 
 pytestmark = pytest.mark.parametrize('chat_page', ['chromium', 'webkit'], indirect=True)
@@ -19,7 +19,7 @@ def test_approval_failure_after_navigation_keeps_original_retry(chat_page):
     p.get_by_role('button',name='拒绝',exact=True).click();p.wait_for_function('!!window.releaseAnswer')
     p.evaluate("chatSwitch(null,'p2')");p.fill('#chat-compose','other draft');p.evaluate('releaseAnswer()')
     p.wait_for_timeout(80);p.evaluate('chatSwitch(first)')
-    p.get_by_role('button',name='重试原回答',exact=True).click()
+    p.locator('.chat-approval-actions').get_by_role('button',name='重试',exact=True).click()
     expect(p.locator('.chat-approval-actions')).to_contain_text('回答已提交')
     answers=p.evaluate("requests.filter(r=>r.path.endsWith('/chat_answer')).map(r=>r.args)")
     assert len(answers)==2 and answers[0]['receipt']==answers[1]['receipt']
@@ -87,7 +87,8 @@ def test_mapping_change_stops_remaining_upload_steps(chat_page):
 
 
 def test_catalog_refresh_preserves_focused_model_option(chat_page):
-    p=chat_page;p.click('#chat-model-picker')
+    # The model picker lives in the 「会话设置」 panel.
+    p=chat_page;open_chat_settings(p);p.click('#chat-model-picker')
     p.locator('[data-model="remote/advanced-model"]').focus()
     p.evaluate('chatLoadCatalog(true)')
     expect(p.locator('[data-model="remote/advanced-model"]')).to_be_focused()

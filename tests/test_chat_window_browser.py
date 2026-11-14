@@ -181,7 +181,7 @@ def test_neutral_appearance_and_reduced_motion(chat_page,appearance):
     p=chat_page;p.evaluate('value => chatApplyAppearance(value)', appearance)
     expect(p.locator('#chat-root')).to_have_attribute('data-appearance',appearance)
     bg=p.evaluate("getComputedStyle($('#chat-root')).backgroundColor")
-    assert bg==('rgb(255, 255, 255)' if appearance=='light' else 'rgb(34, 34, 34)')
+    assert bg==('rgb(255, 255, 255)' if appearance=='light' else 'rgb(28, 28, 27)')
     p.emulate_media(reduced_motion='reduce')
     open_chat_settings(p);p.click('#chat-model-picker')
     assert p.evaluate("getComputedStyle($('#chat-popover')).animationName")=='none'
@@ -261,7 +261,7 @@ def test_theme_switch_is_atomic_for_composer_and_window(chat_page):
       const light=[getComputedStyle($('#chat-root')).backgroundColor,getComputedStyle($('.chat-composer')).backgroundColor];
       return {dark,light};
     }""")
-    assert result['dark']==['rgb(34, 34, 34)','rgb(43, 43, 43)']
+    assert result['dark']==['rgb(28, 28, 27)','rgb(43, 43, 43)']
     assert result['light']==['rgb(255, 255, 255)']*2
 
 

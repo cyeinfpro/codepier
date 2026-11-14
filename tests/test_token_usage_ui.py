@@ -155,7 +155,7 @@ def test_summary_bounds_and_overflow_fail_closed():
 
 def test_summary_labels_scope_version_exclusions_and_non_billing():
     html = run_js('summary', [row()])
-    for text in ('当前已载入', '非账单', '项目工具文本', '不是整段宿主对话',
+    for text in ('当前已载入', '非账单', '项目工具文本', '完整对话用量及模型账单请以供应商记录为准',
                  '图片与文件字节', '历史缺失不会补算', '不是统计置信区间', 'codepier-text-v1'):
         assert text in html
 
@@ -320,7 +320,9 @@ def test_dashboard_reference_scope_and_cache_assumption_are_in_details():
     assert 'MCP 请求参数' not in visible and '95% 假设' in visible
     assert 'GPT-6 Astra' in visible
     assert 'cache_read_percent' in details and 'value="95"' in details
-    assert '不是实测缓存命中率' in details and '缓存写入' in details
+    assert '按此假设比例估算缓存读取费用' in details
+    assert '实际命中率以供应商记录为准' in details
+    assert '真实缓存命中、缓存写入、思考 Token：未知' in details
     assert '2026-10-10' in details and 'developers.openai.com' in details
     assert 'Standard API' in details and '272K' in details
 
@@ -376,7 +378,7 @@ def test_dashboard_essential_context_limit_remains_outside_collapsed_details():
     assert '<span>总 Token</span>' not in visible
     assert 'Unicode' not in visible and '272K' not in visible
     assert 'data-token-filter=' not in visible and 'data-token-export' not in visible
-    assert details.startswith('><summary>查看详情</summary>')
+    assert details.startswith('><summary>查看详情<span class="token-summary-hint">趋势、筛选与明细</span></summary>')
     for name, label in [('settings', '筛选与估价设置'), ('breakdown', '请求与响应明细'),
                         ('trend', '用量趋势'), ('pricing', '计价依据与限制')]:
         assert f'data-token-panel="{name}"><summary>{label}</summary>' in details

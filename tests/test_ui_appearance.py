@@ -43,7 +43,7 @@ function harness({saved=null,legacy=null,dark=false,storageFails=false,backgroun
   class MutationObserver{constructor(fn){this.fn=fn;}observe(){window.observer=this;}}
   const getComputedStyle=()=>({getPropertyValue(name){
     assert.equal(name,'--ui-bg');
-    return background === null ? (root.dataset.appearance==='dark' ? '#191919' : '#f4f4f4') : background;
+    return background === null ? (root.dataset.appearance==='dark' ? '#141413' : '#f5f5f4') : background;
   }});
   const context={window,document,CustomEvent,MutationObserver,Set,TypeError,getComputedStyle};
   vm.createContext(context);vm.runInContext(source,context);
@@ -64,7 +64,7 @@ if(testCase==='preference'){
   ui.value='dark';h.document.dispatchEvent({type:'change',target:ui});
   assert.equal(h.api.getPreference(),'dark');assert.equal(h.api.getScheme(),'dark');
   assert.equal(h.root.dataset.appearance,'dark');assert.equal(h.root.style.colorScheme,'dark');
-  assert.equal(h.meta.content,'#191919');assert.equal(ui.attrs['aria-label'],'全站外观');
+  assert.equal(h.meta.content,'#141413');assert.equal(ui.attrs['aria-label'],'全站外观');
   assert.equal(chat.value,'dark');assert.equal(h.values.get('codepier-appearance'),'dark');
   assert.deepEqual(events.at(-1),{preference:'dark',scheme:'dark'});
 }else if(testCase==='migration'){
@@ -72,7 +72,7 @@ if(testCase==='preference'){
   assert.equal(h.api.getPreference(),'auto');assert.equal(h.api.getScheme(),'dark');
   assert.equal(h.values.get('codepier-appearance'),'auto');assert.equal(h.root.dataset.appearance,'dark');
   h.media.matches=false;h.media.dispatchEvent({type:'change'});
-  assert.equal(h.api.getScheme(),'light');assert.equal(h.meta.content,'#f4f4f4');
+  assert.equal(h.api.getScheme(),'light');assert.equal(h.meta.content,'#f5f5f4');
 }else if(testCase==='storage'){
   const h=harness(),received=[];
   const unsubscribe=h.api.subscribe(value=>received.push(value));
@@ -92,7 +92,7 @@ if(testCase==='preference'){
   const h=harness({background:'  #123456  '});
   assert.equal(h.meta.content,'#123456');
   h.api.setPreference('dark');assert.equal(h.meta.content,'#123456');
-  const missing=harness({background:'',dark:true});assert.equal(missing.meta.content,'#191919');
+  const missing=harness({background:'',dark:true});assert.equal(missing.meta.content,'#141413');
 }else throw new Error('unknown case');
 process.stdout.write(JSON.stringify({case:testCase,ok:true}));
 """

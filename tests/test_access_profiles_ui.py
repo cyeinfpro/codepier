@@ -222,7 +222,7 @@ def test_uncertain_profile_creation_cannot_change_original_request(profiles_page
             route.continue_()
     page.route('**/api/access-profiles', save_then_disconnect)
     page.locator('button[form="profile-form"]').click()
-    first_message = {'conflict': '原请求键已用于其他参数', 'expired': '原请求已执行，历史响应已清理'}.get(failure, '未确认')
+    first_message = {'conflict': '原请求键已用于其他参数', 'expired': '原请求已执行，历史响应已清理'}.get(failure, '待确认')
     expect(page.locator('#profile-save-status')).to_contain_text(first_message)
     form.locator('[name="label"]').fill(label + ' changed')
     page.locator('button[form="profile-form"]').click()
@@ -259,7 +259,7 @@ def test_uncertain_profile_update_retries_original_without_overwriting_concurren
             route.fulfill(response=response)
     page.route('**/api/access-profiles/' + saved['id'], update_then_disconnect)
     page.locator('button[form="profile-form"]').click()
-    expect(page.locator('#profile-save-status')).to_contain_text('未确认')
+    expect(page.locator('#profile-save-status')).to_contain_text('待确认')
     if concurrent:
         current = stack.must(stack.client.get('/api/access-profiles/' + saved['id']))
         changed = dict(requests[0], label=label + ' concurrent', expected_version=current['version'])

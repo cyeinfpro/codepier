@@ -113,7 +113,7 @@ async function chatSend(retry = false) {
     chatStatus(
       c.selected.status === 'stopping'
         ? '正在等待会话进程退出，草稿已保留。'
-        : '会话进程状态待核实，请先检查节点。草稿已保留。',
+        : '会话进程状态待核实，请先检查电脑。草稿已保留。',
       true,
     );
     return;

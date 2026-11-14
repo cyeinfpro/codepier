@@ -105,7 +105,7 @@
   text-align: left;
   font: inherit;
   border: 1px solid var(--cr-line);
-  border-radius: var(--ui-radius-sm);
+  border-radius: var(--ui-radius-small);
   background: var(--ui-side);
   cursor: pointer;
 }

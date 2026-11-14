@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 import pytest
 from playwright.sync_api import expect
-from tests.browser_support import chat_page, event, ROOT
+from tests.browser_support import chat_page, event, open_chat_settings, ROOT
 
 def test_chat_first_send_incremental_safe_ime_and_mobile(chat_page):
     page=chat_page
@@ -48,6 +48,8 @@ def test_chat_pending_switch_drafts_reconnect_and_explicit_approval(chat_page):
     page.fill('#chat-compose','original project message')
     page.press('#chat-compose','Enter')
     page.wait_for_function('!!window.finishSend')
+    # The project picker lives in the 「会话设置」 panel.
+    open_chat_settings(page)
     page.select_option('#chat-project','p2')
     page.fill('#chat-compose','project two draft')
     page.evaluate('finishSend()')

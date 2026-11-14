@@ -144,6 +144,9 @@ function chatClosePopover(restore = false) {
 }
 function chatModelPopover() {
   if (innerWidth <= 1100 && ChatUI.inspector) chatInspector('');
+  // /model can open the picker without clicking the settings capsule. Its
+  // anchor must be visible and focusable for positioning and Escape restore.
+  if (!$('#chat-options').classList.contains('is-open')) chatOptions(true);
   ChatUI.popoverAnchor = 'chat-model-picker';
   const box = $('#chat-popover');
   box.setAttribute('aria-label', '模型选择');
@@ -188,7 +191,7 @@ function chatRenderModels(query) {
       : v.catalogError ||
         (q
           ? '没有匹配的模型'
-          : '本机没有返回可用模型。可刷新目录，或检查节点上的 CLI 登录和配置。');
+          : '本机没有返回可用模型。可刷新目录，或检查电脑上的 CLI 登录和配置。');
     holder.append(empty);
     if (focusModel !== null) $('#chat-model-search').focus({ preventScroll: true });
     return;

@@ -218,7 +218,8 @@ def test_collaboration_shared_tokens_keep_reduced_motion(chat_browser_pool, engi
     page = context.new_page()
     try:
         page.set_content('<div class="cc-workspace cc-chat-shell"><details class="cc-drawer" open><summary>Details</summary></details><div class="cc-project-strip"><button class="btn">Project</button></div></div>')
-        for name in ["tokens.css", "collaboration-workspace.css", "experience.css"]:
+        # experience.css was retired in 1.33.13; the legacy workspace now relies on the shared tokens.
+        for name in ["tokens.css", "collaboration-workspace.css"]:
             page.add_style_tag(path=str(legacy_asset(name) if name in LEGACY_ASSET_NAMES else ROOT / "web" / name))
         assert page.locator(".cc-workspace").evaluate("""el => {
           const style = getComputedStyle(el), root = getComputedStyle(document.documentElement);

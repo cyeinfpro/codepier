@@ -121,7 +121,7 @@
   display: grid;
   justify-items: center;
   gap: 10px;
-  margin: 8px auto 18px;
+  margin: 16px auto 8px;
   text-align: center;
 }
 
@@ -204,10 +204,6 @@
   overflow-x: auto;
   scrollbar-width: none;
   user-select: all;
-}
-
-.cr-pair-qr {
-  margin: 16px auto 8px;
 }
 
 .cr-pair-qr img {

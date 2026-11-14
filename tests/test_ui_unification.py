@@ -33,7 +33,9 @@ VIEWPORTS = (
     (320, 568),
     (390, 844),
     (768, 1024),
-    (1440, 1000),
+    (1024, 768),
+    (1366, 768),
+    (1440, 900),
 )
 SCHEMES = ("light", "dark")
 MANAGEMENT_ROUTES = (
@@ -48,7 +50,7 @@ MANAGEMENT_ROUTES = (
     "artifacts",
     "settings",
 )
-TOKEN_VALUES = {'light': {'--ui-bg': '#f4f4f4', '--ui-panel': '#ffffff', '--ui-text': '#272727', '--ui-accent': '#746018'}, 'dark': {'--ui-bg': '#191919', '--ui-panel': '#222222', '--ui-text': '#e5e5e5', '--ui-accent': '#d1bd75'}}
+TOKEN_VALUES = {'light': {'--ui-bg': '#f5f5f4', '--ui-panel': '#ffffff', '--ui-text': '#272727', '--ui-accent': '#746018'}, 'dark': {'--ui-bg': '#141413', '--ui-panel': '#1c1c1b', '--ui-text': '#e5e5e5', '--ui-accent': '#d1bd75'}}
 
 
 def _asset_positions(html: str) -> dict[str, int]:
@@ -102,8 +104,16 @@ def _navigate(page: Page, route: str) -> None:
     expect(page.locator(".skeleton")).to_have_count(0, timeout=15_000)
     if route == "native":
         expect(page.locator("#chat-root")).to_be_visible()
+    elif route == "identity":
+        # Account navigation lives in the avatar, not the main route groups.
+        expect(page.locator('#page')).to_have_attribute('data-page', 'identity')
+        expect(page.locator('.avatar[data-nav="identity"]')).to_have_count(1)
+        expect(page.locator('#page h1')).to_have_text('我的账号')
     else:
-        expect(page.locator(f'.nav [data-nav="{route}"]')).to_have_attribute(
+        # Tab child routes (profiles, roles, ...) share their group's single
+        # sidebar button, which is the one marked current.
+        group = page.evaluate("route => tabParent[route] || route", route)
+        expect(page.locator(f'.nav [data-nav-group="{group}"]')).to_have_attribute(
             "aria-current", "page"
         )
 
@@ -189,7 +199,7 @@ def _native_management_round_trip(page: Page, draft: str) -> None:
     expect(page.locator("#chat-compose")).to_have_value(draft)
 
 
-def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SCHEMES, viewports=VIEWPORTS) -> dict:
+def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SCHEMES, viewports=VIEWPORTS, engine='chromium') -> dict:
     """Run the complete visual matrix and return machine-readable evidence."""
     _prepare_native_fixture(stack)
     output.mkdir(parents=True, exist_ok=True)
@@ -203,7 +213,8 @@ def exercise_matrix(stack, output: Path, *, screenshots: bool = True, schemes=SC
         "browser_errors": [],
     }
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright.chromium)
+        browser = launch_browser(getattr(playwright, engine))
+        report['engine'] = engine
         try:
             for scheme in schemes:
                 for width, height in viewports:
@@ -316,17 +327,18 @@ def test_contract_assets_load_in_the_required_order():
 
 
 @pytest.mark.isolated_case
+@pytest.mark.parametrize('engine', ('chromium', 'webkit'))
 @pytest.mark.parametrize('scheme', SCHEMES)
 @pytest.mark.parametrize('viewport', VIEWPORTS, ids=lambda value: f'{value[0]}x{value[1]}')
-def test_theme_viewport_conversation_matrix(stack, tmp_path, scheme, viewport):
+def test_theme_viewport_conversation_matrix(stack, tmp_path, scheme, viewport, engine):
     output = (
         SCREENSHOTS
         if os.getenv("CODEPIER_UI_UNIFICATION_SCREENSHOTS")
         else tmp_path / "ui-unification"
     )
     # Each case owns both its screenshots and capture-report.json when sharded.
-    output = output / f'{scheme}-{viewport[0]}x{viewport[1]}' / 'screenshots'
-    report = exercise_matrix(stack, output, schemes=(scheme,), viewports=(viewport,))
+    output = output / f'{engine}-{scheme}-{viewport[0]}x{viewport[1]}' / 'screenshots'
+    report = exercise_matrix(stack, output, schemes=(scheme,), viewports=(viewport,), engine=engine)
     assert len(report["cases"]) == 1
     assert len(report["screenshots"]) == len(report["cases"]) * (
         len(MANAGEMENT_ROUTES) + 1

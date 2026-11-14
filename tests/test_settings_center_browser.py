@@ -156,10 +156,34 @@ def test_scene_switch_keeps_unsaved_draft(settings_page, stack):
     expect(form.locator("select")).to_have_value("auto")
 
 
+def expand_start(page):
+    # The guide starts folded once setup is complete; unfold it if so.
+    toggle = page.locator("[data-settings-start-toggle]")
+    if toggle.get_attribute("aria-expanded") == "false":
+        toggle.click()
+    expect(page.locator(".settings-flow-grid")).to_be_visible()
+
+
+def test_start_guide_remembers_fold(settings_page, stack):
+    page, _ = settings_page
+    login(page, stack)
+    expand_start(page)
+    page.locator("[data-settings-start-toggle]").click()
+    expect(page.locator(".settings-flow-grid")).to_be_hidden()
+    assert page.evaluate("localStorage.getItem('codepier-settings-start-collapsed')") == "1"
+    page.evaluate("navigate('overview')")
+    page.wait_for_function("S.page === 'overview'")
+    page.evaluate("navigate('settings')")
+    expect(page.locator("[data-settings-start-toggle]")).to_have_attribute("aria-expanded", "false")
+    page.locator("[data-settings-start-toggle]").click()
+    assert page.evaluate("localStorage.getItem('codepier-settings-start-collapsed')") == "0"
+
+
 def test_five_start_actions_open_the_real_destination(settings_page, stack):
     page, _ = settings_page
     login(page, stack)
     for target in ("devices", "projects", "connect", "collaboration", "overview"):
+        expand_start(page)
         page.locator('.settings-flow-card [data-settings-entry="' + target + '"]').click()
         page.wait_for_function("target => S.page === target", arg=target)
         expect(page.locator("#settings-center")).to_have_count(0)
@@ -182,7 +206,7 @@ def test_task_cards_use_the_shared_dark_palette(settings_page, stack):
       const a=luminance(title.color), b=luminance(style.backgroundColor);
       return {background:style.backgroundColor, contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
     }""")
-    assert colors["background"] == "rgb(34, 34, 34)"
+    assert colors["background"] == "rgb(28, 28, 27)"
     assert colors["contrast"] >= 4.5
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
 

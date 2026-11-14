@@ -11,24 +11,10 @@
 .settings-toolbar .field {
   min-width: 0;
 }
+/* Look comes from the shared segmented-control primitive in styles.css. */
 .settings-groups {
-  display: flex;
-  gap: 8px;
   flex-wrap: wrap;
-  margin: 18px 0;
-}
-.settings-groups button {
-  font: inherit;
-  color: inherit;
-  border: 1px solid var(--ui-line);
-  background: transparent;
-  border-radius: var(--ui-radius-pill);
-  padding: 8px 14px;
-  cursor: pointer;
-}
-.settings-groups button[aria-pressed='true'] {
-  background: var(--ui-text);
-  color: var(--ui-bg);
+  margin: 16px 0;
 }
 .settings-catalog {
   align-items: start;
@@ -209,22 +195,36 @@
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
 }
+.settings-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.settings-flow-head span {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-muted);
+}
 .settings-flow-card {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  padding: 22px 18px;
+  padding: var(--ui-panel-inset);
   border: 1px solid var(--ui-line);
   border-radius: var(--ui-radius-lg);
   background: var(--ui-panel);
 }
 .settings-flow-card h2 {
-  font-size: var(--ui-text-title);
-  margin: 14px 0 8px;
+  font-size: var(--ui-text-md);
+  margin: 10px 0 6px;
 }
 .settings-flow-card p {
-  font-size: var(--ui-text-sm);
+  flex: 1;
+  font-size: var(--ui-text-xs);
   color: var(--ui-muted);
-  line-height: 1.6;
-  margin: 0 0 20px;
+  line-height: 1.55;
+  margin: 0 0 14px;
 }
 .settings-step {
   display: inline-grid;

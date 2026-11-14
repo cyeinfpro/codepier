@@ -13,7 +13,7 @@ function chatProjectInfo(id, row = {}) {
           ? row.online
           : null;
   const alias = project?.alias || row.project_alias || '未知项目';
-  const node = device?.name || project?.device_name || row.device_name || '本机节点';
+  const node = device?.name || project?.device_name || row.device_name || '本机';
   const forbidden =
     project &&
     ((project.mode !== undefined && project.mode !== 'write') ||
@@ -21,11 +21,11 @@ function chatProjectInfo(id, row = {}) {
       [false, 0].includes(project.device_enabled) ||
       [false, 0].includes(device?.enabled));
   const reason = !project
-    ? '项目映射已不可用，请重新选择项目'
+    ? '项目已不可用，请重新选择项目'
     : forbidden
-      ? '项目未允许写入或执行，请在项目映射中检查权限'
+      ? '项目未允许写入或执行，请在项目设置中检查权限'
       : online === false
-        ? '节点离线；可以查看历史和准备草稿，联网后再发送'
+        ? '电脑离线；可以查看历史和准备草稿，联网后再发送'
         : '';
   return {
     project,
@@ -240,7 +240,7 @@ async function chatList() {
         active = row.id === c.selected?.id;
       const title = row.title || '未命名对话',
         cli = chatProviderName(row.provider);
-      const state = info.online === false ? '节点离线' : chatStateName(row.status);
+      const state = info.online === false ? '电脑离线' : chatStateName(row.status);
       button.className = 'chat-session' + (active ? ' active' : '');
       if (active) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
@@ -309,6 +309,8 @@ function chatTargetSync() {
   box.hidden = !!c.selected;
   const info = chatProjectInfo(c.project, c.selected || {});
   $('#chat-project').value = c.project;
+  for (const button of box.querySelectorAll('[data-chat-cli]'))
+    button.setAttribute('aria-pressed', String(button.dataset.chatCli === c.provider));
   $('#chat-target-info').textContent = info.reason || info.node + ' · 首条消息发送后才创建会话';
   $('#chat-target-info').title = info.root;
   box.dataset.unavailable = String(!!info.reason);
@@ -324,7 +326,23 @@ function chatTargetSync() {
   const title = [info.project ? info.alias : '选择项目', chatProviderName(c.provider)].join(' · ');
   $('#chat-empty-title').textContent = title;
   const summary = $('#chat-config-summary');
-  const label = title + ' · ' + ($('#chat-model-name').textContent || '默认模型');
+  const effort = $('#chat-effort-select'),
+    effortLabel = effort?.selectedOptions[0]?.textContent || '默认思考',
+    directory = c.selected?.cwd || c.cwd || '.',
+    label = [
+      chatProviderName(c.provider),
+      $('#chat-model-name').textContent || '默认模型',
+      effortLabel.split(' · ')[0],
+      directory,
+    ].join(' · ');
+  const capsule = $('#chat-options-toggle');
+  capsule.title = [
+    title,
+    '模型：' + ($('#chat-model-name').textContent || '默认模型'),
+    '思考：' + effortLabel,
+    '工作目录：' + directory,
+  ].join('\n');
+  capsule.setAttribute('aria-label', '会话设置：' + label);
   if (summary.firstChild?.nodeType === Node.TEXT_NODE) summary.firstChild.nodeValue = label;
   else summary.textContent = label;
   $('#chat-subtitle').textContent = info.project ? info.alias + ' · ' + info.node : '选择工作项目';
@@ -453,8 +471,8 @@ function chatNewSession(projectHint = ChatUI.project, providerHint = ChatUI.prov
       const note = document.createElement('p');
       note.className = 'chat-picker-empty';
       note.textContent = S.projects.length
-        ? '没有匹配的项目，试试项目名、节点或目录。'
-        : '还没有项目。请先在「管理项目」中添加项目映射。';
+        ? '没有匹配的项目，试试项目名、电脑或目录。'
+        : '还没有项目。请先在「管理项目」中添加项目。';
       results.append(note);
     }
     const index = buttons.findIndex(

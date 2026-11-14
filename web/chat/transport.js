@@ -66,7 +66,7 @@ function chatConnect() {
           c.selected.error ||
             {
               stopping: '正在等待会话进程退出，草稿已保留。',
-              orphaned: '会话进程状态待核实，请先检查节点。草稿已保留。',
+              orphaned: '会话进程状态待核实，请先检查电脑。草稿已保留。',
             }[c.selected.status] ||
             '会话已停止，发送消息可恢复原生历史',
         );

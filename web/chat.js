@@ -153,7 +153,7 @@ function chatStateName(s) {
       error: '失败',
       cancelled: '已取消',
       cleared: '已清理',
-      orphaned: '需检查节点',
+      orphaned: '需检查电脑',
       uncertain: '待核实',
     }[s] ||
     s ||
@@ -314,11 +314,20 @@ async function chatPage() {
 
   <div class="chat-compose-frame">
   <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
-  <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden><button type="button" id="chat-options-toggle" class="chat-model-picker" aria-label="项目、CLI 与模型" aria-controls="chat-options" aria-expanded="false">${chatIcon('settings')}<span id="chat-config-summary">会话设置</span>${chatIcon('chevron')}</button></div>
+  <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden><button type="button" id="chat-options-toggle" class="chat-model-picker" aria-label="会话设置" aria-haspopup="dialog" aria-controls="chat-options" aria-expanded="false">${chatIcon('settings')}<span id="chat-config-summary">会话设置</span>${chatIcon('chevron')}</button></div>
   <div class="chat-send-actions"><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
   <section id="chat-options" class="chat-options" role="region" aria-label="会话设置"><header class="chat-options-head"><div><strong>会话设置</strong></div><button type="button" id="chat-options-close" class="chat-square" aria-label="关闭会话设置">${chatIcon('close')}</button></header>
-  <div id="chat-new-context" class="chat-new-context"><label>工作项目<select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><span id="chat-target-info"></span></div>
+  <div id="chat-new-context" class="chat-new-context"><label>工作项目<select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><div class="chat-cli-segmented" role="group" aria-label="新对话使用的 CLI">${[
+    ['pi', 'Pi'],
+    ['codex', 'Codex'],
+    ['claude', 'Claude Code'],
+  ]
+    .map(
+      ([id, label]) =>
+        `<button type="button" data-chat-cli="${id}" aria-pressed="${id === c.provider}">${label}</button>`,
+    )
+    .join('')}</div><span id="chat-target-info"></span></div>
   <div class="chat-config-bar"><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button><label class="chat-cli-label"><span>CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
   <button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div>
   <div class="chat-option-tools"><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button></div></section></div>
@@ -401,6 +410,15 @@ async function chatPage() {
   });
   on('chat-project', 'change', (e) => chatSwitch(null, e.target.value, { cwd: '.' }));
   on('chat-provider', 'change', (e) => chatSwitch(null, c.project, { provider: e.target.value }));
+  // The segmented control in the new-chat context drives the same select, so
+  // there is a single switching path.
+  for (const button of document.querySelectorAll('#chat-new-context [data-chat-cli]'))
+    button.addEventListener('click', () => {
+      const select = $('#chat-provider');
+      if (!select || select.disabled || select.value === button.dataset.chatCli) return;
+      select.value = button.dataset.chatCli;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
   $('#chat-history-search').value = c.query;
   $('#chat-history-filter').value = c.filter;
   let searchTimer;
@@ -808,6 +826,9 @@ function chatClosePopover(restore = false) {
 }
 function chatModelPopover() {
   if (innerWidth <= 1100 && ChatUI.inspector) chatInspector('');
+  // /model can open the picker without clicking the settings capsule. Its
+  // anchor must be visible and focusable for positioning and Escape restore.
+  if (!$('#chat-options').classList.contains('is-open')) chatOptions(true);
   ChatUI.popoverAnchor = 'chat-model-picker';
   const box = $('#chat-popover');
   box.setAttribute('aria-label', '模型选择');
@@ -852,7 +873,7 @@ function chatRenderModels(query) {
       : v.catalogError ||
         (q
           ? '没有匹配的模型'
-          : '本机没有返回可用模型。可刷新目录，或检查节点上的 CLI 登录和配置。');
+          : '本机没有返回可用模型。可刷新目录，或检查电脑上的 CLI 登录和配置。');
     holder.append(empty);
     if (focusModel !== null) $('#chat-model-search').focus({ preventScroll: true });
     return;
@@ -1125,7 +1146,7 @@ async function chatSend(retry = false) {
     chatStatus(
       c.selected.status === 'stopping'
         ? '正在等待会话进程退出，草稿已保留。'
-        : '会话进程状态待核实，请先检查节点。草稿已保留。',
+        : '会话进程状态待核实，请先检查电脑。草稿已保留。',
       true,
     );
     return;
@@ -1378,7 +1399,7 @@ function chatConnect() {
           c.selected.error ||
             {
               stopping: '正在等待会话进程退出，草稿已保留。',
-              orphaned: '会话进程状态待核实，请先检查节点。草稿已保留。',
+              orphaned: '会话进程状态待核实，请先检查电脑。草稿已保留。',
             }[c.selected.status] ||
             '会话已停止，发送消息可恢复原生历史',
         );
@@ -1866,9 +1887,31 @@ async function chatCopyText(text) {
 
 function chatApproval(item) {
   if (!item.node) return;
-  item.node.querySelectorAll('.chat-approval-actions').forEach((node) => node.remove());
-  const data = item.data,
-    box = document.createElement('div');
+  item.node
+    .querySelectorAll('.chat-approval-actions, .chat-approval-kv')
+    .forEach((node) => node.remove());
+  const data = item.data;
+  const cmd = data.details?.command || data.command;
+  const cwd = data.details?.cwd || data.cwd;
+  const risk = data.details?.risk || data.details?.reason;
+  if (cmd || cwd || risk) {
+    const kv = document.createElement('dl');
+    kv.className = 'chat-approval-kv';
+    for (const [label, val] of [
+      ['执行命令', cmd],
+      ['作用目录', cwd],
+      ['风险提示', risk],
+    ]) {
+      if (!val) continue;
+      const dt = document.createElement('dt'),
+        dd = document.createElement('dd');
+      dt.textContent = label;
+      dd.textContent = typeof val === 'string' ? val : JSON.stringify(val);
+      kv.append(dt, dd);
+    }
+    if (kv.childElementCount) item.node.append(kv);
+  }
+  const box = document.createElement('div');
   box.className = 'chat-approval-actions';
   if (data.resolved || item.answered) {
     box.textContent = data.resolution === 'closed' ? '此请求已结束' : '回答已提交，等待原生处理';
@@ -2043,7 +2086,7 @@ function chatApproval(item) {
     }
     if (!choices.length) {
       const note = document.createElement('p');
-      note.textContent = '此原生请求没有可用选项。可中断当前任务后，在节点本机 CLI 处理此操作。';
+      note.textContent = '此原生请求没有可用选项。可中断当前任务后，在电脑本机 CLI 处理此操作。';
       box.append(note);
     }
   }
@@ -2449,7 +2492,7 @@ async function chatUploadEntry(
   const valid = () => {
     if (S.session !== identity || entry.removed) return false;
     if (entry.mapping !== mapping())
-      throw new Error('项目映射已改变，上传已停止。请核对工作项目后移除并重新添加附件。');
+      throw new Error('项目已改变，上传已停止。请核对工作项目后移除并重新添加附件。');
     return true;
   };
   entry.uploading = true;
