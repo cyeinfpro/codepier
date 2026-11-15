@@ -205,6 +205,19 @@ def message(source, recipient, *, reply=None, work=None, channels=(), handling=N
             "resume_enrollment",
             recipient["dot_id"],
         )
+    # Attention and activity are orthogonal: a running operation must never
+    # hide the consumer's still-current request for input or authorization.
+    activity = {"state": primary, "label": LABELS.get(primary, "状态待核对")}
+    attention = {"state": "none", "label": "", "next_action": None}
+    if state in {"waiting_input", "waiting_authorization"} and not (
+        handling.get("evidence_current") is False or handling.get("source_current") is False
+    ):
+        attention = {
+            "state": state,
+            "label": LABELS[state],
+            "next_action": action("open_original_message", reply_id or source_id),
+        }
+        primary, reason, kind, target = state, state, "open_original_message", reply_id or source_id
     observed = [
         recipient.get("received_at"),
         recipient.get("handled_at"),
@@ -216,6 +229,8 @@ def message(source, recipient, *, reply=None, work=None, channels=(), handling=N
     return finish(
         {
             "message_id": source_id,
+            "activity": activity,
+            "attention": attention,
             "dot_id": recipient["dot_id"],
             "primary_state": primary,
             "reason_code": reason,

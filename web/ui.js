@@ -143,6 +143,28 @@ function uiPositionMenu(menu) {
   if (shift) list.style.translate = shift + 'px 0';
   list.scrollTop = scrollTop;
 }
+// Close only sibling floating menus before native summary activation. Doing this
+// synchronously avoids delayed toggle events closing a newly selected peer.
+function uiCloseMenuPeers(menu) {
+  if (!(menu instanceof HTMLDetailsElement)) return;
+  const group = menu.matches('.tool-menu')
+    ? menu.closest('.work-controls .actions')
+    : menu.parentElement?.matches('.chat-history-chips')
+      ? menu.parentElement
+      : null;
+  if (!group) return;
+  for (const peer of group.querySelectorAll(':scope > details[open]')) {
+    if (peer !== menu) peer.open = false;
+  }
+}
+document.addEventListener(
+  'click',
+  (event) => {
+    const menu = event.target.closest?.('summary')?.parentElement;
+    if (menu && !menu.open) uiCloseMenuPeers(menu);
+  },
+  true,
+);
 document.addEventListener(
   'toggle',
   (event) => {
@@ -228,8 +250,9 @@ function uiSetMenu(value, restore = true, origin = null) {
   }
 }
 function uiSetPane(pane, focus = false) {
-  if (!['files', 'editor'].includes(pane)) return;
+  if (!['files', 'editor', 'output'].includes(pane)) return;
   S.work.pane = pane;
+  if ($('#page')) $('#page').dataset.workPane = pane;
   const area = $('.workspace');
   if (area) area.dataset.pane = pane;
   $$('[data-ui-pane]').forEach((b) => {
@@ -238,7 +261,12 @@ function uiSetPane(pane, focus = false) {
     b.setAttribute('aria-pressed', String(selected));
   });
   if (focus && matchMedia('(max-width:640px)').matches) {
-    const target = pane === 'editor' ? $('#code-editor') : $('[data-action="tree-home"]');
+    const target =
+      pane === 'output'
+        ? $('#task-output')
+        : pane === 'editor'
+          ? $('#code-editor')
+          : $('[data-action="tree-home"]');
     target?.focus({ preventScroll: true });
   }
 }
@@ -594,9 +622,9 @@ document.addEventListener('click', (e) => {
   const pane = e.target.closest('[data-ui-pane]');
   if (pane) uiSetPane(pane.dataset.uiPane, true);
   // Native details retain keyboard semantics. Collapse only after the original action handler has run.
-  $$('.tool-menu[open]').forEach((menu) => {
-    if (!menu.contains(e.target) || e.target.closest('button'))
-      setTimeout(() => menu.removeAttribute('open'), 0);
+  $$('.tool-menu[open], .chat-history-chips > details[open]').forEach((menu) => {
+    if (!menu.contains(e.target)) menu.open = false;
+    else if (e.target.closest('button')) setTimeout(() => menu.removeAttribute('open'), 0);
   });
 });
 document.addEventListener('keydown', (e) => {
@@ -623,7 +651,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
-    $$('.tool-menu[open]').forEach((menu) => {
+    $$('.tool-menu[open], .chat-history-chips > details[open]').forEach((menu) => {
       menu.removeAttribute('open');
       $('summary', menu)?.focus();
     });
@@ -877,7 +905,7 @@ document.addEventListener(
   'keydown',
   (event) => {
     if (event.defaultPrevented || event.key !== 'Escape') return;
-    const menu = event.target.closest?.('.tool-menu[open]');
+    const menu = event.target.closest?.('.tool-menu[open], .chat-history-chips > details[open]');
     if (!menu) return;
     event.preventDefault();
     menu.open = false;
@@ -895,6 +923,7 @@ document.addEventListener('keydown', (event) => {
   const origin = menu.querySelector('summary');
   if (!menu.open && event.target !== origin) return;
   event.preventDefault();
+  uiCloseMenuPeers(menu);
   menu.open = true;
   const items = [...menu.querySelectorAll('button:not(:disabled),a[href]')].filter(
     (item) => item.getClientRects().length,
@@ -912,4 +941,19 @@ document.addEventListener('keydown', (event) => {
             : 0
           : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
   items[next].focus();
+});
+
+document.addEventListener('click', (e) => {
+  const button = e.target.closest('[data-project-layout]');
+  if (!button) return;
+  const value = button.dataset.projectLayout;
+  if (!['cards', 'list'].includes(value)) return;
+  const collection = $('.workspace-project-collection');
+  if (collection) collection.dataset.layout = value;
+  $$('[data-project-layout]').forEach((item) =>
+    item.setAttribute('aria-pressed', String(item.dataset.projectLayout === value)),
+  );
+  try {
+    localStorage.setItem('codepier-project-layout', value);
+  } catch {}
 });

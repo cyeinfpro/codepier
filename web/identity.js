@@ -75,8 +75,8 @@ window.CodePierIdentity = (() => {
   }
   function selector() {
     if (me?.spaces.length === 1 && current()?.kind === 'personal')
-      return `<div class="iam-space-switch"><span class="form-note">个人空间 · ${esc(current().label)}</span></div>`;
-    return `<div class="field iam-space-switch"><label for="iam-active-space">当前空间</label><select id="iam-active-space" aria-label="当前空间">${(me?.spaces || []).map((s) => `<option value="${esc(s.id)}" ${s.id === S.space_id ? 'selected' : ''}>${esc(s.label)} · ${esc(levels[s.level] || s.level)}</option>`).join('')}</select></div>`;
+      return `<div class="iam-space-switch"><span class="sidebar-field-label">当前空间</span><span class="sidebar-space-value" title="${esc(current().label)}">${esc(current().label)}</span></div>`;
+    return `<div class="field iam-space-switch"><label for="iam-active-space">当前空间</label><select id="iam-active-space" aria-label="当前空间" title="${esc(current()?.label || '空间待核实')}">${(me?.spaces || []).map((s) => `<option value="${esc(s.id)}" ${s.id === S.space_id ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></div>`;
   }
   function bindShell() {
     const choice = $('#iam-active-space');

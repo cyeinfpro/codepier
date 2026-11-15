@@ -92,7 +92,7 @@
   opacity: 0.65;
 }
 .chat-config-bar :is(button, select):hover:not(:disabled) {
-  background: var(--chat-surface);
+  background-color: var(--chat-surface);
 }
 .chat-text-button:hover,
 .chat-composer-note button:hover {

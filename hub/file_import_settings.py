@@ -169,8 +169,13 @@ def _snapshot(record, invalid, environment):
             inherited_source=inherited_source,
             inherited_state=inherited_state,
         )
+    relay = settings["native_relay_enabled"]
+    relay["configured_effective_value"] = relay["effective_value"]
+    relay["blocked_by"] = []
     if not settings["streaming_enabled"]["effective_value"]:
-        settings["native_relay_enabled"]["effective_value"] = False
+        if relay["effective_value"]:
+            relay["blocked_by"] = ["streaming_enabled"]
+        relay["effective_value"] = False
     policy = None
     if all(
         settings[key]["state"] == "known" for key in ("native_file_hosts", "native_file_providers")

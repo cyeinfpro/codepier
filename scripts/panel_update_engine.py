@@ -290,6 +290,30 @@ def select_engine(home, *, expected_uid=0):
     return identity
 
 
+def promotion_release(release):
+    """Bind to the confirmed archive; malformed updater metadata cannot fall back."""
+    if "image_bundle" not in release:
+        return release
+    bundle = release["image_bundle"]
+    expected_url = (
+        f"https://github.com/{release.get('repository')}/releases/download/"
+        f"v{release.get('version')}/codepier-{release.get('version')}-updater.zip"
+    )
+    if (
+        not isinstance(bundle, dict)
+        or set(bundle) != {"asset_id", "bytes", "sha256", "url"}
+        or type(bundle.get("asset_id")) is not int
+        or bundle["asset_id"] <= 0
+        or type(bundle.get("bytes")) is not int
+        or bundle["bytes"] <= 0
+        or not isinstance(bundle.get("sha256"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", bundle["sha256"])
+        or bundle.get("url") != expected_url
+    ):
+        raise EngineError("ENGINE_PROMOTION", "Invalid confirmed updater archive metadata")
+    return {**release, **bundle}
+
+
 def promote_engine(home, identity, job_id, *, expected_uid=0):
     """Caller MUST hold admission fence and prevent subsequent submissions."""
     home = Path(home)
@@ -298,14 +322,17 @@ def promote_engine(home, identity, job_id, *, expected_uid=0):
         raise EngineError("ENGINE_JOB", "Invalid engine promotion job")
     job = read_json(home / "jobs" / job_id / "status.json")
     release = read_json(home / "jobs" / job_id / "release.json")
+    archive = promotion_release(release)
+    updater_bound = "image_bundle" not in release or job.get("staged_engine") == identity
+    archive_sha = archive.get("sha256")
     if (
-        job.get("state") != "succeeded"
+        not updater_bound
+        or archive_sha != identity["sha256"]
+        or job.get("state") != "succeeded"
         or not job.get("commit_decided")
         or pending_jobs(home)
         or job.get("target_version") != identity["version"]
-        or any(
-            release.get(k) != identity[k] for k in ("repository", "release_id", "sha256", "version")
-        )
+        or any(release.get(k) != identity[k] for k in ("repository", "release_id", "version"))
     ):
         raise EngineError(
             "ENGINE_PROMOTION", "Engine promotion is not bound to a successful idle release"

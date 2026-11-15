@@ -223,9 +223,9 @@
     <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="\u663E\u793A\u623F\u95F4\u5217\u8868" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="\u623F\u95F4\u7BA1\u7406">${btn('permissions', icon('folder') + '<span data-cr-project-count>\u9879\u76EE</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>\u6210\u5458</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>\u8FDE\u63A5\u5FAE\u4FE1</span>')}${btn('settings', '\xB7\xB7\xB7', 'aria-label="\u623F\u95F4\u8BBE\u7F6E"', 'cr-icon')}</nav></header>
       <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>\u539F\u623F\u95F4\u5F53\u524D\u53EA\u8BFB</strong><p data-cr-legacy-progress>\u5386\u53F2\u548C\u539F\u5DE5\u4F5C\u5DF2\u4FDD\u7559\u3002\u5904\u7406\u5B8C\u65E7\u8FDE\u63A5\u540E\uFF0C\u7531\u4F60\u660E\u786E\u542F\u7528\u65B0\u623F\u95F4\u754C\u9762\u3002</p></div>${btn('migration', '\u67E5\u770B\u8FC1\u79FB\u8981\u6C42', 'data-cr-migration-open')}</div>
       <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
-      <section class="cr-feed" aria-label="\u623F\u95F4\u5BF9\u8BDD" tabindex="0"><div class="cr-load-older" data-cr-older hidden>${btn('older', '\u66F4\u65E9\u7684\u6D88\u606F')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '\u56DE\u5230\u6700\u65B0')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
+      <section class="cr-feed" aria-label="\u623F\u95F4\u5BF9\u8BDD" tabindex="0"><p class="cr-window-note" data-cr-message-window hidden></p><div class="cr-load-older" data-cr-older hidden>${btn('older', '\u66F4\u65E9\u7684\u6D88\u606F')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '\u56DE\u5230\u6700\u65B0')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
       ${btn('latest', '\u67E5\u770B\u65B0\u6D88\u606F \u2193', 'data-cr-latest hidden', 'cr-latest')}
-      <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="\u5F85\u53D1\u9001\u7684\u9644\u4EF6" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="\u6D88\u606F" placeholder="\u7EE7\u7EED\u5BF9\u8BDD\uFF0C\u6216\u4EA4\u529E\u5DE5\u4F5C\u2026" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="\u53D1\u9001\u6D88\u606F">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="\u6DFB\u52A0\u9644\u4EF6" title="\u6BCF\u4E2A\u9644\u4EF6\u6700\u591A 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="\u9009\u62E9\u9644\u4EF6"><label class="cr-recipient"><span>\u53D1\u9001\u7ED9</span><select name="member_id" aria-label="\u9009\u62E9\u5904\u7406\u6210\u5458"><option value="">\u4E3B\u8D23 dot</option></select></label></div><span data-cr-compose-status>Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C</span></footer></form>
+      <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="\u5F85\u53D1\u9001\u7684\u9644\u4EF6" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="\u6D88\u606F" aria-describedby="cr-compose-status" placeholder="\u7EE7\u7EED\u5BF9\u8BDD\uFF0C\u6216\u4EA4\u529E\u5DE5\u4F5C\u2026" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="\u53D1\u9001\u6D88\u606F">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="\u6DFB\u52A0\u9644\u4EF6" title="\u6BCF\u4E2A\u9644\u4EF6\u6700\u591A 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="\u9009\u62E9\u9644\u4EF6"><label class="cr-recipient"><span>\u53D1\u9001\u7ED9</span><select name="member_id" aria-label="\u9009\u62E9\u5904\u7406\u6210\u5458"><option value="">\u4E3B\u8D23 dot</option></select></label></div><span id="cr-compose-status" data-cr-compose-status role="status" aria-live="polite">Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C</span></footer></form>
     </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="\u5173\u95ED\u9762\u677F"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
   </section>`;
   }
@@ -423,20 +423,28 @@
     root.querySelector('[data-cr-action="attach"]').disabled = disabled || draft.files.length >= 16;
     root.querySelector('#cr-file').disabled = disabled;
     const status = root.querySelector('[data-cr-compose-status]');
+    status.dataset.kind =
+      disabled || unfinished || duplicate || staleCorrection
+        ? 'blocking'
+        : draft.contextCorrection || draft.work
+          ? 'context'
+          : 'shortcut';
     status.textContent =
       disabled && state.room
         ? state.room.legacy
           ? '\u8FC1\u79FB\u524D\u53EA\u8BFB \xB7 \u8349\u7A3F\u5DF2\u4FDD\u7559'
           : '\u623F\u95F4\u53EA\u8BFB \xB7 \u8349\u7A3F\u5DF2\u4FDD\u7559'
-        : unfinished
-          ? '\u8BF7\u5B8C\u6210\u9644\u4EF6\u4E0A\u4F20\u540E\u53D1\u9001'
-          : draft.contextCorrection
-            ? staleCorrection
-              ? '\u8BF7\u91CD\u65B0\u6838\u5BF9\u5F53\u524D\u4E8B\u5B9E'
-              : '\u53D1\u9001\u540E\u7EA0\u6B63\u6240\u9009\u4E8B\u5B9E'
-            : draft.work
-              ? '\u53D1\u9001\u540E\u66F4\u65B0\u539F\u4EA4\u529E'
-              : 'Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C';
+        : duplicate
+          ? '\u6B64\u6D88\u606F\u6B63\u5728\u786E\u8BA4\u53D1\u9001\u7ED3\u679C\uFF0C\u8BF7\u52FF\u91CD\u590D\u53D1\u9001'
+          : unfinished
+            ? '\u8BF7\u5B8C\u6210\u9644\u4EF6\u4E0A\u4F20\u540E\u53D1\u9001'
+            : draft.contextCorrection
+              ? staleCorrection
+                ? '\u8BF7\u91CD\u65B0\u6838\u5BF9\u5F53\u524D\u4E8B\u5B9E'
+                : '\u53D1\u9001\u540E\u7EA0\u6B63\u6240\u9009\u4E8B\u5B9E'
+              : draft.work
+                ? '\u53D1\u9001\u540E\u66F4\u65B0\u539F\u4EA4\u529E'
+                : 'Enter \u53D1\u9001 \xB7 Shift + Enter \u6362\u884C';
     patchFiles();
     const correction = root.querySelector('[data-cr-correction]');
     correction.hidden = !draft.contextCorrection;
@@ -537,12 +545,13 @@
       work_unavailable: '\u539F\u5DE5\u4F5C\u5DF2\u7ED3\u675F\u6216\u4E0D\u53EF\u7EE7\u7EED',
     }[route.reason_code];
     const label =
+      progress.activity?.label ||
       (progress.state && progress.title) ||
       (route.state !== 'queued' && reason) ||
       (route.state === 'queued' && '\u5F85 dot \u5904\u7406') ||
       progress.title;
     if (!label) return '';
-    return `<span data-cr-message-progress data-state="${E(progress.state || route.state || 'saved')}"${progress.reason ? ` title="${E(progress.reason)}"` : ''}>${E(label)}</span>`;
+    return `<span data-cr-message-progress data-state="${E(progress.state || route.state || 'saved')}"${progress.reason ? ` title="${E(progress.reason)}"` : ''}>${E(label)}${progress.attention?.label && progress.attention.label !== label && progress.attention.state !== 'none' ? `<span data-cr-attention="${E(progress.attention.state)}"> \xB7 ${E(progress.attention.label)}</span>` : ''}</span>`;
   }
   function messageMarkup(message) {
     const owner = ['owner', 'user', 'human'].includes(message.author_kind);
@@ -774,6 +783,13 @@
   function patchWindowHints() {
     if (!root) return;
     root.querySelector('[data-cr-older]').hidden = !state.cursor;
+    const windowNote = root.querySelector('[data-cr-message-window]');
+    windowNote.hidden = !state.messageHistory && !state.cursor;
+    windowNote.textContent = state.messageHistory
+      ? '\u5F53\u524D\u4E3A\u5386\u53F2\u6D88\u606F\u7A97\u53E3\uFF0C\u5386\u53F2\u6309\u9875\u8BFB\u53D6\uFF1B\u56DE\u5230\u6700\u65B0\u53EF\u67E5\u770B\u65B0\u6D88\u606F\u3002'
+      : state.cursor
+        ? '\u5F53\u524D\u4EC5\u663E\u793A\u90E8\u5206\u6D88\u606F\uFF0C\u5386\u53F2\u6309\u9875\u8BFB\u53D6\u3002'
+        : '';
     const boundary = root.querySelector('[data-cr-history-end]');
     boundary.hidden = !state.messageHistory;
     boundary.style.minHeight = state.messageHistory
@@ -930,8 +946,8 @@
     const activeWorks = state.works.filter((work) => !finishedWork(work));
     const lead = activeWorks[0];
     const markup = lead
-      ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C')}</strong><small>${E(workStatus(lead))}${activeWorks.length > 1 ? ` \xB7 \u5171 ${activeWorks.length} \u9879` : ''}</small></span><span>${btn('work-detail', '\u67E5\u770B', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '\u5168\u90E8', '', 'cr-text-button')}</span>`
-      : `<span class="cr-work-bar-summary">${state.works.length} \u9879\u5386\u53F2\u5DE5\u4F5C</span>${btn('work-list', '\u5DE5\u4F5C\u8BB0\u5F55', '', 'cr-text-button')}`;
+      ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '\u8FDB\u884C\u4E2D\u7684\u5DE5\u4F5C')}</strong><small>${E(workStatus(lead))}${lead.display?.reason ? ` \xB7 ${E(lead.display.reason)}` : ''}${activeWorks.length > 1 ? ` \xB7 \u5171 ${activeWorks.length} \u9879` : ''}</small></span><span>${btn('work-detail', '\u67E5\u770B', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '\u5168\u90E8', '', 'cr-text-button')}</span>`
+      : `<span class="cr-work-bar-summary">${state.works.length ? `${state.works.length} \u9879\u5386\u53F2\u5DE5\u4F5C` : '\u5DE5\u4F5C\u72B6\u6001\u5F85\u6838\u5BF9'}</span>${btn('work-list', '\u5DE5\u4F5C\u8BB0\u5F55', '', 'cr-text-button')}`;
     node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
     if (node._markup !== markup) {
       node.innerHTML = markup;
@@ -983,6 +999,9 @@
     ${btn('work-detail', '\u67E5\u770B', 'data-id="' + E(work.id) + '"', 'cr-text-button')}</article>`,
         )
         .join('') +
+      (!state.worksComplete
+        ? '<p class="cr-muted">\u4EC5\u663E\u793A\u5F53\u524D\u7A97\u53E3\u4E2D\u7684\u5DE5\u4F5C\uFF0C\u5386\u53F2\u8BB0\u5F55\u53EF\u80FD\u5C1A\u672A\u52A0\u8F7D\u5B8C\u6574\u3002</p>'
+        : '') +
       (state.worksCursor ? btn('more-work', '\u66F4\u65E9\u7684\u5DE5\u4F5C', '', 'cr-full') : '') +
       (state.workHistory ? btn('latest-work', '\u56DE\u5230\u6700\u65B0', '', 'cr-full') : '');
     if (list._markup !== markup) {
@@ -3137,7 +3156,7 @@
       current.loading = false;
     }
   }
-  async function contextSource(id, sourceVersion) {
+  async function contextSource(id, sourceVersion, returnWork = '') {
     openPanel(
       'context-source',
       '\u539F\u6D88\u606F',
@@ -3145,9 +3164,18 @@
     );
     const current = panel,
       owner = state.owner;
-    const result = await api(
-      store.path(current.roomId) + '/messages?message_id=' + encodeURIComponent(id),
-    );
+    let result;
+    try {
+      result = await api(
+        store.path(current.roomId) + '/messages?message_id=' + encodeURIComponent(id),
+      );
+    } catch (error) {
+      if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
+      root.querySelector('[data-cr-context-source]').innerHTML =
+        `<p>\u672A\u80FD\u8BFB\u53D6\u539F\u6D88\u606F\uFF1B\u672A\u91CD\u53D1\u6D88\u606F\u6216\u5DE5\u4F5C\u3002</p>${btn(returnWork ? 'work-source' : 'context-source', '\u91CD\u65B0\u8BFB\u53D6\u539F\u6D88\u606F', `data-id="${E(id)}" data-work-id="${E(returnWork)}"`, 'cr-text-button')}`;
+      panelError(error.message);
+      return;
+    }
     if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
     const message = result.message || result.messages?.find((item) => item.id === id);
     const box = root.querySelector('[data-cr-context-source]');
@@ -3156,7 +3184,7 @@
         '\u539F\u6D88\u606F\u5F53\u524D\u4E0D\u53EF\u89C1\uFF0C\u8BF7\u5237\u65B0\u4E0A\u4E0B\u6587\u3002';
       return;
     }
-    box.innerHTML = `<p class="cr-muted">\u539F\u6D88\u606F ${E(identifier(message.id))} \xB7 \u5F53\u524D\u7248\u672C ${E(supplied(message.version))}</p>${Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">\u539F\u6D88\u606F\u5DF2\u66F4\u65B0\u3002\u6B64\u5904\u662F\u5F53\u524D\u53EF\u8BFB\u7248\u672C\uFF0C\u6458\u8981\u5F15\u7528\u7684\u65E7\u7248\u672C\u9700\u91CD\u65B0\u6838\u5BF9\u3002</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '\u5728\u623F\u95F4\u4E2D\u67E5\u770B', `data-id="${E(id)}"`) : ''}${btn('context', '\u8FD4\u56DE\u5F53\u524D\u4E0A\u4E0B\u6587')}`;
+    box.innerHTML = `<p class="cr-muted">\u539F\u6D88\u606F ${E(identifier(message.id))} \xB7 \u5F53\u524D\u7248\u672C ${E(supplied(message.version))}</p>${sourceVersion !== void 0 && Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">\u539F\u6D88\u606F\u5DF2\u66F4\u65B0\u3002\u6B64\u5904\u662F\u5F53\u524D\u53EF\u8BFB\u7248\u672C\uFF0C\u6458\u8981\u5F15\u7528\u7684\u65E7\u7248\u672C\u9700\u91CD\u65B0\u6838\u5BF9\u3002</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '\u5728\u623F\u95F4\u4E2D\u67E5\u770B', `data-id="${E(id)}"`) : ''}${returnWork ? btn('work-detail', '\u8FD4\u56DE\u5DE5\u4F5C\u8BE6\u60C5', `data-id="${E(returnWork)}"`) : btn('context', '\u8FD4\u56DE\u5F53\u524D\u4E0A\u4E0B\u6587')}`;
     const body = box.querySelector('.cr-message-body');
     if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, message.body_text || '');
     else body.textContent = message.body_text || '';
@@ -3241,6 +3269,7 @@
       ?.dataset.workAction;
     panel.work = work;
     const markup = `<div class="cr-flow-state"><h3>${E(workStatus(work))}</h3><p>${E(work.display?.reason || work.reason_code || '')}</p></div>${!activeRoom() ? '<p class="cr-info">\u623F\u95F4\u5DF2\u6682\u505C\u6216\u5F52\u6863\u3002\u53EF\u4EE5\u67E5\u770B\u5386\u53F2\uFF0C\u4E5F\u53EF\u4EE5\u505C\u6B62\u5DF2\u6709\u5DE5\u4F5C\u3002</p>' : ''}${work.result_summary ? `<p>${E(work.result_summary)}</p>` : ''}${deliveryMarkup(work.channel_deliveries, work.delivery_display, work.channel_deliveries_truncated)}
+    ${workSourceId(work) ? `<p>${state.messages.some((message) => message.id === workSourceId(work)) ? btn('locate-message', '\u67E5\u770B\u539F\u4EA4\u529E\u6D88\u606F', `data-id="${E(workSourceId(work))}"`, 'cr-text-button') : btn('work-source', '\u8BFB\u53D6\u539F\u4EA4\u529E\u6D88\u606F', `data-id="${E(workSourceId(work))}" data-work-id="${E(work.id)}"`, 'cr-text-button')}</p>` : ''}
     <section class="cr-work-summary">${work.acceptance ? `<h3>\u5B8C\u6210\u6761\u4EF6</h3><p>${E(work.acceptance)}</p>` : ''}${coordinatorId ? `<p data-cr-work-coordinator><strong>\u5F53\u524D\u4E3B\u8D23</strong> ${E(coordinator?.name || recovery.coordinator_name || 'dot')}</p>` : ''}${team.length ? `<h3>\u53C2\u4E0E\u6210\u5458</h3><ul>${team.map((member) => `<li>${E(member.name || 'dot')}${(member.member_id || member.id) === coordinatorId ? ' \xB7 \u4E3B\u8D23' : ''}</li>`).join('')}</ul>` : ''}</section>
     <details class="cr-diagnostics cr-work-evidence"><summary>\u6B65\u9AA4\u4E0E\u6267\u884C\u8BB0\u5F55</summary>${work.items?.length ? `<ul>${work.items.map((item) => `<li><strong>${E(item.title || '\u5DE5\u4F5C\u6B65\u9AA4')}</strong> \xB7 ${E(workLabels[item.state] || item.state)}${item.display?.reason || item.reason_code ? `<p>${E(item.display?.reason || item.reason_code)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">\u5F53\u524D\u6CA1\u6709\u53EF\u663E\u793A\u7684\u6267\u884C\u6B65\u9AA4\u3002</p>'}<div data-cr-operation-receipts>${operations.length ? `<ul>${operations.map((operation) => `<li data-operation-id="${E(operation.id || operation.operation_id)}"><strong>${E(operation.display?.title || workLabels[operation.state] || operation.state)}</strong>${operation.cancel_requested && !['succeeded', 'failed', 'cancelled'].includes(operation.state) ? '<p>\u5DF2\u8BF7\u6C42\u505C\u6B62\uFF0C\u7B49\u5F85\u539F\u64CD\u4F5C\u56DE\u6267</p>' : ''}${operation.display?.reason ? `<p>${E(operation.display.reason)}</p>` : ''}</li>`).join('')}</ul>` : '<p class="cr-muted">\u8FD8\u6CA1\u5F00\u59CB\u6267\u884C\u3002</p>'}</div></details>
     ${recovery.state === 'waiting_operations' ? '<p class="cr-info">\u7B49\u5F53\u524D\u64CD\u4F5C\u7ED3\u675F\u540E\u624D\u80FD\u6062\u590D\u6216\u63A5\u66FF\u3002</p>' : ''}
@@ -4325,6 +4354,7 @@
     } else if (action === 'more-context') await loadContext(true);
     else if (action === 'refresh-context') await loadContext();
     else if (action === 'context-source') await contextSource(id, button.dataset.sourceVersion);
+    else if (action === 'work-source') await contextSource(id, void 0, button.dataset.workId);
     else if (action === 'correct-context') {
       const value = panel?.context;
       if (
@@ -4652,6 +4682,14 @@
     panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
     const dialog = root.querySelector('dialog');
     dialog._crOpeningEpoch = panel.epoch;
+    dialog.dataset.panel = name;
+    const close = dialog.querySelector('[data-cr-action="close"]');
+    close.setAttribute(
+      'aria-label',
+      name === 'work' || name === 'context-source'
+        ? '\u8FD4\u56DE\u623F\u95F4\u5BF9\u8BDD'
+        : '\u5173\u95ED\u9762\u677F',
+    );
     if (!dialog.open)
       dialog._crOpener = root._panelOpener?.isConnected
         ? root._panelOpener

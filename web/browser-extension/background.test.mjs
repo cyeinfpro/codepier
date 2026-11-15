@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);}});
 test('concurrent startup events own exactly one native connection',async()=>{
- let unblock,connections=0;
+ let unblock,connections=0,native;
  const gate=new Promise(resolve=>unblock=resolve);
  const chrome={runtime:{id:'a'.repeat(32),getURL:p=>'chrome-extension://'+'a'.repeat(32)+'/'+p,
   onMessage:event(),onStartup:event(),onInstalled:event(),
-  connectNative(){connections++;return {postMessage(){},onMessage:event(),onDisconnect:event()};}},
+  connectNative(){connections++;native={postMessage(){},onMessage:event(),onDisconnect:event()};return native;}},
   storage:{local:{get:()=>gate,set:async()=>{}}},tabs:{get:async()=>{throw Error('not used');}},
   alarms:{create(){},onAlarm:event()}};
  globalThis.chrome=chrome;
@@ -16,5 +16,11 @@ test('concurrent startup events own exactly one native connection',async()=>{
  unblock({});await duplicate;
  for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));
  assert.equal(connections,1,'parallel startup must never leave an older native host consuming requests without replying');
+ const read=()=>new Promise(resolve=>chrome.runtime.onMessage.listeners[0]({action:'status'},{id:chrome.runtime.id,url:chrome.runtime.getURL('popup.html')},resolve));
+ const first=await read();
+ assert.equal(first.data.connection,'正在连接本机桥接');
+ assert.ok(Number.isFinite(first.data.connection_observed_at));
+ native.onMessage.listeners[0]({type:'status',message:'桥接已核实'});
+ assert.equal((await read()).data.connection,'桥接已核实');
  delete globalThis.chrome;
 });

@@ -348,6 +348,11 @@ window.CodePierRoots = (() => {
           if (recoveryMisses < 15) later(recover, 4000);
           return;
         }
+        if (receipt.transport_terminal && receipt.effect_confirmed === false) {
+          state('保存结果待核对', '已收到终态回执，但目录权限写入效果尚未确认。');
+          tell('输入及原操作编号已保留；请核对电脑当前配置，不重复保存。', true);
+          return;
+        }
         const value = await completed(receipt.operation || receipt);
         if (current() && value) await accept(value);
       } catch (error) {

@@ -490,9 +490,9 @@ function renderShell() {
       '工作',
       ['overview', 'projects', 'workbench', 'native', 'workflows', 'collaboration', 'artifacts'],
     ],
-    ['资源', ['devices', 'vps']],
-    ['连接', ['connect', 'integrations']],
-    ['管理', ['members', 'audit', 'diagnostics', 'settings']],
+    ['运行', ['devices', 'vps', 'diagnostics', 'audit']],
+    ['接入与权限', ['connect', 'members', 'integrations']],
+    ['设置与维护', ['settings']],
   ];
   const navigation = groups
     .map(([label, ids]) => {
@@ -521,7 +521,7 @@ function renderShell() {
     )
     .join('');
   $('#app').innerHTML =
-    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport" data-online="false"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><button type="button" class="avatar" data-nav="identity" aria-label="我的账号">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</button><div>${esc(S.session.username)}<br><small class="tiny">${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="breadcrumb-prefix">CodePier</span><span>/</span><span id="breadcrumb-group" class="breadcrumb-group" hidden></span><span id="breadcrumb-group-sep" class="breadcrumb-group" hidden>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制" hidden>${icon('device')}</button><button class="icon-btn" data-action="refresh" id="topbar-refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
+    `<a class="skip-link" href="#page">跳到主要内容</a><div class="shell"><aside class="sidebar" id="sidebar" aria-label="主导航"><button class="icon-btn mobile-close" data-action="toggle-menu" aria-label="收起菜单">${icon('close')}</button>${brand}<nav class="nav" id="primary-navigation" aria-label="主导航">${navigation}</nav><div class="side-bottom">${CodePierIdentity.selector()}${appearanceControl()}<div class="transport" data-online="false"><div class="transport-top"><i class="dot offline" id="event-dot"></i><span id="event-state">正在连接实时通道…</span></div></div><div class="user-box"><button type="button" class="avatar" data-nav="identity" aria-label="我的账号">${esc(S.session.username?.[0]?.toUpperCase() || 'A')}</button><div>${esc(S.session.username)}<br><small class="tiny sidebar-account-role">空间角色：${esc(CodePierIdentity.levelLabel(CodePierIdentity.current()?.level))}</small></div><button class="icon-btn" data-action="logout" aria-label="退出登录">${icon('logout')}</button></div></div></aside><button class="sidebar-scrim" data-ui="close-menu" aria-label="关闭导航" tabindex="-1" hidden></button><main class="main"><header class="topbar"><div class="breadcrumb"><button class="icon-btn mobile-menu" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="展开菜单">${icon('menu')}</button><span class="topbar-space" aria-label="当前空间：${esc(CodePierIdentity.current()?.label || '空间待核实')}" title="${esc(CodePierIdentity.current()?.label || '空间待核实')}">${esc(CodePierIdentity.current()?.label || '空间待核实')}</span><span class="topbar-space-separator" aria-hidden="true">/</span><span id="breadcrumb-group" class="breadcrumb-group" hidden></span><span id="breadcrumb-group-sep" class="breadcrumb-group" hidden>/</span><span id="breadcrumb-page" aria-live="polite">${chosen[2]}</span></div><div class="top-right">${window.CodePierPanelUpdate?.entry() || ''}<button class="quick-jump" data-ui="command" aria-label="快速前往页面或项目">${icon('search')}<span>快速前往</span><kbd>${/Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'} K</kbd></button><button class="icon-btn" data-computer-use aria-label="桌面控制" hidden>${icon('device')}</button><button class="icon-btn" data-action="refresh" id="topbar-refresh" aria-label="刷新">${icon('refresh')}</button></div></header><div id="page" class="page" tabindex="-1"></div><nav class="mobile-dock" aria-label="移动快捷导航">${dock}<button type="button" data-action="toggle-menu" aria-controls="sidebar" aria-expanded="false" aria-label="更多页面">${icon('menu')}<span>更多</span></button></nav></main></div>`;
   uiSetMenu(false, false);
   uiSyncNavigation();
   CodePierIdentity.bindShell();
@@ -910,6 +910,17 @@ function connectEvents() {
     }
   };
 }
+function mainPathContext() {
+  if (!S.mainPath || S.mainPath.session !== S.session || S.mainPath.space !== S.space_id)
+    S.mainPath = {
+      session: S.session,
+      space: S.space_id,
+      pages: new Map(),
+      work: false,
+      native: false,
+    };
+  return S.mainPath;
+}
 async function navigate(page) {
   S.vpsIntent = (S.vpsIntent || 0) + 1;
   if (page === 'terminal') page = 'native';
@@ -943,6 +954,13 @@ async function navigate(page) {
   }
   if (page === 'integrations' && S.page !== page) window.CodePierIntegrations?.inherit(S.page);
   const changed = page !== S.page;
+  const context = mainPathContext();
+  if (changed) {
+    context.pages.set(S.page, { scroll: window.scrollY });
+    context.previous = S.page;
+    if (S.page === 'workbench') context.work = true;
+    if (S.page === 'native') context.native = true;
+  }
   S.page = page;
   location.hash = page;
   const parentGroup = tabParent[page];
@@ -958,7 +976,7 @@ async function navigate(page) {
   uiSyncNavigation();
   await renderPage();
   if (changed && S.page === page) {
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    window.scrollTo({ top: context.pages.get(page)?.scroll || 0, behavior: 'instant' });
     $('#page h1')?.focus({ preventScroll: true });
   }
 }
@@ -1003,9 +1021,12 @@ async function renderPage(showLoading = true) {
     if (['identity', 'members', 'identity-admin'].includes(page)) {
       html = await CodePierIdentity.html(page);
     } else if (page === 'overview') {
-      S.overview = await api('/api/overview?include_token_usage=false');
+      const overview = await api('/api/overview?include_token_usage=false');
+      if (seq !== S.renderSeq || !S.session || page !== S.page) return;
+      S.overview = overview;
       if (seq === S.renderSeq && S.session && page === S.page)
         navActivitySeed(S.overview.active_operations, S.overview.recent_operations || []);
+      S.overview.observed_at = Date.now();
       S.overview.token_usage = { loading: true };
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
@@ -1158,6 +1179,19 @@ function onboardingHTML(o) {
 }
 function overviewHTML() {
   const o = S.overview;
+  const context = mainPathContext();
+  const remembered =
+    context.work &&
+    CodePierIdentity.canNavigate('workbench') &&
+    o.projects.find((p) => p.id === S.work.project);
+  const recentNative =
+    context.native &&
+    CodePierIdentity.canNavigate('native') &&
+    typeof ChatUI !== 'undefined' &&
+    o.projects.some((p) => p.id === ChatUI.project);
+  const attention = o.recent_operations.filter((r) =>
+    ['needs_review', 'interrupted'].includes(r.state),
+  );
   const onboarding = onboardingHTML(o);
   if (!o.devices.length && onboarding) return heading('总览') + onboarding;
   const stats = [
@@ -1182,11 +1216,16 @@ function overviewHTML() {
   ];
   return (
     heading('总览') +
-    onboarding +
     `<div class="overview-grid workspace-overview editorial-board">
-      <section class="panel codepier-focus-card overview-summary" aria-label="工作区概览"><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}" ${label === '今日操作' ? `title="${esc(o.timezone)}"` : ''}><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</section>
-      <section class="panel workspace-operations"><div class="panel-head"><h2>最近操作</h2><button class="btn ghost small" data-nav="audit">查看全部 ${icon('arrow')}</button></div>${operationsTable(o.recent_operations.slice(0, 6))}</section>
-      <section class="panel overview-projects workspace-recent-projects"><div class="panel-head"><h2>项目入口</h2><button class="icon-btn" data-nav="projects" aria-label="查看全部项目">${icon('arrow')}</button></div>${
+      <section class="panel overview-continue"><div class="panel-head"><h2>继续工作</h2></div><div class="panel-body">
+      ${remembered ? `<p><strong>${esc(remembered.alias)}</strong> · ${esc(remembered.device_name)} · ${esc(S.work.path || '项目目录')}${S.work.dirty ? ' · 有未保存草稿' : ''}</p><button class="btn primary" data-nav="workbench">返回工作台</button>` : '<p class="muted">选择下方项目，或打开会话列表。不会自动启动任务。</p>'}
+      ${recentNative ? `<button class="btn" data-nav="native">返回 ${esc(ChatUI.selected?.title || 'CLI 草稿')}</button>` : CodePierIdentity.canNavigate('native') ? '<button class="btn" data-nav="native">查看 CLI 会话</button>' : ''}
+      </div></section>
+      ${attention.length ? `<section class="panel overview-attention"><div class="panel-head"><h2>近期操作待核实</h2></div><p class="form-note">仅当前可见的近期记录 · 核实于 ${esc(new Date(o.observed_at).toLocaleTimeString())}；不是全量待办。</p>${attention.map((r) => `<div class="project-mini"><div class="project-mini-main"><h3>${esc(r.alias || '操作')}</h3><p>${r.state === 'needs_review' ? '原操作要求复核' : '执行中断，需核实原结果'} · ${esc(r.id)}</p></div><button class="btn small" data-action="operation-detail" data-id="${esc(r.id)}">核实原操作</button></div>`).join('')}</section>` : ''}
+
+
+
+      <section class="panel overview-projects workspace-recent-projects"><div class="panel-head"><h2>从项目继续工作</h2><button class="icon-btn" data-nav="projects" aria-label="查看全部项目">${icon('arrow')}</button></div>${
         o.projects.length
           ? o.projects
               .slice(0, 4)
@@ -1197,7 +1236,11 @@ function overviewHTML() {
               .join('')
           : empty('添加项目，开始远程开发。', 'add-project', '添加项目')
       }</section>
-    </div>`
+
+      <section class="panel workspace-operations"><div class="panel-head"><h2>最近操作</h2><button class="btn ghost small" data-nav="audit">查看全部 ${icon('arrow')}</button></div>${operationsTable(o.recent_operations.slice(0, 6))}</section>
+      <details class="panel codepier-focus-card overview-summary"><summary>工作区统计与用量</summary><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}" ${label === '今日操作' ? `title="${esc(o.timezone)}"` : ''}><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</details>
+    </div>` +
+    onboarding
   );
 }
 function devicesHTML() {
@@ -1233,10 +1276,14 @@ function devicesHTML() {
   );
 }
 function projectsHTML() {
+  let layout = 'cards';
+  try {
+    layout = localStorage.getItem('codepier-project-layout') === 'list' ? 'list' : 'cards';
+  } catch {}
   const rows = S.projects
     .map(
       (p) =>
-        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code><button type="button" class="icon-btn workspace-copy-path" data-copy="${esc(p.root)}" aria-label="复制本机路径" title="复制路径">${icon('copy')}</button></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开 ${icon('arrow')}</button>${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}${uiMenu('更多', `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
+        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + ' ' + p.root + ' ' + p.device_name + ' ' + (p.description || '')).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon('folder')}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ''}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code><button type="button" class="icon-btn workspace-copy-path" data-copy="${esc(p.root)}" aria-label="复制本机路径" title="复制路径">${icon('copy')}</button></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === 'write' ? 'purple' : 'neutral'}">${p.mode === 'write' ? '可编辑' : '只读'}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? '已授权' : '未授权'}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开工作台 ${icon('arrow')}</button>${typeof chatProjectButtons === 'function' ? chatProjectButtons(p.id) : ''}${uiMenu('更多', `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
     )
     .join('');
   return (
@@ -1247,9 +1294,9 @@ function projectsHTML() {
       `<button class="btn primary" data-action="add-project">${icon('plus')}添加项目</button>`,
     ) +
     (S.projects.length
-      ? `<div class="project-search workspace-project-search"><label for="project-query">${icon('search')}<input id="project-query" type="search" aria-label="筛选项目" placeholder="搜索项目、电脑或路径"></label><small id="project-count" role="status"></small></div>`
+      ? `<div class="project-search workspace-project-search"><label for="project-query">${icon('search')}<input id="project-query" type="search" aria-label="筛选项目" placeholder="搜索项目、电脑或路径"></label><div class="project-view-controls"><small id="project-count" role="status"></small><div role="group" aria-label="项目显示方式"><button class="btn small" data-project-layout="cards" aria-pressed="${layout === 'cards'}">卡片</button><button class="btn small" data-project-layout="list" aria-pressed="${layout === 'list'}">列表</button></div></div></div>`
       : '') +
-    `${S.projects.length ? `<section class="workspace-project-collection">${rows}<div class="empty panel" id="project-no-match" hidden><p>没有匹配的项目</p><button type="button" class="btn ghost small" data-ui="clear-project-query">清除筛选</button></div></section>` : empty('接入电脑后即可添加项目。', 'add-project', '添加项目')}`
+    `${S.projects.length ? `<section class="workspace-project-collection" data-layout="${layout}">${rows}<div class="empty panel" id="project-no-match" hidden><p>没有匹配的项目</p><button type="button" class="btn ghost small" data-ui="clear-project-query">清除筛选</button></div></section>` : empty('接入电脑后即可添加项目。', 'add-project', '添加项目')}`
   );
 }
 async function addDevice() {
@@ -1634,8 +1681,8 @@ function workbenchHTML() {
   const more = `<button class="btn ghost" data-devtools="worktrees">${icon('folder')}隔离工作目录</button><button class="btn ghost" data-devtools="handoff">${icon('history')}任务衔接</button><button class="btn ghost" data-insight="symbols">${icon('code')}代码结构</button><button class="btn ghost" data-wf-action="context">${icon('file')}项目上下文</button><button class="btn ghost" data-action="checkpoint">${icon('history')}建立源码检查点</button>`;
   return (
     // One IDE header bar: title, project, status and every workbench tool.
-    `<header class="page-head workbench-head"><h1>远程工作台</h1><div class="work-controls ide-toolbar" role="toolbar" aria-label="工作台工具"><select id="work-project" aria-label="选择项目"${p ? ` title="${esc(p.device_name || '')} / ${p.mode === 'write' ? '可编辑' : '只读'}"` : ''}><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? 'selected' : ''}>${esc(p.alias)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select>${p ? onlineBadge(p.online) : ''}${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ''}<span class="muted tiny work-target">${esc(p?.device_name || '')} ${p ? `/ ${p.mode === 'write' ? '可编辑' : '只读'}` : ''}</span><div class="actions">${S.work.project && !S.work.workspace_id && typeof chatProjectButtons === 'function' ? chatProjectButtons(S.work.project) : ''}<button class="btn ghost small" data-action="git-status">${icon('git')}Git 状态</button><button class="btn ghost small" data-action="git-diff">差异</button><button class="btn ghost small" data-action="history">${icon('history')}备份</button><span class="work-toolbar-sep" aria-hidden="true"></span><button class="btn ghost small" data-devtools="validation" title="测试验收">${icon('check')}验收</button><button class="btn ghost small" data-insight="search" title="项目检索">${icon('search')}检索</button><button class="btn ghost small" data-local-skills title="本地技能">${icon('file')}技能</button>${uiMenu('工具', more)}</div></div></header>
-    <div class="tabs mobile-work-tabs" role="group" aria-label="工作区视图"><button data-ui-pane="files">${icon('folder')} 文件</button><button data-ui-pane="editor">${icon('code')} 编辑器</button></div>
+    `<header class="page-head workbench-head"><h1>远程工作台</h1>${mainPathContext().previous && mainPathContext().previous !== 'workbench' && CodePierIdentity.canNavigate(mainPathContext().previous) ? `<button class="btn ghost" data-nav="${esc(mainPathContext().previous)}">返回 ${esc(nav.find((n) => n[0] === mainPathContext().previous)?.[2] || '上页')}</button>` : ''}<div class="work-controls ide-toolbar" role="toolbar" aria-label="工作台工具"><select id="work-project" aria-label="选择项目"${p ? ` title="${esc(p.device_name || '')} / ${p.mode === 'write' ? '可编辑' : '只读'}"` : ''}><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? 'selected' : ''}>${esc(p.alias)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select>${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ''}<span class="muted tiny work-target" aria-label="当前工作目标">${esc(p?.device_name || '')} ${esc(p?.root || '')} ${p ? `/ ${p.mode === 'write' ? '可编辑' : '只读'}` : ''}</span><div class="actions">${S.work.project && !S.work.workspace_id && typeof chatProjectButtons === 'function' ? chatProjectButtons(S.work.project) : ''}${uiMenu('检索与 Git', `<button class="btn ghost small" data-insight="search">${icon('search')}项目检索</button><button class="btn ghost small" data-action="git-status">${icon('git')}Git 状态</button><button class="btn ghost small" data-action="git-diff">查看差异</button>`)}${uiMenu('文件与验收', `<button class="btn ghost small" data-action="history">${icon('history')}文件备份</button><button class="btn ghost small" data-devtools="validation">${icon('check')}测试验收</button><button class="btn ghost small" data-local-skills>${icon('file')}本地技能</button>`)}${uiMenu('更多工具', more)}</div></div></header>
+    <div class="tabs mobile-work-tabs" role="group" aria-label="工作区视图"><button data-ui-pane="files">${icon('folder')} 文件</button><button data-ui-pane="editor">${icon('code')} 编辑器</button><button data-ui-pane="output">${icon('terminal')} 输出</button></div>
     <section class="panel workspace ${w.explorerCollapsed ? 'is-explorer-collapsed' : ''}" data-pane="${w.pane === 'editor' ? 'editor' : 'files'}"${w.explorerWidth ? ` style="--explorer-width:${w.explorerWidth}px"` : ''}><aside class="explorer"><div class="explorer-top"><span>文件目录</span><div><button class="icon-btn" data-action="new-file" aria-label="新建文件">${icon('plus')}</button><button class="icon-btn" data-action="tree-refresh" aria-label="刷新目录">${icon('refresh')}</button></div></div><form id="search-form" class="explorer-tools"><input name="query" placeholder="搜索文件内容" aria-label="搜索项目"><button class="icon-btn" aria-label="执行搜索">${icon('search')}</button></form><div id="file-tree" class="file-tree">${treeHTML()}</div></aside><div class="workspace-resizer" id="workspace-resizer" role="separator" aria-orientation="vertical" aria-label="调节文件树宽度，双击折叠" aria-valuemin="170" aria-valuemax="420" aria-valuenow="${w.explorerCollapsed ? 0 : w.explorerWidth || 240}" tabindex="0"></div><div class="editor-wrap" id="editor-wrap">${editorHTML()}</div></section>
     <div class="taskbar"><select id="task-select" aria-label="选择本机任务"><option value="">选择本机任务</option></select><button class="btn ghost" data-action="load-tasks">刷新任务</button><button class="btn primary" data-action="run-task">${icon('play')}运行</button><button class="btn ghost" data-action="cancel-task">${icon('stop')}停止</button></div><section class="terminal" id="work-terminal" data-size="${esc(w.terminalSize || 'compact')}"><div class="terminal-head"><span>${icon('terminal')}运行输出</span><div class="terminal-controls" role="group" aria-label="输出高度">${[
       ['collapsed', '折叠'],
@@ -1648,7 +1695,7 @@ function workbenchHTML() {
       )
       .join(
         '',
-      )}</div><span id="task-status">${w.operation ? '操作 ' + esc(w.operation.slice(0, 12)) : '等待任务'}</span></div><pre id="task-output">${esc(w.console || '运行任务后，输出将显示在这里。')}</pre></section>` +
+      )}</div><span id="task-status">${w.operation ? '操作 ' + esc(w.operation.slice(0, 12)) : '等待任务'}</span></div><button class="btn small" id="task-new-output" data-action="output-end" hidden>有新输出 · 跳到末尾</button><p class="form-note" id="task-output-coverage">显示当前已加载输出；完整范围以原操作详情为准。</p><pre id="task-output" tabindex="0" aria-label="运行输出">${esc(w.console || '运行任务后，输出将显示在这里。')}</pre></section>` +
     uiHelp(
       '编辑与执行说明',
       '文件保存前需确认差异并通过 SHA 检查，原内容自动备份。编辑器支持完整读取的 UTF-8 文本（上限 1 MiB）；分段读取的文件只读。此处运行本机具名任务；完整 Shell 通过已授权的 MCP <code>shell_exec</code> 调用。',
@@ -1657,7 +1704,7 @@ function workbenchHTML() {
 }
 function treeHTML() {
   const w = S.work;
-  return `<button class="file-node directory" data-action="tree-home">${icon('folder')}<span>${esc(w.treePath === '.' ? '项目根目录' : w.treePath)}</span></button>${w.tree.map((n) => `<button class="file-node ${n.type === 'directory' ? 'directory' : ''} ${w.path === n.path ? 'selected' : ''}" style="--file-depth:${Math.max(0, n.path.split('/').length - (w.treePath === '.' ? 1 : w.treePath.split('/').length + 1))};padding-left:calc(10px + var(--file-depth) * 12px)" data-action="${n.type === 'directory' ? 'tree-dir' : 'read-file'}" data-path="${esc(n.path)}">${icon(n.type === 'directory' ? 'folder' : 'file')}<span>${esc(n.name)}</span></button>`).join('')}${w.treeNext !== null ? `<button class="btn ghost small" data-action="tree-more">加载更多文件</button>` : ''}${!w.tree.length ? '<div class="empty tiny">选择项目后加载目录</div>' : ''}`;
+  return `<button class="file-node directory" data-action="tree-home">${icon('folder')}<span>${esc(w.treePath === '.' ? '项目根目录' : w.treePath)}</span></button>${w.tree.map((n) => `<button class="file-node ${n.type === 'directory' ? 'directory' : ''} ${w.path === n.path ? 'selected' : ''}" style="--file-depth:${Math.max(0, n.path.split('/').length - (w.treePath === '.' ? 1 : w.treePath.split('/').length + 1))};padding-left:calc(10px + var(--file-depth) * 12px)" data-action="${n.type === 'directory' ? 'tree-dir' : 'read-file'}" data-path="${esc(n.path)}">${icon(n.type === 'directory' ? 'folder' : 'file')}<span>${esc(n.name)}</span></button>`).join('')}${w.treeNext !== null ? `<button class="btn ghost small" data-action="tree-more">加载更多文件</button>` : ''}${!w.tree.length ? `<div class="empty tiny" role="status">${!w.project ? '选择项目后加载目录' : w.treeLoadingProject === w.project ? '正在读取项目目录…' : w.treeErrorProject === w.project ? '目录读取失败：' + esc(w.treeError) + '；请刷新重试。' : '此目录为空。'}</div>` : ''}`;
 }
 function editorHTML() {
   const w = S.work,
@@ -1806,15 +1853,30 @@ async function loadTree(more = false) {
   if (!S.work.project) return;
   const project = S.work.project,
     generation = (S.treeGeneration = (S.treeGeneration || 0) + 1);
-  const r = await settled(
-    wtool('fs_tree', {
-      path: S.work.treePath,
-      depth: 2,
-      offset: more ? S.work.treeNext || 0 : 0,
-      limit: 300,
-    }),
-  );
+  S.work.treeLoadingProject = project;
+  S.work.treeErrorProject = '';
+  if ($('#file-tree')) $('#file-tree').innerHTML = treeHTML();
+  let r;
+  try {
+    r = await settled(
+      wtool('fs_tree', {
+        path: S.work.treePath,
+        depth: 2,
+        offset: more ? S.work.treeNext || 0 : 0,
+        limit: 300,
+      }),
+    );
+  } catch (error) {
+    if (project !== S.work.project || generation !== S.treeGeneration) return;
+    S.work.treeLoadingProject = '';
+    S.work.treeErrorProject = project;
+    S.work.treeError = error.message || '未知错误';
+    if ($('#file-tree')) $('#file-tree').innerHTML = treeHTML();
+    throw error;
+  }
   if (project !== S.work.project || generation !== S.treeGeneration) return;
+  S.work.treeLoadingProject = '';
+  S.work.treeErrorProject = '';
   S.work.tree = more ? S.work.tree.concat(r.entries) : r.entries;
   S.work.treeNext = r.next_offset;
   if ($('#file-tree')) $('#file-tree').innerHTML = treeHTML();
@@ -2578,8 +2640,20 @@ async function pollTask() {
       r.error ||
       (r.pending ? '等待本机输出；网络中断不代表任务失败…' : '任务已结束，无输出。');
     if ($('#task-output')) {
-      $('#task-output').textContent = S.work.console;
-      $('#task-output').scrollTop = $('#task-output').scrollHeight;
+      const output = $('#task-output');
+      const atEnd = output.scrollHeight - output.scrollTop - output.clientHeight < 48;
+      const changed = output.textContent !== S.work.console;
+      output.textContent = S.work.console;
+      if (atEnd) output.scrollTop = output.scrollHeight;
+      if ($('#task-new-output')) {
+        if (atEnd) $('#task-new-output').hidden = true;
+        else if (changed) $('#task-new-output').hidden = false;
+      }
+      if ($('#task-output-coverage'))
+        $('#task-output-coverage').textContent =
+          r.output_truncated || r.result?.data?.output_truncated
+            ? '当前输出已截断；请在原操作详情中核实可读取范围。'
+            : '显示当前已加载输出；完整范围以原操作详情为准。';
     }
     if ($('#task-status'))
       $('#task-status').textContent = (stateNames[r.state] || r.state) + ' · ' + r.id.slice(0, 12);
@@ -3126,6 +3200,13 @@ panelActions.register(['open-project'], async (b, e) => {
   await navigate('workbench');
   return;
 });
+panelActions.register(['output-end'], async () => {
+  const output = $('#task-output');
+  if (!output) return;
+  output.scrollTop = output.scrollHeight;
+  $('#task-new-output').hidden = true;
+  output.focus({ preventScroll: true });
+});
 panelActions.register(['tree-refresh'], async (b, e) => {
   await loadTree();
   return;
@@ -3243,23 +3324,75 @@ panelActions.register(['audit-next'], async (b, e) => {
   return;
 });
 panelActions.register(['export-audit'], async (b, e) => {
-  {
-    if (!S.space_id) throw new Error('请先选择仍可访问的工作空间。');
-    const url =
-      '/api/audit-export?' +
-      new URLSearchParams({
-        space_id: S.space_id || '',
-        source: S.auditSource,
-        q: S.auditQuery,
-        offset: '0',
+  if (!S.space_id) throw new Error('请先选择仍可访问的工作空间。');
+  const login = S.session,
+    space = S.space_id;
+  const filters = { source: S.auditSource, q: S.auditQuery };
+  const current = () =>
+    S.session === login &&
+    S.space_id === space &&
+    S.auditSource === filters.source &&
+    S.auditQuery === filters.q &&
+    b.isConnected;
+  let part = 0,
+    nextButton = null;
+  b.parentElement?.querySelector('[data-audit-export-next]')?.remove();
+  const exportPage = async (snapshot = 0, before = 0) => {
+    if (!current()) return;
+    b.disabled = true;
+    if (nextButton) nextButton.disabled = true;
+    try {
+      const params = new URLSearchParams({ ...filters, space_id: space, offset: '0' });
+      if (snapshot) params.set('snapshot_id', String(snapshot));
+      if (before) params.set('before_id', String(before));
+      const response = await fetch('/api/audit-export?' + params, {
+        credentials: 'same-origin',
+        cache: 'no-store',
       });
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'codepier-audit.csv';
-    a.click();
-    toast('导出全部事件中匹配来源/关键词的前 10,000 条；不是仅工具执行列表。');
-    return;
-  }
+      if (!current()) return;
+      if (!response.ok) throw new Error('审计导出未完成，请核对权限或稍后重新读取。');
+      const blob = await response.blob();
+      if (!current()) return;
+      const href = URL.createObjectURL(blob),
+        anchor = document.createElement('a');
+      anchor.href = href;
+      anchor.download = 'codepier-audit-part-' + ++part + '.csv';
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(href), 30000);
+      const truncated = response.headers.get('X-Export-Truncated') === 'true';
+      const bounded = (name) => {
+        const value = response.headers.get(name) || '';
+        return /^[0-9]+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : 0;
+      };
+      const next = bounded('X-Export-Next-Before-ID'),
+        fixed = bounded('X-Export-Snapshot-ID');
+      nextButton?.remove();
+      nextButton = null;
+      if (truncated && next && fixed) {
+        nextButton = document.createElement('button');
+        nextButton.type = 'button';
+        nextButton.className = 'btn ghost small';
+        nextButton.dataset.auditExportNext = '';
+        nextButton.textContent = '继续导出下一批（同一快照）';
+        nextButton.onclick = () =>
+          exportPage(fixed, next).catch((error) => {
+            if (current()) toast(error.message, true);
+          });
+        b.after(nextButton);
+      }
+      toast(
+        truncated
+          ? '已导出当前批；还有匹配事件，可继续导出同一快照。'
+          : '已导出本次快照内当前可见的全部匹配事件。',
+      );
+    } finally {
+      if (current()) {
+        b.disabled = false;
+        if (nextButton) nextButton.disabled = false;
+      }
+    }
+  };
+  await exportPage();
 });
 panelActions.register(['copy-endpoint'], async (b, e) => {
   await copy(b.dataset.url || S.settings.mcp_url);

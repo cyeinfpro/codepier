@@ -424,6 +424,12 @@ function openPanel(name, heading, content, data = {}) {
   panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
   const dialog = root.querySelector('dialog');
   dialog._crOpeningEpoch = panel.epoch;
+  dialog.dataset.panel = name;
+  const close = dialog.querySelector('[data-cr-action="close"]');
+  close.setAttribute(
+    'aria-label',
+    name === 'work' || name === 'context-source' ? '返回房间对话' : '关闭面板',
+  );
   if (!dialog.open)
     dialog._crOpener = root._panelOpener?.isConnected ? root._panelOpener : document.activeElement;
   dialog.querySelector('h2').textContent = heading;

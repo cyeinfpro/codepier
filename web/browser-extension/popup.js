@@ -13,7 +13,8 @@ function render(s) {
   $('extension').textContent = s.extension_id;
   $('profile').textContent = s.profile_id;
   $('pool').textContent = `${s.pool_size} 个标签页 · ${s.available} 个空闲 · ${s.leased} 个租约`;
-  $('connection').textContent = s.connection || '设置已保存';
+  $('connection').textContent = s.connection || '连接状态未知';
+  $('connection-observed').textContent = Number.isFinite(s.connection_observed_at) ? '最近观察：' + new Date(s.connection_observed_at * 1000).toLocaleString('zh-CN') : '尚无连接观察时间';
   $('origins').replaceChildren();
   for (const site of s.origins) {
     const li = document.createElement('li');
@@ -30,9 +31,12 @@ async function run(button, fn) {
   if (button.disabled) return;
   button.disabled = true;
   $('error').textContent = '';
+  $('feedback').textContent = '正在处理…';
   try {
     render(await fn());
+    $('feedback').textContent = '操作已完成；连接状态以上方观察结果为准';
   } catch (e) {
+    $('feedback').textContent = '';
     $('error').textContent = e.message;
     $('retry').hidden = false;
   } finally {
@@ -61,7 +65,7 @@ $('copy').onclick = async () => {
     await navigator.clipboard.writeText(
       JSON.stringify({ extension_id: last.extension_id, profile_id: last.profile_id }, null, 2),
     );
-    $('connection').textContent = '绑定信息已复制，不含账号密码';
+    $('feedback').textContent = '绑定信息已复制，不含账号密码';
   } catch {
     $('error').textContent = '复制失败，请手动复制上方两个编号';
   }

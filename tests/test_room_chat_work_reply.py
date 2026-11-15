@@ -59,3 +59,21 @@ async def test_related_discussion_and_formal_publication_have_separate_effects(c
     assert published['message']['body']['artifact_refs'] == refs
     assert s.room_runtime.intent_revision(goal_id) == 1
     assert len(s.store.all('SELECT * FROM room_goal_publications WHERE goal_id=?', (goal_id,))) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["partial", "blocked"])
+async def test_published_partial_outcome_never_displays_completed(collab, outcome):
+    s, owner, actor, _, identity, credentials = await connected(collab, [{'project': 'proj'}], [{'project_id': 'proj'}])
+    goal, _ = start(s, owner, actor, identity, credentials, project_ids=['proj'])
+    item = s.store.one('SELECT * FROM coordination_work WHERE id=?', (goal['next_request']['arguments']['work_item_id'],))
+    lease, op = admit_read(s, identity, credentials, actor, goal['goal_id'], item, 'proj')
+    done = report(s, identity, credentials, actor, goal['goal_id'], lease, op, outcome='failed')
+    source = s.store.one('SELECT * FROM collaboration_messages WHERE goal_id=? AND origin=?', (goal['goal_id'], 'panel_owner'))
+    refs = [{'work_item_id': done['id'], 'version': done['version'], 'digest': digest(done['result'])}]
+    request = final_request(s, identity, credentials, actor, source, refs, outcome=outcome)
+    s.room_runtime.reply(request, actor)
+    _, display = s.room_runtime.message_status(source, {}, {'state': 'queued', 'member_id': identity['member_id']})
+    assert display['state'] == 'needs_attention'
+    assert display['reason_code'] == 'work_' + outcome
+    assert display['attention']['state'] == 'needs_attention'
+    assert display['activity']['state'] != 'completed'

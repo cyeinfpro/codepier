@@ -75,7 +75,14 @@ def test_browser_lists_reads_resources_and_mobile_layout(prepared,tmp_path):
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         try:
             page.goto(stack.url+'/#workbench');page.fill('#username', 'admin');page.fill('#password',stack.password);page.click('#login-form button')
-            expect(page.locator('[data-local-skills]')).to_be_visible();page.click('[data-local-skills]')
+            # The redesigned toolbar groups secondary tools in a disclosure.
+            # Exercise the real user path, not force-clicking a hidden control.
+            skills_button = page.locator('[data-local-skills]')
+            expect(skills_button).to_be_attached()
+            group = skills_button.locator('xpath=ancestor::details[1]')
+            if group.count() and not group.get_attribute('open') == '':
+                group.locator(':scope > summary').click()
+            expect(skills_button).to_be_visible();skills_button.click()
             expect(page.locator('#local-skills-results')).to_contain_text('Codex 用户技能已授权')
             expect(page.locator('#local-skills-results')).to_contain_text('disabled-skill')
             expect(page.locator('.local-skill-card').filter(has_text='disabled-skill').locator('button')).to_be_disabled()

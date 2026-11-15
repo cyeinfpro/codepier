@@ -1,4 +1,21 @@
 /* Shared controls and touch targets; keep the standalone conversation usable. */
+/* Reapply shared arrow longhands after compact chat controls' background/padding. */
+.chat-workspace select:not([multiple]):not([size]),
+.chat-workspace select[size='1'] {
+  appearance: none;
+  background-image: var(--ui-select-arrow-image);
+  background-repeat: no-repeat;
+  background-position: right var(--ui-select-arrow-inset, 14px) center;
+  background-size: var(--ui-select-arrow-size, 16px);
+  padding-inline-end: var(--ui-select-end-space, 44px);
+}
+@media (forced-colors: active) {
+  .chat-workspace select:not([multiple]):not([size]),
+  .chat-workspace select[size='1'] {
+    appearance: auto;
+    background-image: none;
+  }
+}
 .chat-text-button,
 .chat-secondary-button,
 .chat-danger-button {
@@ -129,5 +146,109 @@
   body.ui-keyboard-open .chat-workspace {
     height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px)));
     min-height: 0;
+  }
+}
+
+/* Settings are one field system on desktop popover and mobile sheet. */
+.chat-options .chat-new-context,
+.chat-options .chat-config-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  gap: 10px;
+}
+.chat-options .chat-new-context {
+  padding: 0 0 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--chat-line);
+}
+.chat-options .chat-new-context .chat-setting-field,
+.chat-options .chat-config-bar .chat-setting-field {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  min-height: 0;
+  margin: 0;
+  color: var(--chat-muted);
+  font-size: var(--ui-text-sm, 13px);
+  white-space: normal;
+}
+.chat-options .chat-setting-field > :is(label, span) {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+.chat-options .chat-setting-field > svg {
+  display: none;
+}
+.chat-options .chat-setting-field > :is(select, button) {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--chat-border);
+  border-radius: var(--ui-radius-small, 8px);
+  background-color: var(--chat-raised);
+  color: var(--chat-fg);
+  font-size: var(--ui-text-sm, 13px);
+  line-height: 1.5;
+}
+.chat-options .chat-setting-field > select {
+  padding-inline-end: var(--ui-select-end-space, 44px);
+}
+.chat-options .chat-setting-field > button {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-inline-end: var(--ui-select-arrow-inset, 14px);
+}
+.chat-options #chat-model-picker > svg:first-child {
+  display: none;
+}
+.chat-options #chat-model-picker > span,
+.chat-options #chat-cwd-button > span {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ui-text-sm, 13px);
+  font-weight: var(--ui-weight-medium, 500);
+  text-align: left;
+}
+.chat-options #chat-model-picker > svg:last-child,
+.chat-options #chat-cwd-button > svg {
+  flex: none;
+  width: var(--ui-select-arrow-size, 16px);
+  height: var(--ui-select-arrow-size, 16px);
+  margin-left: auto;
+  order: 1;
+}
+.chat-options #chat-cwd-button::before {
+  content: none;
+}
+.chat-options .chat-cli-shortcuts {
+  display: grid;
+  gap: 6px;
+}
+.chat-options .chat-setting-caption {
+  color: var(--chat-muted);
+  font-size: var(--ui-text-xs, 12px);
+}
+.chat-options .chat-cli-segmented {
+  width: 100%;
+  justify-self: stretch;
+}
+.chat-options .chat-cli-segmented button {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 760px), (pointer: coarse) {
+  .chat-options .chat-setting-field > :is(select, button),
+  .chat-options .chat-cli-segmented button {
+    min-height: 44px;
   }
 }

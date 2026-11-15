@@ -253,7 +253,7 @@ class ChatroomService:
             result["channel_deliveries"] = channels
         if row["origin"] == "external_channel":
             result["display_name"] = (
-                "Telegram 本人私聊"
+                "Telegram 联系人"
                 if body.get("external_origin", {}).get("channel") == "telegram"
                 else "微信联系人"
             )
@@ -277,7 +277,9 @@ class ChatroomService:
             result["chat_identity_verified"] = trusted["authenticated"]
             result["requires_owner_execution_request"] = not trusted["authenticated"]
             if trusted["authenticated"]:
-                result["display_name"] = "微信本人"
+                result["display_name"] = (
+                    "Telegram 本人" if result["source_channel"] == "telegram" else "微信本人"
+                )
                 result["trusted_author"] = trusted
         continuation = (
             self.c.owner_task_context.presentation(row["id"])
@@ -1034,10 +1036,17 @@ class ChatroomService:
         if kind == "rooms":
             rows = self.store.all(
                 """SELECT id,project_id,environment_id,state,version,title,topic FROM collaboration_rooms
-                WHERE space_id=? AND owner_user_id=? AND project_id=? ORDER BY created,id LIMIT 64""",
+                WHERE space_id=? AND owner_user_id=? AND project_id=? ORDER BY created,id LIMIT 65""",
                 (room["space_id"], room["owner_user_id"], room["project_id"]),
             )
-            return {"items": rows, "next_cursor": None}
+            return {
+                "items": rows[:64],
+                "next_cursor": None,
+                "complete": len(rows) <= 64,
+                "truncated": len(rows) > 64,
+                "window_limit": 64,
+                "scope": "current_project_environments",
+            }
         if kind == "message_status":
             if args["id"]:
                 row = self.c.object("collaboration_messages", room, args["id"])

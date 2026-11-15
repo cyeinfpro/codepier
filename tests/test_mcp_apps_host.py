@@ -5,6 +5,7 @@ file edits, immutable snapshots, operations and tool results remain real.
 """
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -77,6 +78,6 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         assert all('baseline_ref' not in c['arguments'] for c in calls if c['name']=='read')
         assert any(c['name']=='process' and c['arguments'].get('operation')=='wait' for c in calls)
         assert not page.evaluate('window.codepierHostErrors') and not errors
-        folder=BASE/'docs/evidence/workspace-dashboard-20260917/screenshots';folder.mkdir(parents=True,exist_ok=True)
+        folder=Path(os.getenv('CODEPIER_EVIDENCE_DIR',str(BASE/'.work'/('mcp-apps-host-'+uuid.uuid4().hex))));folder.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(folder/f'apps-review-{width}.png'),full_page=True)
         browser.close()

@@ -368,7 +368,13 @@ window.CodePierProjectRuntime = (() => {
           url + '/receipts/' + encodeURIComponent(submission.idempotency_key),
         );
         if (!current()) return;
-        if (value.state === 'succeeded' && value.result?.ok && value.result.data)
+        if (value.transport_terminal && value.effect_confirmed === false) {
+          status('原保存需要核查', '已收到终态回执，但配置写入效果尚未确认；不重复提交');
+          feedback.textContent =
+            '草稿与原操作编号已保留。请核对电脑当前配置。' +
+            (value.operation_id ? ' 原操作：' + value.operation_id : '');
+          review.hidden = false;
+        } else if (value.state === 'succeeded' && value.result?.ok && value.result.data)
           finishSave(value.result.data);
         else if (['failed', 'cancelled'].includes(value.state)) {
           pending.delete(projectId);

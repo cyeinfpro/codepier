@@ -74,6 +74,8 @@ def receipt(runtime, principal, device_id, key):
     if row is None:
         return {
             "state": "not_found",
+            "transport_terminal": False,
+            "effect_confirmed": False,
             "pending": False,
             "operation_id": None,
             "outcome_confirmed": False,
@@ -84,6 +86,10 @@ def receipt(runtime, principal, device_id, key):
     data = result.get("data") or {}
     uncertain = data.get("outcome_confirmed") is False or data.get("state") == "needs_review"
     return {
+        "transport_terminal": operation["state"]
+        in {"succeeded", "failed", "cancelled", "needs_review"},
+        "effect_confirmed": operation["state"] in {"succeeded", "failed", "cancelled"}
+        and not uncertain,
         "state": operation["state"],
         "pending": operation.get("pending", False),
         "operation_id": row["id"],

@@ -25,22 +25,17 @@
     position: relative;
     padding: 0;
   }
-  .cr-recipient::after {
-    content: '⌄';
-    position: absolute;
-    right: 8px;
-    pointer-events: none;
-  }
   .cr-recipient select {
-    appearance: none;
     height: var(--ui-touch-target);
     min-height: var(--ui-touch-target);
-    padding: 8px 24px 8px 8px;
+    padding: 8px;
+    padding-inline-end: var(--ui-select-end-space, 44px);
   }
 }
 
 @media (max-width: 720px) {
   .cr-shell {
+    --cr-gutter: 16px;
     display: flex;
     height: 100%;
     min-height: 0;
@@ -68,7 +63,7 @@
   .cr-topbar {
     gap: 12px;
     min-height: 0;
-    padding: 12px 13px;
+    padding: 12px var(--cr-gutter);
   }
   .cr-room-heading h1 {
     font-size: var(--ui-text-input);
@@ -121,7 +116,7 @@
     padding-left: 16px;
   }
   .cr-feed {
-    padding: 16px 14px 10px;
+    padding: 16px var(--cr-gutter) 10px;
   }
   .cr-message {
     max-width: 96%;
@@ -131,10 +126,10 @@
   }
   .cr-composer {
     width: auto;
-    margin: 8px 10px 12px;
+    margin: 8px var(--cr-gutter) 12px;
     border-radius: var(--ui-radius-lg);
   }
-  .cr-composer > footer > span {
+  .cr-composer > footer > span[data-kind='shortcut'] {
     display: none;
   }
   .cr-composer.is-locked > footer > span {
@@ -154,6 +149,18 @@
     border-top: 1px solid var(--cr-line);
     border-radius: var(--ui-radius-xl);
     padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Conversation work detail is a full-screen modal, not a partial sheet. */
+  .cr-panel[data-panel='work'],
+  .cr-panel[data-panel='context-source'] {
+    inset: 0;
+    margin: 0;
+    width: 100%;
+    max-width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
   }
   /* Bottom-sheet controls remain above the on-screen keyboard. */
   body.ui-keyboard-open .cr-panel {
@@ -268,11 +275,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  width: min(820px, calc(100% - 56px));
+  width: min(var(--cr-content-width), calc(100% - 2 * var(--cr-gutter)));
   margin: 4px auto 0;
-  padding: 6px 12px;
+  padding: 12px;
   border: 1px solid var(--cr-line);
-  border-radius: var(--ui-radius-pill);
+  border-radius: var(--ui-radius-md);
   background: var(--ui-side);
   flex: 0 0 auto;
 }
@@ -285,17 +292,21 @@
   flex: none;
 }
 .cr-work-bar-summary strong {
+  grid-column: 2;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .cr-work-bar-summary small {
-  flex: none;
+  grid-column: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .cr-work-bar-summary {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   min-width: 0;
   font-size: var(--ui-text-xs);
   color: var(--ui-text);
@@ -308,13 +319,19 @@
     min-width: 44px;
     min-height: 44px;
   }
+  .cr-work-bar > span:last-child {
+    justify-content: flex-end;
+    border-top: 1px solid var(--cr-line);
+    padding-top: 4px;
+  }
   .cr-work-bar {
     width: auto;
-    margin: 4px 10px 0;
+    margin: 4px var(--cr-gutter) 0;
+    flex-direction: column;
+    align-items: stretch;
   }
 }
-.cr-create-projects,
-.cr-permission-bulk {
+.cr-create-projects {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
@@ -326,12 +343,38 @@
   border: 1px solid var(--cr-line);
   border-radius: var(--ui-radius-md);
 }
-.cr-permission-bulk label,
+.cr-permission-bulk {
+  display: grid;
+  gap: 12px;
+  margin-block: 0 16px;
+}
+.cr-permission-bulk > label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 10rem);
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ui-text-xs);
+  color: var(--cr-muted);
+}
+.cr-permission-bulk :is(select, input),
 .cr-permission-row-main select {
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
 }
 .cr-scope > details {
-  margin: 4px 0 4px 22px;
+  margin: 8px 0 0;
+}
+.cr-scope > details > summary {
+  min-height: 44px;
+  padding-block: 11px;
+  box-sizing: border-box;
+}
+@media (max-width: 460px) {
+  .cr-permission-bulk > label {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
 }
 .cr-permission-expiry summary,
 .cr-scope > details > summary {
@@ -399,4 +442,12 @@
 
 [data-cr-host-list] .cr-member {
   justify-content: space-between;
+}
+
+/* Send-blocking explanations remain available at every viewport width. */
+.cr-composer > footer > [data-cr-compose-status]:not([data-kind='shortcut']) {
+  display: inline-block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }

@@ -1744,10 +1744,17 @@ class CollaborationService:
                 project = self.runtime.project(args["project"], principal)
                 rows = self.store.all(
                     """SELECT id,project_id,environment_id,state,version,title,topic FROM collaboration_rooms
-                    WHERE space_id=? AND owner_user_id=? AND project_id=? ORDER BY created,id LIMIT 64""",
+                    WHERE space_id=? AND owner_user_id=? AND project_id=? ORDER BY created,id LIMIT 65""",
                     (principal.space_id, principal.user_id, project["id"]),
                 )
-                return {"items": rows, "next_cursor": None}
+                return {
+                    "items": rows[:64],
+                    "next_cursor": None,
+                    "complete": len(rows) <= 64,
+                    "truncated": len(rows) > 64,
+                    "window_limit": 64,
+                    "scope": "current_project_environments",
+                }
             if not room:
                 return {
                     "room": None,

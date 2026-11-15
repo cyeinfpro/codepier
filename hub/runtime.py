@@ -536,11 +536,13 @@ class Runtime:
             "SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",
             (row["id"],),
         )
-        if (
-            row["state"] == "running"
-            or latest
-            and latest["stage"] in {"executing", "persisting", "result_ready"}
-        ):
+        if row["state"] in {"reconnecting", "unknown", "cancelling"}:
+            return {
+                "queue_stage": "unknown",
+                "last_observed_stage": latest["stage"] if latest else None,
+                "last_observed_at": latest["at"] if latest else None,
+            }
+        if row["state"] == "running":
             return {"queue_stage": "running"}
         if latest and latest["stage"] in {"waiting_resource", "waiting_project", "waiting_worker"}:
             try:

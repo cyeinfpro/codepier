@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
@@ -10,10 +12,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from tests.browser_launch import launch_browser
-from tests.support import running_stack
-from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
-from playwright.sync_api import sync_playwright
 
 MEASURE = r"""() => {
  const visible=e=>e.getClientRects().length && getComputedStyle(e).visibility==='visible' && !e.closest('[hidden],[inert]');
@@ -48,8 +46,44 @@ MEASURE = r"""() => {
 }"""
 
 
+def source_fingerprint() -> dict:
+    """Tie evidence to current UI source, not a branch name or old screenshot."""
+    files = {}
+    for path in sorted((ROOT / "web").rglob("*")):
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and not {"node_modules", "vendor", "dist"}.intersection(path.parts)
+            and path.suffix in {".js", ".mjs", ".ts", ".css", ".html", ".json"}
+        ):
+            files[path.relative_to(ROOT).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return files
+
+
+def audit_summary(cases: list) -> dict:
+    contrast = sum(len(case.get("failures", [])) for case in cases)
+    overflow = sum(case["documentWidth"] > case["viewport"]["width"] + 1 for case in cases)
+    skipped = sum(len(case.get("complexBackgroundSkipped", [])) for case in cases)
+    return {
+        "contrast_failures": contrast,
+        "horizontal_overflow_cases": overflow,
+        "complex_background_text_unchecked": skipped,
+        "measured_checks_passed": bool(cases) and not contrast and not overflow,
+        "full_accessibility_verified": False,
+    }
+
+
 def capture(output: Path, *, full: bool = False, engine: str = "chromium") -> dict:
+    from tests.browser_launch import launch_browser
+    from tests.support import running_stack
+    from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture, _set_scheme
+    from playwright.sync_api import expect, sync_playwright
+
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Evidence directory must be new or empty; existing captures are preserved")
     output.mkdir(parents=True, exist_ok=True)
+    source_before = source_fingerprint()
+    started_at = datetime.now(timezone.utc).isoformat()
     results = []
     routes = ["overview", "devices", "projects", "workbench", "settings", "native"]
     viewports = (
@@ -86,6 +120,11 @@ def capture(output: Path, *, full: bool = False, engine: str = "chromium") -> di
                         _set_scheme(page, scheme)
                         for route in routes:
                             _navigate(page, route)
+                            if route == "workbench":
+                                # Capture the loaded fixture, not the transient empty tree.
+                                expect(page.locator(".file-node[data-path]").first).to_be_visible(
+                                    timeout=15_000
+                                )
                             data = page.evaluate(MEASURE)
                             data.update(route=route, scheme=scheme, engine=engine)
                             name = f"{engine}-{scheme}-{width}-{height}-{route}.png"
@@ -114,6 +153,11 @@ def capture(output: Path, *, full: bool = False, engine: str = "chromium") -> di
         "engine": engine,
         "scope": "isolated fixtures; no real model messages; measured visible solid-background text, not full WCAG certification",
         "cases": results,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "source_sha256": source_before,
+        "source_unchanged": source_before == source_fingerprint(),
+        "summary": audit_summary(results),
     }
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
@@ -123,6 +167,17 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--full", action="store_true")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Fail measured contrast/overflow checks; skipped complex backgrounds remain unverified",
+    )
     p.add_argument("--engine", choices=["chromium", "webkit"], default="chromium")
     a = p.parse_args()
-    capture(a.output, full=a.full, engine=a.engine)
+    report = capture(a.output, full=a.full, engine=a.engine)
+    raise SystemExit(
+        1
+        if a.check
+        and (not report["summary"]["measured_checks_passed"] or not report["source_unchanged"])
+        else 0
+    )

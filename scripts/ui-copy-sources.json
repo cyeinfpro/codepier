@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "roots": [
+    "web",
+    "deploy"
+  ],
+  "extensions": [
+    ".js",
+    ".mjs",
+    ".ts",
+    ".html",
+    ".sh",
+    ".ps1"
+  ],
+  "excludeDirectories": [
+    "vendor",
+    "node_modules",
+    "dist"
+  ],
+  "excludeFiles": [
+    "web/index.html",
+    "web/chat.js",
+    "web/collaboration-room.js",
+    "web/bundle.js",
+    "web/mcp-apps/changes-v1.html"
+  ],
+  "reviewOnlyExtensions": [
+    ".sh",
+    ".ps1"
+  ],
+  "note": "Source scope only. Protocol identifiers and installer diagnostics require contextual review; generated files are checked via their source."
+}

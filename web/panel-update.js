@@ -20,6 +20,26 @@ window.CodePierPanelUpdate = (() => {
     accessDenied = false,
     statusFailed = false,
     agentConsent = true;
+  const scopeOwner = () =>
+    JSON.stringify([sessionOwner(S.session) || 'anonymous', S.space_id || '']);
+  const current = (gen) =>
+    gen === generation && scopeOwner() === owner && S.session?.instance_admin === true;
+  function intentSummary(space, login, version, updateAgents) {
+    const selected = login?.spaces?.find((item) => item.id === space);
+    const label =
+      typeof selected?.label === 'string' && selected.label.trim()
+        ? selected.label + '（' + space + '）'
+        : String(space || '未选择空间');
+    // confirmSheet.command uses textContent, not HTML, including space labels.
+    return [
+      '确认空间：' + label,
+      '目标：此 Hub 实例的面板、Hub 和 Agent 分发文件',
+      '版本：' + (data?.running_version || loadedVersion || '未知') + ' → ' + version,
+      updateAgents
+        ? 'Agent 范围：仅上述空间中本次确认时已授权的受管 Agent'
+        : 'Agent 范围：不自动操作已安装的 Agent',
+    ].join('\n');
+  }
   const checkTTL = 5 * 60 * 1000;
   const failureDelay = () => Math.min(15 * 60 * 1000, 60000 * 2 ** Math.min(checkFailures - 1, 4));
   // Captured from the script loaded with this document, never from a later API response.
@@ -31,14 +51,25 @@ window.CodePierPanelUpdate = (() => {
     ?.replace(/^codepier-/, '');
   const reloadParameter = '_codepier_updated';
   const terminal = new Set(['succeeded', 'failed', 'rolled_back', 'recovery_required']);
-  const storageKey = () => `codepier-panel-update:${sessionOwner(S.session) || 'anonymous'}`;
+  const storageKey = (identity = scopeOwner()) => `codepier-panel-update:${identity}`;
   function savePending(value) {
     pending = value;
     sessionValue(storageKey(), value ? JSON.stringify(value) : null);
   }
   function restorePending() {
     try {
-      const value = JSON.parse(sessionValue(storageKey()) || 'null');
+      let value = JSON.parse(sessionValue(storageKey()) || 'null');
+      if (!value) {
+        // Pre-scope clients kept an instance receipt without a space identity.
+        // It remains readable, but must never be replayed or expand Agent consent.
+        value = JSON.parse(
+          sessionValue(`codepier-panel-update:${sessionOwner(S.session) || 'anonymous'}`) || 'null',
+        );
+        if (value) {
+          delete value.intent;
+          value.receipt_only = true;
+        }
+      }
       return value &&
         ['check', 'apply', 'rollback'].includes(value.action) &&
         /^[A-Za-z0-9._:-]{8,128}$/.test(value.body?.idempotency_key) &&
@@ -164,7 +195,7 @@ window.CodePierPanelUpdate = (() => {
     if (version) button.textContent = '回滚至 v' + version;
   }
   function entryStatus() {
-    if (data?.recovery_required) return ['recovery_required', '需恢复'];
+    if (data?.recovery_required) return ['recovery_required', '更新器待恢复'];
     if (awaitingVersion()) return ['verifying', '等待服务恢复'];
     if (discovering) return ['checking', '检查中'];
     if (pending || submitting || data?.busy)
@@ -221,7 +252,7 @@ window.CodePierPanelUpdate = (() => {
     }
     // Consent belongs to the session and workspace that opened the sheet.
     // A late answer must not discard another account's or space's drafts.
-    if (gen !== generation || S.session !== login || S.space_id !== space) return;
+    if (!current(gen) || S.session !== login || S.space_id !== space) return;
     reloadPage(data?.operation);
   }
   function paintDetails() {
@@ -512,7 +543,7 @@ window.CodePierPanelUpdate = (() => {
   }
   function schedule(ms = 2000) {
     clearTimeout(timer);
-    if (!accessDenied && S.session && sessionOwner(S.session) === owner && S.session.instance_admin)
+    if (!accessDenied && S.session && scopeOwner() === owner && S.session.instance_admin)
       timer = setTimeout(() => load(), ms);
   }
   async function load(manual = false) {
@@ -521,7 +552,7 @@ window.CodePierPanelUpdate = (() => {
       nextCheckAt = 0;
     }
     const gen = generation;
-    if (!S.session || sessionOwner(S.session) !== owner || !S.session.instance_admin) return;
+    if (!S.session || scopeOwner() !== owner || !S.session.instance_admin) return;
     if (reader || submitting || accessDenied) return;
     clearTimeout(timer);
     timer = null;
@@ -534,7 +565,7 @@ window.CodePierPanelUpdate = (() => {
         '/api/panel-update/status' + (key ? '?request_key=' + encodeURIComponent(key) : ''),
         { signal: control.signal, retryDelays: [], requestTimeout: 10000, cache: 'no-store' },
       );
-      if (gen !== generation || reader !== control) return;
+      if (!current(gen) || reader !== control) return;
       const wasWatching = watching;
       data = result;
       statusFailed = false;
@@ -580,7 +611,7 @@ window.CodePierPanelUpdate = (() => {
             requestTimeout: 15000,
             cache: 'no-store',
           });
-          if (gen !== generation || reader !== control) return;
+          if (!current(gen) || reader !== control) return;
           // A user may start an update while discovery is in flight. Never replace that receipt.
           if (!pending && !submitting) {
             discovery = {
@@ -597,7 +628,7 @@ window.CodePierPanelUpdate = (() => {
           }
         } catch (error) {
           if (
-            gen !== generation ||
+            !current(gen) ||
             reader !== control ||
             error.name === 'AbortError' ||
             error.code === 'SESSION_CHANGED'
@@ -613,7 +644,7 @@ window.CodePierPanelUpdate = (() => {
               : '检查正式发布失败，请稍后重试。';
           }
         } finally {
-          if (gen === generation) discovering = false;
+          if (current(gen)) discovering = false;
         }
       }
       const awaiting = refreshAfterUpdate();
@@ -631,7 +662,7 @@ window.CodePierPanelUpdate = (() => {
       else schedule(30000);
     } catch (error) {
       if (
-        gen !== generation ||
+        !current(gen) ||
         reader !== control ||
         error.name === 'AbortError' ||
         error.code === 'SESSION_CHANGED'
@@ -647,13 +678,7 @@ window.CodePierPanelUpdate = (() => {
     } finally {
       if (reader === control) reader = null;
     }
-    if (
-      continueIntent &&
-      gen === generation &&
-      !pending &&
-      !submitting &&
-      hostMatches(continueIntent)
-    )
+    if (continueIntent && current(gen) && !pending && !submitting && hostMatches(continueIntent))
       await submit('apply', false, false, true, continueIntent);
   }
   function shouldDiscover() {
@@ -673,6 +698,10 @@ window.CodePierPanelUpdate = (() => {
     return !fresh && Date.now() >= nextCheckAt;
   }
   async function submit(action, reuse = false, automatic = false, direct = false, intent = null) {
+    if (pending?.receipt_only) {
+      await load();
+      return;
+    }
     if (
       awaitingVersion() ||
       !S.session?.instance_admin ||
@@ -701,6 +730,7 @@ window.CodePierPanelUpdate = (() => {
           try {
             approved = await CP.ui.confirmSheet({
               title: `更新至 ${c.version}？`,
+              command: intentSummary(space, login, c.version, updateAgents),
               body: `包含面板、Hub 和 Agent 分发文件（来源 ${data.repository}）。${updateAgents ? '健康检查成功后自动更新当前空间已授权受管 Agent。' : '本次不自动更新 Agent。'}切换期间面板短暂维护，数据卷保留。`,
               confirmLabel: '确认更新',
             });
@@ -709,7 +739,7 @@ window.CodePierPanelUpdate = (() => {
           }
           if (
             !approved ||
-            gen !== generation ||
+            !current(gen) ||
             S.session !== login ||
             S.space_id !== space ||
             accessDenied ||
@@ -735,6 +765,7 @@ window.CodePierPanelUpdate = (() => {
           action,
           body: {
             idempotency_key: 'panel-update-' + uid(),
+            expected_space_id: S.space_id,
             version: c.version,
             release_id: c.release_id,
             sha256: c.sha256,
@@ -750,6 +781,7 @@ window.CodePierPanelUpdate = (() => {
         try {
           approved = await CP.ui.confirmSheet({
             title: `回滚至 v${version}？`,
+            command: intentSummary(space, login, version, false),
             body: '切换期间面板短暂维护，当前数据继续使用。',
             confirmLabel: '确认回滚',
             danger: true,
@@ -759,7 +791,7 @@ window.CodePierPanelUpdate = (() => {
         }
         if (
           !approved ||
-          gen !== generation ||
+          !current(gen) ||
           S.session !== login ||
           S.space_id !== space ||
           accessDenied ||
@@ -793,9 +825,9 @@ window.CodePierPanelUpdate = (() => {
     paint();
     try {
       await post('/api/panel-update/' + request.action, request.body);
-      if (gen === generation) note = '请求已保存，正在读取更新进度。';
+      if (current(gen)) note = '请求已保存，正在读取更新进度。';
     } catch (error) {
-      if (error.code === 'SESSION_CHANGED' || gen !== generation) return;
+      if (error.code === 'SESSION_CHANGED' || !current(gen)) return;
       // Only a definitive pre-execution rejection releases the request identity.
       if (error.status >= 400 && error.status < 500) {
         savePending(null);
@@ -806,10 +838,10 @@ window.CodePierPanelUpdate = (() => {
         }
         if ([401, 403, 404].includes(error.status)) accessDenied = true;
         if (!automatic) toast(error.message, true);
-      } else if (gen === generation)
+      } else if (current(gen))
         note = '提交回执暂未收到，正在按原请求编号核实。请不要重复点击更新。';
     } finally {
-      if (gen === generation) {
+      if (current(gen)) {
         submitting = false;
         paint();
         await load();
@@ -818,11 +850,18 @@ window.CodePierPanelUpdate = (() => {
   }
   function detach(force = false) {
     // Session teardown runs before S.session is cleared; it must bypass the repaint fast path.
-    const currentOwner = force ? null : sessionOwner(S.session);
+    const currentOwner = force ? null : scopeOwner();
     // Page repaints must not starve a live update monitor or interrupt its POST.
     if (!force && owner === currentOwner && S.session?.instance_admin) {
       if (!timer && !reader && !submitting) schedule(watching ? 2000 : 30000);
       return;
+    }
+    // Preserve only the original request receipt across a space/user transition.
+    if (pending?.intent && owner) {
+      const receipt = { ...pending };
+      delete receipt.intent;
+      pending = receipt;
+      sessionValue(storageKey(owner), JSON.stringify(receipt));
     }
     generation++;
     closeDetails(false);
@@ -849,7 +888,7 @@ window.CodePierPanelUpdate = (() => {
   }
   function resume() {
     if (!S.session?.instance_admin) return;
-    if (owner !== sessionOwner(S.session)) detach();
+    if (owner !== scopeOwner()) detach();
     pending = pending || restorePending();
     watching = watching || !!pending;
     paint();

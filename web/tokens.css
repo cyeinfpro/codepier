@@ -1,5 +1,10 @@
 /* Editorial workspace: paired reading colors + bounded entity cover colors. */
 :root {
+  --ui-select-arrow-size: 16px;
+  --ui-select-arrow-inset: 14px;
+  --ui-select-end-space: 44px;
+  --ui-select-arrow-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='m3 6 5 5 5-5' fill='none' stroke='%237d817e' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
   color-scheme: light;
   --ui-bg: #f5f5f4;
   --ui-panel: #ffffff;

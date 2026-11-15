@@ -108,6 +108,25 @@ function chatEvent(e) {
   if (e.type === 'delta' || e.type === 'message') v.phase = 'reply';
   if (e.type === 'user') v.phase = 'working';
   chatScheduleLayout();
+  if (e.type === 'settings_result') {
+    const op = v.settingOp;
+    if (!op || op.receipt !== e.receipt) return;
+    if (e.actual) v.settings = { ...(v.settings || {}), ...e.actual };
+    op.outcome = e.outcome;
+    op.state = 'error';
+    chatSettings(v.settings);
+    chatStatus(
+      {
+        partial: '部分设置已生效；当前模型与强度已回读，请核对后重试剩余项',
+        applied: '实际配置已生效，但原操作回执仍为失败；无需重试',
+        rejected: '原生回读确认设置未变更',
+        unknown: '设置结果待核实；不能确认是否部分生效',
+      }[e.outcome] || '设置结果待核实',
+      e.outcome !== 'applied',
+    );
+    chatSyncChrome();
+    return;
+  }
   if (e.type === 'settings') {
     v.settings = { ...(v.settings || {}), ...e };
     if (e.commands) v.commands = e.commands;
@@ -195,7 +214,7 @@ function chatEvent(e) {
   if (e.type === 'error' && v.settingOp?.receipt === e.receipt) {
     v.settingOp.state = 'error';
     chatSettings(v.settings);
-    chatStatus(e.text || '设置失败', true);
+    chatStatus((e.text || '原生设置返回错误') + '；正在核实实际配置，可能部分生效', true);
   }
   if (
     ['user', 'delta', 'message', 'reasoning', 'tool'].includes(e.type) &&

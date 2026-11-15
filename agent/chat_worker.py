@@ -143,6 +143,9 @@ class Protocol:
         self.refresh_errors = set()
         self.refresh_receipt = None
         self.settings_deadline = 0
+        self.settings_readbacks = {}
+        self.settings_readback_deadlines = {}
+        self.settings_generation = 0
         self.compaction_receipt = None
         self.operation_deadlines = {}
         self.defaults = saved.get("defaults", {})
@@ -283,7 +286,9 @@ class Protocol:
             return
         self.settings_busy, self.settings_receipt = True, receipt
         self.settings_deadline = time.monotonic() + 15
+        self.settings_generation += 1
         self.selection = selected
+        self.settings_before = dict(self.settings)
         self.emit("settings_pending", receipt=receipt, **selected)
         if selected.get("model"):
             provider, mid = selected["model"].split("/", 1)
@@ -307,7 +312,15 @@ class Protocol:
             self.emit("settings_pending", receipt=receipt, cleared=True)
             if receipt is None:
                 raise RuntimeError("Initial native settings rejected: " + error)
-            self.call("get_state")
+            tag = "readback_settings:" + receipt
+            self.settings_readbacks[tag] = (
+                receipt,
+                dict(self.selection),
+                dict(self.settings_before),
+                self.settings_generation,
+            )
+            self.settings_readback_deadlines[tag] = time.monotonic() + 15
+            self.call("get_state", tag=tag)
             return
         data = data or {}
         if tag == "settings_model":
@@ -349,6 +362,18 @@ class Protocol:
             self.emit("settings", receipt=receipt, **self.settings)
             self.finish(receipt, "completed")
             self.emit("settings_pending", receipt=receipt, cleared=True)
+
+    def expire_settings_readbacks(self):
+        for tag, deadline in list(self.settings_readback_deadlines.items()):
+            if time.monotonic() <= deadline:
+                continue
+            self.settings_readback_deadlines.pop(tag, None)
+            receipt, _, _, generation = self.settings_readbacks.pop(tag)
+            for key, value in list(self.calls.items()):
+                if value == tag:
+                    self.calls.pop(key, None)
+            if generation == self.settings_generation:
+                self.emit("settings_result", receipt=receipt, outcome="unknown")
 
     def operation(self, receipt, name, method, params=None):
         key = self.call(method, params)
@@ -648,6 +673,54 @@ class Protocol:
         if kind == "response":
             tag = self.calls.pop(m.get("id"), "")
             if not tag:
+                return
+            if tag.startswith("readback_settings:"):
+                self.settings_readback_deadlines.pop(tag, None)
+                receipt, requested, before, generation = self.settings_readbacks.pop(tag)
+                if generation != self.settings_generation:
+                    return
+                data = m.get("data") or {}
+                if not m.get("success", False) or not isinstance(data, dict):
+                    self.emit("settings_result", receipt=receipt, outcome="unknown")
+                    return
+                actual = {k: data[k] for k in ("model", "thinkingLevel") if k in data}
+                if "model" in actual:
+                    native_model = actual["model"]
+                    if not isinstance(native_model, dict) or not all(
+                        isinstance(native_model.get(key), str) and native_model[key]
+                        for key in ("provider", "id")
+                    ):
+                        actual.pop("model")
+                if "thinkingLevel" in actual and not isinstance(actual["thinkingLevel"], str):
+                    actual.pop("thinkingLevel")
+                model = actual.get("model") or {}
+                values = {
+                    "model": model.get("provider", "") + "/" + model.get("id", ""),
+                    "effort": actual.get("thinkingLevel"),
+                }
+                complete = all(
+                    ("model" if k == "model" else "thinkingLevel") in actual for k in requested
+                )
+                matches = complete and all(values.get(k) == v for k, v in requested.items())
+                changed = any(actual.get(k) != before.get(k) for k in actual)
+                outcome = (
+                    "applied"
+                    if matches
+                    else "partial"
+                    if complete and changed
+                    else "rejected"
+                    if complete
+                    else "unknown"
+                )
+                self.settings.update(actual)
+                self.publish_settings()
+                self.emit(
+                    "settings_result",
+                    receipt=receipt,
+                    outcome=outcome,
+                    actual=actual,
+                    requested=requested,
+                )
                 return
             if tag and tag.startswith("settings_"):
                 self.settings_response(
@@ -1220,6 +1293,7 @@ def run(directory, sid, config_path=None):
                     text="Native compaction completion timed out",
                 )
                 protocol.compaction_receipt = None
+            protocol.expire_settings_readbacks()
             if protocol.settings_busy and time.monotonic() > protocol.settings_deadline:
                 protocol.settings_response(
                     "settings_timeout", False, error="Native settings acknowledgement timed out"

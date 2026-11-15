@@ -251,3 +251,54 @@ def test_supervised_fd_cannot_borrow_other_description_lock(tmp_path):
         assert engine.validate_supervised_fd(tmp_path, owner, expected_uid=os.getuid()) == owner
     finally:
         os.close(unrelated); os.close(owner)
+
+
+@pytest.mark.parametrize("change", [None, "digest", "missing_digest", "invalid_bundle", "empty_bundle", "source_fallback", "staged", "repository", "release_id", "version", "uncommitted", "asset_id", "bytes", "url", "override"])
+def test_image_updater_promotion_binds_verified_archive_not_source(fixture, change):
+    home, _, asset = fixture
+    identity = stage(fixture)
+    engine.atomic_json(home / 'engine-current.json', identity)
+    path = job(home, identity, 'succeeded')
+    record = engine.read_json(path / 'status.json')
+    record['staged_engine'] = identity
+    release = dict(asset, sha256='0' * 64, image_bundle={
+        'sha256': asset['sha256'], 'bytes': asset['bytes'],
+        'asset_id': 42, 'url': 'https://github.com/cyeinfpro/codepier/releases/download/v1.30.6/codepier-1.30.6-updater.zip',
+    })
+    if change == 'digest':
+        release['image_bundle']['sha256'] = 'f' * 64
+    elif change == 'missing_digest':
+        del release['image_bundle']['sha256']
+    elif change == 'invalid_bundle':
+        release['image_bundle'] = None
+    elif change == 'empty_bundle':
+        release['image_bundle'] = {}
+    elif change == 'source_fallback':
+        release['sha256'] = asset['sha256']
+        release['image_bundle']['sha256'] = 'f' * 64
+    elif change == 'staged':
+        record['staged_engine'] = dict(identity, sha256='f' * 64)
+    elif change == 'repository':
+        release['repository'] = 'other/publisher'
+    elif change == 'release_id':
+        release['release_id'] += 1
+    elif change == 'version':
+        release['version'] = '1.30.7'
+    elif change in ('asset_id', 'bytes'):
+        release['image_bundle'][change] = True
+    elif change == 'url':
+        release['image_bundle']['url'] = 'https://example.com/other.zip'
+    elif change == 'override':
+        release['image_bundle']['repository'] = 'other/publisher'
+    elif change == 'uncommitted':
+        record['commit_decided'] = False
+    engine.atomic_json(path / 'status.json', record)
+    engine.atomic_json(path / 'release.json', release)
+    if change is None:
+        assert engine.promote_engine(home, identity, 'a' * 32, expected_uid=os.getuid()) == identity
+    else:
+        before = (home / 'engine-current.json').read_bytes()
+        with pytest.raises(engine.EngineError) as raised:
+            engine.promote_engine(home, identity, 'a' * 32, expected_uid=os.getuid())
+        assert raised.value.code == 'ENGINE_PROMOTION'
+        assert (home / 'engine-current.json').read_bytes() == before

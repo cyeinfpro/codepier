@@ -198,9 +198,10 @@ def test_unhandled_error_keeps_default_response_and_server_id(events):
 
 
 @pytest.mark.parametrize("kind", ["cancelled", "reset", "disconnect"])
-def test_transport_interruption_does_not_cancel_business_work(events, kind):
+def test_transport_interruption_records_transport_not_task_outcome(events, kind):
+    # Middleware-only contract. Actual command survival and exactly-once effects
+    # are tested with a real Hub/Agent in test_operation_continuation_integration.
     async def scenario():
-        business = {"cancel_requested": False}
         async def endpoint(scope, receive, send):
             if kind == "cancelled":
                 raise asyncio.CancelledError()
@@ -218,7 +219,6 @@ def test_transport_interruption_does_not_cancel_business_work(events, kind):
         else:
             with pytest.raises(asyncio.CancelledError if kind == "cancelled" else ConnectionResetError):
                 await middleware(scope, receive, send)
-        assert not business["cancel_requested"]
         assert audit.request_id() is None
     asyncio.run(scenario())
     assert events[-1]["outcome"] == "transport_interrupted"

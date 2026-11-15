@@ -14,6 +14,14 @@ fi
 pairing=${1:-}
 root=${2:-}
 shell_mode=${3:-full}
+case "$shell_mode" in full|disabled) ;; *) echo 'Shell 选项必须为 full 或 disabled' >&2; exit 1 ;; esac
+if [[ -f "$install_directory/config.json" ]]; then
+  echo '检测到已有配置：保留原权限，安装状态不代表 Hub 已在线。'
+elif [[ "$shell_mode" == full ]]; then
+  echo '权限范围：开启当前系统用户完整 Shell 和目录任务，不是目录沙箱；可用第三个参数 disabled 关闭。'
+else
+  echo '权限范围：关闭 Shell 和目录任务；目录文件访问仍按授权配置。'
+fi
 if [[ ! -f "$install_directory/config.json" ]]; then
   [[ -n "$pairing" ]] || read -r -p '配对文件完整路径：' pairing
   [[ -n "$root" ]] || read -r -p '允许访问的项目父目录：' root

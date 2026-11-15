@@ -48,7 +48,7 @@ window.CodePierSettings = (() => {
   };
 
   const views = [
-    ['', '开始'],
+    ['', '常用设置'],
     ['devices', '设备'],
     ['projects', '项目'],
     ['connect', '接入'],
@@ -119,8 +119,7 @@ window.CodePierSettings = (() => {
     } catch {
       // Storage can be unavailable (private mode, embedded views).
     }
-    const o = S.overview;
-    return !!(o && o.devices?.length && o.projects?.length && o.active_grants > 0);
+    return true;
   }
   function startHTML() {
     if (state.startCollapsed === null) state.startCollapsed = startCollapsedDefault();
@@ -472,7 +471,6 @@ window.CodePierSettings = (() => {
         .join('') +
       '</nav><p id="settings-draft-note" class="settings-draft-note" hidden role="status">有未保存的改动</p>' +
       '<p id="settings-filter-status" class="form-note" role="status"></p>' +
-      startHTML() +
       '<div id="settings-chain">' +
       chainHTML() +
       '</div>' +
@@ -501,6 +499,7 @@ window.CodePierSettings = (() => {
           CodePierPanelUpdate.html() +
           '</details>'
         : '') +
+      startHTML() +
       '</section>'
     );
   }
@@ -532,7 +531,7 @@ window.CodePierSettings = (() => {
 
     function filter() {
       const q = state.query.trim().toLocaleLowerCase();
-      const selected = new Set(viewItems[state.group] || []);
+      const selected = state.group === '' ? commonItems : new Set(viewItems[state.group] || []);
       let count = 0,
         advancedCount = 0;
       for (const item of state.data.items) {

@@ -217,6 +217,8 @@ REQUIRED_FILES = BASE_REQUIRED | (
 )
 
 PUBLIC_DOCS = {
+    "docs/UI_UX_SYSTEM_REDESIGN_2026-11-14.md",
+    "docs/UI_UX_ACTION_LANGUAGE.md",
     "docs/VERIFICATION_TOOLS.md",
     "docs/examples/subscription_lifetime.py",
     "docs/examples/dot_outbox.py",

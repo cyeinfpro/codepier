@@ -121,3 +121,79 @@ def test_space_selector_restores_current_space_after_membership_failure(iam_page
     expect(page.locator('#toasts')).to_contain_text('你已不属于该空间')
     assert page.evaluate('S.space_id') == 'legacy'
     assert not errors
+
+
+def test_invited_member_explicit_role_save_readback_and_reload(iam_page, stack):
+    """No external invite: a disposable local user accepts the UI-created token."""
+    import time
+    from hub.store import Store
+    from shared.crypto import password_hash
+    from tests.support import fixture_http_client
+
+    page, errors = iam_page
+    uid = uuid.uuid4().hex
+    username = 'role-fixture-' + uid[:8]
+    password = 'Isolated-role-fixture-only-123'
+    store = Store(stack.hubdir)
+    try:
+        store.execute('INSERT INTO users VALUES(?,?,?,?)',
+                      (uid, username, password_hash(password), time.time()))
+    finally:
+        store.close()
+    space = stack.must(stack.client.post('/api/iam/spaces',
+        json={'label': 'Role assignment ' + uid[:8], 'idempotency_key': uuid.uuid4().hex}))
+    page.reload()
+    page.locator('[data-iam-space="' + space['id'] + '"]').click()
+    expect(page.locator('#iam-active-space')).to_have_value(space['id'])
+    role = page.evaluate("""async body => await api('/api/access-roles', {
+        method:'POST', body:JSON.stringify(body)})""", {
+        'label': 'Read only fixture role', 'project_rules': [{'actions': ['read'], 'all_projects': True}],
+        'device_rules': [], 'idempotency_key': uuid.uuid4().hex,
+    })
+    page.evaluate("navigate('members')")
+    page.locator('[data-iam="invite"]').click()
+    page.locator('#iam-form [name="login_verified"]').check()
+    page.locator('button[form="iam-form"]').click()
+    expect(page.locator('.modal .secret')).to_be_visible()
+    token = page.locator('.modal .secret').inner_text()
+    with fixture_http_client(stack.url) as recipient:
+        signed = stack.must(recipient.post('/api/login', json={'username': username, 'password': password}))
+        recipient.headers['X-RD-CSRF'] = signed['csrf']
+        accepted = stack.must(recipient.post('/api/iam/invites/accept', json={'invitation': token}))
+        assert accepted['space_id'] == space['id']
+    page.keyboard.press('Escape')
+    page.evaluate('renderPage(false)')
+    member = page.locator('[data-member-person="' + uid + '"]')
+    expect(member).to_contain_text('待分配项目权限')
+    member.locator('[data-iam-assignment]').click()
+    form = page.locator('#iam-form')
+    expect(form.locator('[name="role_id"]')).to_have_value('')
+    expect(form.locator('[name="may_delegate"]')).not_to_be_checked()
+    form.locator('[name="role_id"]').select_option(role['id'])
+    expect(form.locator('[data-assignment-policy]')).to_contain_text('读取')
+    page.locator('button[form="iam-form"]').click()
+    expect(page.locator('.ui-sheet')).to_contain_text('Read only fixture role')
+    page.locator('.ui-sheet button[type="submit"]').click()
+    expect(page.locator('#iam-form')).to_have_count(0)
+    path = '/api/iam/spaces/' + space['id'] + '/assignments'
+    saved = page.evaluate('async path => await api(path)', path)['assignments']
+    assignment = next(item for item in saved if item['user_id'] == uid and item['role_id'] == role['id'])
+    assert assignment['active'] and not assignment['may_delegate'] and assignment['source'] == 'manual'
+    version = assignment['version']
+    page.reload()
+    expect(page.locator('#page h1')).to_have_text('空间成员')
+    expect(page.locator('[data-member-person="' + uid + '"]')).not_to_contain_text('待分配项目权限')
+    edit = page.locator('[data-iam-assignment="' + role['id'] + '"][data-user="' + uid + '"]')
+    edit.click()
+    expect(page.locator('#iam-form [name="role_id"]')).to_have_value(role['id'])
+    expect(page.locator('#iam-form [name="active"]')).to_be_checked()
+    expect(page.locator('#iam-form [name="may_delegate"]')).not_to_be_checked()
+    reloaded = page.evaluate('async path => await api(path)', path)['assignments']
+    assert next(item for item in reloaded if item['user_id'] == uid and item['role_id'] == role['id'])['version'] == version
+    assert token not in page.content()
+    from pathlib import Path
+    evidence = Path(os.getenv('CODEPIER_EVIDENCE_DIR', '.work/iam-role-' + uuid.uuid4().hex))
+    evidence.mkdir(parents=True, exist_ok=True)
+    engine = page.context.browser.browser_type.name
+    page.screenshot(path=str(evidence / f'iam-role-readback-{engine}-{page.viewport_size["width"]}.png'), full_page=True)
+    assert not errors

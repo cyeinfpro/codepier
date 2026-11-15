@@ -26,7 +26,7 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
       }
       if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state)) {
         op.state = result.state === 'uncertain' ? 'uncertain' : 'error';
-        chatStatus('设置未生效，请查看错误或重试', true);
+        chatStatus('设置返回错误，实际配置待核实；可能部分生效', true);
         chatSettings(v.settings);
         return;
       }

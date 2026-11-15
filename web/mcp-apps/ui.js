@@ -14,10 +14,21 @@ export function notice(parent, text, error = false) {
 export function button(text, action, className = '') {
   const node = el('button', text, className);
   node.type = 'button';
+  let failure = null;
   node.addEventListener('click', async () => {
+    if (node.disabled) return;
+    failure?.remove();
+    failure = null;
     node.disabled = true;
     try { await action(); }
-    catch (error) { if (node.isConnected) notice(node.parentElement, error.message || '读取未完成，请重试', true); }
+    catch (error) {
+      if (node.isConnected) {
+        const id = error?.operationId || error?.operation_id;
+        const receipt = typeof id === 'string' && /^[a-f0-9]{32}$/.test(id)
+          ? ' 原操作：' + id + '。需要核实时查询这个编号，不重新执行。' : '';
+        failure = notice(node.parentElement, (error?.message || '操作未完成，请查看详情') + receipt, true);
+      }
+    }
     finally { node.disabled = false; node.reconcileDisabled?.(); }
   });
   return node;

@@ -443,7 +443,7 @@ def test_production_hub_maintenance_and_health(tmp_path,monkeypatch):
     monkeypatch.setenv('HUB_PANEL_UPDATE_SOCKET',str(gate_dir/'updater.sock'))
     app=create_app(str(tmp_path/'real-hub'))
     with TestClient(app) as client:
-        assert client.get('/healthz').json()['panel_update']=={'maintenance':False,'ready':False}
+        assert client.get('/healthz').json()['panel_update']=={'maintenance':False,'ready':False,'drain_ready':False,'phase':'inactive','ready_semantics':'maintenance_drain_only'}
         (gate_dir/'maintenance.json').write_text('{}')
         result=client.get('/healthz')
         assert result.status_code==200 and result.json()['panel_update']['ready']
@@ -477,6 +477,7 @@ def test_agent_update_consent_and_bridge_errors(tmp_path,choice,failure):
     body={'idempotency_key':'consent-test-key','version':TARGET,'release_id':17,'sha256':'b'*64,
           'confirmation':TARGET}
     if choice is not None:body['update_agents']=choice
+    if choice is True:body['expected_space_id']='legacy'
     try:
         with TestClient(app) as client:
             client.cookies.set('rd_session','cookie')
@@ -524,7 +525,7 @@ def test_old_host_receipt_without_agent_consent_cannot_expand_authority(tmp_path
         with TestClient(app) as client:
             client.cookies.set('rd_session','cookie')
             body={'idempotency_key':'legacy-apply-key','version':TARGET,'release_id':17,'sha256':'b'*64,
-                  'confirmation':TARGET,'update_agents':True}
+                  'confirmation':TARGET,'update_agents':True,'expected_space_id':'legacy'}
             response=client.post('/api/panel-update/apply',json=body,headers={'X-RD-CSRF':'csrf'})
             assert response.status_code==(409 if found else 503)
             assert calls==['GET']
@@ -556,7 +557,7 @@ def test_legacy_host_apply_then_new_hub_preserves_no_agent_authority(tmp_path,mo
                     assert status['operation']['state']=='succeeded'
                     assert status['agent_rollout'] is None
                     body={k:release[k] for k in ('version','release_id','sha256')}
-                    body.update(idempotency_key='old-panel-apply-key',confirmation=TARGET,update_agents=True)
+                    body.update(idempotency_key='old-panel-apply-key',confirmation=TARGET,update_agents=True,expected_space_id='legacy')
                     response=client.post('/api/panel-update/apply',json=body,headers={'X-RD-CSRF':'csrf'})
                     assert response.status_code==409
                     assert response.json()['error']['code']=='AGENT_CONSENT_NOT_RECORDED'
@@ -817,3 +818,75 @@ def test_orphan_recovery_preserves_nonempty_lock(tmp_path, name):
     with pytest.raises(source.UpdateError):
         updater.recover_orphan_install_lock(tmp_path, confirm_installers_stopped=True)
     assert (lock / name).read_text() == 'existing owner'
+
+def test_apply_rejects_changed_space_before_bridge_or_rollout(tmp_path):
+    class Bridge:
+        async def request(self, *args, **kwargs):
+            pytest.fail("space mismatch must be rejected before contacting updater")
+    app, store = make_auth_app(tmp_path, Bridge())
+    try:
+        with TestClient(app) as client:
+            client.cookies.set("rd_session", "cookie")
+            response = client.post("/api/panel-update/apply",
+                json={"idempotency_key": "space-bound-apply", "version": TARGET, "release_id": 17,
+                      "sha256": "b" * 64, "confirmation": TARGET, "update_agents": True,
+                      "expected_space_id": "another-space"},
+                headers={"X-RD-CSRF": "csrf"})
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "UPDATE_SPACE_CHANGED"
+            assert not store.all("SELECT * FROM panel_agent_rollouts")
+    finally:
+        store.close()
+
+
+def test_expected_space_is_validation_only_and_preserves_consent_fingerprint(tmp_path):
+    calls = []
+    class Bridge:
+        async def request(self, method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                return {"request_found": False}
+            assert "expected_space_id" not in body
+            return {"operation": {"state": "queued"}}
+    app, store = make_auth_app(tmp_path, Bridge())
+    body = {"idempotency_key": "space-compatible", "version": TARGET, "release_id": 17,
+            "sha256": "b" * 64, "confirmation": TARGET}
+    try:
+        with TestClient(app) as client:
+            client.cookies.set("rd_session", "cookie")
+            headers = {"X-RD-CSRF": "csrf"}
+            assert client.post("/api/panel-update/apply", json=body, headers=headers).status_code == 202
+            consent = store.one("SELECT * FROM panel_update_consents WHERE request_key=?", (body["idempotency_key"],))
+            bound = {**body, "expected_space_id": consent["space_id"]}
+            result = client.post("/api/panel-update/apply", json=bound, headers=headers)
+            assert result.status_code == 202, result.text
+            assert store.one("SELECT fingerprint FROM panel_update_consents WHERE request_key=?", (body["idempotency_key"],))["fingerprint"] == consent["fingerprint"]
+    finally:
+        store.close()
+
+
+def test_cached_client_cannot_create_unbound_agent_consent_but_original_can_resume(tmp_path):
+    calls = []
+    class Bridge:
+        async def request(self, method, path, body=None):
+            calls.append(method)
+            return {"request_found": False} if method == "GET" else {"operation": {"state": "queued"}}
+    app, store = make_auth_app(tmp_path, Bridge())
+    body = {"idempotency_key": "cached-unbound-key", "version": TARGET, "release_id": 17,
+            "sha256": "b" * 64, "confirmation": TARGET, "update_agents": True}
+    try:
+        with TestClient(app) as client:
+            client.cookies.set("rd_session", "cookie")
+            headers = {"X-RD-CSRF": "csrf"}
+            rejected = client.post("/api/panel-update/apply", json=body, headers=headers)
+            assert rejected.status_code == 409
+            assert rejected.json()["error"]["code"] == "UPDATE_SPACE_CONFIRMATION_REQUIRED"
+            assert calls == []
+            assert not store.all("SELECT * FROM panel_update_consents")
+            accepted = client.post("/api/panel-update/apply", json={**body, "expected_space_id": "legacy"}, headers=headers)
+            assert accepted.status_code == 202, accepted.text
+            original = client.post("/api/panel-update/apply", json=body, headers=headers)
+            assert original.status_code == 202, original.text
+            assert len(store.all("SELECT * FROM panel_agent_rollouts")) == 1
+    finally:
+        store.close()

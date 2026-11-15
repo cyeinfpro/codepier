@@ -1,8 +1,8 @@
 {
   "outputs": {
     "browser-extension.zip": {
-      "sha256": "790045e7cc88db38f7b2e6a5f8947bcbc35b5060c373efa6db99a40ff81bb8f9",
-      "bytes": 13864
+      "sha256": "4e34e1c53a91928922d55d69a572a7718277d6d19a90771320cb8ee1481d5aeb",
+      "bytes": 14190
     },
     "integration-guide.md": {
       "sha256": "857889037cd6d2bf4bdccb8c947aa41fa8ba3e7a9edd8249f707f652b916f207",
@@ -11,11 +11,11 @@
   },
   "extension_sources": {
     "manifest.json": "71e74e2d74214d4f4e1239f1491dbdbc5b72c2f6821998fee0d7821a581dccaf",
-    "background.js": "b8c11868de7d7536539fb3669f751f6e7c6208f584674d52a3be3d7102a55be9",
+    "background.js": "724c60437fbbde579935139b5ba952907a7699637581af1c5ed937915e4323e6",
     "workspace.js": "10f6f099b15dc21662f4949dba6d35f1f9f72b0bbc70a3177782a36ddeb56055",
     "page.js": "25f11964f5e3f9702e4bf14a1bb43fa99a2a03610bb496081a1b2087275d794e",
-    "popup.html": "9f9215adfff9676b2efec4f18eabc6bc269cfc949dbf5e9efc4a47c90decbea5",
-    "popup.js": "27e5004f4838670a6349287402edb13b4101d8db95b9d29f4137d8f2ada337e5",
+    "popup.html": "79ddba7d5c1a5a0ced7ea3dbe6643908632f4b2903f880618be2d250097eaa07",
+    "popup.js": "945a7d5778b35f6b415a21e4a8fdf81127c4953fc598c7689950d10f26d8de43",
     "popup.css": "c099c2165b1acdf6688d9a75751f6b5e005faad5d6a9472414a5e588605fa8d6",
     "idle.html": "849c864fb4b6403c7056d4a5fa0aa8f176bb2dd01bd6291a0370b3c2c8013868"
   },

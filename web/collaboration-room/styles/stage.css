@@ -24,7 +24,7 @@
   justify-content: space-between;
   gap: 14px;
   min-height: 64px;
-  padding: 12px 28px;
+  padding: 12px var(--cr-gutter);
   border-bottom: 1px solid var(--cr-line);
 }
 

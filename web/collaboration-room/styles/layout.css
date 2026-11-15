@@ -12,6 +12,8 @@
 }
 
 .cr-shell {
+  --cr-gutter: 28px;
+  --cr-content-width: 820px;
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);

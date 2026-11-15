@@ -43,8 +43,8 @@ def output_page(row, text, total, *, start, upstream=False):
         row["output_truncated"] = False
     if upstream:
         row["output_recovery"] = (
-            "Earlier output was not saved. If a complete log is needed, run a new command "
-            "with output redirected to a file in the run directory, then page that file."
+            "Earlier output was not saved. Inspect the original operation receipt and existing log files. "
+            "Do not rerun the original command merely to recover output; it may repeat side effects."
         )
 
 

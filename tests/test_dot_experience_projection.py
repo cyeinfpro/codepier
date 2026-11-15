@@ -326,3 +326,22 @@ def test_generic_authorization_wait_does_not_imply_scope_expansion():
         reply={'id': 'explanation', 'body': {'dot_reply_complete': False}},
         handling={'state': 'waiting_authorization', 'reason_code': 'authorization_required', 'reply_id': 'explanation'})
     assert value['next_action'] == {'kind': 'open_original_message', 'target_ref': 'explanation', 'mutates': False}
+
+@pytest.mark.parametrize("state", ["waiting_input", "waiting_authorization"])
+def test_current_attention_is_not_hidden_by_running_work(state):
+    value = ep.message({"id": "m"}, {"dot_id": "d", "state": "read"},
+        handling={"state": state}, work={"work_item_id": "w", "execution_state": "running",
+                                        "consumer_freshness": "fresh"})
+    assert value["primary_state"] == state
+    assert value["attention"]["state"] == state
+    assert value["attention"]["next_action"]["target_ref"] == "m"
+    assert value["activity"] == {"state": "processing", "label": "正在处理"}
+    assert value["execution"]["state"] == "running"
+
+
+def test_stale_attention_does_not_claim_current_input_needed():
+    value = ep.message({"id": "m"}, {"dot_id": "d"},
+        handling={"state": "waiting_input", "source_current": False},
+        work={"work_item_id": "w", "execution_state": "running", "consumer_freshness": "fresh"})
+    assert value["primary_state"] == "needs_attention"
+    assert value["attention"]["state"] == "none"

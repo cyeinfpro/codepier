@@ -1,5 +1,7 @@
 """Real loopback Hub/Agent plus isolated Chromium/WebKit onboarding checks."""
 from pathlib import Path
+import os
+import uuid
 
 import pytest
 from playwright.sync_api import expect
@@ -75,7 +77,7 @@ def test_connection_ui_preview_and_late_response_do_not_cross_navigation(stack, 
         expect(preview).to_contain_text('配置文本校验通过，尚未运行')
         expect(preview).to_contain_text('PAT 实际范围：未验证')
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-        screenshots = Path('.work/connection-ui')
+        screenshots = Path(os.getenv('CODEPIER_EVIDENCE_DIR', '.work/connection-ui-' + uuid.uuid4().hex))
         screenshots.mkdir(parents=True, exist_ok=True)
         page.screenshot(path=str(screenshots/('connection-setup-'+browser+'.png')), full_page=True)
         # Editing invalidates the prior preview; no stale configuration survives.

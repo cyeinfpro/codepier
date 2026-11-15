@@ -90,15 +90,19 @@
   width: 100%;
   border-radius: var(--ui-radius-small);
   padding: 10px 12px;
-  background: var(--ui-side);
+  background-color: var(--ui-side);
   border: 1px solid var(--cr-line);
   font-size: var(--ui-text-input);
   font-weight: var(--ui-weight-regular);
   color: var(--ui-text);
 }
 
+.cr-field select {
+  padding-inline-end: var(--ui-select-end-space, 44px);
+}
+
 .cr-field :is(input, select, textarea):focus {
-  background: var(--cr-surface);
+  background-color: var(--cr-surface);
   border-color: var(--ui-border);
 }
 
@@ -193,7 +197,8 @@
 }
 
 .cr-connection-mode {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
   padding: 3px;
   border-radius: var(--ui-radius-small);
@@ -201,8 +206,10 @@
 }
 
 .cr-connection-mode label {
-  flex: 1;
-  display: flex;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, auto);
+  min-height: 44px;
   gap: 7px;
   align-items: center;
   justify-content: center;
@@ -410,4 +417,78 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 20px;
+}
+
+/* Work detail is a reading inspector, not a centered onboarding flow. */
+.cr-panel[data-panel='work'] [data-cr-work-view] {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.cr-panel[data-panel='work'] [data-cr-work-view] > * {
+  margin-block: 0;
+}
+.cr-panel[data-panel='work'] .cr-flow-state {
+  text-align: left;
+  padding: 0 0 16px;
+  border-bottom: 1px solid var(--cr-line);
+}
+.cr-panel[data-panel='work'] .cr-work-summary p {
+  margin: 0;
+  line-height: 1.65;
+}
+.cr-panel[data-panel='work'] .cr-work-evidence {
+  padding-block: 16px;
+  border-block: 1px solid var(--cr-line);
+}
+.cr-panel[data-panel='work'] [data-cr-work-view] > p > .cr-text-button {
+  padding-inline: 0;
+}
+
+/* Scoped inspector controls share rails without changing native input semantics. */
+.cr-setting-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.cr-setting-actions > button {
+  min-width: 0;
+  min-height: 44px;
+  white-space: normal;
+}
+.cr-connection-mode label > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cr-panel [data-cr-form='permissions'] {
+  gap: 16px;
+}
+.cr-panel [data-cr-form='permissions'] > h3 {
+  margin: 0;
+}
+.cr-panel [data-cr-form='permissions'] > .cr-inspection-section,
+.cr-panel [data-cr-form='permissions'] > .cr-continuation {
+  margin: 0;
+}
+.cr-panel [data-cr-form='permissions'] > .cr-continuation {
+  padding-block: 0;
+  border: 0;
+}
+.cr-panel [data-cr-form='permissions'] .cr-choice {
+  padding-block: 12px;
+}
+.cr-panel [data-cr-continuation-result]:empty {
+  display: none;
+}
+.cr-panel [data-cr-form='permissions'] [hidden] {
+  display: none;
+}
+.cr-scope [data-permission-lifetime]:not([hidden]) {
+  display: grid;
+  gap: 12px;
+  padding-block: 4px 12px;
+}
+.cr-scope [data-permission-lifetime] > .cr-field {
+  display: grid;
+  align-items: stretch;
+  gap: 7px;
 }

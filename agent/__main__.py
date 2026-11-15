@@ -14,13 +14,80 @@ from agent.config import validate_config
 DEFAULT = Path.home() / ".codepier-agent" / "config.json"
 
 
+def config_summary(config):
+    """Conservative recursive projection: values not explicitly public stay hidden."""
+    public_fields = {
+        "hub_url",
+        "device_id",
+        "name",
+        "state_dir",
+        "allowed_roots",
+        "path",
+        "writable",
+        "allow_tasks",
+        "tasks",
+        "shell",
+        "enabled",
+        "projects",
+        "timeout",
+        "cwd",
+        "description",
+        "project_runtimes",
+        "language_servers",
+        "skills",
+        "codex_enabled",
+        "codex_projects",
+        "codex_home",
+        "extra_roots",
+        "computer",
+        "allowed_apps",
+        "plugin_root",
+        "mcp_policy",
+        "integrations",
+        "scheduler",
+        "journal_retention",
+        "review_storage",
+        "env",
+        "command",
+        "args",
+    }
+    named_maps = {"tasks", "project_runtimes", "language_servers"}
+
+    def project(value, field=""):
+        if field == "env":
+            return {key: "<redacted>" for key in value} if isinstance(value, dict) else "<redacted>"
+        if field in named_maps:
+            if not isinstance(value, dict):
+                return "<redacted>"
+            return {
+                key: project(item) if isinstance(item, dict) else "<redacted>"
+                for key, item in value.items()
+            }
+        # Command arguments may embed credentials as well as environment values.
+        if field in {"command", "args"}:
+            return "<redacted>"
+        if isinstance(value, dict):
+            return {
+                key: project(item, key) if key in public_fields else "<redacted>"
+                for key, item in value.items()
+                if key != "secret"
+            }
+        if isinstance(value, list):
+            return [project(item, field) for item in value]
+        return value
+
+    return project(config)
+
+
 def main():
     # Redirected Windows service logs can use a legacy code page. Logging a
     # localized status line must never tear down an authenticated connection.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="backslashreplace")
-    parser = argparse.ArgumentParser(description="CodePier 家用 Agent — 只主动连接，不开放家里端口")
+    parser = argparse.ArgumentParser(
+        description="CodePier 电脑 Agent — 只主动连接 Hub，不开放本机入站端口"
+    )
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--config", default=None, help="配置路径（放在子命令之前）")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -261,20 +328,7 @@ def main():
             print(
                 "配置已保存。运行中的 Agent 将自动加载并重新连接；迁移面板时需要保留云端数据与设备密钥。"
             )
-        public = {k: v for k, v in c.items() if k != "secret"}
-        # Local task environment values can contain credentials; show names only.
-        public["tasks"] = {
-            name: {
-                **task,
-                **({"env": {k: "<redacted>" for k in task["env"]}} if "env" in task else {}),
-            }
-            for name, task in public.get("tasks", {}).items()
-        }
-        if "shell" in public:
-            public["shell"] = {
-                **public["shell"],
-                "env": {k: "<redacted>" for k in public["shell"].get("env", {})},
-            }
+        public = config_summary(c)
         print(json.dumps(public, ensure_ascii=False, indent=2))
     else:
         from shared.config import ConfigurationError

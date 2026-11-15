@@ -45,18 +45,27 @@ def receipt(runtime, principal, project, key):
     if row is None:
         return {
             "state": "not_found",
+            "transport_terminal": False,
+            "effect_confirmed": False,
             "pending": False,
             "operation_id": None,
             "outcome_confirmed": False,
             "replay_recommended": False,
         }
     operation = runtime.operation(row["id"], principal, {"include_output": False})
+    result = operation.get("result") or {}
+    data = result.get("data") or {}
+    uncertain = data.get("outcome_confirmed") is False or data.get("state") == "needs_review"
+    terminal = operation["state"] in {"succeeded", "failed", "cancelled", "needs_review"}
+    confirmed = operation["state"] in {"succeeded", "failed", "cancelled"} and not uncertain
     return {
+        "transport_terminal": terminal,
+        "effect_confirmed": confirmed,
         "state": operation["state"],
         "pending": operation.get("pending", False),
         "operation_id": row["id"],
         "result": operation.get("result"),
         "error": operation.get("error"),
-        "outcome_confirmed": operation["state"] in {"succeeded", "failed", "cancelled"},
+        "outcome_confirmed": confirmed,
         "replay_recommended": False,
     }

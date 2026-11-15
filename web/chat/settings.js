@@ -99,7 +99,13 @@ function chatSettings(settings) {
   const state = $('#chat-setting-state');
   state.textContent = v.settingOp
     ? v.settingOp.state === 'error'
-      ? '设置失败'
+      ? v.settingOp.outcome === 'applied'
+        ? '实际已生效 · 原操作失败'
+        : v.settingOp.outcome === 'partial'
+          ? '部分生效'
+          : v.settingOp.outcome === 'rejected'
+            ? '未变更'
+            : '结果待核实'
       : v.settingOp.state === 'uncertain'
         ? '设置待核实'
         : '正在切换…'
@@ -113,7 +119,9 @@ function chatSettings(settings) {
             : '首条消息生效'
         : '';
   $('#chat-settings-retry').hidden =
-    !v.settingOp || !['error', 'uncertain'].includes(v.settingOp.state);
+    !v.settingOp ||
+    v.settingOp.outcome === 'applied' ||
+    !['error', 'uncertain'].includes(v.settingOp.state);
   state.parentElement.classList.toggle(
     'has-update',
     !!v.settingOp || !!v.pendingSettings || !!v.configForResume,

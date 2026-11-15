@@ -29,11 +29,12 @@ def queue_rows(store, runtime, principal, limit=100):
         LEFT JOIN devices d ON d.id=o.device_id WHERE """
         + clause
         + " AND o.state IN (?,?,?,?,?) ORDER BY o.created,o.id LIMIT ?",
-        (*args, *ACTIVE, 1000),
+        (*args, *ACTIVE, 1001),
     )
     observed = time.time()
     result = []
-    for row in rows:
+    scan_incomplete = len(rows) > 1000
+    for row in rows[:1000]:
         # SQL is only a coarse tenant/owner filter. Apply the full originating
         # operation policy (including computer scopes and project roles) before
         # projecting any metadata, then independently filter each blocker.
@@ -51,7 +52,11 @@ def queue_rows(store, runtime, principal, limit=100):
             break
     return {
         "operations": result[:limit],
-        "truncated": len(result) > limit,
+        "truncated": len(result) > limit or scan_incomplete,
+        "complete": not (len(result) > limit or scan_incomplete),
+        "completeness_reason": "bounded_authorization_scan"
+        if scan_incomplete
+        else ("visible_limit" if len(result) > limit else None),
         "observed_at": observed,
         "scope": "visible_space_operations",
         "diagnostics_available": principal.instance_admin,

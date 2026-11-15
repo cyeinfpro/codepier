@@ -302,6 +302,14 @@ function chatSyncChrome() {
           : v.active && v.mode === 'steer'
             ? '立即补充'
             : '发送消息');
+  const blocker = $('#chat-send-blocker');
+  if (blocker) {
+    blocker.textContent = blocked || (v.busy ? '正在确认发送，请稍候' : '');
+    blocker.hidden = !blocker.textContent;
+    send.setAttribute('aria-describedby', 'chat-send-blocker');
+    const hint = $('#chat-status');
+    if (hint) hint.hidden = !!blocker.textContent && hint.dataset.quiet === 'true';
+  }
   send.setAttribute(
     'aria-label',
     v.busy ? '正在确认发送' : v.active && v.mode === 'steer' ? '立即补充' : '发送消息',
@@ -575,7 +583,7 @@ function chatPalette() {
   dialog.className = 'chat-sheet chat-palette';
   dialog.setAttribute('aria-label', '快捷操作');
   dialog.innerHTML =
-    '<div class="chat-palette-search"><input type="search" aria-label="搜索操作与会话" placeholder="搜索操作、当前列表会话或页面…"><kbd>esc</kbd></div><div class="chat-palette-results"></div><footer>↑ ↓ 选择 <span>↵ 打开</span></footer>';
+    '<div class="chat-palette-search"><input type="search" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="chat-palette-results" aria-label="搜索操作与会话" placeholder="搜索操作、当前列表会话或页面…"><kbd>esc</kbd></div><div class="chat-palette-results" id="chat-palette-results" role="listbox" aria-label="操作与会话"></div><footer>↑ ↓ 选择 <span>↵ 打开</span></footer>';
   root.append(dialog);
   const input = dialog.querySelector('input'),
     results = dialog.querySelector('.chat-palette-results'),
@@ -650,6 +658,9 @@ function chatPalette() {
         label = document.createElement('span'),
         hint = document.createElement('small');
       b.type = 'button';
+      b.id = 'chat-palette-option-' + i;
+      b.setAttribute('role', 'option');
+      b.tabIndex = -1;
       label.textContent = a.label;
       hint.textContent = a.hint;
       b.append(label, hint);
@@ -660,7 +671,13 @@ function chatPalette() {
     highlight();
   };
   const highlight = () => {
-    [...results.children].forEach((b, i) => b.classList.toggle('active', i === active));
+    [...results.children].forEach((b, i) => {
+      b.classList.toggle('active', i === active);
+      b.setAttribute('aria-selected', String(i === active));
+    });
+    const selected = results.children[active];
+    if (selected) input.setAttribute('aria-activedescendant', selected.id);
+    else input.removeAttribute('aria-activedescendant');
     results.children[active]?.scrollIntoView({ block: 'nearest' });
   };
   input.oninput = render;

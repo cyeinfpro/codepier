@@ -39,14 +39,23 @@ window.CodePierConnectionSetup = (() => {
   }
   function renderStatus(result) {
     const last = result.last_actual_call;
-    return `<dl class="kv"><dt>Hub MCP</dt><dd>${esc(result.hub_mcp_url || '未知')}</dd>
+    const layers = result.layers || [];
+    const conclusion = layers.some(
+      (layer) => layer.status === 'blocked' || layer.status === 'offline',
+    )
+      ? '连接存在阻塞，请先处理下列检查项'
+      : layers.some((layer) => layer.status === 'stale' || layer.status === 'unknown')
+        ? '连接尚未完整确认，请按下一步核实'
+        : '已取得分层检查结果，实际调用证据见下方';
+    const diagnostics = `<dl class="kv"><dt>Hub MCP</dt><dd>${esc(result.hub_mcp_url || '未知')}</dd>
       <dt>当前空间 / 持有人</dt><dd>${esc(result.space.label)} / ${esc(result.owner.label)}</dd>
       <dt>当前服务版本 / 工具协议</dt><dd>${esc(result.server_info.version)} / ${esc(result.contract_protocol)}</dd>
       <dt>当前工具目录版本</dt><dd><code>${esc(result.catalog.current_effective_sha256 || '未知')}</code></dd>
       <dt>最近发送的目录版本</dt><dd><code>${esc(result.catalog.last_served_sha256 || '未知')}</code></dd>
       <dt>最近实际调用</dt><dd>${last ? esc(last.tool) + ' · 服务 ' + esc(last.server_info.version) + ' · 工具协议 ' + esc(last.tool_contract_version) + ' · ' + esc(timeText(last.observed_at)) : '未知'}</dd>
       <dt>ChatGPT 工具扫描 / 缓存</dt><dd>尚未确认</dd>
-      <dt>客户端目录版本</dt><dd>${result.catalog.client_report_matches_last_served == null ? '未知' : result.catalog.client_report_matches_last_served ? '与最近发送的版本相同' : '版本不同，请刷新 ChatGPT 连接后再测试'}</dd></dl>
+      <dt>客户端目录版本</dt><dd>${result.catalog.client_report_matches_last_served == null ? '未知' : result.catalog.client_report_matches_last_served ? '与最近发送的版本相同' : '版本不同，请刷新 ChatGPT 连接后再测试'}</dd></dl>`;
+    return `<h3>${esc(conclusion)}</h3><h4>下一步</h4><ul>${result.next_actions.map((item) => '<li>' + esc(item) + '</li>').join('') || '<li>暂无建议操作；不能据此推断客户端缓存已刷新。</li>'}</ul>
       <ol class="integration-steps">${result.layers
         .map(
           (
@@ -56,8 +65,7 @@ window.CodePierConnectionSetup = (() => {
         ${layer.read_capability ? ' · 读取能力：' + esc(layer.read_capability) : ''}</p>${layer.note ? '<p>' + esc(layer.note) + '</p>' : ''}</li>`,
         )
         .join('')}</ol>
-      <p>${esc(result.catalog.note)}</p>
-      <ul>${result.next_actions.map((item) => '<li>' + esc(item) + '</li>').join('')}</ul>`;
+      <details><summary>技术诊断与目录证据</summary>${diagnostics}<p>${esc(result.catalog.note)}</p></details>`;
   }
   function renderPreview(value) {
     return `<h3>${value.configuration_valid ? '配置文本校验通过，尚未运行' : '配置需修正'}</h3>

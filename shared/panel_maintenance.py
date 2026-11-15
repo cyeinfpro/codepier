@@ -41,9 +41,13 @@ class PanelMaintenance:
             else 0
         )
         native = len(getattr(getattr(self.runtime, "native", None), "pending", {}))
+        drain_ready = active and not (self.inflight or operations or native)
         return {
+            "drain_ready": drain_ready,
+            "ready_semantics": "maintenance_drain_only",
+            "phase": "inactive" if not active else ("drain_ready" if drain_ready else "draining"),
             "maintenance": active,
-            "ready": active and not (self.inflight or operations or native),
+            "ready": drain_ready,
         }
 
 

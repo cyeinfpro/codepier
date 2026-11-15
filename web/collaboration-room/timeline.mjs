@@ -87,12 +87,13 @@ export function messageProgress(message) {
     work_unavailable: '原工作已结束或不可继续',
   }[route.reason_code];
   const label =
+    progress.activity?.label ||
     (progress.state && progress.title) ||
     (route.state !== 'queued' && reason) ||
     (route.state === 'queued' && '待 dot 处理') ||
     progress.title;
   if (!label) return '';
-  return `<span data-cr-message-progress data-state="${E(progress.state || route.state || 'saved')}"${progress.reason ? ` title="${E(progress.reason)}"` : ''}>${E(label)}</span>`;
+  return `<span data-cr-message-progress data-state="${E(progress.state || route.state || 'saved')}"${progress.reason ? ` title="${E(progress.reason)}"` : ''}>${E(label)}${progress.attention?.label && progress.attention.label !== label && progress.attention.state !== 'none' ? `<span data-cr-attention="${E(progress.attention.state)}"> · ${E(progress.attention.label)}</span>` : ''}</span>`;
 }
 
 export function messageMarkup(message) {
@@ -318,6 +319,13 @@ export function deliveryMarkup(deliveries = [], display, truncated = false) {
 export function patchWindowHints() {
   if (!root) return;
   root.querySelector('[data-cr-older]').hidden = !state.cursor;
+  const windowNote = root.querySelector('[data-cr-message-window]');
+  windowNote.hidden = !state.messageHistory && !state.cursor;
+  windowNote.textContent = state.messageHistory
+    ? '当前为历史消息窗口，历史按页读取；回到最新可查看新消息。'
+    : state.cursor
+      ? '当前仅显示部分消息，历史按页读取。'
+      : '';
   const boundary = root.querySelector('[data-cr-history-end]');
   boundary.hidden = !state.messageHistory;
   boundary.style.minHeight = state.messageHistory
@@ -481,8 +489,8 @@ export function patchWorks() {
   const activeWorks = state.works.filter((work) => !finishedWork(work));
   const lead = activeWorks[0];
   const markup = lead
-    ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '进行中的工作')}</strong><small>${E(workStatus(lead))}${activeWorks.length > 1 ? ` · 共 ${activeWorks.length} 项` : ''}</small></span><span>${btn('work-detail', '查看', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '全部', '', 'cr-text-button')}</span>`
-    : `<span class="cr-work-bar-summary">${state.works.length} 项历史工作</span>${btn('work-list', '工作记录', '', 'cr-text-button')}`;
+    ? `<span class="cr-work-bar-summary"><span class="cr-work-indicator ${E(lead.state)}" aria-hidden="true"></span><strong>${E(lead.title || '进行中的工作')}</strong><small>${E(workStatus(lead))}${lead.display?.reason ? ` · ${E(lead.display.reason)}` : ''}${activeWorks.length > 1 ? ` · 共 ${activeWorks.length} 项` : ''}</small></span><span>${btn('work-detail', '查看', `data-id="${E(lead.id)}"`, 'cr-text-button')}${btn('work-list', '全部', '', 'cr-text-button')}</span>`
+    : `<span class="cr-work-bar-summary">${state.works.length ? `${state.works.length} 项历史工作` : '工作状态待核对'}</span>${btn('work-list', '工作记录', '', 'cr-text-button')}`;
   node.hidden = !state.works.length && state.worksComplete && !state.worksCursor;
   if (node._markup !== markup) {
     node.innerHTML = markup;
@@ -535,6 +543,9 @@ export function renderWorkList() {
     ${btn('work-detail', '查看', 'data-id="' + E(work.id) + '"', 'cr-text-button')}</article>`,
       )
       .join('') +
+    (!state.worksComplete
+      ? '<p class="cr-muted">仅显示当前窗口中的工作，历史记录可能尚未加载完整。</p>'
+      : '') +
     (state.worksCursor ? btn('more-work', '更早的工作', '', 'cr-full') : '') +
     (state.workHistory ? btn('latest-work', '回到最新', '', 'cr-full') : '');
   if (list._markup !== markup) {

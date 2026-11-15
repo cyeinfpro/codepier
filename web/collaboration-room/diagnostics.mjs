@@ -324,7 +324,7 @@ export async function loadContext(more = false) {
   }
 }
 
-export async function contextSource(id, sourceVersion) {
+export async function contextSource(id, sourceVersion, returnWork = '') {
   openPanel(
     'context-source',
     '原消息',
@@ -332,9 +332,18 @@ export async function contextSource(id, sourceVersion) {
   );
   const current = panel,
     owner = state.owner;
-  const result = await api(
-    store.path(current.roomId) + '/messages?message_id=' + encodeURIComponent(id),
-  );
+  let result;
+  try {
+    result = await api(
+      store.path(current.roomId) + '/messages?message_id=' + encodeURIComponent(id),
+    );
+  } catch (error) {
+    if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
+    root.querySelector('[data-cr-context-source]').innerHTML =
+      `<p>未能读取原消息；未重发消息或工作。</p>${btn(returnWork ? 'work-source' : 'context-source', '重新读取原消息', `data-id="${E(id)}" data-work-id="${E(returnWork)}"`, 'cr-text-button')}`;
+    panelError(error.message);
+    return;
+  }
   if (panel !== current || state.owner !== owner || state.roomId !== current.roomId) return;
   const message = result.message || result.messages?.find((item) => item.id === id);
   const box = root.querySelector('[data-cr-context-source]');
@@ -342,7 +351,7 @@ export async function contextSource(id, sourceVersion) {
     box.textContent = '原消息当前不可见，请刷新上下文。';
     return;
   }
-  box.innerHTML = `<p class="cr-muted">原消息 ${E(identifier(message.id))} · 当前版本 ${E(supplied(message.version))}</p>${Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">原消息已更新。此处是当前可读版本，摘要引用的旧版本需重新核对。</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '在房间中查看', `data-id="${E(id)}"`) : ''}${btn('context', '返回当前上下文')}`;
+  box.innerHTML = `<p class="cr-muted">原消息 ${E(identifier(message.id))} · 当前版本 ${E(supplied(message.version))}</p>${sourceVersion !== undefined && Number(sourceVersion) !== Number(message.version) ? '<p class="cr-info">原消息已更新。此处是当前可读版本，摘要引用的旧版本需重新核对。</p>' : ''}<div class="cr-message-body"></div>${message.attachments?.length ? `<div class="cr-message-files">${message.attachments.map(attachmentMarkup).join('')}</div>` : ''}${state.messages.some((item) => item.id === id) ? btn('locate-message', '在房间中查看', `data-id="${E(id)}"`) : ''}${returnWork ? btn('work-detail', '返回工作详情', `data-id="${E(returnWork)}"`) : btn('context', '返回当前上下文')}`;
   const body = box.querySelector('.cr-message-body');
   if (typeof chatRichMarkdown === 'function') chatRichMarkdown(body, message.body_text || '');
   else body.textContent = message.body_text || '';

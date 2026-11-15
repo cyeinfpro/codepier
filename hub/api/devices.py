@@ -9,6 +9,7 @@ import uuid
 from fastapi import Request
 from shared.agent_lifecycle import DEVICE_ACTIONS
 from shared.crypto import token
+from shared.release_source import UpdateError, version_tuple
 from shared.util import DevError, VERSION, normalize_url
 from hub.api.models import DeviceCreate, DeviceUpdate
 
@@ -58,10 +59,18 @@ def device_rows(store, runtime, principal):
             reason = "当前 Agent 版本尚未声明一键管理能力，请重新执行一次安装命令完成基础升级"
         elif not row["online"]:
             reason = "设备上线后才能执行更新、重启或卸载"
+        try:
+            installed, target = version_tuple(version), version_tuple(VERSION)
+            version_relation = (
+                "older" if installed < target else ("newer" if installed > target else "equal")
+            )
+        except (UpdateError, ValueError, TypeError):
+            version_relation = "unknown"
         row["agent"] = {
             "version": version,
             "target_version": VERSION,
-            "update_available": bool(version and version != VERSION),
+            "update_available": version_relation == "older",
+            "version_relation": version_relation,
             "managed": bool(management.get("managed")),
             "service": bool(management.get("service")),
             "service_kind": str(management.get("service_kind") or "")[:40],

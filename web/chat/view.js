@@ -41,7 +41,7 @@ async function chatPage() {
   <div class="chat-send-actions"><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
   <section id="chat-options" class="chat-options" role="region" aria-label="会话设置"><header class="chat-options-head"><div><strong>会话设置</strong></div><button type="button" id="chat-options-close" class="chat-square" aria-label="关闭会话设置">${chatIcon('close')}</button></header>
-  <div id="chat-new-context" class="chat-new-context"><label>工作项目<select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><div class="chat-cli-segmented" role="group" aria-label="新对话使用的 CLI">${[
+  <div id="chat-new-context" class="chat-new-context"><label class="chat-setting-field"><span>工作项目</span><select id="chat-project" aria-label="项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === c.project ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select></label><div class="chat-cli-shortcuts"><span class="chat-setting-caption">CLI 快捷选择</span><div class="chat-cli-segmented" role="group" aria-label="新对话使用的 CLI">${[
     ['pi', 'Pi'],
     ['codex', 'Codex'],
     ['claude', 'Claude Code'],
@@ -50,12 +50,12 @@ async function chatPage() {
       ([id, label]) =>
         `<button type="button" data-chat-cli="${id}" aria-pressed="${id === c.provider}">${label}</button>`,
     )
-    .join('')}</div><span id="chat-target-info"></span></div>
-  <div class="chat-config-bar"><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button><label class="chat-cli-label"><span>CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
-  <button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div>
+    .join('')}</div></div><span id="chat-target-info"></span></div>
+  <div class="chat-config-bar"><div class="chat-setting-field"><label for="chat-model-picker">模型</label><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button></div><label class="chat-cli-label chat-setting-field"><span>会话 CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label chat-setting-field">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
+  <div class="chat-setting-field"><label for="chat-cwd-button">工作目录</label><button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div></div>
   <div class="chat-option-tools"><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button></div></section></div>
   <div class="chat-setting-feedback"><span id="chat-setting-state" class="chat-setting-state"></span><button type="button" id="chat-settings-retry" class="chat-text-button" hidden>重试设置</button></div>
-  <div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试</button></div></div>
+  <p id="chat-send-blocker" class="chat-popover-help" role="status" hidden></p><div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试</button></div></div>
   </div>
   <aside id="chat-inspector" class="chat-inspector" hidden><header><strong>会话详情</strong><button id="chat-inspector-close" class="chat-square" aria-label="关闭会话详情">${chatIcon('close')}</button></header><nav class="chat-inspector-tabs">${[
     ['overview', '概览'],

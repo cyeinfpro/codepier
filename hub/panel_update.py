@@ -26,6 +26,7 @@ class CheckUpdate(BaseModel):
 
 
 class ApplyUpdate(CheckUpdate):
+    expected_space_id: str | None = Field(default=None, min_length=1, max_length=128)
     update_agents: bool = False  # Old cached panels retain their original confirmation scope.
     version: str = Field(pattern=r"^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$")
     release_id: int = Field(gt=0)
@@ -226,7 +227,15 @@ def make_panel_update_router(auth, runtime, client=None):
 
     async def submit(request, body, action):
         principal = auth.instance(request, True)
-        payload = body.model_dump(exclude={"confirmation", "update_agents"})
+        if (
+            action == "apply"
+            and body.expected_space_id is not None
+            and body.expected_space_id != principal.space_id
+        ):
+            raise DevError(
+                "UPDATE_SPACE_CHANGED", "更新确认所属空间已变化，请回到原空间核实原请求", 409
+            )
+        payload = body.model_dump(exclude={"confirmation", "update_agents", "expected_space_id"})
         if action in {"apply", "rollback"} and body.confirmation != body.version:
             raise DevError("CONFIRMATION_REQUIRED", "请明确确认所检查的目标版本", 409)
         payload.update(current_version=VERSION, actor=principal.actor)
@@ -249,6 +258,12 @@ def make_panel_update_router(auth, runtime, client=None):
                 (body.idempotency_key,),
             )
             if not consent:
+                if body.expected_space_id is None:
+                    raise DevError(
+                        "UPDATE_SPACE_CONFIRMATION_REQUIRED",
+                        "首次升级 Agent 必须确认当前空间；请刷新面板重新确认，原操作可继续读取",
+                        409,
+                    )
                 previous = await bridge.request(
                     "GET", "/status?" + urlencode({"request_key": body.idempotency_key})
                 )
@@ -266,7 +281,9 @@ def make_panel_update_router(auth, runtime, client=None):
                     )
         if action == "apply":
             created = await runtime.store.run(
-                rollouts.confirm, body.model_dump(exclude={"confirmation"}), principal
+                rollouts.confirm,
+                body.model_dump(exclude={"confirmation", "expected_space_id"}),
+                principal,
             )
         try:
             data = await bridge.request("POST", "/" + action, payload)

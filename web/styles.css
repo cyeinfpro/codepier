@@ -1419,7 +1419,7 @@ kbd {
 .field small {
   font-size: var(--ui-text-sm);
 }
-input:not([type='checkbox']),
+input:not([type='checkbox'], [type='radio']),
 select,
 textarea {
   width: 100%;
@@ -1434,10 +1434,52 @@ textarea {
     background var(--ui-motion-fast) var(--ui-ease),
     border-color var(--ui-motion-fast) var(--ui-ease);
 }
-input:not([type='checkbox']),
+input:not([type='checkbox'], [type='radio']),
 select {
   min-height: var(--ui-control-height);
 }
+/* Preserve native select interaction while giving the indicator a stable inset.
+   Multiple/listbox selects keep their platform rendering and intrinsic height. */
+select:not([multiple]):not([size]) {
+  min-height: var(--ui-control-height);
+  line-height: 1.4;
+  padding-block: 8px;
+  padding-inline: 12px var(--ui-select-end-space);
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: var(--ui-select-arrow-image);
+  background-repeat: no-repeat;
+  background-position: right var(--ui-select-arrow-inset) center;
+  background-size: var(--ui-select-arrow-size);
+  vertical-align: middle;
+}
+@media (forced-colors: active) {
+  select:not([multiple]):not([size]) {
+    appearance: auto;
+    -webkit-appearance: auto;
+    background-image: none;
+    forced-color-adjust: auto;
+  }
+}
+input[type='radio'] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  margin: 0;
+  flex: none;
+  accent-color: var(--ui-accent);
+}
+@media (max-width: 760px), (pointer: coarse) {
+  select:not([multiple]):not([size]) {
+    min-height: var(--ui-touch-target);
+  }
+  label:has(> input[type='radio']) {
+    min-height: var(--ui-touch-target);
+  }
+}
+
 input:hover:not(:disabled):not([readonly]),
 select:hover:not(:disabled),
 textarea:hover:not(:disabled):not([readonly]) {
@@ -1447,7 +1489,7 @@ input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--ui-accent);
-  background: var(--ui-raised);
+  background-color: var(--ui-raised);
 }
 input:focus-visible,
 select:focus-visible,
@@ -3442,7 +3484,7 @@ button.ui-busy {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
   }
-  input:not([type='checkbox']),
+  input:not([type='checkbox'], [type='radio']),
   select,
   textarea {
     font-size: var(--ui-text-input);
@@ -3679,7 +3721,7 @@ button.ui-busy {
     width: var(--ui-touch-target);
     height: var(--ui-touch-target);
   }
-  .field :is(input:not([type='checkbox']), select, textarea),
+  .field :is(input:not([type='checkbox'], [type='radio']), select, textarea),
   .appearance-control select,
   .command-search input {
     min-height: var(--ui-touch-target);
@@ -3729,8 +3771,8 @@ button.ui-busy {
   font-size: var(--ui-text-sm);
   font-weight: var(--ui-weight-semibold);
 }
-.field > :is(input:not([type='checkbox']), select, textarea),
-.form-section :is(input:not([type='checkbox']), select, textarea) {
+.field > :is(input:not([type='checkbox'], [type='radio']), select, textarea),
+.form-section :is(input:not([type='checkbox'], [type='radio']), select, textarea) {
   border-radius: var(--ui-radius-md);
 }
 .management-page .notice {
@@ -4348,7 +4390,7 @@ html {
 .icon-btn {
   border-radius: var(--ui-radius-small);
 }
-:where(.field, .form-section) :is(input:not([type='checkbox']), select, textarea) {
+:where(.field, .form-section) :is(input:not([type='checkbox'], [type='radio']), select, textarea) {
   border-color: var(--ui-control-border);
 }
 .notice {

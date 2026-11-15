@@ -87,7 +87,9 @@ window.CodePierFileImportSettings = (() => {
       input =
         '<select name="' +
         key +
-        '_mode"><option value="inherit" ' +
+        '_mode" id="file-import-' +
+        key +
+        '-mode"><option value="inherit" ' +
         (value === null ? 'selected' : '') +
         '>继承上级配置</option><option value="explicit" ' +
         (value !== null ? 'selected' : '') +
@@ -116,7 +118,9 @@ window.CodePierFileImportSettings = (() => {
             '</div>';
     }
     return (
-      '<div class="settings-import-field"><label class="field"><strong>' +
+      '<div class="settings-import-field"><label class="field"' +
+      (!boolean ? ' for="file-import-' + key + '-mode"' : '') +
+      '><strong>' +
       esc(labels[key]) +
       '</strong>' +
       (boolean ? input : '') +
@@ -127,6 +131,9 @@ window.CodePierFileImportSettings = (() => {
       ' · ' +
       esc(sources[item.source] || item.source) +
       (item.state === 'invalid' ? ' · 配置无效，已限制' : '') +
+      (item.blocked_by?.includes('streaming_enabled')
+        ? '<br>已配置转发，但流式接收尚未启用，因此当前不生效。请先核对“流式接收”设置。'
+        : '') +
       '<br>继承值：' +
       esc(text(item.inherited_value)) +
       ' · ' +

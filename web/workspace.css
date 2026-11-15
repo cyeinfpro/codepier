@@ -828,9 +828,9 @@
   }
   .mobile-dock {
     position: fixed;
-    right: max(10px, env(safe-area-inset-right));
+    right: max(16px, env(safe-area-inset-right));
     bottom: max(10px, env(safe-area-inset-bottom));
-    left: max(10px, env(safe-area-inset-left));
+    left: max(16px, env(safe-area-inset-left));
     z-index: var(--ui-z-dock);
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -993,8 +993,8 @@
     flex: 1 1 100%;
   }
   .mobile-dock {
-    right: max(6px, env(safe-area-inset-right));
-    left: max(6px, env(safe-area-inset-left));
+    right: max(16px, env(safe-area-inset-right));
+    left: max(16px, env(safe-area-inset-left));
   }
 }
 @media (prefers-reduced-motion: no-preference) and (hover: hover) {
@@ -1473,4 +1473,418 @@
 }
 .workspace-project-actions .tool-menu-items > .actions {
   display: contents;
+}
+
+/* Explicit work choices precede optional statistics at every viewport. */
+#page[data-page='overview'] > .editorial-board {
+  grid-template-rows: auto;
+  align-content: start;
+}
+#page[data-page='overview'] .workspace-recent-projects {
+  grid-column: 1 / -1;
+  grid-row: auto;
+  order: 0;
+}
+#page[data-page='overview'] .workspace-operations {
+  grid-column: 1 / -1;
+  grid-row: auto;
+  order: 1;
+}
+#page[data-page='overview'] .overview-summary {
+  grid-column: 1 / -1;
+  grid-row: auto;
+  order: 2;
+}
+.overview-summary > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: var(--ui-weight-semibold);
+}
+.overview-summary:not([open]) > :not(summary) {
+  display: none;
+}
+.work-target {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  #page[data-page='workbench'][data-work-pane='output'] > .workspace {
+    display: none;
+  }
+  #page[data-page='workbench']:not([data-work-pane='output']) > .terminal,
+  #page[data-page='workbench']:not([data-work-pane='output']) > .taskbar {
+    display: none;
+  }
+}
+
+#page[data-page='overview'] .overview-continue,
+#page[data-page='overview'] .overview-attention {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+#page[data-page='overview'] .overview-continue {
+  order: -2;
+}
+#page[data-page='overview'] .overview-attention {
+  order: -1;
+}
+.overview-continue .panel-body {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.overview-continue p {
+  flex: 1 1 240px;
+  overflow-wrap: anywhere;
+}
+.overview-attention .project-mini-main p {
+  overflow-wrap: anywhere;
+}
+@media (min-width: 901px) {
+  .workspace-project-collection[data-layout='list'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .workspace-project-collection[data-layout='list'] .workspace-project-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(220px, 2fr);
+    gap: 12px;
+  }
+  .workspace-project-collection[data-layout='list'] .workspace-project-actions {
+    grid-column: 1 / -1;
+  }
+}
+.project-search > [role='group'] {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#task-new-output {
+  margin: 8px 12px;
+}
+#task-output-coverage {
+  padding: 0 12px;
+}
+
+/* Keep the authorized current space visible, including narrow navigation. */
+.topbar .breadcrumb > span.topbar-space:not(#breadcrumb-page) {
+  display: inline-block;
+  min-width: 0;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .topbar-space {
+    max-width: 6em;
+    flex: 0 1 auto;
+  }
+  .mobile-work-tabs {
+    flex-wrap: wrap;
+  }
+  .mobile-work-tabs button {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Main-path layout: shared content rails, compact disclosure rows and
+   explicit control groups, rather than accidental flex wrapping. */
+.overview-continue .panel-head {
+  padding: 16px 20px 0;
+  min-height: 0;
+}
+.overview-continue .panel-body {
+  padding: 12px 20px 16px;
+}
+.overview-continue p {
+  margin: 0;
+}
+#page[data-page='overview'] details.overview-summary {
+  padding: 0;
+}
+.overview-summary > summary {
+  min-height: 56px;
+  padding: 16px 20px;
+  gap: 8px;
+}
+.overview-summary > summary::before {
+  content: '▸';
+  flex: none;
+}
+.overview-summary[open] > summary::before {
+  content: '▾';
+}
+.overview-summary[open] > :not(summary) {
+  margin-inline: 20px;
+}
+.workspace-project-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+.workspace-project-facts div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+}
+.workspace-project-actions {
+  padding-inline: 20px;
+}
+.topbar .breadcrumb > span.topbar-space-separator:not(#breadcrumb-page) {
+  display: inline;
+  flex: none;
+}
+@media (max-width: 640px) {
+  .page-head.workbench-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .workbench-head > .work-controls {
+    grid-column: 1 / -1;
+    width: 100%;
+    gap: 10px;
+  }
+  .workbench-head .work-target {
+    flex-basis: 100%;
+  }
+  .workbench-head .work-controls > .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 8px;
+    margin-left: 0;
+  }
+  .workbench-head .work-controls > .actions > .btn,
+  .workbench-head .work-controls > .actions > .tool-menu,
+  .workbench-head .work-controls > .actions > .tool-menu > summary {
+    width: 100%;
+    min-width: 0;
+  }
+  .workbench-head .work-controls > .actions > .btn,
+  .workbench-head .work-controls > .actions > .tool-menu > summary {
+    justify-content: center;
+    min-height: 44px;
+  }
+  #settings-center .settings-groups {
+    width: 100%;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  #settings-center .settings-groups > button {
+    flex: 1 1 70px;
+  }
+  .topbar-space {
+    max-width: 7em;
+  }
+}
+
+.workspace-project-row {
+  --project-inset: 20px;
+}
+.workspace-project-head,
+.workspace-project-actions {
+  padding-inline: var(--project-inset);
+}
+.workspace-project-path,
+.workspace-project-facts {
+  margin-inline: var(--project-inset);
+}
+.workspace-project-search {
+  justify-content: space-between;
+  gap: 16px;
+}
+.project-view-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+}
+.project-view-controls #project-count {
+  margin: 0;
+}
+.project-view-controls > [role='group'] {
+  display: flex;
+  gap: 8px;
+}
+#page[data-page='overview'] .onboarding-compact {
+  padding: 0;
+  margin-top: 16px;
+}
+#page[data-page='overview'] .onboarding-compact > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px 20px;
+  min-height: 56px;
+  list-style: none;
+}
+#page[data-page='overview'] .onboarding-compact > summary::before {
+  content: '▸';
+  flex: none;
+}
+#page[data-page='overview'] .onboarding-compact[open] > summary::before {
+  content: '▾';
+}
+#page[data-page='overview'] .onboarding-compact > summary::-webkit-details-marker {
+  display: none;
+}
+@media (max-width: 640px) {
+  #page[data-page='collaboration'] {
+    padding-inline: 0;
+  }
+  .workspace-project-row {
+    --project-inset: 16px;
+  }
+  .workspace-project-search > .project-view-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+/* Keep quantity and view mode atomic; wrap the whole group, not its labels. */
+.workspace-project-search {
+  flex-wrap: wrap;
+}
+.workspace-project-search > label {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+/* The overview is a six-record preview. Let all preview rows determine its
+   height; the page scrolls instead of cutting a row inside a fixed viewport. */
+#page[data-page='overview'] .workspace-operations {
+  flex: none;
+  min-height: max-content;
+}
+#page[data-page='overview'] .workspace-operations .table-scroll {
+  flex: none;
+  height: auto;
+  max-height: none;
+  overflow-y: visible;
+}
+
+/* Overview is a vertically scrolling document, not a viewport-sized board.
+   Its grid must contribute the full intrinsic height to sibling disclosures. */
+#page[data-page='overview'] > .editorial-board {
+  flex: none;
+  height: auto;
+  min-height: max-content;
+  grid-template-rows: none;
+  grid-auto-rows: max-content;
+}
+.project-view-controls {
+  max-width: 100%;
+}
+.project-view-controls #project-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.project-view-controls > [role='group'] {
+  flex: none;
+}
+.workspace-project-actions {
+  flex-wrap: wrap;
+}
+
+#settings-center .settings-card .panel-head {
+  padding: 16px 20px 8px;
+  min-height: 0;
+}
+#settings-center .settings-card .panel-body {
+  padding: 8px 20px 20px;
+}
+#settings-center .settings-card .settings-details {
+  margin-top: 16px;
+  padding-top: 0;
+}
+#settings-center .settings-card .settings-details > summary {
+  min-height: 32px;
+  display: list-item;
+}
+
+/* Sidebar preferences are one field family; role belongs to account context,
+   not to each space name. Native selects preserve OS keyboard/picker behavior. */
+.sidebar .side-bottom {
+  display: grid;
+  gap: 12px;
+  padding: 16px 4px 4px;
+}
+.sidebar .side-bottom .iam-space-switch,
+.sidebar .side-bottom > .appearance-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+.sidebar .side-bottom .iam-space-switch > label,
+.sidebar .side-bottom .sidebar-field-label,
+.sidebar .side-bottom > .appearance-control > span {
+  font-size: var(--ui-text-xs);
+  line-height: 1.4;
+  font-weight: var(--ui-weight-medium);
+  color: var(--ui-muted);
+}
+.sidebar .side-bottom select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  margin: 0;
+  padding: 10px var(--ui-select-end-space) 10px 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-control-radius);
+  background-color: var(--ui-panel);
+  color: var(--ui-text);
+  font-size: var(--ui-text-sm);
+  line-height: 1.4;
+}
+.sidebar-space-value {
+  display: block;
+  padding: 10px 12px;
+  min-height: 44px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-control-radius);
+  overflow-wrap: anywhere;
+}
+.sidebar .side-bottom .transport {
+  margin: 0;
+  padding: 4px 0;
+  font-size: var(--ui-text-xs);
+}
+.sidebar .side-bottom .user-box {
+  margin: 0;
+  padding: 12px 0 0;
+  gap: 10px;
+}
+.sidebar-account-role {
+  display: inline-block;
+  margin-top: 3px;
+  color: var(--ui-muted);
+  line-height: 1.4;
+}
+@media (max-height: 760px) {
+  .sidebar {
+    overflow-y: auto;
+  }
+  .sidebar > .nav {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
+  }
+  .sidebar .side-bottom {
+    margin-top: 16px;
+  }
 }

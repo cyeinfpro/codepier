@@ -153,3 +153,55 @@ def test_saved_semantics_never_claim_applied_before_agent_report(panel):
     info["scheduler"].pop("resource_semantics")
     app.state.store.execute("UPDATE devices SET info=? WHERE id='device'", (json.dumps(info),))
     assert client.get(path).json()["resource_semantics"]["effective"] is None
+
+def test_bounded_authorization_scan_never_claims_empty_complete(panel, monkeypatch):
+    app, client = panel
+    runtime = app.state.runtime
+    for number in range(1001):
+        operation(app, f"hidden-{number:04}")
+    def denied(*args, **kwargs):
+        raise DevError("FORBIDDEN", "synthetic private operation", 403)
+    monkeypatch.setattr(runtime, "operation_row", denied)
+    value = client.get("/api/operations/queue").json()
+    assert value["operations"] == []
+    assert value["complete"] is False and value["truncated"] is True
+    assert value["completeness_reason"] == "bounded_authorization_scan"
+    assert "hidden-" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("state", ["unknown", "reconnecting", "cancelling"])
+def test_old_execution_event_does_not_claim_current_running(panel, state):
+    app, client = panel
+    operation(app, "uncertain", state=state)
+    app.state.store.execute(
+        "INSERT INTO operation_events(operation_id,source,seq,stage,at,detail) VALUES (?,?,?,?,?,?)",
+        ("uncertain", "agent", 1, "executing", 100, "{}"))
+    value = client.get("/api/operations/queue").json()["operations"][0]
+    assert value["queue_stage"] == "unknown"
+    assert value["last_observed_stage"] == "executing"
+    assert value["last_observed_at"] == 100
+
+
+@pytest.mark.parametrize("version,relation", [("0.0.1", "older"), ("999999.0.0", "newer"), ("unparseable", "unknown")])
+def test_agent_version_relationship_does_not_offer_downgrade(panel, version, relation):
+    app, client = panel
+    app.state.store.execute("UPDATE devices SET info=? WHERE id='device'", (json.dumps({"version": version}),))
+    agent = client.get("/api/devices").json()["devices"][0]["agent"]
+    assert agent["version_relation"] == relation
+    assert agent["update_available"] is (relation == "older")
+
+
+@pytest.mark.parametrize("count,truncated", [(2, False), (10001, True)])
+def test_audit_export_reports_bounded_page_completeness(panel, monkeypatch, count, truncated):
+    import hub.api.activity as activity
+    app, client = panel
+    def rows(store, principal, limit, offset, *args):
+        assert limit == 10001
+        return [{"id": n, "at": 1, "actor": "panel:test", "action": "test",
+                 "target": "", "status": "ok", "detail": {}} for n in range(count)]
+    monkeypatch.setattr(activity, "audit_rows", rows)
+    response = client.get("/api/audit-export?offset=5")
+    assert response.status_code == 200
+    assert response.headers["X-Export-Truncated"] == str(truncated).lower()
+    assert response.headers["X-Export-Rows"] == str(min(count, 10000))
+    assert response.headers["X-Export-Next-Offset"] == ("10005" if truncated else "")

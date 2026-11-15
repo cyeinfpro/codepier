@@ -39,7 +39,9 @@ function theme(context) {
 function decode(op) {
   if (op.pending) return null;
   if (op.state !== 'succeeded' || op.result?.ok !== true) {
-    throw new Error(op.result?.error?.message || (typeof op.error === 'string' ? op.error : '') || '原操作未成功；不能当作空结果。');
+    const error = new Error(op.result?.error?.message || (typeof op.error === 'string' ? op.error : '') || '原操作未成功；不能当作空结果。');
+    error.operationId = op.operation_id || op.id;
+    throw error;
   }
   return {...op.result.data, operation_id: op.operation_id || op.id};
 }

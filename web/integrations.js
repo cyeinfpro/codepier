@@ -150,7 +150,7 @@ window.CodePierIntegrations = (() => {
         '围绕当前项目检查、验证与继续工作。',
         action('refresh', '重新检查'),
       ) +
-      `<section class="integration-center" id="integration-center"><div class="integration-context"><label>工作项目<select id="i-project" aria-label="工作项目">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === v.project ? 'selected' : ''}>${esc(p.alias)} · ${esc(p.device_name || '')} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select></label><label>操作目录<select id="i-workspace" aria-label="操作目录"><option value="">原项目目录</option>${v.trees
+      `<section class="integration-center" id="integration-center"><div class="integration-context"><label>工作项目<select id="i-project" aria-label="工作项目" title="${esc(p ? `${p.alias} · ${p.device_name || ''} · ${p.online ? '在线' : '离线'}` : '尚未选择项目')}">${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === v.project ? 'selected' : ''}>${esc(p.alias)} · ${esc(p.device_name || '')} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select></label><label>操作目录<select id="i-workspace" aria-label="操作目录" title="${esc(directory)}"><option value="">原项目目录</option>${v.trees
         .filter((t) => t.state === 'ready')
         .map(
           (t) =>

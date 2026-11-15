@@ -2,7 +2,7 @@
    Single-Surface Composer (No Inner Tool Boxes or Divider Lines)
    ------------------------------------------------------------------------ */
 .cr-composer {
-  width: min(820px, calc(100% - 56px));
+  width: min(var(--cr-content-width), calc(100% - 2 * var(--cr-gutter)));
   margin: 6px auto 20px;
   border: 1px solid color-mix(in srgb, var(--cr-line) 85%, transparent);
   border-radius: var(--ui-radius-xl);
@@ -23,7 +23,7 @@
   display: flex;
   align-items: flex-end;
   gap: 12px;
-  padding: 12px 14px 4px 18px;
+  padding: 12px 12px 4px;
 }
 
 .cr-composer textarea {
@@ -71,7 +71,7 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 2px 16px 10px 12px;
+  padding: 2px 12px 10px;
   color: var(--cr-muted);
   font-size: var(--ui-text-xs);
 }
@@ -159,7 +159,8 @@
 .cr-recipient select {
   border: 0;
   color: var(--ui-text);
-  background: transparent;
+  background-color: transparent;
+  padding-inline-end: var(--ui-select-end-space, 44px);
   max-width: 190px;
   font-size: var(--ui-text-xs);
   font-weight: var(--ui-weight-medium);

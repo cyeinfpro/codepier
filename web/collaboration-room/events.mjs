@@ -446,6 +446,7 @@ export async function click(button) {
   } else if (action === 'more-context') await loadContext(true);
   else if (action === 'refresh-context') await loadContext();
   else if (action === 'context-source') await contextSource(id, button.dataset.sourceVersion);
+  else if (action === 'work-source') await contextSource(id, undefined, button.dataset.workId);
   else if (action === 'correct-context') {
     const value = panel?.context;
     if (

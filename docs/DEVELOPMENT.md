@@ -32,6 +32,7 @@ Playwright 1.64.1 在本机 macOS 26.3.1 / arm64 的默认 Chromium headless she
 npm --prefix web/mcp-apps run format:check
 npm --prefix web/mcp-apps run build
 .venv/bin/python scripts/build_integration_assets.py
+.venv/bin/python scripts/build_integration_assets.py --check
 .venv/bin/python scripts/build_web_assets.py
 .venv/bin/python scripts/build_web_assets.py --check
 ```
@@ -39,6 +40,10 @@ npm --prefix web/mcp-apps run build
 主动排版使用 npm run format。ES Module 公共层在 web/core，已有功能通过生成的 CP bundle 渐进接入；不要手工编辑 bundle.js、index.html 或 assets-manifest.json。页面模板 index.source.html 不手写版本号。修改任何入口资源后重新构建并校验哈希，否则启动或发布检查应失败，而不是发布混合版本资源。
 
 协作房间源码在 `web/collaboration-room/*.mjs`，共享视图状态和生命周期集中于 `index.mjs`。聊天源码在 `web/chat/*.js`，按 `manifest.json` 顺序组合并保留现有全局接口；两个 `styles/manifest.json` 维持 CSS 层叠顺序。修改源码后运行 `npm --prefix web/mcp-apps run build`，再生成面板资源清单。不要直接编辑生成的 `web/collaboration-room.js`、`web/chat.js` 或对应的两个 CSS 文件；`node web/mcp-apps/build-room.mjs --check` 验证生成物一致性。
+
+集成资产的 `--check` 只读取并比较确定性生成结果，缺失或漂移时退出 1，不修改文件内容或 mtime；修正源后用无 `--check` 命令重建。文案源范围由 `scripts/ui-copy-sources.json` 管理，覆盖 Web HTML/JS/MJS/TS、扩展、MCP Apps 与安装脚本，排除 vendor/依赖和生成物；`--coverage` 输出实际扫描路径。安装器诊断保留为上下文审阅项，不能把扫描无错误当成全产品文案认证。
+
+视觉审计使用每轮新的证据目录，例如 `TMPDIR=/tmp .venv/bin/python scripts/ui_comfort_audit.py --output .work/ui-YYYYMMDD-HHMMSS --check`；非空目录会拒绝覆盖。报告含源 SHA、开始/结束时间、源是否变化、可计算的文字对比与横向溢出门禁。复杂背景明确列为未检查，测量通过不等于 WCAG 或真实平台验收。运行期间源码变化会使 check 失败，整合冻结后再运行。
 
 文案检查 `node scripts/check-ui-copy.mjs --check` 阻止明确的连续否定、装饰英文等问题；`--audit` 另列操作记录、权限、设备与目录用词供场景检查。工程诊断、真实协议名称及容量单位可以保留，不把模式命中数当成产品缺陷数。
 

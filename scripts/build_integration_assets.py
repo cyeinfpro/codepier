@@ -2,6 +2,7 @@
 """Build deterministic public integration assets from explicit source files."""
 
 from __future__ import annotations
+import argparse
 import hashlib
 import io
 import json
@@ -22,7 +23,7 @@ EXTENSION_FILES = (
 )
 
 
-def build():
+def render_assets():
     source = ROOT / "web/browser-extension"
     buffer = io.BytesIO()
     entries = {}
@@ -45,12 +46,34 @@ def build():
     outputs = {"browser-extension.zip": buffer.getvalue(), "integration-guide.md": guide}
     info = {}
     for name, raw in outputs.items():
-        (ROOT / "web" / name).write_bytes(raw)
         info[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
     result = {"outputs": info, "extension_sources": entries, "contains_credentials": False}
-    (ROOT / "web/integration-assets.json").write_text(json.dumps(result, indent=2) + "\n")
+    outputs["integration-assets.json"] = (json.dumps(result, indent=2) + "\n").encode()
+    return outputs, result
+
+
+def build(*, check: bool = False):
+    """Render once; check mode never writes, including when outputs are missing."""
+    outputs, result = render_assets()
+    drift = []
+    for name, raw in outputs.items():
+        path = ROOT / "web" / name
+        if check:
+            if not path.is_file() or path.read_bytes() != raw:
+                drift.append(name)
+        else:
+            path.write_bytes(raw)
+    if check:
+        result = {**result, "check": True, "drift": drift, "matches": not drift}
     return result
 
 
 if __name__ == "__main__":
-    print(json.dumps(build(), indent=2))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check", action="store_true", help="Report generated drift without writing"
+    )
+    options = parser.parse_args()
+    result = build(check=options.check)
+    print(json.dumps(result, indent=2))
+    raise SystemExit(1 if options.check and not result["matches"] else 0)

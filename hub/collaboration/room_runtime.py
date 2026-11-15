@@ -1157,9 +1157,10 @@ class RoomRuntime:
             )
             work = (
                 self.store.one(
-                    """SELECT g.state, EXISTS (
-                    SELECT 1 FROM room_goal_publications p WHERE p.goal_id=g.id
-                    AND p.intent_revision=COALESCE(i.intent_revision,1)) AS published,
+                    """SELECT g.state, (
+                    SELECT json_extract(m.body,'$.outcome') FROM room_goal_publications p
+                    JOIN collaboration_messages m ON m.id=p.message_id WHERE p.goal_id=g.id
+                    AND p.intent_revision=COALESCE(i.intent_revision,1)) AS publication_outcome,
                     EXISTS (SELECT 1 FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
                         LEFT JOIN room_native_work_assignments a ON a.work_id=c.work_item_id
                         WHERE c.goal_id=g.id AND COALESCE(a.intent_revision,1)=COALESCE(i.intent_revision,1)
@@ -1172,7 +1173,12 @@ class RoomRuntime:
                 if body.get("work_intent_change", True)
                 else None
             )
-            if work and (work["published"] or work["state"] in {"completed", "succeeded"}):
+            if work and work["publication_outcome"] in {"partial", "blocked"}:
+                state, reason = "needs_attention", "work_" + work["publication_outcome"]
+            elif work and (
+                work["publication_outcome"] == "succeeded"
+                or work["state"] in {"completed", "succeeded"}
+            ):
                 state, reason = "completed", ""
             elif work and work["state"] in {"cancelled", "expired", "paused"}:
                 state, reason = (
@@ -1214,6 +1220,8 @@ class RoomRuntime:
             "work_unavailable": "原工作已结束",
             "input_partially_handled": "已回复，仍有待处理事项",
             "work_admitted": "工作已接收，等待执行",
+            "work_partial": "部分完成，仍有未完成事项",
+            "work_blocked": "已回复，工作仍受阻",
             "work_paused": "工作已暂停",
             "work_cancelled": "工作已取消",
             "work_expired": "工作授权已到期",
@@ -1230,7 +1238,21 @@ class RoomRuntime:
         )
         return (
             {**route, "state": state, "reason_code": reason} if route else {},
-            {"state": state, "title": title, "reason_code": reason},
+            {
+                "state": state,
+                "title": title,
+                "reason_code": reason,
+                "activity": {"state": state, "label": title},
+                "attention": {
+                    "state": "needs_attention"
+                    if reason in {"work_partial", "work_blocked", "input_partially_handled"}
+                    else "none",
+                    "label": title
+                    if reason in {"work_partial", "work_blocked", "input_partially_handled"}
+                    else "",
+                    "next_action": None,
+                },
+            },
         )
 
     @projection

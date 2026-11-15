@@ -7,7 +7,8 @@ window.CodePierQueue = (() => {
     controller = null,
     live = true,
     stageFilter = '',
-    truncated = false;
+    truncated = false,
+    completenessReason = '';
   const pending = new Set();
   const rows = new Map();
   const stages = { hub_queue: 'Hub 待投递', agent_waiting: 'Agent 等资源', running: '运行中' };
@@ -196,13 +197,21 @@ window.CodePierQueue = (() => {
       '<div class="queue-list" tabindex="0" role="region" aria-label="活动操作列表">' +
       (items.map(card).join('') ||
         '<div class="queue-empty"><strong>' +
-          (stageFilter ? '此阶段暂无操作' : '当前没有活动操作') +
+          (truncated
+            ? '已读取范围内暂无匹配操作'
+            : stageFilter
+              ? '此阶段暂无操作'
+              : '当前没有活动操作') +
           '</strong><span>' +
           (stageFilter ? '可切换到全部活动查看其他操作。' : '新的活动操作将在同步后显示。') +
           '</span></div>') +
       '</div>' +
       (truncated
-        ? '<p class="form-note queue-limit">仅展示最早的 100 个可见活动操作，不代表全部队列。</p>'
+        ? '<p class="form-note queue-limit">' +
+          (completenessReason === 'bounded_authorization_scan'
+            ? '可见范围扫描尚未完整；已读取结果不代表全部队列。'
+            : '仅展示最早的 100 个可见活动操作，不代表全部队列。') +
+          '</p>'
         : '')
     );
   }
@@ -247,7 +256,8 @@ window.CodePierQueue = (() => {
       ) {
         rows.clear();
         list(data.operations).forEach((item) => rows.set(item.id, item));
-        truncated = !!data.truncated;
+        truncated = !!data.truncated || data.complete === false;
+        completenessReason = data.completeness_reason || '';
         paint();
       }
       root.querySelector('[data-queue-status]').textContent =

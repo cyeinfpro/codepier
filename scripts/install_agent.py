@@ -2136,7 +2136,11 @@ def install_source(
                 status="service_pending",
                 last_error="",
             )
-        install_cli_links(base)
+        try:
+            install_cli_links(base)
+        except Exception as exc:
+            update_management(base, status="cli_error", last_error=str(exc)[:500])
+            raise
         try:
             start_service(
                 base,
@@ -2254,13 +2258,44 @@ def main():
         return
     if args.status:
         if not (base / "config.json").exists():
-            print(json.dumps({"installed": False}))
+            print(
+                json.dumps(
+                    {
+                        "installed": False,
+                        "config_present": False,
+                        "service_state": "not_verified",
+                        "hub_state": "unknown",
+                    }
+                )
+            )
             return
         current = read_installed_config(base)
+        try:
+            management = json.loads((base / "management.json").read_text(encoding="utf-8"))
+            if not isinstance(management, dict):
+                management = {}
+        except (OSError, ValueError):
+            management = {}
         print(
             json.dumps(
                 {
                     "installed": True,
+                    "config_present": True,
+                    "installation_stage": management.get("status", "unknown"),
+                    "stage_observed_at": management.get("updated_at"),
+                    "service_state": "not_verified",
+                    "service_observed_at": None,
+                    "post_install_attention": {
+                        "cli_error": [
+                            "命令入口安装未完成；保留配对与运行时，核对安装日志后修复入口。"
+                        ],
+                        "service_error": [
+                            "后台服务配置未完成；保留配对与运行时，核对服务安装日志。"
+                        ],
+                        "service_pending": ["后台服务配置仍待完成；先核对原安装结果。"],
+                    }.get(management.get("status"), []),
+                    "hub_state": "unknown",
+                    "status_note": "配置存在不代表后台服务正在运行或 Hub 已在线；安装阶段仅为最后一次记录。",
                     "name": current.get("name", ""),
                     "device_id": current["device_id"],
                     "version": runtime_version(base / "runtime"),
@@ -2576,7 +2611,11 @@ def main():
             status="service_pending" if not args.no_service else "ready",
             last_error="",
         )
-        install_cli_links(base)
+        try:
+            install_cli_links(base)
+        except Exception as exc:
+            update_management(base, status="cli_error", last_error=str(exc)[:500])
+            raise
         if not args.no_service:
             try:
                 start_service(base, python)
@@ -2601,7 +2640,6 @@ def main():
                 raise ValueError(
                     "Service setup failed; pairing and runtime were preserved."
                 ) from exc
-        install_cli_links(base)
         print("Agent installed: " + str(base))
         print(
             "Manage: "

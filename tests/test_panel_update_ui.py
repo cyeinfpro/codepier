@@ -763,3 +763,101 @@ def test_update_confirmation_stays_bound_to_original_space(update_browser, stack
         assert errors == []
     finally:
         page.close()
+
+@pytest.mark.parametrize("change", ["space", "role"])
+def test_deferred_install_does_not_cross_scope_or_authority(update_browser, stack, change):
+    browser, _ = update_browser
+    state = ready()
+    candidate = copy.deepcopy(state["candidate"])
+    state.update(candidate=None, update_available=False, discovery_candidate=candidate, discovery_available=True)
+    def post(route, calls):
+        assert calls[-1]["path"].endswith("/check")
+        state.update(busy=True, request_found=True, operation={
+            "id": "b" * 32, "kind": "check", "state": "running", "message": "核验所选发布", "events": []})
+        route.fulfill(status=202, json={"operation": state["operation"]})
+    page, calls, errors = open_settings(browser, stack, state, post_handler=post, clock=True)
+    try:
+        page.click("#panel-update-apply")
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
+        expect(page.locator("#panel-update-state")).to_contain_text("核验所选发布")
+        original_space = page.evaluate("S.space_id")
+        page.evaluate("""change => {
+            if (change === 'space') S.space_id = 'another-space';
+            else S.session.instance_admin = false;
+            CodePierPanelUpdate.detach();
+        }""", change)
+        state.update(busy=False, candidate=candidate, update_available=True)
+        state["operation"].update(state="succeeded")
+        page.clock.fast_forward(10000)
+        if change == "space":
+            page.evaluate("id => { S.space_id=id; CodePierPanelUpdate.resume(); }", original_space)
+            page.clock.fast_forward(10000)
+        assert len(calls) == 1
+        assert errors == []
+    finally:
+        page.close()
+
+@pytest.mark.parametrize("change", ["space", "role"])
+def test_late_check_response_cannot_continue_apply_after_authority_change(update_browser, stack, change):
+    browser, _ = update_browser
+    state = ready()
+    candidate = copy.deepcopy(state["candidate"])
+    state.update(candidate=None, update_available=False, discovery_candidate=candidate, discovery_available=True)
+    held = []
+    holding = {"enabled": False}
+    def get(route):
+        if holding["enabled"]:
+            held.append(route)
+        else:
+            route.fulfill(json=copy.deepcopy(state))
+    def post(route, calls):
+        holding["enabled"] = True
+        state.update(busy=True, request_found=True, operation={
+            "id": "e" * 32, "kind": "check", "state": "running", "message": "核验中", "events": []})
+        route.fulfill(status=202, json={"operation": state["operation"]})
+    page, calls, errors = open_settings(browser, stack, state, post_handler=post, get_handler=get, clock=True)
+    try:
+        page.click("#panel-update-apply")
+        page.locator('dialog.ui-sheet button[type="submit"]').click()
+        for _ in range(30):
+            if held:
+                break
+            page.wait_for_timeout(25)
+        assert held
+        page.evaluate("""change => {
+            if (change === 'space') S.space_id = 'another-space';
+            else S.session.instance_admin = false;
+        }""", change)
+        state.update(busy=False, candidate=candidate, update_available=True)
+        state["operation"].update(state="succeeded")
+        holding["enabled"] = False
+        for route in held:
+            route.fulfill(json=copy.deepcopy(state))
+        page.wait_for_timeout(100)
+        page.clock.fast_forward(10000)
+        assert len(calls) == 1
+        page.evaluate("CodePierPanelUpdate.detach()")
+        assert errors == []
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("space_label", ["研发空间", "", "<img src=x onerror=alert(1)>"])
+def test_update_intent_summary_names_bound_space_target_and_version(update_browser, stack, space_label):
+    browser, _ = update_browser
+    page, calls, errors = open_settings(browser, stack, ready())
+    try:
+        space = page.evaluate("S.space_id")
+        page.evaluate("""label => {
+            S.session.spaces = label ? [{id: S.space_id, label}] : [];
+        }""", space_label)
+        page.click("#panel-update-apply")
+        summary = page.locator("dialog.ui-sheet .ui-sheet-command")
+        expect(summary).to_contain_text("确认空间：" + (space_label + "（" + space + "）" if space_label else space))
+        expect(summary).to_contain_text("目标：此 Hub 实例的面板、Hub 和 Agent 分发文件")
+        expect(summary).to_contain_text("版本：" + VERSION + " → 1.11.0")
+        expect(summary.locator("img")).to_have_count(0)
+        page.locator("dialog.ui-sheet .ghost").click()
+        assert calls == [] and errors == []
+    finally:
+        page.close()
