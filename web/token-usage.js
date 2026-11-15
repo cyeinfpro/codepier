@@ -261,7 +261,7 @@ window.CodePierTokenUsage = (() => {
           '–' +
           formatTokens(total.high) +
           (calls ? ' · 经验估算，历史可能不完整' : ' · 情景估算，历史可能不完整')
-      : '未包含完整对话上下文，非实际账单。';
+      : '未包含完整对话上下文，仅供估算参考。';
     return (
       '<div class="token-dashboard-metrics">' +
       '<div class="token-dashboard-metric is-total"><span>' +
@@ -269,9 +269,9 @@ window.CodePierTokenUsage = (() => {
       '</span><strong title="' +
       number(n) +
       ' Token">' +
-      (n === null ? '未记录' : '约 ' + formatTokens(n)) +
+      (n === null ? '未记录' : formatTokens(n)) +
       '</strong></div>' +
-      '<div class="token-dashboard-metric is-cost"><span>参考费用 · USD（非账单）</span><strong>' +
+      '<div class="token-dashboard-metric is-cost"><span>参考费用 · USD</span><strong>' +
       escape(formatUSD(amount)) +
       '</strong></div></div>' +
       '<p class="token-dashboard-note token-dashboard-context">' +
@@ -572,16 +572,11 @@ window.CodePierTokenUsage = (() => {
       return (
         '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span></div><p role="status">' +
         (data?.loading ? '正在读取统计…' : '统计暂不可用') +
-        '</p><details class="token-usage-help"><summary>统计说明</summary><p>实际模型用量未提供。</p></details></div>'
+        '</p><p class="token-detail-note">实际模型用量未提供。</p></div>'
       );
     const value = data.summary,
-      period = data.period || {},
-      filters = data.filters || {};
+      period = data.period || {};
     const title = { today: '今日', '7d': '近 7 天', '30d': '近 30 天' }[period.key] || '所选时间';
-    const panels =
-      dashboardState?.authority === data.authority_key ? dashboardState?.panels || {} : {};
-    const panel = (name, label) =>
-      `<details class="token-detail-panel" data-token-panel="${name}"${panels[name] ? ' open' : ''}><summary>${label}</summary>`;
     const select = (name, label, choices, selected, all = '') =>
       '<label>' +
       label +
@@ -598,16 +593,15 @@ window.CodePierTokenUsage = (() => {
       '<div class="token-dashboard" data-token-dashboard>' +
       `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span>` +
       (Number.isFinite(data.freshness?.as_of)
-        ? '<span class="token-dashboard-freshness">统计截至 ' +
+        ? '<span class="token-dashboard-freshness" title="统计最多每30秒更新">更新于 ' +
           escape(dateText(data.freshness.as_of, period.timezone)) +
-          '，最多每 30 秒更新。</span>'
+          '</span>'
         : '') +
       '</div>' +
       headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
-      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情<span class="token-summary-hint">趋势、筛选与明细</span></summary>` +
-      panel('settings', '筛选与估价设置') +
-      '<div class="token-dashboard-filters">' +
+      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情<span class="token-summary-hint">时间范围与趋势</span></summary>` +
+      '<div class="token-dashboard-filters token-primary-filter">' +
       select(
         'period',
         '时间范围',
@@ -618,78 +612,16 @@ window.CodePierTokenUsage = (() => {
         ],
         period.key,
       ) +
-      select('project', '授权项目', data.options?.projects || [], filters.project, '全部授权项目') +
-      select(
-        'connection',
-        '授权连接标签',
-        data.options?.connections || [],
-        filters.connection,
-        '全部授权连接',
-      ) +
-      select('session', '匿名窗口', data.options?.sessions || [], filters.session, '全部匿名窗口') +
-      '</div>' +
-      pricingDetails(
-        modelEstimate(value)?.reference_cost || value.reference_cost,
-        true,
-        !!panels.pricing,
-      ) +
-      '</details>' +
-      panel('breakdown', '请求与响应明细') +
-      (modelEstimate(value)
-        ? '<p><strong>工具文本 Token</strong>：约 ' +
-          formatTokens(combined(value).estimated_tokens) +
-          '。仅参数与返回，不包含历史重读。</p>'
-        : '') +
-      metricDetails(value, 'input', 'MCP 请求参数') +
-      metricDetails(value, 'output', 'MCP 响应文本') +
-      (callEstimate(value)
-        ? '<p><strong>推断模型轮次</strong>：' +
-          number(value.call_estimate.grouped_tool_rounds) +
-          ' 轮工具交互 + ' +
-          number(value.call_estimate.provisional_tails) +
-          ' 次临时收尾；新调用到来后重算，不累加旧收尾。</p>' +
-          (integer(contextEstimate(value)?.total?.estimated_tokens) !== null
-            ? '<p><strong>上下文重放参考</strong>：约 ' +
-              formatTokens(contextEstimate(value)?.total?.estimated_tokens) +
-              ' Token。与按调用估算分别比较，不相加。</p>'
-            : '')
-        : '') +
-      '</details>' +
-      panel('trend', '用量趋势') +
+      '</div><section class="token-trend-section" aria-label="用量趋势"><h4>用量趋势</h4>' +
       trendHTML(data) +
-      '</details>' +
-      `<details class="token-usage-help token-detail-panel" data-token-panel="help"${panels.help ? ' open' : ''}><summary>统计说明</summary>` +
-      '<p>' +
+      '</section>' +
+      '<p class="token-detail-note">' +
       escape(dateText(period.start, period.timezone)) +
       ' 至 ' +
       escape(dateText(period.end, period.timezone)) +
       ' · ' +
       escape(period.timezone || 'UTC') +
-      ' · 当前保留的授权记录 ' +
-      number(value.wire_attempts) +
-      ' 次工具调用。</p>' +
-      (callEstimate(value)
-        ? '<p>按调用估算：采用 Astra 编程调用样本，每轮输入约 ' +
-          number(value.call_estimate.calibration?.input_tokens_per_round) +
-          '、输出约 ' +
-          number(value.call_estimate.calibration?.output_tokens_per_round) +
-          ' Token；这是完整输入输出先验，大段可见内容只提高估算，不重复叠加整个先验。训练样本 ' +
-          number(value.call_estimate.calibration?.training_calls) +
-          ' 次，源模型不是已识别的当前执行模型。文字未记录时仍可按次数推算；实际 token 与缓存未知。</p><p>工具批量、并行和同目标轮询的归组只是情景假设，推断模型轮次不是实测 API 次数。样本验证使用真实 API 次数，不代表当前项目精度。范围不是统计置信区间。</p>'
-        : '') +
-      (contextEstimate(value)
-        ? '<p>上下文重放对照：固定底座约12K，近8轮完整保留，更早历史每轮保留98%，约64K触发压缩。工具调用和轮询合并只是情景假设，不能当作实测模型轮数。范围不是统计置信区间。</p>'
-        : '') +
-      '<p>实际模型用量未提供：没有可核验的模型实际用量接口。工具文本部分的二进制文件/图片字节不计入，' +
-      '工具定义只在上下文情景底座中近似计入。已识别的敏感字段和链接不计入工具文本；重试仍有传输文本成本，不是完整对话账单。粗略范围不是统计置信区间。</p>' +
-      '<p>连接名称是授权标签，不代表已识别宿主产品；匿名窗口只表示相关性，可能因重启变化。</p>' +
-      '<p>仅显示有保留调用的时间桶，缺失不补零；没有调用记录的历史不会补算。活动最多保留 ' +
-      number(data.coverage?.activity_row_limit) +
-      ' 条，估算最长保留 ' +
-      number(data.coverage?.estimate_retention_days) +
-      ' 天，所选时间段可能不完整。算法 ' +
-      escape(value.version || VERSION) +
-      '。</p></details><button type="button" class="secondary token-export" data-token-export>导出统计 JSON</button></details>' +
+      '。仅统计已记录部分；估算仅供参考，缺失不补零。</p></details>' +
       '<p class="token-dashboard-status" role="status" aria-live="polite"></p></div>'
     );
   }

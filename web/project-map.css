@@ -1,0 +1,131 @@
+#project-map-center {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+#project-map-center .map-controls,
+#project-map-center .map-results {
+  padding: 20px;
+}
+.map-fields {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.map-fields label {
+  display: grid;
+  gap: 8px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.map-fields input,
+.map-fields select {
+  width: 100%;
+  min-width: 0;
+}
+.map-target,
+.map-status,
+.map-results code {
+  overflow-wrap: anywhere;
+}
+.map-status:empty {
+  display: none;
+}
+.map-result-head,
+.map-entry-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.map-result-head h2,
+.map-entry-head h3 {
+  margin: 0;
+}
+.map-entry-head h3 {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: var(--ui-text-md);
+}
+.project-map-entries,
+.map-audit-rows {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+}
+.project-map-entries > li {
+  padding: 16px 0;
+  border-top: 1px solid var(--ui-border);
+}
+.project-map-entries p,
+.map-entry-facts {
+  overflow-wrap: anywhere;
+}
+.project-map-entries summary {
+  padding: 8px 0;
+  cursor: pointer;
+}
+.map-entry-facts {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 8px 16px;
+}
+.map-entry-facts dd {
+  margin: 0;
+}
+.map-audit > .form-note,
+.map-audit > [role='alert'],
+.map-audit-rows {
+  margin-inline: 20px;
+}
+.map-audit-rows li,
+.map-audit-rows li > div {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.map-audit-rows li {
+  justify-content: space-between;
+  padding: 12px 0;
+  border-top: 1px solid var(--ui-border);
+}
+@media (max-width: 600px) {
+  #project-map-center .map-controls,
+  #project-map-center .map-results {
+    padding: 16px;
+  }
+  .map-fields label {
+    flex-basis: 100%;
+  }
+  .map-fields > button {
+    flex: 1 1 140px;
+  }
+  .map-entry-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .map-entry-facts dt {
+    margin-top: 8px;
+    color: var(--ui-muted);
+  }
+}
+
+/* Target choice and map search are separate aligned rows, not a wrapping toolbar. */
+.map-target-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+.map-query-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  margin-top: 16px;
+}
+@media (max-width: 600px) {
+  .map-target-fields,
+  .map-query-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

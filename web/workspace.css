@@ -1475,7 +1475,7 @@
   display: contents;
 }
 
-/* Explicit work choices precede optional statistics at every viewport. */
+/* Overview follows DOM order: always-visible statistics, then work choices. */
 #page[data-page='overview'] > .editorial-board {
   grid-template-rows: auto;
   align-content: start;
@@ -1488,22 +1488,12 @@
 #page[data-page='overview'] .workspace-operations {
   grid-column: 1 / -1;
   grid-row: auto;
-  order: 1;
+  order: 0;
 }
 #page[data-page='overview'] .overview-summary {
   grid-column: 1 / -1;
   grid-row: auto;
-  order: 2;
-}
-.overview-summary > summary {
-  cursor: pointer;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  font-weight: var(--ui-weight-semibold);
-}
-.overview-summary:not([open]) > :not(summary) {
-  display: none;
+  order: 0;
 }
 .work-target {
   overflow-wrap: anywhere;
@@ -1519,26 +1509,12 @@
   }
 }
 
-#page[data-page='overview'] .overview-continue,
 #page[data-page='overview'] .overview-attention {
   grid-column: 1 / -1;
   min-width: 0;
 }
-#page[data-page='overview'] .overview-continue {
-  order: -2;
-}
 #page[data-page='overview'] .overview-attention {
-  order: -1;
-}
-.overview-continue .panel-body {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.overview-continue p {
-  flex: 1 1 240px;
-  overflow-wrap: anywhere;
+  order: 0;
 }
 .overview-attention .project-mini-main p {
   overflow-wrap: anywhere;
@@ -1596,34 +1572,6 @@
 
 /* Main-path layout: shared content rails, compact disclosure rows and
    explicit control groups, rather than accidental flex wrapping. */
-.overview-continue .panel-head {
-  padding: 16px 20px 0;
-  min-height: 0;
-}
-.overview-continue .panel-body {
-  padding: 12px 20px 16px;
-}
-.overview-continue p {
-  margin: 0;
-}
-#page[data-page='overview'] details.overview-summary {
-  padding: 0;
-}
-.overview-summary > summary {
-  min-height: 56px;
-  padding: 16px 20px;
-  gap: 8px;
-}
-.overview-summary > summary::before {
-  content: '▸';
-  flex: none;
-}
-.overview-summary[open] > summary::before {
-  content: '▾';
-}
-.overview-summary[open] > :not(summary) {
-  margin-inline: 20px;
-}
 .workspace-project-facts {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1886,5 +1834,27 @@
   }
   .sidebar .side-bottom {
     margin-top: 16px;
+  }
+}
+
+/* Restore the original overview pair: operations left, projects right.
+   Statistics stay first; a real attention notice gets its own full row. */
+@media (min-width: 901px) {
+  #page[data-page='overview'] .workspace-operations {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  #page[data-page='overview'] .workspace-recent-projects {
+    grid-column: 2;
+    grid-row: 2;
+  }
+  #page[data-page='overview'] .overview-attention {
+    grid-row: 2;
+  }
+  #page[data-page='overview'] .editorial-board:has(> .overview-attention) > .workspace-operations,
+  #page[data-page='overview']
+    .editorial-board:has(> .overview-attention)
+    > .workspace-recent-projects {
+    grid-row: 3;
   }
 }

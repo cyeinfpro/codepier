@@ -6,17 +6,32 @@ import asyncio
 import csv
 import io
 import json
+from typing import Literal
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi import Query, Request
 from fastapi.responses import Response, StreamingResponse
 from shared.util import DevError
 from hub import iam
+from hub.operation_categories import operation_category_sql
 
 
-def operation_rows(store, principal, limit=40, offset=0, status="", project="", source=""):
+def operation_rows(
+    store,
+    principal,
+    limit=40,
+    offset=0,
+    status="",
+    project="",
+    source="",
+    category="all",
+    *,
+    count_only=False,
+):
     clause, args = iam.private_sql(principal, "o.")
-    where = [clause]
+    category_clause, category_args = operation_category_sql(category, "o.")
+    where = [clause, category_clause]
+    args.extend(category_args)
     if not principal.admin:
         where.append(
             "(o.project_id IS NULL OR o.project_id IN (%s))"
@@ -32,10 +47,16 @@ def operation_rows(store, principal, limit=40, offset=0, status="", project="", 
     if source in {"mcp", "panel"}:
         where.append("o.actor LIKE ?")
         args.append(source + ":%")
+    if count_only:
+        return store.one(
+            "SELECT count(*) AS n FROM operations o WHERE " + " AND ".join(where), args
+        )["n"]
     sql = "SELECT o.id,o.device_id,o.project_id,o.actor,o.tool,o.state,o.created,o.updated,o.error,o.attempts,o.accepted_at,o.deadline,o.cancel_requested,o.transport_error,p.alias,d.name AS device_name FROM operations o LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    return store.all(sql + " ORDER BY o.created DESC LIMIT ? OFFSET ?", (*args, limit, offset))
+    return store.all(
+        sql + " ORDER BY o.created DESC,o.id DESC LIMIT ? OFFSET ?", (*args, limit, offset)
+    )
 
 
 def audit_rows(
@@ -80,13 +101,28 @@ def make_activity_router(context: HubContext):
         status: str = "",
         project: str = "",
         source: str = "",
+        category: Literal["all", "tools", "project_map"] = "all",
     ):
         principal = auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
-        rows = operation_rows(store, principal, limit + 1, offset, status, project, source)
+        with store.transaction(immediate=False):
+            rows = operation_rows(
+                store, principal, limit + 1, offset, status, project, source, category
+            )
+            total = operation_rows(
+                store,
+                principal,
+                status=status,
+                project=project,
+                source=source,
+                category=category,
+                count_only=True,
+            )
         return {
             "operations": rows[:limit],
             "next_offset": offset + limit if len(rows) > limit else None,
+            "total": total,
+            "category": category,
         }
 
     # Exact queue route must precede the operation-id route.

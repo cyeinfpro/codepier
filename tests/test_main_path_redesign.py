@@ -37,8 +37,9 @@ def test_main_path_order_and_mobile_output_preserves_editor(stack, chat_browser_
     try:
         _login(p, stack)
         _navigate(p, "overview")
-        expect(p.locator(".overview-summary")).not_to_have_attribute("open")
-        assert p.locator(".workspace-recent-projects").bounding_box()["y"] < p.locator(".overview-summary").bounding_box()["y"]
+        assert p.locator(".overview-summary").evaluate("e=>e.tagName") == "SECTION"
+        expect(p.locator(".overview-summary .workspace-stats")).to_be_visible()
+        assert p.locator(".overview-summary").bounding_box()["y"] < p.locator(".workspace-recent-projects").bounding_box()["y"]
         _navigate(p, "workbench")
         p.locator('[data-action="read-file"][data-path="src/main.py"]').click()
         expect(p.locator("#code-editor")).to_be_visible()
@@ -66,10 +67,67 @@ def test_main_path_order_and_mobile_output_preserves_editor(stack, chat_browser_
         expect(p.locator("#task-new-output")).to_be_hidden()
         p.evaluate("void navigate('overview')")
         p.get_by_role("button", name="继续离开", exact=True).click()
-        expect(p.locator(".overview-continue")).to_contain_text("有未保存草稿")
-        p.get_by_role("button", name="返回工作台", exact=True).click()
+        expect(p.locator(".overview-continue")).to_have_count(0)
+        _navigate(p, "workbench")
         expect(p.locator("#code-editor")).to_have_value("draft survives\\n")
         assert p.evaluate("S.work.dirty")
 
     finally:
         context.close()
+
+
+import pytest
+
+@pytest.mark.parametrize('width,theme', [(390,'light'),(390,'dark'),(1440,'light'),(1440,'dark')])
+def test_overview_statistics_always_first(stack, chat_browser_pool, width, theme):
+    from pathlib import Path
+    context=chat_browser_pool('chromium').new_context(viewport={'width':width,'height':1000 if width==1440 else 844})
+    page=context.new_page()
+    try:
+        def synthetic_paths(route):
+            response=route.fetch()
+            data=response.json()
+            for i,project in enumerate(data.get('projects',[])):
+                project['root']='/workspace/demo/project-'+str(i+1)
+            route.fulfill(response=response,json=data)
+        page.route('**/api/overview',synthetic_paths)
+        _login(page,stack)
+        page.evaluate('t=>CodePierAppearance.setPreference(t)',theme)
+        _navigate(page,'overview')
+        section=page.locator('.overview-summary')
+        expect(section.locator('h2')).to_have_text('工作区统计与用量')
+        assert section.evaluate('e=>e.tagName')=='SECTION'
+        assert section.evaluate('e=>e.parentElement.firstElementChild===e')
+        expect(section.locator('.workspace-stats')).to_be_visible()
+        expect(section.locator('.workspace-stat')).to_have_count(4)
+        assert section.locator(':scope > summary').count()==0
+        assert section.bounding_box()['y']<page.locator('.workspace-recent-projects').bounding_box()['y']
+        expect(page.locator('.overview-continue')).to_have_count(0)
+        projects=page.locator('.workspace-recent-projects').bounding_box()
+        operations=page.locator('.workspace-operations').bounding_box()
+        if width > 900:
+            assert abs(projects['y']-operations['y'])<=1
+            assert operations['x']+operations['width']<=projects['x']
+            assert operations['width']>projects['width']
+        else:
+            assert projects['y']+projects['height']<=operations['y']+1
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+        folder=Path('.work/overview-pair-restored');folder.mkdir(parents=True,exist_ok=True)
+        page.screenshot(path=str(folder/f'{theme}-{width}.png'),full_page=True)
+        page.screenshot(path=str(folder/f'{theme}-{width}.jpg'),type='jpeg',quality=35,full_page=True)
+        # A real attention row must not split the desktop card pair or overlap it.
+        page.evaluate("""() => {
+            S.overview.recent_operations = [{id:'attention-fixture',state:'needs_review',alias:'Review fixture',tool:'exec',created_at:0}];
+            document.querySelector('#page').innerHTML = overviewHTML();
+        }""")
+        expect(page.locator('.overview-attention')).to_be_visible()
+        projects=page.locator('.workspace-recent-projects').bounding_box()
+        operations=page.locator('.workspace-operations').bounding_box()
+        attention=page.locator('.overview-attention').bounding_box()
+        assert attention['y']+attention['height']<=projects['y']+1
+        assert attention['y']+attention['height']<=operations['y']+1
+        if width>900:
+            assert abs(projects['y']-operations['y'])<=1
+        else:
+            assert projects['y']+projects['height']<=operations['y']+1
+    finally:context.close()

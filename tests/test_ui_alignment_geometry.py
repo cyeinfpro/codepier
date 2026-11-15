@@ -119,16 +119,11 @@ def test_real_page_alignment(stack, width, height, scheme):
             page.screenshot(path=str(evidence / (key+"-settings.png")), full_page=True)
 
             page.evaluate("navigate('overview')")
-            expect(page.locator("details.overview-summary > summary")).to_be_visible()
-            summaries = [geometry(page.locator("details.overview-summary > summary"))]
+            expect(page.locator(".overview-summary-heading h2")).to_have_text("工作区统计与用量")
+            expect(page.locator(".overview-summary .workspace-stats")).to_be_visible()
+            assert page.locator(".editorial-board > :first-child").get_attribute("class").find("overview-summary") >= 0
             onboarding = page.locator(".onboarding-compact > summary")
-            if onboarding.count():
-                summaries.append(geometry(onboarding))
-                for edge in ("contentLeft", "contentRight", "paddingLeft", "paddingRight"):
-                    close(summaries[0][edge], summaries[1][edge], "overview summary "+edge)
-                for item in summaries:
-                    assert item["height"] >= 56, item
-            metrics["summaries"] = summaries
+            metrics["statistics"] = geometry(page.locator(".overview-summary"))
             table = page.locator(".workspace-operations .table-scroll")
             expect(table).to_be_visible()
             table_metrics = table.evaluate("""n => {
@@ -141,16 +136,15 @@ def test_real_page_alignment(stack, width, height, scheme):
                 assert table_metrics["lastBottom"] <= table_metrics["bottom"]+1, table_metrics
             metrics["overview_last_row"] = table_metrics
             recent_panel = geometry(page.locator(".workspace-operations"))
-            following_summary = geometry(page.locator("details.overview-summary > summary"))
-            assert recent_panel["bottom"] <= following_summary["top"]+1, (
-                "recent operations panel overlaps following summary",
-                recent_panel, following_summary)
+            statistics = geometry(page.locator(".overview-summary"))
+            assert statistics["bottom"] <= recent_panel["top"]+1, (
+                "statistics overlap subsequent operations", statistics, recent_panel)
             if onboarding.count():
                 onboarding_box = geometry(onboarding)
                 assert recent_panel["bottom"] <= onboarding_box["top"]+1, (
                     "recent operations panel overlaps onboarding summary",
                     recent_panel, onboarding_box)
-            metrics["overview_sibling_clearance"] = [recent_panel, following_summary]
+            metrics["overview_sibling_clearance"] = [statistics, recent_panel]
             page.screenshot(path=str(evidence / (key+"-overview.png")), full_page=True)
 
             if width <= 640:

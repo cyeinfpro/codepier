@@ -1,4 +1,5 @@
 """New context contract renders compactly without replacing wire detail semantics."""
+
 import json
 from pathlib import Path
 import subprocess
@@ -19,13 +20,18 @@ process.stdout.write(JSON.stringify(context.window.CodePierTokenUsage[input.op](
 
 
 def render(data, operation="dashboard"):
-    result = subprocess.run(["node", "-e", NODE], cwd=ROOT,
-                            input=json.dumps({"op": operation, "value": data}),
-                            capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        ["node", "-e", NODE],
+        cwd=ROOT,
+        input=json.dumps({"op": operation, "value": data}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     return json.loads(result.stdout)
 
 
-def test_default_context_headline_range_and_folded_wire_details():
+def test_default_context_headline_range_without_secondary_wire_details():
     data = synthetic_dashboard()
     html = render(data)
     assert "含上下文 Token" in html
@@ -33,9 +39,10 @@ def test_default_context_headline_range_and_folded_wire_details():
     assert "范围 131.85K–363.3K" in html
     assert "GPT-6 Astra · 输入缓存 95% 假设" in html
     assert "历史可能不完整" in html
-    assert "<strong>工具文本 Token</strong>：约 11K" in html
-    assert "模型输入（含上下文）" in html
-    assert 'data-token-filters><summary>查看详情' in html
+    assert "<strong>工具文本 Token</strong>" not in html
+    assert "模型输入（含上下文）" in html  # retained trend legend
+    assert "data-token-panel=" not in html
+    assert "data-token-filters><summary>查看详情" in html
     assert "未包含完整对话上下文" not in html
 
 
@@ -45,13 +52,18 @@ def test_actual_usage_injection_is_never_rendered_as_context():
     data["summary"]["context_estimate"]["actual_usage"] = {"total_tokens": 987654321}
     html = render(data)
     assert "987654321" not in html
-    assert "实际模型用量未提供" in html
-    assert "不是统计置信区间" in html
+    assert "估算仅供参考" in html
+    assert "缺失不补零" in html
 
 
-@pytest.mark.parametrize("field,value", [
-    ("kind", "actual"), ("version", "future-context"), ("scope", "whole-host-bill"),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("kind", "actual"),
+        ("version", "future-context"),
+        ("scope", "whole-host-bill"),
+    ],
+)
 def test_unrecognized_context_falls_back_to_explicit_wire_label(field, value):
     data = synthetic_dashboard()
     data["summary"]["context_estimate"][field] = value
@@ -78,7 +90,10 @@ def test_context_export_keeps_kind_scope_and_wire_breakdown_separate():
     export = json.loads(render(data, "exportJSON"))
     assert export["kind"] == "mcp_context_scenario_estimate"
     assert export["schema_version"] == 3
-    assert export["summary"]["context_estimate"]["reference_cost"]["scope"] == "context_scenario_equivalent"
+    assert (
+        export["summary"]["context_estimate"]["reference_cost"]["scope"]
+        == "context_scenario_equivalent"
+    )
     assert export["summary"]["reference_cost"]["scope"] == "visible_tool_text_equivalent"
     assert "contributions" not in json.dumps(export)
 
@@ -87,4 +102,4 @@ def test_context_cost_cannot_borrow_incompatible_wire_cost_scope():
     data = synthetic_dashboard()
     data["summary"]["context_estimate"]["reference_cost"]["scope"] = "visible_tool_text_equivalent"
     html = render(data)
-    assert '<span>参考费用 · USD（非账单）</span><strong>未记录</strong>' in html
+    assert "<span>参考费用 · USD</span><strong>未记录</strong>" in html

@@ -39,7 +39,7 @@
 }
 .token-dashboard-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
   gap: 0.75rem 1.5rem;
   margin: 0.65rem 0 0.3rem;
   align-items: start;
@@ -60,14 +60,15 @@
   margin: 0.25rem 0;
   font-size: var(--ui-page-title);
   font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  white-space: nowrap;
 }
 .token-dashboard-metric strong.is-unavailable {
   font-size: var(--ui-text-title);
   line-height: 1.9;
 }
 .token-dashboard-metric.is-total strong {
-  font-size: var(--ui-text-display);
+  font-size: var(--ui-text-h2);
   letter-spacing: -0.02em;
 }
 .token-dashboard-metric.is-cost {
@@ -269,104 +270,6 @@
   margin-top: 0.65rem;
   font-size: var(--ui-text-xs);
 }
-/* Keep short desktop overviews within their existing screen-height budget.
-   Reclaim whitespace only; figures, context limits and controls keep their size. */
-@media (min-width: 901px) {
-  .overview-summary .token-dashboard {
-    margin-top: 12px;
-    padding-top: 10px;
-  }
-  .overview-summary .token-dashboard-metrics {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 8px 28px;
-    margin-block: 6px 2px;
-  }
-  .overview-summary .token-dashboard-metric {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    flex: 0 1 auto;
-  }
-  .overview-summary .token-dashboard-metric strong {
-    margin: 0;
-    font-size: var(--ui-text-h2);
-    line-height: 1.2;
-  }
-  .overview-summary .token-dashboard-metric.is-total strong {
-    font-size: var(--ui-text-h2);
-  }
-  .overview-summary .token-dashboard-metric.is-cost {
-    margin-left: auto;
-    text-align: right;
-  }
-  .overview-summary .token-dashboard-metric.is-cost strong {
-    font-size: var(--ui-text-title);
-  }
-  .overview-summary .token-dashboard-note,
-  .overview-summary .token-dashboard-limit {
-    display: inline-block;
-    margin: 4px 14px 2px 0;
-  }
-  .overview-summary [data-token-filters] {
-    margin-top: 2px;
-  }
-  /* Collapsed: one summary strip — title, figures and "查看详情" on the first
-     row, the estimate notes truncated to a single muted row beneath. */
-  .overview-summary .token-dashboard:has(> [data-token-filters]:not([open])) {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 2px 24px;
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > .token-dashboard-head {
-    flex: 0 0 auto;
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    .token-dashboard-freshness {
-    margin-left: 0;
-    font-size: var(--ui-text-xs);
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > .token-dashboard-metrics {
-    flex: 1 1 auto;
-    margin: 0;
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > [data-token-filters] {
-    order: 3;
-    flex: 0 0 auto;
-    margin: 0 0 0 auto;
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > .token-dashboard-note,
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > .token-dashboard-limit {
-    order: 4;
-    /* A real basis pushes both lines onto their own row beneath the figures. */
-    flex: 1 1 40%;
-    min-width: 0;
-    margin: 0;
-    overflow: hidden;
-    font-size: var(--ui-text-xs);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  .overview-summary
-    .token-dashboard:has(> [data-token-filters]:not([open]))
-    > :is([role='status'], .token-dashboard-status) {
-    order: 5;
-    flex-basis: 100%;
-  }
-}
 .token-summary-hint {
   margin-left: 8px;
   color: var(--ui-soft);
@@ -374,4 +277,101 @@
 }
 [data-token-filters][open] > summary .token-summary-hint {
   display: none;
+}
+
+/* Essential usage controls: time range and trend only. */
+.token-primary-filter {
+  display: flex;
+  margin-block: 16px 12px;
+}
+.token-primary-filter label {
+  flex: 0 1 220px;
+}
+.token-trend-section {
+  margin-block: 12px 20px;
+}
+.token-trend-section h4 {
+  margin: 0 0 8px;
+  font-size: var(--ui-text-sm, 14px);
+  font-weight: var(--ui-weight-semibold, 600);
+}
+.token-dashboard .token-usage-help {
+  color: var(--ui-muted, inherit);
+  font-size: var(--ui-text-xs, 12px);
+  line-height: 1.6;
+}
+@media (max-width: 600px) {
+  .token-primary-filter label {
+    flex: 1 1 100%;
+  }
+  .token-trend li {
+    grid-template-columns: 4.5rem minmax(0, 1fr);
+  }
+  .token-trend li > small {
+    grid-column: 2;
+  }
+}
+
+/* Intrinsic value widths decide when the pair stacks, not a device guess. */
+[data-token-dashboard] .token-dashboard-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 16px;
+  margin: 16px 0 12px;
+}
+[data-token-dashboard] .token-dashboard-metric {
+  flex: 1 1 9rem;
+  min-width: min-content;
+  max-width: 100%;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: var(--ui-radius-md);
+  background-color: color-mix(in srgb, currentColor 3%, transparent);
+  text-align: left;
+}
+/* The core card has one stable layout whether details are open or closed. */
+[data-token-dashboard] .token-dashboard-metric > span {
+  min-block-size: 3em;
+}
+[data-token-dashboard] .token-dashboard-metric strong {
+  line-height: 1.2;
+  margin: 6px 0 0;
+}
+[data-token-dashboard] .token-dashboard-head {
+  gap: 8px 12px;
+}
+[data-token-dashboard] .token-dashboard-freshness {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-muted);
+  opacity: 1;
+}
+[data-token-dashboard] > .token-dashboard-note,
+[data-token-dashboard] > .token-dashboard-limit {
+  margin: 4px 0;
+  font-size: var(--ui-text-xs);
+  line-height: 1.6;
+  opacity: 1;
+  color: var(--ui-muted);
+}
+[data-token-dashboard] > [data-token-filters] {
+  margin-top: 12px;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+[data-token-dashboard] > [data-token-filters] > summary {
+  padding-block: 12px;
+  cursor: pointer;
+  font-weight: var(--ui-weight-medium);
+}
+@media (max-width: 600px) {
+  [data-token-dashboard] .token-dashboard-freshness {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+  [data-token-dashboard] .token-dashboard-metrics {
+    gap: 12px;
+  }
+  [data-token-dashboard] .token-dashboard-metric {
+    padding: 12px;
+  }
 }

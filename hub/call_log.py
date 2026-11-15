@@ -12,6 +12,8 @@ import json
 import math
 import re
 import time
+from typing import Literal
+from hub.operation_categories import operation_category_sql
 
 from fastapi import Query, Request
 
@@ -249,6 +251,7 @@ def register_call_log(app, runtime, auth):
         tool: str = Query("", max_length=100),
         watch: str = Query("", max_length=4096),
         include_filters: bool = True,
+        category: Literal["all", "tools", "project_map"] = "all",
     ):
         principal = auth.panel(request)
         if (
@@ -268,12 +271,17 @@ def register_call_log(app, runtime, auth):
             "user": principal.user_id,
             "epoch": principal.user_epoch,
         }
+        if category != "all":
+            filters["category"] = category
         clause, scope_args = iam.private_sql(principal, "o.")
         if not principal.admin:
             clause += " AND (o.project_id IS NULL OR o.project_id IN (%s))" % (
                 ",".join("?" for _ in principal.projects) or "NULL"
             )
             scope_args.extend(principal.projects)
+        category_clause, category_args = operation_category_sql(category, "o.")
+        clause += " AND " + category_clause
+        scope_args.extend(category_args)
         where, values = [clause], list(scope_args)
         for column, value in (("o.state", status), ("o.project_id", project), ("o.tool", tool)):
             if value:
@@ -307,6 +315,11 @@ def register_call_log(app, runtime, auth):
                 "(" + " OR ".join(column + " LIKE ? ESCAPE '\\'" for column in columns) + ")"
             )
             values.extend(["%" + literal + "%"] * len(columns))
+        count_sql = (
+            "SELECT count(*) AS n FROM operations o LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id WHERE "
+            + " AND ".join(where)
+        )
+        total = store.all(count_sql, values)[0]["n"]
         if cursor:
             created, identifier = _decode_cursor(cursor, filters)
             where.append("(o.created < ? OR (o.created = ? AND o.id < ?))")
@@ -330,6 +343,8 @@ def register_call_log(app, runtime, auth):
                 (*scope_args, *watched),
             )
         return {
+            "category": category,
+            "total": total,
             "updates": [public_row(row, observed) for row in updates],
             "operations": [public_row(row, observed) for row in rows],
             "next_cursor": _cursor(rows[-1]["created"], rows[-1]["id"], filters) if more else None,

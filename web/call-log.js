@@ -101,6 +101,7 @@ window.CodePierCallLog = (() => {
               : ['other', '工具'];
   const params = () =>
     new URLSearchParams({
+      category: 'tools',
       limit: '40',
       cursor: st().cursor,
       q: S.auditQuery || '',

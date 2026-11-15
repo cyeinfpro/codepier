@@ -15,6 +15,7 @@ from shared.token_cost import DEFAULT_CACHE_READ_PERCENT
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
 from hub.api.activity import operation_rows, audit_rows
+from hub.operation_categories import operation_category_sql
 from hub.token_dashboard import (
     Period,
     token_dashboard_async,
@@ -67,6 +68,9 @@ def make_system_router(context: HubContext):
                 ",".join("?" for _ in principal.projects) or "NULL"
             )
             args.extend(principal.projects)
+        category_clause, category_args = operation_category_sql("tools")
+        clause += " AND " + category_clause
+        args.extend(category_args)
         counts = {
             r["state"]: r["n"]
             for r in store.all(
@@ -100,7 +104,7 @@ def make_system_router(context: HubContext):
                 + " AND state IN ('running','queued','reconnecting','cancelling')",
                 args,
             )["n"],
-            "recent_operations": operation_rows(store, principal, limit=8),
+            "recent_operations": operation_rows(store, principal, limit=8, category="tools"),
             "recent_audit": audit_rows(store, principal, limit=6),
             "token_usage": token_usage,
             "mcp_url": public_url() + "/mcp",

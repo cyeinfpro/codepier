@@ -10,6 +10,7 @@ const nav = [
   ['overview', 'dashboard', '总览'],
   ['devices', 'device', '电脑'],
   ['projects', 'folder', '项目'],
+  ['project-map', 'network', '项目地图'],
   ['vps', 'cloud', 'VPS'],
   ['workbench', 'code', '工作台'],
   ['workflows', 'history', '任务进度'],
@@ -488,7 +489,16 @@ function renderShell() {
   const groups = [
     [
       '工作',
-      ['overview', 'projects', 'workbench', 'native', 'workflows', 'collaboration', 'artifacts'],
+      [
+        'overview',
+        'projects',
+        'project-map',
+        'workbench',
+        'native',
+        'workflows',
+        'collaboration',
+        'artifacts',
+      ],
     ],
     ['运行', ['devices', 'vps', 'diagnostics', 'audit']],
     ['接入与权限', ['connect', 'members', 'integrations']],
@@ -981,6 +991,7 @@ async function navigate(page) {
   }
 }
 async function renderPage(showLoading = true) {
+  window.CodePierProjectMap?.detach();
   window.CodePierConnectionSetup?.detach();
   window.CodePierSettings?.detach();
   window.CodePierCollaboration?.detach();
@@ -1038,6 +1049,9 @@ async function renderPage(showLoading = true) {
     } else if (page === 'projects') {
       await loadBasics();
       html = projectsHTML();
+    } else if (page === 'project-map') {
+      await loadBasics();
+      html = CodePierProjectMap.html();
     } else if (page === 'vps') {
       html = await vpsHTML(seq);
     } else if (page === 'workbench') {
@@ -1107,6 +1121,7 @@ async function renderPage(showLoading = true) {
     if (page === 'roles') CodePierRoles.bind();
     if (page === 'profiles') CodePierProfiles.bind();
     if (page === 'connect') CodePierConnectionSetup.bind();
+    if (page === 'project-map') CodePierProjectMap.bind();
     if (page === 'vps') bindVps();
     if (page === 'workbench') bindWorkbench();
     if (page === 'workflows') bindWorkflows();
@@ -1179,16 +1194,6 @@ function onboardingHTML(o) {
 }
 function overviewHTML() {
   const o = S.overview;
-  const context = mainPathContext();
-  const remembered =
-    context.work &&
-    CodePierIdentity.canNavigate('workbench') &&
-    o.projects.find((p) => p.id === S.work.project);
-  const recentNative =
-    context.native &&
-    CodePierIdentity.canNavigate('native') &&
-    typeof ChatUI !== 'undefined' &&
-    o.projects.some((p) => p.id === ChatUI.project);
   const attention = o.recent_operations.filter((r) =>
     ['needs_review', 'interrupted'].includes(r.state),
   );
@@ -1217,10 +1222,7 @@ function overviewHTML() {
   return (
     heading('总览') +
     `<div class="overview-grid workspace-overview editorial-board">
-      <section class="panel overview-continue"><div class="panel-head"><h2>继续工作</h2></div><div class="panel-body">
-      ${remembered ? `<p><strong>${esc(remembered.alias)}</strong> · ${esc(remembered.device_name)} · ${esc(S.work.path || '项目目录')}${S.work.dirty ? ' · 有未保存草稿' : ''}</p><button class="btn primary" data-nav="workbench">返回工作台</button>` : '<p class="muted">选择下方项目，或打开会话列表。不会自动启动任务。</p>'}
-      ${recentNative ? `<button class="btn" data-nav="native">返回 ${esc(ChatUI.selected?.title || 'CLI 草稿')}</button>` : CodePierIdentity.canNavigate('native') ? '<button class="btn" data-nav="native">查看 CLI 会话</button>' : ''}
-      </div></section>
+      <section class="panel codepier-focus-card overview-summary" aria-labelledby="overview-summary-title"><div class="overview-summary-heading"><h2 id="overview-summary-title">工作区统计与用量</h2></div><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}" ${label === '今日操作' ? `title="${esc(o.timezone)}"` : ''}><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</section>
       ${attention.length ? `<section class="panel overview-attention"><div class="panel-head"><h2>近期操作待核实</h2></div><p class="form-note">仅当前可见的近期记录 · 核实于 ${esc(new Date(o.observed_at).toLocaleTimeString())}；不是全量待办。</p>${attention.map((r) => `<div class="project-mini"><div class="project-mini-main"><h3>${esc(r.alias || '操作')}</h3><p>${r.state === 'needs_review' ? '原操作要求复核' : '执行中断，需核实原结果'} · ${esc(r.id)}</p></div><button class="btn small" data-action="operation-detail" data-id="${esc(r.id)}">核实原操作</button></div>`).join('')}</section>` : ''}
 
 
@@ -1238,7 +1240,7 @@ function overviewHTML() {
       }</section>
 
       <section class="panel workspace-operations"><div class="panel-head"><h2>最近操作</h2><button class="btn ghost small" data-nav="audit">查看全部 ${icon('arrow')}</button></div>${operationsTable(o.recent_operations.slice(0, 6))}</section>
-      <details class="panel codepier-focus-card overview-summary"><summary>工作区统计与用量</summary><div class="stats workspace-stats" aria-label="工作区统计">${stats.map(([label, value, suffix, ico, foot, tone]) => `<article class="stat workspace-stat ${tone}" ${label === '今日操作' ? `title="${esc(o.timezone)}"` : ''}><div class="stat-top"><span>${label}</span>${icon(ico)}</div><div class="stat-value">${esc(value)}<small>${esc(suffix)}</small></div><div class="stat-foot">${esc(foot)}</div></article>`).join('')}</div>${window.CodePierTokenUsage?.dashboard(o.token_usage) || ''}</details>
+
     </div>` +
     onboarding
   );

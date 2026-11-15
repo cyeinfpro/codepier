@@ -35,28 +35,28 @@ def test_calibrated_card_counts_filters_export_and_mobile(chat_browser_pool, bro
         expect(card.locator(".is-cost")).to_contain_text("$2.43")
         expect(card).to_contain_text("10 次工具调用 · 约 11 个模型轮次")
         expect(card.locator("[data-token-filter=period]")).to_be_hidden()
-        assert card.bounding_box()["height"] < 340
+        # The responsive card may stack; readability and reachability beat a fixed height cap.
+        for metric in card.locator(".token-dashboard-metric").all():
+            metric.scroll_into_view_if_needed()
+            box = metric.bounding_box()
+            assert box and box["x"] >= -1 and box["x"] + box["width"] <= width + 1
+            assert box["y"] >= -1 and box["y"] + box["height"] <= 901
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
         evidence = ROOT / ".work/call-estimate-preview"
         evidence.mkdir(parents=True, exist_ok=True)
         card.screenshot(path=str(evidence / f"calls-{browser_kind}-{width}.png"))
         card.locator("[data-token-filters] > summary").focus()
         page.keyboard.press("Enter")
-        card.locator("[data-token-panel=breakdown] > summary").click()
-        expect(card.locator("[data-token-panel=breakdown]")).to_contain_text("工具文本 Token：约 11K")
-        expect(card.locator("[data-token-panel=breakdown]")).to_contain_text("上下文重放参考：约 206.49K")
-        card.locator("[data-token-panel=settings] > summary").click()
-        field = card.locator("[data-token-filter=cache_read_percent]")
-        field.fill("100")
-        field.press("Tab")
-        page.wait_for_function("pending.length===1")
-        page.evaluate("data=>pending[0].resolve(data)", synthetic_dashboard(percent=100, calibrated=True))
-        expect(card.locator(".is-cost")).to_contain_text("$1.85")
-        expect(card.locator(".is-total")).to_contain_text("1.5M")
-        expect(field).to_have_value("100")
-        with page.expect_download() as downloaded:
-            card.locator("[data-token-export]").click()
-        exported = json.loads(Path(downloaded.value.path()).read_text())
+        expect(card.locator('[data-token-panel], [data-token-export]')).to_have_count(0)
+        expect(card.locator('.token-trend-section')).to_be_visible()
+        field=card.locator('[data-token-filter=period]')
+        field.select_option('7d');page.wait_for_function('pending.length===1')
+        result=synthetic_dashboard(percent=100,calibrated=True);result['period']['key']='7d'
+        page.evaluate('data=>pending[0].resolve(data)',result)
+        expect(card.locator('.is-cost')).to_contain_text('$1.85')
+        expect(card.locator('.is-total')).to_contain_text('1.5M')
+        expect(field).to_have_value('7d')
+        exported=json.loads(page.evaluate('data=>CodePierTokenUsage.exportJSON(data)',result))
         assert exported["kind"] == "mcp_call_calibration_estimate"
         assert exported["summary"]["call_estimate"]["estimated_model_rounds"] == 11
         assert exported["summary"]["call_estimate"]["actual_usage"] is None

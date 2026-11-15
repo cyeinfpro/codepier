@@ -164,7 +164,7 @@ def test_mobile_topbar_space_and_overview_cli_permission(stack, chat_browser_poo
           CodePierIdentity.canNavigate=savedCanNavigate;
           document.querySelector('#page').innerHTML=overviewHTML();
         }""")
-        expect(page.locator('.overview-continue [data-nav="native"]')).to_have_count(1)
+        expect(page.locator('.overview-continue')).to_have_count(0)
         page.evaluate("S.space_id='unavailable-space';renderShell()")
         expect(page.locator('.topbar-space')).to_be_visible()
         expect(page.locator('.topbar-space')).to_have_text('空间待核实')
