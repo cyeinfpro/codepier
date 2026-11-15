@@ -175,7 +175,10 @@ jobs:
           expected = os.environ['VERSION']
           if health.get('status') != 'ok' or health.get('version') != expected:
               raise SystemExit(f"healthz reported status {health.get('status')!r} version {health.get('version')!r}; expected ok {expected!r}")
-          if health.get('panel_update') != {'maintenance': False, 'ready': False}:
+          if health.get('panel_update') != {
+              'maintenance': False, 'ready': False, 'drain_ready': False,
+              'phase': 'inactive', 'ready_semantics': 'maintenance_drain_only',
+          }:
               raise SystemExit('Unexpected maintenance state without a host updater: ' + json.dumps(health.get('panel_update')))
           print(json.dumps(health, ensure_ascii=False))
           PY

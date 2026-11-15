@@ -946,6 +946,7 @@
     "tests/test_iam_invite_role_recovery.py",
     "tests/test_iam_review_regressions.py",
     "tests/test_iam_ui.py",
+    "tests/test_image_health_contract.py",
     "tests/test_image_promotion.py",
     "tests/test_import_concurrency.py",
     "tests/test_incoming_files.py",
