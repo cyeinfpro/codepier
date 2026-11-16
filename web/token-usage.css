@@ -212,9 +212,6 @@
   border: 1px dashed currentColor;
   opacity: 0.5;
 }
-.token-dashboard [role='status']:empty {
-  display: none;
-}
 @media (max-width: 600px) {
   .token-dashboard-metrics {
     grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
@@ -373,5 +370,29 @@
   }
   [data-token-dashboard] .token-dashboard-metric {
     padding: 12px;
+  }
+}
+
+/* First read reserves the same core structure; no fabricated values or shimmer. */
+.token-dashboard-placeholder .token-dashboard-freshness,
+.token-dashboard-placeholder .token-dashboard-note,
+.token-dashboard-placeholder .token-dashboard-limit,
+.token-dashboard-placeholder [data-token-filters] {
+  visibility: hidden;
+}
+.token-dashboard-placeholder .token-dashboard-metric strong {
+  color: transparent;
+  background: color-mix(in srgb, var(--ui-muted) 12%, transparent);
+  border-radius: 4px;
+  width: 5ch;
+}
+[data-token-dashboard] > .token-dashboard-status {
+  display: block;
+  min-block-size: 3.2em;
+  margin: 0;
+}
+@media (max-width: 360px) {
+  [data-token-dashboard] > .token-dashboard-note {
+    min-block-size: 3.2em;
   }
 }

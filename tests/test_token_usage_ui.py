@@ -274,7 +274,10 @@ def test_pending_dashboard_never_looks_like_zero_usage():
     html = run_js("dashboard", {"loading": True})
     assert "正在读取统计" in html
     assert "约 0" not in html
-    assert "实际模型用量未提供" in html
+    assert 'aria-busy="true"' in html
+    assert "token-dashboard-placeholder" in html
+    assert "token-dashboard-metrics" in html
+    assert "缺失数据不会补成零" in html
 
 
 def test_dashboard_refresh_state_is_scoped_and_late_results_are_discarded():

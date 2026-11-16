@@ -174,6 +174,7 @@ function discardLocalWork(owner = sessionOwner(S.session) || S.suspendedUser) {
   taskSessionValue('codepier-task-submission', null, owner);
 }
 function clearSpaceSnapshots() {
+  window.CodePierTokenUsage?.resetDashboard(true);
   clearTimeout(S.activityTimer);
   S.activityRevision = (S.activityRevision || 0) + 1;
   S.activeOps = new Set();
@@ -1020,8 +1021,14 @@ async function renderPage(showLoading = true) {
   if (typeof chatDetach === 'function') chatDetach();
   const seq = ++S.renderSeq;
   const page = S.page;
+  const tokenOwner = S.session,
+    tokenSpace = S.space_id;
   const tokenContinuation = page === 'overview' && !!$('#page [data-token-dashboard]');
-  if (showLoading) {
+  const preservedToken =
+    tokenContinuation && window.CodePierTokenUsage?.cachedDashboard()
+      ? $('#page [data-token-dashboard]')
+      : null;
+  if (showLoading && !tokenContinuation) {
     $('#page').setAttribute('aria-busy', 'true');
     $('#page').innerHTML = uiLoadingPage(page);
   }
@@ -1038,7 +1045,7 @@ async function renderPage(showLoading = true) {
       if (seq === S.renderSeq && S.session && page === S.page)
         navActivitySeed(S.overview.active_operations, S.overview.recent_operations || []);
       S.overview.observed_at = Date.now();
-      S.overview.token_usage = { loading: true };
+      S.overview.token_usage = window.CodePierTokenUsage?.cachedDashboard() || { loading: true };
       S.projects = S.overview.projects;
       S.devices = S.overview.devices;
       syncComputerShortcut();
@@ -1100,6 +1107,9 @@ async function renderPage(showLoading = true) {
     if (!showLoading) await uiWaitForPagePointer();
     if (seq !== S.renderSeq || !S.session) return;
     const presentation = showLoading ? null : uiCapturePage();
+    const tokenFocus = preservedToken?.contains(document.activeElement)
+      ? document.activeElement
+      : null;
     if (page === 'vps' && !showLoading) vpsReplacePage(html);
     else if (
       !showLoading &&
@@ -1108,14 +1118,23 @@ async function renderPage(showLoading = true) {
     )
       CP.dom.replacePage($('#page'), html);
     else $('#page').innerHTML = html;
-    uiPageReady(showLoading, presentation);
+    if (preservedToken && window.CodePierTokenUsage?.cachedDashboard()) {
+      $('#page [data-token-dashboard]')?.replaceWith(preservedToken);
+    }
+    uiPageReady(showLoading && !tokenContinuation, presentation);
+    if (tokenFocus?.isConnected) tokenFocus.focus({ preventScroll: true });
     if (['identity', 'members', 'identity-admin'].includes(page)) CodePierIdentity.bind();
     if (page === 'overview')
       void window.CodePierTokenUsage?.loadDashboard(
         $('#page'),
         api,
         tokenContinuation,
-        () => seq === S.renderSeq && !!S.session && S.page === 'overview',
+        () =>
+          seq === S.renderSeq &&
+          S.session === tokenOwner &&
+          S.space_id === tokenSpace &&
+          !!S.session &&
+          S.page === 'overview',
       );
     if (page === 'mcp-gateway') CodePierGateway.bind();
     if (page === 'roles') CodePierRoles.bind();

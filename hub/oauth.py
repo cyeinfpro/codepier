@@ -51,7 +51,9 @@ class OAuth:
             host.lower()
             for host in env_csv(
                 "OAUTH_REDIRECT_HOSTS",
-                "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,localhost,127.0.0.1,::1",
+                "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,antigravity.google,"
+                "oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,"
+                "oauth-redirect-test.googleusercontent.com,localhost,127.0.0.1,::1",
             )
         }
         self.router = APIRouter()

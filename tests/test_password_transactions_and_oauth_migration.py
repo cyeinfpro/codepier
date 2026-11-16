@@ -134,6 +134,7 @@ def test_oauth_migration_preserves_custom_policy(value):
 @pytest.mark.parametrize('legacy', OAUTH_LEGACY_DEFAULTS)
 def test_oauth_migration_updates_frozen_target_not_rollback(tmp_path, legacy):
     home, config, job, spec = deployment(tmp_path)
+    job['kind'] = 'apply'
     spec['services']['hub']['environment']['OAUTH_REDIRECT_HOSTS'] = legacy
     before = f'OAUTH_REDIRECT_HOSTS={legacy}\n'.encode()
     (tmp_path / '.env').write_bytes(before)

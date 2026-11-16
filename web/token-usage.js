@@ -499,9 +499,58 @@ window.CodePierTokenUsage = (() => {
     cache_read_percent: String(data.summary?.reference_cost?.pricing?.cache_read_percent ?? 95),
     reference_model: data.summary?.reference_cost?.pricing?.model || 'gpt-6-astra',
   });
-  let dashboardState = null;
-  function resetDashboard() {
+  let dashboardState = null,
+    dashboardCache = null;
+  const identity = () =>
+    typeof S === 'undefined'
+      ? { owner: null, user: '', space: '' }
+      : {
+          owner: S.session,
+          user: S.session?.user_id || S.session?.username || '',
+          space: S.space_id,
+        };
+  const sameIdentity = (captured) => {
+    const now = identity();
+    return (
+      now.owner === captured.owner && now.user === captured.user && now.space === captured.space
+    );
+  };
+  const permissionError = (error) =>
+    [401, 403].includes(error?.status) ||
+    error?.code === 'STATISTICS_AUTHORITY_CHANGED' ||
+    /UNAUTH|FORBIDDEN|ACCESS_DENIED|PERMISSION|SESSION_CHANGED/.test(error?.code || '');
+  const hasAuthority = (data) =>
+    typeof data?.authority_key === 'string' && data.authority_key.length > 0;
+  function rememberDashboard(data) {
+    dashboardCache = hasAuthority(data) ? { ...identity(), data } : null;
+  }
+  function cachedDashboard() {
+    if (!dashboardCache) return null;
+    if (!sameIdentity(dashboardCache)) {
+      resetDashboard();
+      return null;
+    }
+    return dashboardCache.data;
+  }
+  function clearDashboard(root, text) {
+    dashboardCache = null;
+    root.onclick = null;
+    root.onchange = null;
+    const holder = document.createElement('div');
+    holder.innerHTML = dashboard({ loading: true });
+    root.className = holder.firstElementChild.className;
+    root.replaceChildren(...holder.firstElementChild.childNodes);
+    root.setAttribute('aria-busy', 'false');
+    root.querySelector('[role=status]').textContent = text;
+  }
+  function resetDashboard(clearVisible = false) {
     dashboardState = null;
+    dashboardCache = null;
+    if (clearVisible && typeof document !== 'undefined') {
+      document
+        .querySelectorAll('[data-token-dashboard]')
+        .forEach((root) => clearDashboard(root, '访问范围已变化，正在读取当前统计…'));
+    }
   }
   function viewState(data, continuing = true) {
     if (!continuing || !dashboardState || dashboardState.authority !== data.authority_key) {
@@ -515,7 +564,7 @@ window.CodePierTokenUsage = (() => {
     }
     return dashboardState;
   }
-  async function prepareDashboard(initial, fetcher, continuing, valid) {
+  async function prepareDashboard(initial, fetcher, continuing, valid, invalidate = () => {}) {
     if (!initial?.summary || !valid()) return initial;
     const state = viewState(initial, continuing),
       revision = state.revision;
@@ -531,10 +580,15 @@ window.CodePierTokenUsage = (() => {
     ) {
       result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));
       if (!valid() || dashboardState !== state || state.revision !== revision) return null;
-      if (result.authority_key !== state.authority) {
+      if (!hasAuthority(result) || result.authority_key !== state.authority) {
+        invalidate();
         resetDashboard();
         result = await fetcher('/api/token-usage');
         if (!valid()) return null;
+        if (!hasAuthority(result))
+          throw Object.assign(new Error('Unknown authority'), {
+            code: 'STATISTICS_AUTHORITY_CHANGED',
+          });
         viewState(result, false);
       }
     }
@@ -544,22 +598,52 @@ window.CodePierTokenUsage = (() => {
   async function loadDashboard(container, fetcher, continuing, valid) {
     const placeholder = container?.querySelector('[data-token-dashboard]');
     if (!placeholder) return;
-    const current = () => valid() && placeholder.isConnected && container.contains(placeholder);
+    const owner = identity(),
+      cached = continuing ? cachedDashboard() : null;
+    if (cached?.summary) bindDashboard(container, fetcher, cached);
+    const state = dashboardState,
+      revision = state?.revision;
+    const current = () =>
+      valid() && sameIdentity(owner) && placeholder.isConnected && container.contains(placeholder);
     try {
       const initial = await fetcher('/api/token-usage');
       if (!current()) return;
-      const data = await prepareDashboard(initial, fetcher, continuing, current);
+      if (!hasAuthority(initial)) {
+        resetDashboard();
+        clearDashboard(placeholder, '授权范围未确认，统计已清除。请刷新重试。');
+        return;
+      }
+      if (cached && initial.authority_key !== cached.authority_key) {
+        clearDashboard(placeholder, '授权范围已变化，正在读取当前统计…');
+        resetDashboard();
+      } else if (state && (dashboardState !== state || state.revision !== revision)) return;
+      const data = await prepareDashboard(initial, fetcher, continuing, current, () =>
+        clearDashboard(placeholder, '授权范围已变化，正在读取当前统计…'),
+      );
       if (!current() || !data) return;
+      const focusedFilter = placeholder.contains(document.activeElement)
+        ? document.activeElement.dataset.tokenFilter
+        : null;
       const holder = document.createElement('div');
       holder.innerHTML = dashboard(data);
       placeholder.replaceWith(holder.firstElementChild);
       bindDashboard(container, fetcher, data);
-    } catch {
-      // Statistics are independent of live device/task state. A failed or late
-      // response cannot replace the page, revive navigation, or expose old data.
-      if (current()) {
-        const status = placeholder.querySelector('[role=status]');
-        if (status) status.textContent = '统计暂不可用，请刷新重试。';
+      if (focusedFilter)
+        container
+          .querySelector('[data-token-filter="' + focusedFilter + '"]')
+          ?.focus({ preventScroll: true });
+    } catch (error) {
+      if (!current()) return;
+      if (permissionError(error)) {
+        resetDashboard();
+        clearDashboard(placeholder, '权限已变化，统计已清除。请重新确认访问权限。');
+      } else {
+        const status = placeholder.querySelector('.token-dashboard-status, [role=status]');
+        if (status)
+          status.textContent = cachedDashboard()?.summary
+            ? '后台刷新失败，仍显示上一次结果。'
+            : '统计暂不可用，请刷新重试。';
+        placeholder.setAttribute('aria-busy', 'false');
       }
     }
   }
@@ -570,9 +654,14 @@ window.CodePierTokenUsage = (() => {
         dashboardState?.authority === data?.authority_key ? dashboardState?.expanded : false;
     if (!data?.summary)
       return (
-        '<div class="token-dashboard" data-token-dashboard><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span></div><p role="status">' +
+        '<div class="token-dashboard token-dashboard-placeholder" data-token-dashboard aria-busy="' +
+        !!data?.loading +
+        '"><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span><span class="token-dashboard-freshness" aria-hidden="true">等待统计时间</span></div>' +
+        '<div class="token-dashboard-metrics" aria-hidden="true"><div class="token-dashboard-metric is-total"><span>Token 估算</span><strong>—</strong></div><div class="token-dashboard-metric is-cost"><span>参考费用 · USD</span><strong>—</strong></div></div>' +
+        '<p class="token-dashboard-note" aria-hidden="true">统计依据将在读取后显示</p><p class="token-dashboard-limit" aria-hidden="true">缺失数据不会补成零</p>' +
+        '<details data-token-filters inert aria-hidden="true"><summary>查看详情<span class="token-summary-hint">时间范围与趋势</span></summary></details><p class="token-dashboard-status" role="status">' +
         (data?.loading ? '正在读取统计…' : '统计暂不可用') +
-        '</p><p class="token-detail-note">实际模型用量未提供。</p></div>'
+        '</p></div>'
       );
     const value = data.summary,
       period = data.period || {};
@@ -596,7 +685,7 @@ window.CodePierTokenUsage = (() => {
         ? '<span class="token-dashboard-freshness" title="统计最多每30秒更新">更新于 ' +
           escape(dateText(data.freshness.as_of, period.timezone)) +
           '</span>'
-        : '') +
+        : '<span class="token-dashboard-freshness">更新时间未提供</span>') +
       '</div>' +
       headline(value) +
       (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
@@ -650,13 +739,15 @@ window.CodePierTokenUsage = (() => {
   function bindDashboard(container, fetcher, initial) {
     let root = container?.querySelector('[data-token-dashboard]');
     if (!root || !initial?.summary) return;
+    rememberDashboard(initial);
+    const bindingOwner = identity();
     let data = initial,
       sequence = 0;
     let state = viewState(initial);
     const generation = ++bindingGeneration;
     const bind = () => {
       root._codepierTokenGeneration = generation;
-      // The collapsed overview strip truncates these lines; keep the full text on hover.
+      // Keep the full estimate basis available on hover.
       root
         .querySelectorAll(':scope > .token-dashboard-note, :scope > .token-dashboard-limit')
         .forEach((line) => (line.title = line.textContent.trim()));
@@ -727,31 +818,46 @@ window.CodePierTokenUsage = (() => {
         state.expanded = !!root.querySelector('[data-token-filters]')?.open;
         state.revision += 1;
         root.querySelector('.token-dashboard-status').textContent = '正在读取当前授权范围…';
+        let authorityChanged = false;
         try {
           let result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));
           if (
             current !== sequence ||
             !captured.isConnected ||
             captured._codepierTokenGeneration !== generation ||
+            !sameIdentity(bindingOwner) ||
             dashboardState !== state
           )
             return;
+          if (!hasAuthority(result)) {
+            resetDashboard();
+            clearDashboard(captured, '授权范围未确认，旧统计已清除。请刷新重试。');
+            return;
+          }
           const sameAuthority = result.authority_key === state.authority;
           if (!sameAuthority) {
+            authorityChanged = true;
+            clearDashboard(captured, '授权范围已变化，正在读取当前统计…');
             result = await fetcher('/api/token-usage');
             if (
               current !== sequence ||
               !captured.isConnected ||
               captured._codepierTokenGeneration !== generation ||
+              !sameIdentity(bindingOwner) ||
               dashboardState !== state
             )
               return;
+            if (!hasAuthority(result))
+              throw Object.assign(new Error('Unknown authority'), {
+                code: 'STATISTICS_AUTHORITY_CHANGED',
+              });
             state = viewState(result, false);
           }
           if (
             current !== sequence ||
             !captured.isConnected ||
             captured._codepierTokenGeneration !== generation ||
+            !sameIdentity(bindingOwner) ||
             dashboardState !== state
           )
             return;
@@ -765,20 +871,27 @@ window.CodePierTokenUsage = (() => {
             );
           }
           data = result;
+          rememberDashboard(result);
           state.filters = filterValues(result);
           const holder = document.createElement('div');
           holder.innerHTML = dashboard(data, state.expanded);
           root = holder.firstElementChild;
           captured.replaceWith(root);
           bind();
-        } catch {
+        } catch (error) {
           if (
             current !== sequence ||
             !captured.isConnected ||
             captured._codepierTokenGeneration !== generation ||
+            !sameIdentity(bindingOwner) ||
             dashboardState !== state
           )
             return;
+          if (authorityChanged || permissionError(error)) {
+            resetDashboard();
+            clearDashboard(root, '权限范围已变化，旧统计已清除。请刷新重试。');
+            return;
+          }
           state.filters = filterValues(data);
           state.revision += 1;
           root.querySelectorAll('[data-token-filter]').forEach((select) => {
@@ -806,5 +919,6 @@ window.CodePierTokenUsage = (() => {
     prepareDashboard,
     loadDashboard,
     resetDashboard,
+    cachedDashboard,
   };
 })();

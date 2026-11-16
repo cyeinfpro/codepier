@@ -18,6 +18,34 @@
 
 在客户端创建连接，选择 OAuth。CodePier 实现授权码、S256 PKCE、DCR 公共客户端 `token_endpoint_auth_method=none`，不实现 CIMD、private_key_jwt 或 client_secret_basic；采用服务实际支持的认证方式。跳转面板后登录、核对项目范围和工具权限，再明确确认。授权码及回调地址精确匹配；不要为解决回调失败放行任意域名。
 
+### Google Antigravity
+
+Antigravity 使用远程 Streamable HTTP，在 IDE 的 Agent 面板选择 **MCP Servers → Manage MCP Servers → View raw config**，将以下条目合并进现有 `mcpServers`（不要覆盖其他服务）：
+
+```json
+{
+  "mcpServers": {
+    "codepier": {
+      "serverUrl": "https://你的域名/mcp"
+    }
+  }
+}
+```
+
+刷新服务并按客户端提示登录 CodePier、核对项目及工具权限。CodePier 提供公共客户端 DCR、授权码和 S256 PKCE；Antigravity 的 OAuth 回调为 `https://antigravity.google/oauth-callback`。默认允许主机已包含 `antigravity.google`，已有自定义 `OAUTH_REDIRECT_HOSTS` 需保留原值并追加该主机，重建 Hub 后生效。不能使用通配符或关闭认证。CodePier 当前未实现 CIMD；DCR 的真实客户端兼容性需在目标 Antigravity 版本中验证。
+
+如客户端 OAuth 无法完成，可在面板 **MCP 接入** 创建独立、限定范围的 PAT，并在该配置中添加 `"headers": {"Authorization": "Bearer 你的PAT"}`。令牌只显示一次；配置文件包含秘密，不要提交或分享。先授予读取权限，再根据需要调整。重载后检查工具列表，并读取授权项目的 README；模拟测试或工具列表不代表真实读写已验证。[Google 配置说明](https://developers.google.com/knowledge/mcp)。
+
+### Gemini 网页版自定义关联应用
+
+在 Gemini 网页版的关联应用设置中添加 `https://你的域名/mcp`，使用动态客户端注册和 S256 PKCE。Gemini 会在一次注册中提交生产、沙盒和测试环境的六个回调 URI，分别使用 `/r/` 和 `/a/` 路径。三个回调主机都必须在 `OAUTH_REDIRECT_HOSTS` 中：
+
+- `oauth-redirect.googleusercontent.com`
+- `oauth-redirect-sandbox.googleusercontent.com`
+- `oauth-redirect-test.googleusercontent.com`
+
+更新后的默认部署允许以上精确主机。自定义列表保留现有主机并追加三项，然后重建 Hub。登记后仍要求授权和换取令牌时使用同一条完整回调 URI。Gemini 提示自动注册失败时，先检查真实请求是否有其中一个回调被拒。通过注册后，在 Gemini 完成关联与 CodePier 授权，再用只读项目验证工具调用。[Google OAuth 指南](https://developers.google.com/connected-apps/mcp/oauth)
+
 ### Claude 远程连接器
 
 Claude 的托管连接器使用同一个公开 MCP URL。选择 OAuth 的“自动注册”（DCR）；CodePier 当前不支持 CIMD，不能假设“使用 Claude 已发布的身份”可用。客户端为 public client + S256 PKCE，认证方法是 `none`，不要把 PAT、Agent 密钥或管理员密码填进 OAuth client secret。
@@ -111,4 +139,4 @@ stdio 桥接器为所有请求使用同一个 PAT，并移除客户端 OAuth 元
 
 ### 旧版 OAuth 回调允许列表
 
-旧部署可能在 `.env` 显式保存了不含 `claude.ai` 或 `grok.com` 的历史默认 `OAUTH_REDIRECT_HOSTS`。更新器和重新运行安装脚本只迁移完全一致的两版旧默认值（OpenAI-only、OpenAI + Claude），保留自定义列表；更新详情会记录 `oauth_redirect_hosts_migrated`。自定义策略仍需管理员自行确认加入所需的 `claude.ai` / `grok.com` 并重建 Hub。k3s 需重新应用 ConfigMap 并重启 Deployment。Claude Code 的回环回调不受此项影响。
+旧部署可能在 `.env` 显式保存了不含 `claude.ai` 或 `grok.com` 的历史默认 `OAUTH_REDIRECT_HOSTS`。更新器和重新运行安装脚本只迁移完全一致的旧默认值（OpenAI-only，以及依次加入 Claude、Grok、Antigravity 的各版默认值），保留自定义列表；更新详情会记录 `oauth_redirect_hosts_migrated`。自定义策略仍需管理员自行确认加入所需的 `claude.ai` / `grok.com` / `antigravity.google` 并重建 Hub。k3s 需重新应用 ConfigMap 并重启 Deployment。Claude Code 的回环回调不受此项影响。
