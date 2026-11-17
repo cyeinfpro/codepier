@@ -1739,8 +1739,15 @@ class CollaborationService:
     def read(self, raw, principal):
         args = validate(contracts.Read, raw)
         with self.store.transaction(immediate=False):
+            kind = args["kind"]
+            if kind == "overview" and not self.config.enabled:
+                principal = refresh_principal(self.store, principal)
+                self.runtime.project(args["project"], principal)
+                return {"room": None, "collaboration_state": "disabled", "can_manage": False}
+            # Project environment listing is already filtered by the current
+            # grant. It must not resolve a legacy/default conversation.
             principal, room = self.scope(principal, args, optional=True)
-            if args["kind"] == "rooms":
+            if kind == "rooms":
                 project = self.runtime.project(args["project"], principal)
                 rows = self.store.all(
                     """SELECT id,project_id,environment_id,state,version,title,topic FROM collaboration_rooms
@@ -1760,13 +1767,26 @@ class CollaborationService:
                     "room": None,
                     "features": self.features(principal),
                     "setup_required": True,
+                    "collaboration_state": "not_configured",
                     "delegation": self.delegation.authority_descriptor(),
                     "delegation_recovery": self.delegation.consumer.recovery(args, principal),
                     "schema_version": 3,
                     "capabilities": self.chatroom.capabilities(principal),
                     "can_manage": bool(principal.admin and not principal.grant_id),
                 }
-            kind = args["kind"]
+            if kind == "overview":
+                try:
+                    conversation = self.conversations.resolve(principal, room, args)
+                except DevError as exc:
+                    if exc.code != "CONVERSATION_ARCHIVED":
+                        raise
+                    return {
+                        "room": None,
+                        "collaboration_state": "archived",
+                        "reason_code": exc.code,
+                        "setup_required": True,
+                        "can_manage": bool(principal.admin and not principal.grant_id),
+                    }
             if kind == "teams":
                 conversation = self.conversations.resolve(principal, room, args)
                 return {
@@ -1791,7 +1811,7 @@ class CollaborationService:
             self.chatroom.same_room(room, args)
             if kind in {"timeline", "thread", "search", "members", "changes", "message_status"}:
                 return self.chatroom.read(args, principal, room)
-            if args["conversation_id"]:
+            if args["conversation_id"] and kind != "overview":
                 conversation = self.conversations.resolve(principal, room, args)
                 if kind == "messages":
                     return self.conversations.read({**args, "kind": "timeline"}, principal, room)
@@ -1881,6 +1901,7 @@ class CollaborationService:
                 "room": room,
                 "features": self.features(principal),
                 "setup_required": False,
+                "collaboration_state": "ready",
                 "can_manage": bool(principal.admin and not principal.grant_id),
                 "chat_identity_verified": False,
                 "production_actions_enabled": False,
@@ -1890,7 +1911,8 @@ class CollaborationService:
             for item in ("messages", "jobs", "goals", "incidents", "agents", "subscriptions"):
                 page = self.listing(principal, room, item, args["limit"])
                 result[item], result[item + "_next_cursor"] = page["items"], page["next_cursor"]
-            conversation = self.conversations.resolve(principal, room, args)
+            if kind != "overview":
+                conversation = self.conversations.resolve(principal, room, args)
             result["conversation"] = self.conversations.view(principal, conversation)
             result["teams"] = self.coordination.teams.listing(
                 {
@@ -2033,10 +2055,11 @@ class CollaborationService:
                     )
 
     def invoke(self, name, raw, principal):
-        self.guard()
         from shared.public_collaboration import resolve
 
         name, raw = resolve(name, raw)
+        if name != "collaboration_read" or raw.get("kind", "overview") != "overview":
+            self.guard()
         from shared.room_contracts import ROOM_QUERY_ACTIONS, ROOM_MUTATION_ACTIONS
         from shared.room_consumer_contracts import ROOM_CONSUMER_QUERIES, ROOM_CONSUMER_ACTIONS
 

@@ -2,7 +2,7 @@
 
 本项目的 Hub、Agent 和 stdio 桥接器不需要模型 API Key。原生 CLI 的账号，以及官方 Tunnel 的运行凭据，是各自独立的授权。本文不表示已访问你的账号、创建 Tunnel 或部署服务。
 
-工具目录统一为九个入口，浏览器和桌面包含在内；其他能力通过各工具的操作按需发现。旧工具名已移除，更新后需要刷新客户端工具目录。调用示例见 [九个 MCP 工具](CORE_TOOLS.md)。
+默认 /mcp 使用 unified 工具目录，提供 query、act、get_profile 三个入口。更新后刷新客户端工具目录。调用示例见 [统一工具](UNIFIED_TOOLS.md)，兼容目录见 [Core 工具](CORE_TOOLS.md)。
 
 ## 两条接入路线
 
@@ -34,7 +34,7 @@ Antigravity 使用远程 Streamable HTTP，在 IDE 的 Agent 面板选择 **MCP 
 
 刷新服务并按客户端提示登录 CodePier、核对项目及工具权限。CodePier 提供公共客户端 DCR、授权码和 S256 PKCE；Antigravity 的 OAuth 回调为 `https://antigravity.google/oauth-callback`。默认允许主机已包含 `antigravity.google`，已有自定义 `OAUTH_REDIRECT_HOSTS` 需保留原值并追加该主机，重建 Hub 后生效。不能使用通配符或关闭认证。CodePier 当前未实现 CIMD；DCR 的真实客户端兼容性需在目标 Antigravity 版本中验证。
 
-如客户端 OAuth 无法完成，可在面板 **MCP 接入** 创建独立、限定范围的 PAT，并在该配置中添加 `"headers": {"Authorization": "Bearer 你的PAT"}`。令牌只显示一次；配置文件包含秘密，不要提交或分享。先授予读取权限，再根据需要调整。重载后检查工具列表，并读取授权项目的 README；模拟测试或工具列表不代表真实读写已验证。[Google 配置说明](https://developers.google.com/knowledge/mcp)。
+如客户端 OAuth 无法完成，可在面板 **MCP 接入** 创建独立、限定范围的 PAT，并在该配置中添加 `"headers": {"Authorization": "Bearer 你的PAT"}`。令牌只显示一次；配置文件包含秘密，不要提交或分享。先授予读取权限，再根据需要调整。重载后检查工具列表，并读取授权项目的 README；模拟测试或工具列表不代表真实读写已验证。[Google Antigravity MCP 官方文档](https://antigravity.google/docs/mcp/)。
 
 ### Gemini 网页版自定义关联应用
 

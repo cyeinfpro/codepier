@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import ssl
+import subprocess
 import time
 from dataclasses import replace
 
@@ -145,6 +146,97 @@ def test_roots_notification_preserves_transport_checks(wire, method, version, ex
         headers['Authorization'] = 'Bearer ' + token
     response = client.post('/mcp', headers=headers, json={'jsonrpc': '2.0', 'method': method})
     assert response.status_code == status, response.text
+
+
+@pytest.mark.parametrize('origin', [
+    'https://claude.ai', 'https://grok.com', 'https://gemini.google.com',
+    'https://antigravity.google', 'https://antigravity.google.com',
+])
+def test_supported_browser_origins_can_preflight_and_call(wire, origin):
+    _, client, _, _, _ = wire
+    response = client.options('/mcp', headers={'Origin': origin})
+    assert response.status_code == 204
+    assert response.headers['access-control-allow-origin'] == origin
+    assert rpc(wire, 'tools/list', {}, {'Origin': origin}).status_code == 200
+    assert client.options('/mcp', headers={'Origin': origin + '.invalid'}).status_code == 403
+
+
+def test_collaboration_overview_distinguishes_missing_archived_and_disabled(wire):
+    app, _, _, _, _ = wire
+    service = app.state.runtime.collaboration
+    arguments = {'action': 'collab.list', 'view': 'overview', 'project': 'fixture'}
+
+    def overview():
+        response = rpc(wire, 'tools/call', {'name': 'query', 'arguments': arguments}, {'Mcp-Name': 'query'})
+        result = response.json()['result']
+        assert not result['isError'], result
+        return result['structuredContent']
+
+    assert overview()['collaboration_state'] == 'not_configured'
+    owner = Principal('panel:admin', 'owner', {'read', 'write'}, ['*'], admin=True)
+    _, room = service.scope(owner, {'project': 'fixture', 'environment_id': 'production'}, create=True)
+    app.state.store.execute(
+        "UPDATE conversation_rooms SET state='archived', archived_at=? WHERE id=?",
+        (time.time(), room['id']),
+    )
+    status = overview()
+    assert (status['collaboration_state'], status['can_manage'], status['room']) == ('archived', False, None)
+    service.config = replace(service.config, enabled=False)
+    assert overview()['collaboration_state'] == 'disabled'
+    catalog = rpc(wire, 'tools/list', {}).json()['result']['tools']
+    query = next(item for item in catalog if item['name'] == 'query')
+    assert 'collab.list' in query['inputSchema']['properties']['action']['enum']
+
+
+def test_unified_attachment_can_supply_url_without_native_file_object(wire):
+    arguments = {'action': 'source_check', 'project': 'fixture',
+                 'args': {'idempotency_key': 'generic-attachment-test',
+                          'download_url': 'https://attachments.invalid/document?secret=private-fixture'}}
+    response = rpc(wire, 'tools/call', {'name': 'query', 'arguments': arguments}, {'Mcp-Name': 'query'})
+    assert response.status_code == 200
+    output = response.json()['result']
+    assert 'private-fixture' not in json.dumps(output)
+    assert not output['isError'], output
+    value = output['structuredContent']
+    assert (value['checked'], value['source_host']) == (True, 'attachments.invalid'), value
+    assert value['source_allowed'] is False and value['request_sent'] is False
+
+
+def test_live_git_status_does_not_require_a_baseline(tmp_path):
+    from agent.git_freshness import working_changes
+    from shared.unified_contracts import translate
+
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    (tmp_path / 'staged.txt').write_text('staged')
+    (tmp_path / 'untracked.txt').write_text('untracked')
+    subprocess.run(['git', '-C', str(tmp_path), 'add', 'staged.txt'], check=True)
+    (tmp_path / 'staged.txt').write_text('unstaged')
+    plan = translate('query', {'action': 'changes', 'project': 'fixture'})
+    assert plan.view == 'status' and plan.args['options']['status'] is True
+    first = working_changes(tmp_path, offset=0, limit=1)
+    assert first['dirty'] == 2 and first['entries'] == ['AM staged.txt']
+    last = working_changes(tmp_path, offset=first['next_offset'], limit=1)
+    assert last['entries'] == ['?? untracked.txt'] and last['next_offset'] is None
+
+    from hub.core_tools import result
+
+    rendered = result('read', plan.args, {**first, 'operation_id': 'fixture'}, unified=plan)
+    assert rendered['structuredContent']['entries'] == first['entries']
+    assert rendered['structuredContent']['dirty'] == 2
+
+
+def test_default_view_unwraps_completed_file_read():
+    from hub.core_tools import result
+    from shared.unified_contracts import translate
+
+    plan = translate('query', {'action': 'file', 'project': 'fixture', 'path': 'readme.txt'})
+    data = {'path': 'readme.txt', 'content': 'fixture', 'sha256': 'a' * 64}
+    value = {'operations': [{'id': 'original', 'state': 'succeeded', 'result': {'ok': True, 'data': data}}]}
+    output = result('process', {'operation': 'wait'}, value, unified=plan)
+    structured = output['structuredContent']
+    assert 'operations' not in structured
+    assert structured['operation_id'] == 'original'
+    assert structured['content'] == 'fixture'
 
 
 @pytest.mark.parametrize('mirror', [False, True])

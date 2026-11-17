@@ -1,8 +1,10 @@
 # Changelog
 
-## 1.33.20 · 2026-11-17 · Antigravity 兼容与依赖更新
+## 1.33.20 · 2026-11-17 · MCP 客户端兼容与依赖更新
 
-- 修复 Antigravity CLI 发出目录变更通知后，MCP 工具从会话断开的情况。服务端确认通知后，连接继续按已有授权读取项目。
+- 修复 Antigravity CLI 发出目录变更通知后 MCP 工具断开的问题。补齐主流浏览器客户端来源和 OAuth 提示，兼容公共客户端省略 client_id 的解绑请求。
+- 统一成功读取的直返和等待结果，兼容文件起始 offset 0，增加无需快照的 Git 状态。协作概览区分未启用、未配置和归档。
+- 支持从已获准的精确主机导入跨客户端 HTTPS 附件链接。安装文档从 GitHub 读取最新正式版本，目录说明对齐默认的三个工具。
 - 更新运行时及 MCP 兼容环境的 websockets 17.4、typing-inspection 0.4.5、sse-starlette 3.7.0 和 python-multipart 0.0.33。
 - 更新测试依赖 Playwright 1.65.1，以及前端格式化工具 Prettier 3.10.1。重新生成前端第三方许可清单。
 

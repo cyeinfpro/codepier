@@ -104,7 +104,7 @@ class OAuth:
         except (ValueError, TypeError) as exc:
             raise DevError(
                 "INVALID_REDIRECT",
-                "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符；管理员请检查 OAUTH_REDIRECT_HOSTS（Claude 需 claude.ai，Grok 需 grok.com），修改后重启 Hub",
+                "回调必须是允许主机上的完整 HTTPS 地址（本机回调可用 HTTP），不可使用通配符；管理员请检查 OAUTH_REDIRECT_HOSTS（Claude、Grok、Antigravity 与 Gemini 使用各自的完整 OAuth 回调主机），修改后重启 Hub",
             ) from exc
         return value
 
@@ -165,7 +165,9 @@ class OAuth:
         )
         if not row:
             raise DevError(
-                "AUTH_REQUEST_EXPIRED", "授权请求已过期或已经处理，请从 ChatGPT 重新连接", 410
+                "AUTH_REQUEST_EXPIRED",
+                "授权请求已过期或已经处理，请从发起授权的客户端重新连接",
+                410,
             )
         return row
 
@@ -690,18 +692,28 @@ class OAuth:
             form = await self.form(request)
 
             def finish():
-                row = self.store.one(
-                    "SELECT t.grant_id,g.client_id FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=?",
-                    (digest(form.get("token", "")),),
-                )
-                if row and row["client_id"] == form.get("client_id"):
-                    self.store.execute("UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],))
-                    self.store.audit(
-                        "oauth:" + str(row["client_id"]),
-                        "oauth.revoke",
-                        row["grant_id"],
-                        target_kind="grant",
+                # DCR supports only public clients. The bearer token identifies its
+                # OAuth grant when the client omits its optional revocation client_id.
+                client_id = form.get("client_id")
+                with self.store.lock, self.store.db:
+                    row = self.store.db.execute(
+                        """SELECT t.grant_id,g.client_id FROM tokens t
+                           JOIN grants g ON g.id=t.grant_id
+                           JOIN oauth_clients c ON c.id=g.client_id
+                           WHERE t.hash=? AND g.revoked=0""",
+                        (digest(form.get("token", "")),),
+                    ).fetchone()
+                    if not row or (client_id is not None and row["client_id"] != client_id):
+                        return JSONResponse({})
+                    self.store.db.execute(
+                        "UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],)
                     )
+                self.store.audit(
+                    "oauth:" + row["client_id"],
+                    "oauth.revoke",
+                    row["grant_id"],
+                    target_kind="grant",
+                )
                 return JSONResponse({})
 
             return await self.store.run(finish)

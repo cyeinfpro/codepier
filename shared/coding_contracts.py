@@ -52,6 +52,7 @@ class ShowChanges(CodingArgs):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
     baseline_ref: str = Field(default="", pattern=r"^(|[a-f0-9]{32})$")
     review_ref: str = Field(default="", pattern=r"^(|[a-f0-9]{32})$")
+    status: bool = False
     finalize: bool = Field(
         default=False,
         description="With baseline_ref, atomically replace the baseline with its final immutable review. Repeating returns that same result. Default keeps the baseline for further comparisons until expiry.",
@@ -63,6 +64,12 @@ class ShowChanges(CodingArgs):
 
     @model_validator(mode="after")
     def exactly_one_reference(self):
+        if self.status:
+            if self.baseline_ref or self.review_ref or self.finalize or self.path:
+                raise ValueError(
+                    "Git status cannot be combined with snapshot references, finalize or path"
+                )
+            return self
         if bool(self.baseline_ref) == bool(self.review_ref):
             raise ValueError(
                 "Supply exactly one of baseline_ref (freeze a review) or review_ref (read the same snapshot)"

@@ -9,7 +9,7 @@ import tempfile
 import time
 
 
-def _read(root, args):
+def _read(root, args, *, trim=True):
     with tempfile.TemporaryFile() as output:
         result = subprocess.run(
             [
@@ -45,7 +45,29 @@ def _read(root, args):
         data = output.read(1024 * 1024 + 1)
         if len(data) > 1024 * 1024:
             raise ValueError("git metadata exceeds budget")
-        return data.decode("utf-8", "replace").strip()
+        decoded = data.decode("utf-8", "replace")
+        return decoded.strip() if trim else decoded
+
+
+def working_changes(root, *, offset, limit):
+    root = Path(root)
+    if not (root / ".git").exists() or (root / ".git").is_symlink():
+        return {"available": False, "reason": "not_a_git_root", "network_checked": False}
+    try:
+        status = _read(root, ["status", "--porcelain=v1", "--untracked-files=normal"], trim=False)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {"available": False, "reason": "git_metadata_unavailable", "network_checked": False}
+    entries = status.splitlines()
+    end = offset + limit
+    return {
+        "available": True,
+        "scope": "working_tree",
+        "network_checked": False,
+        "dirty": len(entries),
+        "entries": entries[offset:end],
+        "offset": offset,
+        "next_offset": end if end < len(entries) else None,
+    }
 
 
 def freshness(root):

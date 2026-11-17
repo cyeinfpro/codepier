@@ -781,7 +781,7 @@ def result(
 ):
     from shared.mcp_presentation import token_view, raw_output_sources
 
-    if view >= 3 and verbosity != "full" and unified and unified is not True and name == "process":
+    if verbosity != "full" and unified and unified is not True and name == "process":
         from shared.unified_contracts import unwrap_waited
 
         unwrapped = unwrap_waited(value, unified)

@@ -56,7 +56,9 @@ def test_every_legacy_facade_operation_has_a_unified_address():
     assert not missing
     assert set(found) <= legacy_pairs()
     # workspace.open is reachable read-only (query project) and with a baseline (act baseline).
-    assert {key for key, value in found.items() if len(value) > 1} == {('workspace', 'open')}
+    assert {key for key, value in found.items() if len(value) > 1} == {
+        ('workspace', 'open'), ('read', 'changes'),
+    }
 
 
 def test_every_public_collaboration_action_has_exactly_one_address():

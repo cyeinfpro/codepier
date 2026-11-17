@@ -95,6 +95,18 @@ _GLOBS = (
 )
 _GUIDES = {
     (
+        "collab.list",
+        "overview",
+    ): "Project-level collaboration state. Supply project; an optional conversation_id selects an authorized room.",
+    (
+        "collab.list",
+        "rooms",
+    ): "List the authorized project's legacy collaboration environments. Supply project.",
+    (
+        "collab.list",
+        "room_list",
+    ): "List independent rooms owned by the signed-in panel administrator. A project OAuth or PAT grant cannot list these rooms.",
+    (
         "project",
         "open",
     ): "Read project rules and status. Omit context_id on first open; reuse the returned ID only when you have its body.",
@@ -105,11 +117,11 @@ _GUIDES = {
     (
         "file",
         "file",
-    ): "Read one file. offset is one-based; resume at next_offset. Keep the SHA for edits.",
+    ): "Read one file. offset 0 or 1 starts at the first line; resume at next_offset. Keep the SHA for edits.",
     (
         "file",
         "batch",
-    ): "Read up to 8 items from one project. Follow each file’s next_offset if its content was limited.",
+    ): "Read up to 8 files from one project in one call. Item offsets 0 and 1 start at the first line; follow each file’s next_offset.",
     (
         "tree",
         "tree",
@@ -142,6 +154,10 @@ _GUIDES = {
         "changes",
         "changes",
     ): "Supply exactly one of baseline_ref or review_ref. Freeze by baseline_ref, then page using review_ref.",
+    (
+        "changes",
+        "status",
+    ): "Inspect current staged, unstaged and untracked paths without capturing a baseline. Entries use Git porcelain v1; page with next_offset.",
     (
         "baseline",
         "open",
@@ -249,6 +265,21 @@ def _input_schema(tool, action, view, legacy, schema):
         fields.update({key: {"type": "string"} for key in ("action", "tool", "view", "event")})
         fields["detail"] = {"enum": ["brief", "schema"], "default": "brief"}
         # 'action' and 'view' inside args select the target, not this envelope.
+    if action == "changes":
+        fields.pop("status", None)
+        if view == "status":
+            fields = {
+                key: value
+                for key, value in fields.items()
+                if key in {"project", "workspace_id", "offset", "limit"}
+            }
+    if action in {"source_check", "import"}:
+        fields["download_url"] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "HTTPS attachment URL when the client cannot supply a native file object. The Hub must allow its exact host.",
+        }
     if action == "file" and view == "file":
         required.add("path")
     if (action, view) == ("edit", "write"):

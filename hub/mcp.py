@@ -91,6 +91,12 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             f"{request.url.scheme}://{request.url.netloc}",
             public_url(),
             "https://chatgpt.com",
+            "https://chat.openai.com",
+            "https://claude.ai",
+            "https://grok.com",
+            "https://gemini.google.com",
+            "https://antigravity.google",
+            "https://antigravity.google.com",
         }
         allowed.update(v for v in env_csv("MCP_ALLOWED_ORIGINS") if v)
         return not origin or origin in allowed

@@ -1,6 +1,8 @@
 # MCP 工具与调用约定
 
-基础目录有 15 个工具：九个开发原语 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`，两个专用只读查询 `project_query`、`task_query`，两个项目知识接口 `project_knowledge_build`、`project_knowledge_query`，以及身份与当前权限 `get_profile`、`get_access_context`。协作开启后增加三个入口，标准目录合计 18 个；按授权可用的外部网关工具另外计算。
+默认 /mcp 公开 [unified 的三个入口](UNIFIED_TOOLS.md)：query、act、get_profile。本页说明显式使用 /mcp?profile=core 时的兼容目录。
+
+Core 基础目录有 15 个工具：九个开发原语 `workspace`、`read`、`write`、`edit`、`exec`、`process`、`vps`、`browser`、`computer`，两个专用只读查询 `project_query`、`task_query`，两个项目知识接口 `project_knowledge_build`、`project_knowledge_query`，以及身份与当前权限 `get_profile`、`get_access_context`。协作开启后增加三个入口，标准目录合计 18 个；按授权可用的外部网关工具另外计算。
 
 保留标准身份、原生附件写入和精确补丁各自的语义。此前已退役的旧开发工具仍返回 `TOOL_REMOVED`，`full`、`coding` 不恢复它们。1.20 对旧协作工具采用不同的兼容方式：旧名称不再出现在工具目录中，但已缓存客户端的调用继续进入相同权限检查和业务处理；不能用别名绕过功能开关或授权。
 

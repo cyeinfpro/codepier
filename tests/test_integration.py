@@ -130,6 +130,40 @@ def oauth_prepare(stack,scope='read write execute'):
     id=parse_qs(urlparse(auth.headers['location']).query)['authorize'][0]
     return reg,id,verifier,args
 
+def test_public_oauth_revocation_can_omit_client_id(stack):
+    reg, request_id, verifier, _ = oauth_prepare(stack, scope='read')
+    decision = stack.must(stack.client.post('/api/oauth/requests/'+request_id+'/decide',
+        json={'allow': True, 'scopes': ['read'], 'projects': [stack.project['id']]}))
+    code = parse_qs(urlparse(decision['redirect']).query)['code'][0]
+    token_form = {'grant_type': 'authorization_code', 'client_id': reg['client_id'],
+                  'redirect_uri': reg['redirect_uris'][0], 'code_verifier': verifier,
+                  'resource': stack.url+'/mcp', 'code': code}
+    tokens = stack.must(stack.client.post('/oauth/token', data=token_form))
+    access = tokens['access_token']
+    assert stack.client.post('/oauth/revoke', data={'token': access, 'client_id': 'unrelated'}).status_code == 200
+    assert stack.rpc('ping', token_value=access).status_code == 200
+    assert stack.client.post('/oauth/revoke', data={'token': stack.pat}).status_code == 200
+    assert stack.rpc('ping').status_code == 200
+    for _ in range(2):
+        assert stack.client.post('/oauth/revoke', data={'token': tokens['refresh_token']}).status_code == 200
+    assert stack.rpc('ping', token_value=access).status_code == 401
+
+
+def test_zero_file_offset_starts_at_first_line(stack):
+    single = {'action': 'file', 'project': 'ProjectAlpha', 'path': 'README.md', 'offset': 0}
+    batch = {'action': 'file', 'view': 'batch', 'project': 'ProjectAlpha',
+             'args': {'items': [{'path': 'README.md', 'offset': 0}]}}
+    values = []
+    for arguments in (single, batch):
+        response = stack.rpc('tools/call', {'name': 'query', 'arguments': arguments})
+        result = response.json()['result']
+        assert not result['isError'], result
+        values.append(result['structuredContent'])
+    assert values[0]['offset'] == 1
+    assert values[1]['files'][0]['offset'] == 1
+    assert values[1]['files'][0]['sha256'] == values[0]['sha256']
+
+
 def test_oauth_pkce_full_flow_refresh_and_replay(stack):
     reg,id,verifier,args=oauth_prepare(stack)
     details=stack.client.get('/api/oauth/requests/'+id);assert details.json()['client_name']=='Integration OAuth'

@@ -41,7 +41,13 @@ def directory(scopes=None, *, collaboration=False):
     for tool, actions in u.ACTIONS.items():
         for action, routes in actions.items():
             if action.startswith("collab."):
-                views = list(routes) if collaboration else []
+                views = (
+                    list(routes)
+                    if collaboration
+                    else ["overview"]
+                    if action == "collab.list"
+                    else []
+                )
             elif action == "help":
                 views = list(routes)
             elif action == "baseline" and scopes is not None and "write" not in scopes:
@@ -103,7 +109,8 @@ def catalog(scopes=None, *, collaboration=False):
     return {
         "tools": directory(scopes, collaboration=collaboration),
         "note": "Choose a view or use the default. query help accepts args.tool/action/view; "
-        "args.detail=schema returns machine schemas. Action-specific fields go in args.",
+        "args.detail=schema returns machine schemas. Action-specific fields go in args. "
+        "For project collaboration use collab.list/overview; independent room_list is panel-owner only.",
     }
 
 

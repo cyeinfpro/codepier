@@ -71,10 +71,30 @@ call returns the same structured result as the legacy call.
 * Initialize instructions describe the unified tools when the profile is `unified`.
 * Connection evidence compares the served catalog with the router default, which is now `unified`.
 
+### Collaboration discovery
+
+Use `query(action="collab.list", view="overview", project=...)` to inspect the
+authorized project's collaboration state. `archived` indicates that the selected
+or default room was removed. `not_configured` indicates that the project has no
+collaboration environment. `disabled` indicates that collaboration is disabled
+on the Hub. Archived rooms remain unavailable for other room operations.
+
+Use `view="rooms"` to list the project's older environment records. The independent
+room list (`view="room_list"`) requires the signed-in panel owner's administrative
+session. A project OAuth or PAT grant can use project overview and environment queries.
+
 ### Opt-in compact view
 
-Use `?view=3` on the unified connection to try the smaller tool responses. Successful inline reads have
-the same shape as direct reads. Project open returns compact document and directory lines and keeps the
+In the default lean response, successful reads completed during the inline wait
+have the same shape as direct reads. Use `query(action="file", view="batch", args={"items": [...]})`
+to read up to eight files from one workspace with a single operation. File offsets
+`0` and `1` both start from the first line.
+
+`query(action="changes", view="status", project=...)` returns a paginated local Git
+status with staged, unstaged and untracked paths. A call without snapshot references
+uses this view by default. Supply `baseline_ref` or `review_ref` for an immutable review.
+
+Use `?view=3` on the unified connection for smaller tool responses. Project open returns compact document and directory lines and keeps the
 full context ID, baseline reference and Git commit. Project lists group aliases by shared defaults.
 Sync search groups matches by path. Pass `args.format="structured"` on tree, sync search or project
 list for object rows. Catalog help lists collaboration action names; action-specific help lists their views.
@@ -148,6 +168,13 @@ The `omitted` map names directories with capped results. Narrow `path`, increase
 `next_offset` to inspect more. Older Agents return the previous filesystem listing.
 
 ### Native attachments and help pointers
+
+Clients that can pass a signed HTTPS attachment URL can use `args.download_url` for
+`query(action="source_check")` and `act(action="import")`. Omit `file` when using this path.
+The Hub checks the exact download and redirect hosts against the operator-managed
+native file policy, including `CODEPIER_NATIVE_FILE_HOSTS`. Run `source_check` with
+the URL first. A provider-specific API file ID, browser cookie, or account API key
+cannot be substituted for a downloadable URL.
 
 Native attachments use the top-level `file` field: `query(action="source_check", file=..., ...)`
 previews the source without saving it; `act(action="import", file=..., ...)` imports it under

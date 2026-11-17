@@ -1425,6 +1425,12 @@ OUTPUT_SCHEMAS.update(
         "show_changes": _object(
             {
                 **_RECEIPT,
+                "available": _BOOL,
+                "reason": _STR,
+                "network_checked": _BOOL,
+                "dirty": {"type": "integer"},
+                "entries": {"type": "array", "items": _STR},
+                "offset": {"type": "integer"},
                 "review_ref": _STR,
                 "baseline_ref": _STR,
                 "immutable": _BOOL,
@@ -1439,8 +1445,14 @@ OUTPUT_SCHEMAS.update(
                 "diff": _STR,
                 "next_offset": _NULLABLE_INT,
             },
-            ("operation_id", "review_ref", "summary", "coverage"),
-        ),
+            ("operation_id",),
+        )
+        | {
+            "anyOf": [
+                {"required": ["review_ref", "summary", "coverage"]},
+                {"required": ["available"]},
+            ],
+        },
         "apply_patch": _object(
             {
                 **_RECEIPT,

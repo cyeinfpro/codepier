@@ -13,6 +13,8 @@ handles and response waiting live in ``hub.unified_tools``.
 
 from __future__ import annotations
 
+from hashlib import sha256
+
 import copy
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,7 +50,11 @@ CORE_ACTIONS = {
             "get": ("process", "search_get"),
             "cancel": ("process", "search_cancel"),
         },
-        "changes": {"changes": ("read", "changes"), "reviews": ("read", "reviews")},
+        "changes": {
+            "changes": ("read", "changes"),
+            "status": ("read", "changes"),
+            "reviews": ("read", "reviews"),
+        },
         "history": {"history": ("read", "history")},
         "symbols": {"symbols": ("read", "symbols")},
         "artifacts": {"list": ("read", "artifacts"), "get": ("read", "artifact")},
@@ -432,6 +438,8 @@ def _auto_view(action, flat):
         return "get" if flat.get("ids") else "list"
     if action == "project":
         return "open" if flat.get("project") else "list"
+    if action == "changes":
+        return "changes" if flat.get("baseline_ref") or flat.get("review_ref") else "status"
     return ""
 
 
@@ -473,6 +481,17 @@ def translate(tool, raw):
             422,
         )
     flat.update(copy.deepcopy(call.args))
+    if call.action in {"source_check", "import"} and "download_url" in flat:
+        url = flat.pop("download_url")
+        if flat.get("file") is not None or not isinstance(url, str) or not 1 <= len(url) <= 8192:
+            raise DevError(
+                "INVALID_ARGUMENTS",
+                "Supply either file or an HTTPS download_url (max 8192 characters).",
+                422,
+            )
+        # A URL-only caller has no host-provided ID. Bind its retry identity to
+        # the exact URL unless the import includes its own content SHA-256.
+        flat["file"] = {"download_url": url, "file_id": "url-" + sha256(url.encode()).hexdigest()}
     handle = ""
     if call.action.startswith("collab."):
         handle = flat.pop("handle", "") or ""
@@ -526,6 +545,8 @@ def translate(tool, raw):
         presentation_format = flat.pop("format", "")
         if presentation_format not in ("", "compact", "structured"):
             raise DevError("INVALID_ARGUMENTS", "format must be compact or structured", 422)
+    if (call.action, view) == ("changes", "status"):
+        flat["status"] = True
     args = legacy_call(legacy_tool, operation, flat)
     if call.wait is not None:
         wait = call.wait

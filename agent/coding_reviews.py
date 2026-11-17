@@ -828,6 +828,10 @@ def open_workspace(engine, project, args):
 
 
 def show_changes(engine, project, args):
+    if args.get("status"):
+        from agent.git_freshness import working_changes
+
+        return working_changes(engine.root(project)[0], offset=args["offset"], limit=args["limit"])
     if args.get("baseline_ref"):
         summary = freeze_review(
             engine, project, args["baseline_ref"], finalize=args.get("finalize", False)

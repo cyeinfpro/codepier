@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
-from pydantic import Field, model_validator
+from typing import Annotated, Any, Literal
+from pydantic import AfterValidator, Field, model_validator
 from shared.computer_contracts import ComputerArgs, DesktopAction
 from shared.coding_contracts import PatchChange
 from shared.integration_contracts import NativeFile
@@ -184,9 +184,16 @@ from shared.config import env_int
 READ_BATCH_PAYLOAD_BYTES = env_int("CODEPIER_MCP_RESPONSE_BYTES", 48 * 1024, 8 * 1024, 1024 * 1024)
 
 
+FileLineOffset = Annotated[
+    int,
+    Field(ge=0, le=1000000, description="One-based line number. 0 starts at the first line."),
+    AfterValidator(lambda offset: offset or 1),
+]
+
+
 class ReadBatchItem(ComputerArgs):
     path: str = Field(min_length=1, max_length=1024)
-    offset: int = Field(default=1, ge=1, le=1000000)
+    offset: FileLineOffset = 1
     limit: int = Field(default=2000, ge=1, le=2000)
     expected_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
 
@@ -212,7 +219,7 @@ class Read(Project):
         default_factory=dict, description="Options: project_query(help)."
     )
     path: str = Field(default="", max_length=1024)
-    offset: int = Field(default=1, ge=1, le=1000000, description="One-based line number.")
+    offset: FileLineOffset = 1
     limit: int = Field(default=2000, ge=1, le=2000)
     expected_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
