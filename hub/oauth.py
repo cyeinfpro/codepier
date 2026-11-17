@@ -108,7 +108,7 @@ class OAuth:
             ) from exc
         return value
 
-    def auth_request(self, params):
+    def auth_request(self, params, *, validate_only=False):
         client_id = params.get("client_id", "")
         client = self.store.one("SELECT * FROM oauth_clients WHERE id=?", (client_id,))
         if not client:
@@ -157,6 +157,8 @@ class OAuth:
         state = params.get("state", "")
         if len(state) > 2048:
             raise DevError("INVALID_STATE", "state 过长")
+        if validate_only:
+            return None
         id = token(24)
         self.store.execute(
             "INSERT INTO oauth_requests(id,client_id,redirect_uri,challenge,state,scopes,resource,expires,used) VALUES (?,?,?,?,?,?,?,?,0)",
@@ -172,6 +174,34 @@ class OAuth:
             ),
         )
         return id
+
+    def recover_authorization_link(self, params):
+        """Restart one observed damaged link on-origin, never authorize it.
+
+        This is deliberately not URI normalization. The original invalid request
+        creates no consent/code/grant; the second request must pass normal exact
+        matching and explicit consent. Token exchange never accepts this alias.
+        """
+        broken = "h ttps://antigravity.google/oauth-callback"
+        canonical = "https://antigravity.google/oauth-callback"
+        if params.get("redirect_uri") != broken:
+            return None
+        supported = {
+            "client_id", "redirect_uri", "response_type", "code_challenge",
+            "code_challenge_method", "resource", "scope", "state",
+        }
+        # Unknown extensions may affect authorization semantics; do not drop
+        # them or guess how to replay them. Duplicate keys are rejected upstream.
+        if set(params) - supported:
+            return None
+        client = self.store.one(
+            "SELECT redirects FROM oauth_clients WHERE id=?", (params.get("client_id", ""),)
+        )
+        if not client or json.loads(client["redirects"]) != [canonical]:
+            return None
+        corrected = {**params, "redirect_uri": canonical}
+        self.auth_request(corrected, validate_only=True)
+        return "/oauth/authorize?" + urlencode(corrected)
 
     def get_request(self, id):
         row = self.store.one(
@@ -396,7 +426,18 @@ class OAuth:
             params = dict(request.query_params)
             if len(request.query_params.multi_items()) != len(params):
                 raise DevError("INVALID_REQUEST", "授权参数不能重复")
-            id = self.auth_request(params)
+            try:
+                id = self.auth_request(params)
+            except DevError as exc:
+                if exc.code != "INVALID_REDIRECT":
+                    raise
+                recovery = self.recover_authorization_link(params)
+                if recovery is None:
+                    raise
+                return RedirectResponse(
+                    recovery, status_code=303,
+                    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+                )
             return RedirectResponse("/?authorize=" + id, status_code=303)
 
         @router.get("/api/oauth/requests/{id}")

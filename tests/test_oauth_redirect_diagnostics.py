@@ -6,7 +6,7 @@ from tests.test_oauth_antigravity import antigravity_api as antigravity_api, reg
 
 @pytest.mark.parametrize("redirect, hint", [
     ("", "缺少回调地址"),
-    ("h ttps://antigravity.google/oauth-callback", "含空格"),
+    ("ht tps://antigravity.google/oauth-callback", "含空格"),
     (" " + CALLBACK, "含空格"),
     (CALLBACK + "\t", "含空格"),
     (CALLBACK + "\n", "含空格"),
