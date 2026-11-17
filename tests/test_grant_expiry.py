@@ -181,7 +181,8 @@ def test_oauth_migrated_lifetime_and_consumed_token_not_extended(api):
     exchanged = client.post("/oauth/token", data=form)
     assert exchanged.status_code == 200, exchanged.text
     fresh = exchanged.json()
-    assert "expires_in" not in fresh and "refresh_token" not in fresh
+    assert "expires_in" not in fresh
+    assert fresh["refresh_token"] == tokens["refresh_token"]
     end = time.time() + 60
     assert edit(client, gid, end, revision=2).status_code == 200
     assert store.one("SELECT expires FROM tokens WHERE hash=?", (digest(tokens["refresh_token"]),))["expires"] == end

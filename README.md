@@ -2,7 +2,7 @@
 
 通过 ChatGPT、Gemini、Antigravity、Claude 或 Grok，在已授权的电脑和服务器上读代码、改文件、跑测试，并核对执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.33.23-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.33.24-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -79,7 +79,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
-当前源码为 **v1.33.23**：为已确认的 Antigravity 单一回调拼写损坏增加受限同源恢复，随后仍要求登录、明确授权及精确回调换码。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
+当前源码为 **v1.33.24**：补齐旧 OAuth 连接刷新响应，原样保留刷新凭据和授权期限，并提供不含凭据的换码诊断；真实第三方客户端接续仍需验收。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
 
 ## 使用示例
 
@@ -130,9 +130,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.33.23 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.33.24 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.33.23
+- **Version:** 1.33.24
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

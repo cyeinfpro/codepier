@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -31,6 +32,8 @@ from hub import iam, grant_expiry, oauth_lifetime
 # clients may request every scope advertised by protected-resource metadata.
 LEGACY_OAUTH_SCOPES = ["read", "write", "execute", "computer"]
 
+
+LOGGER = logging.getLogger("uvicorn.error")
 
 DCR_CLIENT_LIMIT = 4096
 
@@ -628,8 +631,15 @@ class OAuth:
         @router.post("/oauth/token")
         async def exchange(request: Request):
             await self.store.run(self.throttle, request)
+            flow = "unknown"
             try:
                 form = await self.form(request)
+                requested_flow = form.get("grant_type")
+                flow = (
+                    requested_flow
+                    if requested_flow in {"authorization_code", "refresh_token"}
+                    else "unsupported"
+                )
 
                 def exchange_form():
                     if form.get("resource", self.resource()) != self.resource():
@@ -693,15 +703,19 @@ class OAuth:
                                     status_code=400,
                                 )
                             result = self.new_tokens(row["grant_id"])
+                            # Persistent linking clients may replace the whole saved
+                            # response. Echo the validated alias; never rotate it or
+                            # extend the grant's deadline during a refresh.
+                            result["refresh_token"] = form["refresh_token"]
                     else:
                         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
                     return JSONResponse(
                         result, headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
                     )
 
-                return await self.store.run(exchange_form)
+                response = await self.store.run(exchange_form)
             except DevError as exc:
-                return JSONResponse(
+                response = JSONResponse(
                     {
                         "error": "invalid_grant"
                         if exc.code == "INVALID_TOKEN"
@@ -710,6 +724,21 @@ class OAuth:
                     },
                     status_code=400 if exc.code == "INVALID_TOKEN" else exc.status,
                 )
+
+            except Exception:
+                # No exception text, request body, credentials or identifiers.
+                LOGGER.info("oauth.token flow=%s outcome=exchange_exception", flow)
+                raise
+            # Emit success only after the database worker commits the transaction.
+            outcome = (
+                ("legacy_refreshed" if flow == "refresh_token" else "issued")
+                if response.status_code == 200
+                else json.loads(response.body)["error"]
+            )
+            LOGGER.info(
+                "oauth.token flow=%s status=%s outcome=%s", flow, response.status_code, outcome
+            )
+            return response
 
         @router.post("/oauth/revoke")
         async def revoke(request: Request):

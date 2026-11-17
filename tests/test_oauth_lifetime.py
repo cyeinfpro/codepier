@@ -57,7 +57,8 @@ def test_existing_clients_migrate_without_login_or_token_replacement(api, monkey
     first = refresh(client, cid, old["refresh_token"])
     assert first.status_code == 200, first.text
     result = first.json()
-    assert "refresh_token" not in result and "expires_in" not in result
+    assert result["refresh_token"] == old["refresh_token"]
+    assert "expires_in" not in result
     # Retry after a lost response, then wake a stale process much later.
     assert refresh(client, cid, old["refresh_token"]).json() == result
     real_time = time.time
@@ -86,6 +87,7 @@ def test_concurrent_refresh_converges_on_one_credential(api, monkeypatch):
         responses = list(pool.map(lambda _: refresh(client, cid, old["refresh_token"]), range(6)))
     assert {r.status_code for r in responses} == {200}
     assert len({r.json()["access_token"] for r in responses}) == 1
+    assert {r.json()["refresh_token"] for r in responses} == {old["refresh_token"]}
     assert app.state.store.one(
         "SELECT count(*) n FROM oauth_lifetime_credentials WHERE grant_id=?", (gid,))["n"] == 1
 
@@ -225,9 +227,8 @@ def test_independent_connections_serialize_migration_result(api, monkeypatch):
             store.close()
 
 
-def test_failed_issue_rolls_back_without_consuming_legacy_alias(api, monkeypatch):
-    import sqlite3
-    from hub.oauth_lifetime import issue
+def test_failed_issue_rolls_back_without_consuming_legacy_alias(api, monkeypatch, caplog):
+    import logging
 
     app, client, _ = api
     cid, old, gid = old_connection(app, client, monkeypatch)
@@ -236,9 +237,13 @@ def test_failed_issue_rolls_back_without_consuming_legacy_alias(api, monkeypatch
     before = store.all("SELECT * FROM tokens WHERE grant_id=? ORDER BY hash", (gid,))
     store.execute("""CREATE TRIGGER fixture_issue_failure BEFORE INSERT ON oauth_lifetime_credentials
         BEGIN SELECT RAISE(ABORT, 'injected issue failure'); END""")
-    with pytest.raises(sqlite3.IntegrityError, match="injected issue failure"):
-        with store.transaction():
-            issue(store, gid)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    caplog.clear()
+    failed = refresh(client, cid, old["refresh_token"])
+    assert failed.status_code == 409
+    assert "injected issue failure" not in failed.text
+    messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith("oauth.token ")]
+    assert messages == ["oauth.token flow=refresh_token outcome=exchange_exception"]
     assert store.all("SELECT * FROM tokens WHERE grant_id=? ORDER BY hash", (gid,)) == before
     assert not store.one("SELECT * FROM oauth_lifetime_credentials WHERE grant_id=?", (gid,))
     store.execute("DROP TRIGGER fixture_issue_failure")
@@ -293,3 +298,98 @@ def test_finite_deadline_ends_old_access_alias_and_stable_credential(api, monkey
         assert rpc(client, old["access_token"], PING).status_code == 401
         assert rpc(client, new["access_token"], PING).status_code == 401
         assert refresh(client, cid, old["refresh_token"]).status_code == 400
+
+
+@pytest.mark.parametrize("unlimited", [False, True])
+def test_legacy_client_can_save_every_refresh_response(api, monkeypatch, unlimited):
+    app, client, _ = api
+    cid, old, gid = old_connection(app, client, monkeypatch, unlimited=unlimited)
+    migrate(app)
+    original = grant(app, old["access_token"])
+    credentials = old
+    first = None
+    real_time = time.time
+    for delay in (0, 3600, 3 * 86400):
+        with monkeypatch.context() as patch:
+            patch.setattr(time, "time", lambda: real_time() + delay)
+            response = refresh(client, cid, credentials["refresh_token"])
+            assert response.status_code == 200, response.text
+            credentials = response.json()  # Strict clients replace their saved response.
+            assert credentials["refresh_token"] == old["refresh_token"]
+            assert grant(app, credentials["access_token"]) == original
+            assert rpc(client, credentials["access_token"], PING).status_code == 200
+            if unlimited:
+                assert "expires_in" not in credentials
+            elif first:
+                assert 0 < credentials["expires_in"] < first["expires_in"]
+            if first:
+                assert credentials["access_token"] == first["access_token"]
+            else:
+                first = credentials
+
+
+def test_reauthorize_registered_client_without_deleting_connection(api, monkeypatch):
+    import base64
+    import hashlib
+    from urllib.parse import parse_qs, urlsplit
+
+    app, client, _ = api
+    cid, old, _ = old_connection(app, client, monkeypatch, unlimited=True)
+    migrate(app)
+    verifier = "reauthorize-verifier-" * 4
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    params = {"response_type": "code", "client_id": cid,
+              "redirect_uri": "http://localhost:12345/callback",
+              "code_challenge_method": "S256", "code_challenge": challenge,
+              "resource": "http://testserver/mcp"}
+    response = client.get("/oauth/authorize", params=params, follow_redirects=False)
+    request_id = parse_qs(urlsplit(response.headers["location"]).query)["authorize"][0]
+    decision = client.post(f"/api/oauth/requests/{request_id}/decide", json={
+        "allow": True, "scopes": ["read"], "projects": ["project"]})
+    assert decision.status_code == 200, decision.text
+    code = parse_qs(urlsplit(decision.json()["redirect"]).query)["code"][0]
+    form = {"grant_type": "authorization_code", "code": code, "client_id": cid,
+            "redirect_uri": params["redirect_uri"], "code_verifier": verifier}
+    assert client.post("/oauth/token", data={**form, "code_verifier": "x" * 64}).status_code == 400
+    result = client.post("/oauth/token", data=form)
+    assert result.status_code == 200, result.text
+    assert "refresh_token" not in result.json()
+    assert rpc(client, result.json()["access_token"], PING).status_code == 200
+    assert refresh(client, cid, old["refresh_token"]).status_code == 200
+    assert rpc(client, old["access_token"], PING).status_code == 200
+    assert client.post("/oauth/token", data=form).status_code == 400
+
+
+def test_token_diagnostics_are_bounded_and_credential_free(api, monkeypatch, caplog):
+    import logging
+    from hub.oauth import OAuth
+
+    app, client, _ = api
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+    cid, old, _ = old_connection(app, client, monkeypatch, unlimited=True)
+    migrate(app)
+    result = refresh(client, cid, old["refresh_token"])
+    assert result.status_code == 200
+    assert refresh(client, "wrong", old["refresh_token"]).status_code == 400
+    assert refresh(client, cid, old["refresh_token"], scope="execute").status_code == 400
+    assert client.post("/oauth/token", data={"grant_type": "secret-unsupported-flow"}).status_code == 400
+    assert client.post("/oauth/token", data={"grant_type": "authorization_code",
+        "code": "secret-code", "code_verifier": "secret-verifier"}).status_code == 400
+    messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith("oauth.token ")]
+    assert "oauth.token flow=authorization_code status=200 outcome=issued" in messages
+    assert "oauth.token flow=refresh_token status=200 outcome=legacy_refreshed" in messages
+    assert "oauth.token flow=refresh_token status=400 outcome=invalid_grant" in messages
+    assert "oauth.token flow=refresh_token status=400 outcome=invalid_scope" in messages
+    assert "oauth.token flow=authorization_code status=400 outcome=invalid_grant" in messages
+    assert "oauth.token flow=unsupported status=400 outcome=unsupported_grant_type" in messages
+    for secret in (cid, old["access_token"], old["refresh_token"], result.json()["access_token"],
+                   "secret-code", "secret-verifier", "secret-unsupported-flow"):
+        assert secret not in "\n".join(messages)
+    caplog.clear()
+    def fail_issue(self, grant_id):
+        raise RuntimeError("secret-database-exception")
+    monkeypatch.setattr(OAuth, "new_tokens", fail_issue)
+    with pytest.raises(RuntimeError, match="secret-database-exception"):
+        refresh(client, cid, old["refresh_token"])
+    messages = [r.getMessage() for r in caplog.records if r.getMessage().startswith("oauth.token ")]
+    assert messages == ["oauth.token flow=refresh_token outcome=exchange_exception"]

@@ -270,7 +270,7 @@ def test_legacy_refresh_retries_are_idempotent_but_wrong_client_is_denied(api):
     response = client.post("/oauth/token", data=form)
     assert response.status_code == 200
     new = response.json()
-    assert "refresh_token" not in new
+    assert new["refresh_token"] == old["refresh_token"]
     assert client.post("/oauth/token", data={**form, "client_id": "unrelated-client"}).status_code == 400
     assert rpc(client, new["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
     repeated = client.post("/oauth/token", data=form)
