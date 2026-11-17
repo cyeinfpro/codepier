@@ -1,4 +1,4 @@
-"""Space-bound multi-user OAuth authorization code + S256 PKCE, DCR and rotating refresh tokens.
+"""Space-bound multi-user OAuth authorization code + S256 PKCE, DCR and grant-bound credentials.
 
 Public clients only (token_endpoint_auth_method=none). Explicit per-authorization
 consent; resource bound grants; no token forwarding; no wildcard redirect URLs.
@@ -17,14 +17,14 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from hub.auth import Auth
-from hub.access_profiles import effective_grant, validate_profile_consent
+from hub.access_profiles import validate_profile_consent
 from hub.access import access_defaults, project_selection
 from hub.runtime import Runtime
 from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
 from shared.role_contracts import ROLE_SCOPE
 from hub.roles import validate_role_consent, public_role
-from hub import iam, grant_expiry
+from hub import iam, grant_expiry, oauth_lifetime
 
 
 # Discovery must never combine mutually exclusive fixed and role modes. MCP
@@ -47,6 +47,7 @@ class OAuth:
             "UPDATE grants SET resource=? WHERE client_id IS NOT NULL AND resource IS NULL",
             (self.resource(),),
         )
+        oauth_lifetime.migrate_existing(self.store)
         self.redirect_hosts = {
             host.lower()
             for host in env_csv(
@@ -259,39 +260,7 @@ class OAuth:
         )
 
     def new_tokens(self, grant_id: str):
-        self.store.require_transaction()
-        grant = self.store.one("SELECT * FROM grants WHERE id=?", (grant_id,))
-        scopes, _, _ = effective_grant(self.store, grant)
-        if grant.get("authorization_mode") == "role":
-            scopes = {ROLE_SCOPE}  # OAuth delegation is stable; capabilities are live policy.
-        lifetime = grant_expiry.check(self.store, grant_id)
-        now = time.time()
-        end = (
-            (
-                grant_expiry.UNLIMITED_TOKEN_EXPIRY
-                if lifetime["expires"] is None
-                else lifetime["expires"]
-            )
-            if lifetime
-            else now + 30 * 86400
-        )
-        access_end = min(now + 3600, end)
-        access, refresh = "rda_" + token(), "rdr_" + token()
-        self.store.db.execute(
-            "INSERT INTO tokens VALUES (?,?,?,'access',?,?)",
-            (token(16), digest(access), grant_id, access_end, now),
-        )
-        self.store.db.execute(
-            "INSERT INTO tokens VALUES (?,?,?,'refresh',?,?)",
-            (token(16), digest(refresh), grant_id, end, now),
-        )
-        return {
-            "access_token": access,
-            "token_type": "Bearer",
-            "expires_in": max(0, int(access_end - now)),
-            "refresh_token": refresh,
-            "scope": " ".join(sorted(scopes)),
-        }
+        return oauth_lifetime.issue(self.store, grant_id)
 
     @staticmethod
     async def json_object(request: Request):
@@ -674,7 +643,7 @@ class OAuth:
                             .rstrip(b"=")
                             .decode()
                         )
-                        with self.store.lock, self.store.db:
+                        with self.store.transaction():
                             row = self.store.db.execute(
                                 "SELECT c.*,g.revoked FROM oauth_codes c JOIN grants g ON g.id=c.grant_id WHERE c.hash=?",
                                 (digest(form.get("code", "")),),
@@ -694,11 +663,17 @@ class OAuth:
                             )
                             result = self.new_tokens(row["grant_id"])
                     elif form.get("grant_type") == "refresh_token":
-                        with self.store.lock, self.store.db:
-                            row = self.store.db.execute(
-                                "SELECT t.*,g.client_id,g.revoked,g.resource FROM tokens t JOIN grants g ON g.id=t.grant_id WHERE t.hash=? AND t.kind IN ('refresh','refresh_used')",
+                        # Durable compatibility for credentials valid at upgrade.
+                        # The whole lookup/reply is serialized across DB writers.
+                        with self.store.transaction():
+                            row = self.store.one(
+                                """SELECT t.*,g.client_id,g.revoked,g.resource,g.scopes
+                                FROM oauth_refresh_migrations m
+                                JOIN tokens t ON t.hash=m.token_hash AND t.grant_id=m.grant_id
+                                JOIN grants g ON g.id=m.grant_id
+                                WHERE m.token_hash=? AND t.kind='refresh'""",
                                 (digest(form.get("refresh_token", "")),),
-                            ).fetchone()
+                            )
                             if (
                                 not row
                                 or row["revoked"]
@@ -707,18 +682,8 @@ class OAuth:
                                 or row["resource"] != self.resource()
                             ):
                                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                            if row["kind"] == "refresh_used":
-                                # Both holders are indistinguishable after a token is
-                                # stolen. Reuse revokes the entire rotation family.
-                                self.store.db.execute(
-                                    "UPDATE grants SET revoked=1 WHERE id=?", (row["grant_id"],)
-                                )
-                                return JSONResponse({"error": "invalid_grant"}, status_code=400)
-                            granted = self.store.one(
-                                "SELECT scopes FROM grants WHERE id=?", (row["grant_id"],)
-                            )
                             if form.get("scope") is not None and set(form["scope"].split()) != set(
-                                json.loads(granted["scopes"])
+                                json.loads(row["scopes"])
                             ):
                                 return JSONResponse(
                                     {
@@ -727,9 +692,6 @@ class OAuth:
                                     },
                                     status_code=400,
                                 )
-                            self.store.db.execute(
-                                "UPDATE tokens SET kind='refresh_used' WHERE hash=?", (row["hash"],)
-                            )
                             result = self.new_tokens(row["grant_id"])
                     else:
                         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)

@@ -1,3 +1,4 @@
+from tests.oauth_legacy import legacy_call
 """Real OAuth/PAT requests for durable current-and-future project authorization."""
 import base64
 import hashlib
@@ -79,7 +80,7 @@ def test_defaults_are_opt_in_and_never_auto_consent_or_expand_existing_grants(ap
 
 def test_existing_oauth_token_sees_future_projects_without_reconnect_and_can_shrink(api):
     app, client, pat = api
-    client_id, tokens = oauth_tokens(client)
+    client_id, tokens = legacy_call(client, oauth_tokens, client)
     old_grant = grant_for(app, tokens['access_token'])
     before_tokens = [dict(row) for row in app.state.store.all('SELECT * FROM tokens ORDER BY id')]
     response = client.put('/api/settings/access', json={

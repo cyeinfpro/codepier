@@ -44,7 +44,7 @@ def test_oauth_explicit_lifetime(api, days):
     tokens = client.post("/oauth/token", data={"grant_type": "authorization_code", "code": code,
         "client_id": registration["client_id"], "redirect_uri": callback, "code_verifier": verifier})
     assert tokens.status_code == 200, tokens.text
-    token_row = app.state.store.one("SELECT * FROM tokens WHERE hash=?", (digest(tokens.json()["refresh_token"]),))
+    token_row = app.state.store.one("SELECT * FROM tokens WHERE hash=?", (digest(tokens.json()["access_token"]),))
     lifetime = app.state.store.one("SELECT * FROM grant_expirations WHERE grant_id=?", (token_row["grant_id"],))
     if days is None:
         assert lifetime["expires"] is None
@@ -52,7 +52,11 @@ def test_oauth_explicit_lifetime(api, days):
     else:
         assert 6.99 * 86400 < lifetime["expires"] - time.time() <= 7 * 86400
         assert token_row["expires"] == lifetime["expires"]
-    assert tokens.json()["expires_in"] == 3600
+    assert "refresh_token" not in tokens.json()
+    if days is None:
+        assert "expires_in" not in tokens.json()
+    else:
+        assert 6.99 * 86400 < tokens.json()["expires_in"] <= 7 * 86400
 
 
 def test_edit_expiration_csrf_origin_and_space(api):
@@ -165,23 +169,23 @@ def test_deleted_credentials_not_recreated_and_owner_boundary(api):
     assert edit(client, gid, None, revision=2, confirm=True).status_code == 404
 
 
-def test_oauth_rotation_lifetime_and_consumed_token_not_extended(api):
+def test_oauth_migrated_lifetime_and_consumed_token_not_extended(api):
+    from tests.oauth_legacy import legacy_call
     app, client, _ = api
-    client_id, tokens = oauth_tokens(client)
+    client_id, tokens = legacy_call(client, oauth_tokens, client)
     store = app.state.store
     row = store.one("SELECT * FROM tokens WHERE hash=?", (digest(tokens["refresh_token"]),))
     gid = row["grant_id"]
     assert edit(client, gid, None).status_code == 200
     form = {"grant_type": "refresh_token", "client_id": client_id, "refresh_token": tokens["refresh_token"]}
-    rotated = client.post("/oauth/token", data=form)
-    assert rotated.status_code == 200, rotated.text
-    fresh = rotated.json()
-    assert fresh["expires_in"] == 3600
-    consumed = store.one("SELECT * FROM tokens WHERE hash=?", (digest(tokens["refresh_token"]),))
+    exchanged = client.post("/oauth/token", data=form)
+    assert exchanged.status_code == 200, exchanged.text
+    fresh = exchanged.json()
+    assert "expires_in" not in fresh and "refresh_token" not in fresh
     end = time.time() + 60
     assert edit(client, gid, end, revision=2).status_code == 200
-    assert store.one("SELECT expires FROM tokens WHERE hash=?", (digest(fresh["refresh_token"]),))["expires"] == end
+    assert store.one("SELECT expires FROM tokens WHERE hash=?", (digest(tokens["refresh_token"]),))["expires"] == end
     assert store.one("SELECT expires FROM tokens WHERE hash=?", (digest(fresh["access_token"]),))["expires"] == end
-    assert store.one("SELECT expires FROM tokens WHERE hash=?", (digest(tokens["refresh_token"]),))["expires"] == consumed["expires"]
-    assert client.post("/oauth/token", data=form).status_code == 400
+    assert client.post("/oauth/token", data=form).status_code == 200
+    assert client.delete("/api/grants/" + gid).status_code == 200
     assert edit(client, gid, None, revision=3, confirm=True).status_code == 409

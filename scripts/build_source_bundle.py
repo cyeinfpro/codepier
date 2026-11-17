@@ -279,6 +279,7 @@ PUBLIC_DOCS = {
     "docs/AGENT_PATHS_AND_SMB.md",
     "docs/ARCHITECTURE.md",
     "docs/CHATGPT.md",
+    "docs/OAUTH_LIFETIME.md",
     "docs/CALL_LOG.md",
     "docs/CLAUDE_CLI.md",
     "docs/CLI-GLOBAL-FLOW-20260918.md",

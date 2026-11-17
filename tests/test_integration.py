@@ -145,7 +145,7 @@ def test_public_oauth_revocation_can_omit_client_id(stack):
     assert stack.client.post('/oauth/revoke', data={'token': stack.pat}).status_code == 200
     assert stack.rpc('ping').status_code == 200
     for _ in range(2):
-        assert stack.client.post('/oauth/revoke', data={'token': tokens['refresh_token']}).status_code == 200
+        assert stack.client.post('/oauth/revoke', data={'token': tokens['access_token']}).status_code == 200
     assert stack.rpc('ping', token_value=access).status_code == 401
 
 
@@ -164,7 +164,7 @@ def test_zero_file_offset_starts_at_first_line(stack):
     assert values[1]['files'][0]['sha256'] == values[0]['sha256']
 
 
-def test_oauth_pkce_full_flow_refresh_and_replay(stack):
+def test_oauth_pkce_full_flow_lifetime_and_code_replay(stack):
     reg,id,verifier,args=oauth_prepare(stack)
     details=stack.client.get('/api/oauth/requests/'+id);assert details.json()['client_name']=='Integration OAuth'
     assert stack.client.post('/api/oauth/requests/'+id+'/decide',json={'allow':True,'scopes':['read'],'projects':[]}).status_code==400
@@ -175,9 +175,9 @@ def test_oauth_pkce_full_flow_refresh_and_replay(stack):
     tokens=stack.must(stack.client.post('/oauth/token',data=form));assert 'access_token' in tokens
     assert not stack.mcp('workspace', {'operation': 'list'},token_value=tokens['access_token'])['isError']
     assert stack.client.post('/oauth/token',data=form).status_code==400
-    refresh={'grant_type':'refresh_token','client_id':reg['client_id'],'refresh_token':tokens['refresh_token'],'resource':stack.url+'/mcp'}
-    new=stack.must(stack.client.post('/oauth/token',data=refresh));assert new['refresh_token']!=tokens['refresh_token']
-    assert stack.client.post('/oauth/token',data=refresh).status_code==400
+    assert 'refresh_token' not in tokens
+    assert tokens['expires_in'] > 29 * 86400
+    new = tokens
     assert stack.client.post('/api/oauth/requests/'+id+'/decide',json={'allow':True,'scopes':['read'],'projects':[stack.project['id']]}).status_code==410
     assert stack.client.post('/oauth/revoke',data={'token':new['access_token'],'client_id':reg['client_id']}).status_code==200
     assert stack.rpc('ping',token_value=new['access_token']).status_code==401

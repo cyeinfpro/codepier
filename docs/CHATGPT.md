@@ -18,6 +18,8 @@
 
 在客户端创建连接，选择 OAuth。CodePier 实现授权码、S256 PKCE、DCR 公共客户端 `token_endpoint_auth_method=none`，不实现 CIMD、private_key_jwt 或 client_secret_basic；采用服务实际支持的认证方式。跳转面板后登录、核对项目范围和工具权限，再明确确认。授权码及回调地址精确匹配；不要为解决回调失败放行任意域名。
 
+OAuth 连接统一遵循面板所选授权期限：选“无限期”就持续有效，直到撤销或授权条件变化，不再每小时刷新。自 1.33.23 起新连接只返回访问凭据；升级前仍有效的连接自动接续，旧客户端下次刷新可原地换取稳定访问凭据，无需改配置或重新同意。已撤销或过期的连接不会自动恢复。迁移边界、有限期行为及回滚要求见 [OAuth 授权期限](OAUTH_LIFETIME.md)。
+
 ### Google Antigravity
 
 Antigravity 使用远程 Streamable HTTP，在 IDE 的 Agent 面板选择 **MCP Servers → Manage MCP Servers → View raw config**，将以下条目合并进现有 `mcpServers`（不要覆盖其他服务）：

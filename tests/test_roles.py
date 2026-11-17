@@ -1,3 +1,4 @@
+from tests.oauth_legacy import legacy_call
 """Live role grants: additions, revocation, rule pairing and delegated creation."""
 import asyncio
 import json
@@ -173,7 +174,7 @@ def role_oauth(client,r,p,**extra):
 
 def test_role_oauth_refresh_keeps_coarse_scope_but_follows_new_projects(api):
     app,client,_=api
-    r=role(client);p=profile(client,r);cid,t=role_oauth(client,r,p)
+    r=role(client);p=profile(client,r);cid,t=legacy_call(client,role_oauth,client,r,p)
     assert t['scope'] == ROLE_SCOPE
     add_project(app)
     r=must(update_role(client,r,project_rules=[{'actions':['read','execute'],'all_projects':True}]))
@@ -182,7 +183,7 @@ def test_role_oauth_refresh_keeps_coarse_scope_but_follows_new_projects(api):
     assert grant_for(app,t['access_token'])['id'] == grant_for(app,fresh['access_token'])['id']
     assert visible_projects(client,t['access_token']) == visible_projects(client,fresh['access_token']) == {'project','future'}
     paused=must(update_role(client,r,enabled=False))
-    rotated=must(client.post('/oauth/token',data={'grant_type':'refresh_token','refresh_token':fresh['refresh_token'],'client_id':cid}))
+    rotated=must(client.post('/oauth/token',data={'grant_type':'refresh_token','refresh_token':t['refresh_token'],'client_id':cid}))
     assert rotated['scope']==ROLE_SCOPE
     error(call(client,rotated['access_token'],'projects_list'),'ROLE_POLICY_DENIED')
     must(update_role(client,paused,enabled=True))
@@ -192,7 +193,7 @@ def test_role_oauth_refresh_keeps_coarse_scope_but_follows_new_projects(api):
 def test_scope_refresh_cannot_upgrade_legacy_to_role(api):
     from tests.test_audit_api import oauth_tokens
     app,client,_=api
-    cid,t=oauth_tokens(client)
+    cid,t=legacy_call(client,oauth_tokens,client)
     response=client.post('/oauth/token',data={'grant_type':'refresh_token','refresh_token':t['refresh_token'],'client_id':cid,'scope':ROLE_SCOPE})
     assert response.status_code==400 and response.json()['error']=='invalid_scope'
     # Rejected scope change does not consume the original rotation token.

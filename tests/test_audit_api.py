@@ -1,5 +1,6 @@
 """Regression cases for API trust boundaries and credential lifecycle races."""
 from __future__ import annotations
+from tests.oauth_legacy import legacy_call
 
 import asyncio
 import base64
@@ -252,7 +253,7 @@ def test_password_change_rechecks_session_after_async_verification(api, monkeypa
 
 def test_oauth_audience_remains_bound_after_public_url_change(api):
     app, client, pat = api
-    client_id, tokens = oauth_tokens(client)
+    client_id, tokens = legacy_call(client, oauth_tokens, client)
     assert rpc(client, tokens["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
     assert client.put("/api/settings", json={"public_url": "http://new-resource.test"}).status_code == 200
     assert rpc(client, tokens["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401
@@ -262,18 +263,20 @@ def test_oauth_audience_remains_bound_after_public_url_change(api):
     assert rpc(client, pat, {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
 
 
-def test_refresh_replay_revokes_family_but_wrong_client_does_not(api):
+def test_legacy_refresh_retries_are_idempotent_but_wrong_client_is_denied(api):
     app, client, _ = api
-    client_id, old = oauth_tokens(client)
+    client_id, old = legacy_call(client, oauth_tokens, client)
     form = {"grant_type": "refresh_token", "refresh_token": old["refresh_token"], "client_id": client_id}
     response = client.post("/oauth/token", data=form)
     assert response.status_code == 200
     new = response.json()
+    assert "refresh_token" not in new
     assert client.post("/oauth/token", data={**form, "client_id": "unrelated-client"}).status_code == 400
     assert rpc(client, new["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
-    assert client.post("/oauth/token", data=form).status_code == 400
-    assert rpc(client, new["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401
-    assert client.post("/oauth/token", data={**form, "refresh_token": new["refresh_token"]}).status_code == 400
+    repeated = client.post("/oauth/token", data=form)
+    assert repeated.status_code == 200
+    assert repeated.json()["access_token"] == new["access_token"]
+    assert rpc(client, new["access_token"], {"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
 
 
 def test_health_checks_worker_and_database(api, monkeypatch):

@@ -70,7 +70,7 @@ def update(store, principal, grant_id, expires, expected_revision, confirm_react
             raise DevError("EXPIRATION_CONFLICT", "期限已被修改，请刷新后重试", 409)
         now = time.time()
         token_row = store.one(
-            "SELECT max(expires) AS expires FROM tokens WHERE grant_id=? AND kind IN ('pat','refresh')",
+            "SELECT max(expires) AS expires FROM tokens WHERE grant_id=? AND kind IN ('pat','refresh','access')",
             (grant_id,),
         )
         old_expires = previous["expires"] if previous else token_row["expires"]
@@ -91,8 +91,14 @@ def update(store, principal, grant_id, expires, expected_revision, confirm_react
             "UPDATE tokens SET expires=? WHERE grant_id=? AND kind IN ('pat','refresh')",
             (value, grant_id),
         )
+        unified = store.one("SELECT 1 FROM oauth_lifetime_grants WHERE grant_id=?", (grant_id,))
         store.db.execute(
-            "UPDATE tokens SET expires=min(expires,?) WHERE grant_id=? AND kind='access'",
+            (
+                "UPDATE tokens SET expires=? WHERE grant_id=? AND kind='access' "
+                "AND hash IN (SELECT token_hash FROM oauth_lifetime_access)"
+                if unified
+                else "UPDATE tokens SET expires=min(expires,?) WHERE grant_id=? AND kind='access'"
+            ),
             (value, grant_id),
         )
         store.db.execute(

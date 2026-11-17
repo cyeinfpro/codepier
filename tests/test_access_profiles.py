@@ -1,3 +1,4 @@
+from tests.oauth_legacy import legacy_call
 """Profile ceilings, stable identities and old-grant compatibility over real HTTP."""
 import base64
 import hashlib
@@ -133,7 +134,7 @@ def test_create_is_idempotent_and_never_reassigns_identity(api):
 def test_refresh_reconnect_and_scope_upgrade_keep_profile_id_but_not_grant_ownership(api):
     app, client, _ = api
     profile = create(client, scopes=['read', 'write'])
-    client_id, first = oauth(client, profile, scopes=['read'])
+    client_id, first = legacy_call(client, oauth, client, profile, scopes=['read'])
     first_grant = grant_for(app, first['access_token'])
     refreshed = client.post('/oauth/token', data={'grant_type': 'refresh_token', 'client_id': client_id,
                                                 'refresh_token': first['refresh_token']})
@@ -177,7 +178,7 @@ def test_profile_shrink_disables_queued_admission_and_refresh_without_killing_wo
     store = app.state.store
     store.execute('UPDATE projects SET allow_tasks=1')
     profile = create(client, scopes=['read', 'write', 'execute'])
-    client_id, tokens = oauth(client, profile)
+    client_id, tokens = legacy_call(client, oauth, client, profile)
     grant = grant_for(app, tokens['access_token'])
     project = store.one('SELECT * FROM projects WHERE id=?', ('project',))
     operation = {'project_id': 'project', 'device_id': 'device', 'tool': 'shell_exec', 'grant_id': grant['id']}

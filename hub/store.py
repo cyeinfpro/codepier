@@ -372,6 +372,9 @@ class Store:
         from hub.grant_expiry import migrate as migrate_grant_expiry
 
         migrate_grant_expiry(self.db)
+        from hub.oauth_lifetime import migrate_schema as migrate_oauth_lifetime
+
+        migrate_oauth_lifetime(self.db)
 
     @contextmanager
     def transaction(self, *, immediate=True):

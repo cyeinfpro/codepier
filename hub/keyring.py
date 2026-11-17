@@ -24,6 +24,7 @@ from shared.instance_lock import InstanceLock
 RING_FILE = "master.keys.json"
 JOURNAL_FILE = "rekey.json"
 CIPHER_COLUMNS = (
+    ("oauth_lifetime_credentials", "secret"),
     ("operation_payload_archives", "body"),
     ("devices", "secret"),
     ("operations", "payload"),
@@ -75,6 +76,7 @@ PREFIXED_CIPHER_COLUMNS = (
     ("mcp_tasks", "terminal_operation", "history:v1:"),
 )
 CIPHER_PRIMARY_KEYS = {
+    "oauth_lifetime_credentials": "grant_id",
     "operation_payload_archives": "operation_id",
     "oidc_transactions": "state_hash",
     "operation_output_tails": "operation_id",
