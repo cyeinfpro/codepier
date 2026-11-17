@@ -1,7 +1,8 @@
 # Changelog
 
-## 1.33.20 · 2026-11-17 · 依赖更新
+## 1.33.20 · 2026-11-17 · Antigravity 兼容与依赖更新
 
+- 修复 Antigravity CLI 发出目录变更通知后，MCP 工具从会话断开的情况。服务端确认通知后，连接继续按已有授权读取项目。
 - 更新运行时及 MCP 兼容环境的 websockets 17.4、typing-inspection 0.4.5、sse-starlette 3.7.0 和 python-multipart 0.0.33。
 - 更新测试依赖 Playwright 1.65.1，以及前端格式化工具 Prettier 3.10.1。重新生成前端第三方许可清单。
 

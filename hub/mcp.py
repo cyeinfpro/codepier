@@ -41,6 +41,8 @@ from shared.mcp_presentation import present, error_view
 from shared.util import DevError, VERSION, valid_json_value
 from shared.mcp_protocol import (
     LEGACY,
+    MODERN,
+    PREFIX,
     SUPPORTED,
     SERVER_INFO,
     ProtocolError,
@@ -169,6 +171,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             return failure(
                 None, -32600, "Expected one JSON-RPC request; batches are not supported", 400
             )
+        notification = "id" not in body
         identifier = body.get("id")
         if "id" in body and (
             isinstance(identifier, bool) or not isinstance(identifier, (str, int))
@@ -186,7 +189,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         if not isinstance(metadata, dict):
             return failure(identifier, -32602, "_meta must be an object", 400 if modern else 200)
         if modern:
-            if "id" not in body:
+            if notification and method != "notifications/roots/list_changed":
                 return failure(
                     None, -32601, "No HTTP client notifications are implemented for 2026-07-28", 404
                 )
@@ -194,7 +197,16 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 for header in ("mcp-protocol-version", "mcp-method", "mcp-name"):
                     if len(request.headers.getlist(header)) > 1:
                         raise ProtocolError(-32020, "Duplicate request metadata headers")
-                metadata = validate_modern(body, request.headers)
+                if not notification:
+                    metadata = validate_modern(body, request.headers)
+                # Antigravity can send the legacy roots notification with modern metadata.
+                # CodePier projects come from authorized grants, so there is nothing to refresh.
+                elif (
+                    request.headers.get("mcp-protocol-version", MODERN) != MODERN
+                    or metadata.get(PREFIX + "protocolVersion", MODERN) != MODERN
+                    or request.headers.get("mcp-method", method) != method
+                ):
+                    raise ProtocolError(-32020, "Invalid metadata for roots change notification")
             except ProtocolError as exc:
                 return failure(identifier, exc.code, exc.message, 400, exc.data)
         else:
@@ -248,7 +260,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         if profile != "unified" and view == "3":
             view = "2"
         instructions = CORE_WORKFLOW_INSTRUCTIONS if view == "1" else CORE_INSTRUCTIONS
-        if "id" not in body:
+        if notification:
             return Response(status_code=202)
         try:
             principal = await runtime.store.run(refresh_principal, runtime.store, principal)

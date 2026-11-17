@@ -91,6 +91,62 @@ def rpc(wire, method, params, headers=None):
                              'params': {**params, '_meta': metadata}})
 
 
+@pytest.mark.parametrize(('version', 'with_metadata'), [
+    (None, False),
+    ('2025-11-25', False),
+    ('2026-07-28', False),
+    (None, True),
+    ('2026-07-28', True),
+])
+def test_roots_notification_keeps_project_tools_available(wire, version, with_metadata):
+    app, client, token, _, _ = wire
+    app.state.store.execute(
+        "INSERT INTO projects(id,alias,alias_key,device_id,root,description,mode,allow_tasks,created) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ('hidden', 'hidden', 'hidden', 'device', '/tmp/hidden', '', 'read', 0, time.time()),
+    )
+    catalog = rpc(wire, 'tools/list', {}).json()['result']['tools']
+    assert {tool['name'] for tool in catalog} == {'query', 'act', 'get_profile'}
+    method = 'notifications/roots/list_changed'
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json, text/event-stream'}
+    if version:
+        headers['MCP-Protocol-Version'] = version
+    body = {'jsonrpc': '2.0', 'method': method}
+    if with_metadata:
+        headers['Mcp-Method'] = method
+        body['params'] = {'_meta': {
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientCapabilities': {'roots': {'listChanged': True}},
+        }}
+
+    for _ in range(2):
+        response = client.post('/mcp', headers=headers, json=body)
+        assert response.status_code == 202, response.text
+        assert response.content == b''
+
+    response = rpc(wire, 'tools/call', {'name': 'query', 'arguments': {'action': 'project'}},
+                   {'Mcp-Name': 'query'})
+    result = response.json()['result']
+    assert not result['isError'], result
+    assert [project['alias'] for project in result['structuredContent']['projects']] == ['fixture']
+
+
+@pytest.mark.parametrize(('method', 'version', 'extra', 'authorized', 'status'), [
+    ('notifications/roots/list_changed', '2026-07-28', {}, False, 401),
+    ('notifications/roots/list_changed', '2026-07-28', {'Origin': 'https://invalid.example'}, True, 403),
+    ('notifications/roots/list_changed', '2099-01-01', {}, True, 400),
+    ('notifications/roots/list_changed', '2026-07-28', {'Mcp-Method': 'tools/call'}, True, 400),
+    ('notifications/unknown', '2026-07-28', {}, True, 404),
+])
+def test_roots_notification_preserves_transport_checks(wire, method, version, extra, authorized, status):
+    _, client, token, _, _ = wire
+    headers = {'Accept': 'application/json, text/event-stream', 'MCP-Protocol-Version': version, **extra}
+    if authorized:
+        headers['Authorization'] = 'Bearer ' + token
+    response = client.post('/mcp', headers=headers, json={'jsonrpc': '2.0', 'method': method})
+    assert response.status_code == status, response.text
+
+
 @pytest.mark.parametrize('mirror', [False, True])
 def test_http_subscribe_and_unsubscribe_optional_name_header(wire, mirror):
     app, _, _, args, captured = wire

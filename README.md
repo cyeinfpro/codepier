@@ -78,7 +78,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
-当前源码为 **v1.33.20**：更新 Python 运行时与测试依赖、Prettier 和对应的第三方许可清单。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
+当前源码为 **v1.33.20**：修复 Antigravity CLI 发出目录变更通知后 MCP 工具断开的情况，更新 Python 和前端工具依赖。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
 
 ## 使用示例
 
