@@ -187,8 +187,14 @@ class OAuth:
         if params.get("redirect_uri") != broken:
             return None
         supported = {
-            "client_id", "redirect_uri", "response_type", "code_challenge",
-            "code_challenge_method", "resource", "scope", "state",
+            "client_id",
+            "redirect_uri",
+            "response_type",
+            "code_challenge",
+            "code_challenge_method",
+            "resource",
+            "scope",
+            "state",
         }
         # Unknown extensions may affect authorization semantics; do not drop
         # them or guess how to replay them. Duplicate keys are rejected upstream.
@@ -435,7 +441,8 @@ class OAuth:
                 if recovery is None:
                     raise
                 return RedirectResponse(
-                    recovery, status_code=303,
+                    recovery,
+                    status_code=303,
                     headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
                 )
             return RedirectResponse("/?authorize=" + id, status_code=303)
