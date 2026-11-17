@@ -18,6 +18,9 @@ window.CodePierQueue = (() => {
     agent_pending: '电脑已接收，等待执行',
     lane_capacity: '通道容量',
     project_limit: '项目配额',
+    remote_target_limit: '远程目标并发额度',
+    resource_pressure: '电脑资源压力',
+    project_fairness: '项目公平轮转',
     waiting_resource: '等待资源',
     waiting_worker: '等待执行额度',
     waiting_project: '等待项目额度',
@@ -144,7 +147,13 @@ window.CodePierQueue = (() => {
       '</code><span class="queue-device">' +
       esc(item.device_name || '未记录电脑') +
       '</span></div>' +
-      badge(item.state) +
+      (item.queue_stage && stages[item.queue_stage] && ['queued', 'running'].includes(item.state)
+        ? '<span class="badge" data-queue-state="' +
+          esc(item.queue_stage) +
+          '">' +
+          esc(stages[item.queue_stage]) +
+          '</span>'
+        : badge(item.state)) +
       '</div>' +
       '<details class="queue-command"><summary aria-label="展开或收起参数摘要"><code class="queue-summary">' +
       esc(summary) +
@@ -248,6 +257,7 @@ window.CodePierQueue = (() => {
       if (!current(c)) return;
       const target = root.querySelector('[data-queue-content]');
       // A refresh must not replace a pressed/focused button or selected evidence.
+      let applied = false;
       const selection = window.getSelection();
       if (
         (!target.contains(document.activeElement) ||
@@ -259,9 +269,10 @@ window.CodePierQueue = (() => {
         truncated = !!data.truncated || data.complete === false;
         completenessReason = data.completeness_reason || '';
         paint();
+        applied = true;
       }
       root.querySelector('[data-queue-status]').textContent =
-        '当前空间可见操作 · 已同步 ' +
+        (applied ? '当前空间可见操作 · 已同步 ' : '已取得新状态，当前交互结束后刷新 · ') +
         new Date().toLocaleTimeString('zh-CN', { hour12: false }) +
         (live ? '' : ' · 自动更新已暂停');
       const diagnostics = root.querySelector('[data-queue-diagnostics]');

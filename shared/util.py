@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from shared.audit_redaction import redact_command, redact_text
 
-VERSION = "1.33.24"
+VERSION = "1.33.25"
 
 
 class DevError(Exception):

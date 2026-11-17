@@ -1,5 +1,5 @@
 {
-  "version": "1.33.24",
+  "version": "1.33.25",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -187,8 +187,8 @@
       "bytes": 6858
     },
     "queue.js": {
-      "sha256": "826a3db3aa559f2a37b9fdbc5dcbf159a3b58136d99ec9649c49877386780d7a",
-      "bytes": 17324
+      "sha256": "c48a3023c4a2ab6ccd6c92f237c03e6287fdba2fcba94de5883c1a05762bf657",
+      "bytes": 17855
     },
     "roles.js": {
       "sha256": "d0a985b8a059762a4b63b15ddc64fe2423163dcc0dbe5881afe2ca858758c83b",

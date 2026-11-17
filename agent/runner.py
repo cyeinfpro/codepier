@@ -1684,6 +1684,11 @@ class Agent:
                     cleanup_run_directories(root)
                     path = prepare_run_directory(root, id)
                     self._execution_run_dirs[id] = path
+                    from agent.operation_logs import OperationLog
+
+                    if not hasattr(self, "_execution_logs"):
+                        self._execution_logs = {}
+                    self._execution_logs[id] = OperationLog(path)
                     return path
 
             try:
@@ -1736,6 +1741,9 @@ class Agent:
                         },
                     )
                 if run_dir is not None:
+                    log = self._execution_logs[id]
+                    await self._snapshot_io(log.close)
+                    result["output_log"] = log.receipt(id)
                     result["run_directory"] = ".codepier/runs/" + id
                     if any(
                         resource.get("kind", "path") == "path"
@@ -1781,6 +1789,9 @@ class Agent:
                     else "independent",
                 }
             finally:
+                log = getattr(self, "_execution_logs", {}).pop(id, None)
+                if log is not None:
+                    await self._snapshot_io(log.close)
                 owned_run = getattr(self, "_execution_run_dirs", {}).pop(id, None)
                 if owned_run is not None:
                     await self._snapshot_io(finish_run_directory, owned_run)
@@ -1926,6 +1937,21 @@ class Agent:
                 except DevError:
                     return False
 
+            def readiness(task):
+                from agent.task_preflight import inspect_requirements
+
+                try:
+                    environment = (
+                        {}
+                        if runtime["mode"] == "container_v1"
+                        else legacy_environment(False, task.get("env", {}))
+                        if runtime["mode"] == "native_compat"
+                        else build_environment(self.config, project, root, task.get("env", {}))
+                    )
+                    return inspect_requirements(task, environment, root, mode=runtime["mode"])
+                except DevError as exc:
+                    return {"state": "blocked", "code": exc.code, "checks": []}
+
             enabled = project.get("allow_tasks", False) and spec.get("allow_tasks", False)
             return {
                 "enabled": enabled,
@@ -1938,6 +1964,7 @@ class Agent:
                         "timeout": t.get("timeout", 300),
                         "cwd": t.get("cwd", "."),
                         "executable_available": available(t),
+                        "readiness": readiness(t),
                         "environment_keys": sorted(t.get("env", {})),
                         "allow_read_concurrency": bool(t.get("allow_read_concurrency", False)),
                     }
@@ -2107,6 +2134,14 @@ class Agent:
             from agent.project_runtime import legacy_environment
 
             environment = legacy_environment(inherit_env, task_env, full_access=full_access)
+            from agent.task_preflight import enforce_requirements
+
+            enforce_requirements(
+                execution_project.get("_runtime_task_binding", {}).get("definition", {}),
+                environment,
+                execution_root,
+                mode=profile["mode"],
+            )
             if run_dir is not None:
                 environment.update(run_environment(run_dir))
             result = await self._run_process_account(
@@ -2122,6 +2157,11 @@ class Agent:
             return decorate_result(
                 result, execution_project, id, runtime, root, cwd=cwd, command=command
             )
+        from agent.task_preflight import enforce_requirements
+
+        preflight_task = execution_project.get("_runtime_task_binding", {}).get("definition", {})
+        if profile["mode"] == "container_v1":
+            enforce_requirements(preflight_task, {}, execution_root, mode=profile["mode"])
         plan = prepare(config, execution_project, execution_root, command, cwd, task_env)
         if holder:
             for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
@@ -2146,6 +2186,12 @@ class Agent:
                 if profile["mode"] == "container_v1"
                 else str(run_dir)
             )
+        enforce_requirements(
+            preflight_task,
+            plan.environment,
+            execution_root,
+            mode=profile["mode"],
+        )
         # Check the exact workload before adding a trusted container transport.
         enforce_argv(config, execution_project, plan.command, plan.cwd, plan.environment)
         driver = None
@@ -2348,8 +2394,11 @@ class Agent:
                 await self.disk_call(self.journal.update_output, id, decoded_output, seq)
                 persisted_seq, last_persist = seq, now
 
-        def append_output(text):
+        async def append_output(text):
             nonlocal decoded_output, output_truncated
+            log = getattr(self, "_execution_logs", {}).get(id)
+            if log is not None:
+                await self._snapshot_io(log.append, text)
             output_truncated = output_truncated or len(decoded_output) + len(text) > 131072
             decoded_output = (decoded_output + text)[-131072:]
 
@@ -2360,14 +2409,19 @@ class Agent:
                 chunk = await process.stdout.read(65536)
                 if not chunk:
                     process_event("process_stdout_eof", pid=process.pid)
-                    append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
+                    await append_output(
+                        output_filter.feed(decoder.decode(b"", final=True), final=True)
+                    )
+                    log = getattr(self, "_execution_logs", {}).get(id)
+                    if log is not None:
+                        log.finish()
                     await snapshot(True)
                     return
                 # Fingerprint received pipe bytes before decoding/redaction/tail
-                # limits. No full log or credential-bearing byte buffer is kept.
+                # limits. No raw log or credential-bearing byte buffer is kept.
                 output_total_bytes += len(chunk)
                 output_total_hash.update(chunk)
-                append_output(output_filter.feed(decoder.decode(chunk)))
+                await append_output(output_filter.feed(decoder.decode(chunk)))
                 await snapshot()
                 # stdout may remain immediately readable; let heartbeat/cancel run.
                 await asyncio.sleep(0)

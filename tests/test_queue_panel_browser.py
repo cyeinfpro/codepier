@@ -61,6 +61,9 @@ def test_three_stages_blockers_xss_mobile_and_safe_run_entry(queue_page, tmp_pat
     assert page.locator("[data-queue-stage=agent_waiting] strong").inner_text() == "1"
     assert page.locator("[data-queue-stage=running] strong").inner_text() == "1"
     assert page.locator(".queue-list > [data-queue-id]").count() == 3
+    assert page.locator("[data-queue-id=hub] [data-queue-state]").inner_text() == "Hub 待投递"
+    assert page.locator("[data-queue-id=reader] [data-queue-state]").inner_text() == "Agent 等资源"
+    assert page.locator("[data-queue-id=writer] [data-queue-state]").inner_text() == "运行中"
     assert "24 秒" in page.locator("[data-queue-id=reader]").inner_text()
     assert "部分阻塞操作受限或不可用" in page.locator("[data-queue-id=reader]").inner_text()
     assert not page.locator("img").count()
@@ -100,6 +103,8 @@ def test_refresh_preserves_focused_evidence_and_denial_clears_view(queue_page):
     page.wait_for_function("window.readCalls.length>=2")
     assert page.evaluate("window.focused===document.activeElement && window.focused.isConnected")
     assert "new summary" not in page.locator("[data-queue-id=reader]").inner_text()
+    assert "已取得新状态" in page.locator("[data-queue-status]").inner_text()
+    assert "已同步" not in page.locator("[data-queue-status]").inner_text()
     page.evaluate("document.activeElement.blur();CodePierQueue.refresh()")
     page.wait_for_function("document.querySelector('[data-queue-id=reader]').textContent.includes('new summary')")
     page.evaluate("window.apiError=403;CodePierQueue.refresh()")

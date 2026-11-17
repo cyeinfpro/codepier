@@ -103,6 +103,10 @@ def validate_config(value: object, config_path: Path) -> dict:
                 for k, v in task["env"].items()
             ):
                 raise ValueError(f"任务 {name}: env 必须是文字键值对象")
+        if "requirements" in task:
+            from agent.task_preflight import validate_requirements
+
+            task["requirements"] = validate_requirements(task["requirements"])
     c["tasks"] = tasks
     c["shell"] = validate_shell(c.get("shell", {}))
     from agent.project_runtime import validate_runtimes
