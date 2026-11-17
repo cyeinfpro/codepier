@@ -1043,6 +1043,7 @@
     "tests/test_oauth_discovery.py",
     "tests/test_oauth_gemini.py",
     "tests/test_oauth_grok.py",
+    "tests/test_oauth_redirect_diagnostics.py",
     "tests/test_oidc_acceptance_transport.py",
     "tests/test_oidc_bootstrap.py",
     "tests/test_oidc_integration.py",

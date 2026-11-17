@@ -114,8 +114,23 @@ class OAuth:
         if not client:
             raise DevError("INVALID_CLIENT", "未知 OAuth 客户端")
         redirect = params.get("redirect_uri", "")
+        # Diagnose broken/copied URLs without repairing them or reflecting
+        # untrusted authorization parameters. Exact matching stays mandatory.
+        if not redirect:
+            raise DevError(
+                "INVALID_REDIRECT",
+                "授权链接缺少回调地址；请关闭此错误页，从发起授权的客户端重新连接，不要复用或手工修改旧链接",
+            )
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 or c == "\\" for c in redirect):
+            raise DevError(
+                "INVALID_REDIRECT",
+                "授权链接的回调地址含空格、控制字符或反斜杠；请关闭此错误页，从发起授权的客户端重新连接，不要复用或手工修改旧链接",
+            )
         if redirect not in json.loads(client["redirects"]):
-            raise DevError("INVALID_REDIRECT", "回调地址与客户端登记地址不一致")
+            raise DevError(
+                "INVALID_REDIRECT",
+                "回调地址与客户端登记地址不一致；请从发起授权的客户端重新连接。若仍失败，请核对客户端登记的完整回调地址（含路径、查询参数和末尾斜线），不要放宽回调校验",
+            )
         self.validate_redirect(redirect)
         if params.get("response_type") != "code":
             raise DevError("UNSUPPORTED_RESPONSE_TYPE", "仅支持授权码流程")
