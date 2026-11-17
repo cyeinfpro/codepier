@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.33.20 · 2026-11-17 · 依赖更新
+
+- 更新运行时及 MCP 兼容环境的 websockets 17.4、typing-inspection 0.4.5、sse-starlette 3.7.0 和 python-multipart 0.0.33。
+- 更新测试依赖 Playwright 1.65.1，以及前端格式化工具 Prettier 3.10.1。重新生成前端第三方许可清单。
+
 ## 1.33.19 · 2026-11-16 · Google MCP 接入与用量加载
 
 - 支持 Google Antigravity 和 Gemini 网页版的 MCP OAuth 自动注册。Gemini 一次提交生产、沙盒和测试环境的六个回调，Hub 按登记的完整 URI 校验授权和换取令牌。
