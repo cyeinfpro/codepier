@@ -60,6 +60,12 @@ def serve_hub(args, parser):
     server.run()
 
 
+def configure_storage(data_dir):
+    os.environ["HUB_DATA_DIR"] = str(Path(data_dir).expanduser().resolve())
+    # Index builds and statement journals can outgrow a container's /tmp tmpfs.
+    os.environ.setdefault("SQLITE_TMPDIR", os.getenv("HUB_STATE_DIR") or os.environ["HUB_DATA_DIR"])
+
+
 def main():
     parser = argparse.ArgumentParser(description="CodePier Hub")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -97,7 +103,7 @@ def main():
     backfill_hosts.add_argument("--limit", type=int, default=64)
     backfill_hosts.add_argument("--restart-scan", action="store_true")
     args = parser.parse_args()
-    os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
+    configure_storage(args.data_dir)
     if args.command in {"backup", "restore"}:
         import zipfile
 

@@ -77,7 +77,7 @@ def fake_hub(tmp_path, *, existing=False, probe_status='3'):
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
   'compose version'|'compose config --quiet'|'compose build hub') exit 0 ;;
-  *'python -c '*) exit "$PROBE_STATUS" ;;
+  *'--entrypoint python hub -c '*) exit "$PROBE_STATUS" ;;
   *'python -m hub init'*) [[ "$CODEPIER_ADMIN_PASSWORD" == "$EXPECTED_PASSWORD" ]] || exit 45; exit 0 ;;
   'compose up '*) exit "${START_STATUS:-0}" ;;
 esac
@@ -105,7 +105,7 @@ def test_hub_one_command_noninteractive_password_not_in_args_or_env_file(tmp_pat
     assert '-e CODEPIER_ADMIN_PASSWORD hub python -m hub init --username operator' in log
     assert env['EXPECTED_PASSWORD'] not in log + settings + result.stdout + result.stderr
     assert 'HUB_PORT=8080' in settings and 'http://192.0.2.20:8080' in settings
-    assert 'compose up -d --wait --wait-timeout 90' in log
+    assert 'compose up -d --wait --wait-timeout 300' in log
     assert (tmp_path / '.env').stat().st_mode & 0o777 == 0o600
 
 

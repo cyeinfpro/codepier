@@ -691,6 +691,11 @@ class DockerRuntime:
             volume_env = "CODEPIER_HUB_STATE_VOLUME"
         else:
             target["volumes"][key]["name"] = new_volume
+        # The candidate may predate the Hub CLI's SQLite spill directory default.
+        target_env.setdefault("SQLITE_TMPDIR", target_env.get("HUB_STATE_DIR") or "/app/data")
+        healthcheck = target["services"]["hub"].setdefault("healthcheck", {})
+        if not healthcheck.get("disable"):
+            healthcheck.setdefault("start_period", "4m")
         save_compose(path / "target.json", target)
         return {
             "old_volume": old_volume,
@@ -946,6 +951,8 @@ class DockerRuntime:
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=64m,mode=1777",
                 *mounts,
+                "--env",
+                f"SQLITE_TMPDIR={state}",
                 "--entrypoint",
                 "python",
                 image_id,
@@ -1064,9 +1071,9 @@ class DockerRuntime:
             "never",
             "--wait",
             "--wait-timeout",
-            "90",
+            "300",
             "hub",
-            timeout=120,
+            timeout=330,
         )
 
     def verify(self, job, which="target"):

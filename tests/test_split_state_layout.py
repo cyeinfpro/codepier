@@ -1,8 +1,10 @@
 """Split storage keeps file originals stable while versioning both databases."""
 import json
+import os
 import sqlite3
 import subprocess
 import sys
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +15,32 @@ from scripts.panel_update_source import UpdateError
 
 def marker(path):
     (path / ".codepier-state.json").write_text(json.dumps({"schema_version": 1, "layout": "split-state-v1"}))
+
+
+@pytest.mark.parametrize("split, override", [(False, False), (True, False), (True, True)])
+@patch.dict(os.environ)
+def test_cli_uses_state_disk_for_sqlite_spills(tmp_path, monkeypatch, split, override):
+    from hub import __main__ as cli
+
+    assets = tmp_path / "assets"
+    state = tmp_path / "state" if split else assets
+    state.mkdir()
+    if split:
+        Store(state).close()
+        marker(state)
+        monkeypatch.setenv("HUB_STATE_DIR", str(state))
+    else:
+        monkeypatch.delenv("HUB_STATE_DIR", raising=False)
+    expected = tmp_path / "custom" if override else state
+    monkeypatch.delenv("SQLITE_TMPDIR", raising=False)
+    if override:
+        expected.mkdir()
+        monkeypatch.setenv("SQLITE_TMPDIR", str(expected))
+    seen = []
+    monkeypatch.setattr(cli, "serve_hub", lambda *_: seen.append(os.environ.get("SQLITE_TMPDIR")))
+    monkeypatch.setattr(sys, "argv", ["hub", "--data-dir", str(assets), "run"])
+    cli.main()
+    assert seen == [str(expected)]
 
 
 def test_split_store_routes_database_keys_without_touching_assets(tmp_path, monkeypatch):

@@ -38,7 +38,7 @@ USER 10001:10001
 RUN python -c "from hub.app import create_app"
 VOLUME /app/data
 EXPOSE 8765
-HEALTHCHECK --interval=30s --timeout=4s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=4s --start-period=4m --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/livez',timeout=3)"
 ENTRYPOINT ["python", "-m", "shared.hub_data_contract", "--exec"]
 CMD ["python", "-m", "hub", "run", "--host", "0.0.0.0", "--port", "8765"]

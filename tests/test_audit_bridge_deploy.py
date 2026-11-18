@@ -231,7 +231,7 @@ def fake_hub_installer(tmp_path, *, probe_status=0, start_status=0):
 printf '%s\\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
   'compose version'|'compose config --quiet'|'compose build hub') exit 0 ;;
-  *'python -c '*)
+  *'--entrypoint python hub -c '*)
     [[ "$*" == *'--volume codepier_hub_data:/app/data:ro'* ]] || exit 98
     exit "$PROBE_STATUS" ;;
   *'python -m hub init'*) exit 0 ;;
@@ -261,7 +261,7 @@ def test_hub_new_volume_initializes_once_and_waits_for_health(tmp_path):
     result, log = fake_hub_installer(tmp_path, probe_status=3)
     assert result.returncode == 0
     assert log.count("python -m hub init") == 1
-    assert "compose up -d --wait --wait-timeout 90" in log
+    assert "compose up -d --wait --wait-timeout 300" in log
     assert (log.index('--volume codepier_hub_data:/app/data:ro')
             < log.index('migrate_hub.py proxy-trust')
             < log.index('migrate_hub.py write-boundary')

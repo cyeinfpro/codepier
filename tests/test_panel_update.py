@@ -445,6 +445,8 @@ def test_production_hub_maintenance_and_health(tmp_path,monkeypatch):
     with TestClient(app) as client:
         assert client.get('/healthz').json()['panel_update']=={'maintenance':False,'ready':False,'drain_ready':False,'phase':'inactive','ready_semantics':'maintenance_drain_only'}
         (gate_dir/'maintenance.json').write_text('{}')
+        assert client.get('/livez').json() == {'status': 'ok'}
+        assert client.get('/readyz').status_code == 503
         result=client.get('/healthz')
         assert result.status_code==200 and result.json()['panel_update']['ready']
         assert client.post('/api/login',json={'username':'admin','password':'example'}).status_code==503

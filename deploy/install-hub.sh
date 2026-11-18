@@ -167,7 +167,7 @@ if ((needs_init == 1)); then
   unset CODEPIER_ADMIN_PASSWORD RD_ADMIN_PASSWORD
 fi
 # Preserve the caller's full Compose selection, including a configured HTTPS proxy.
-docker compose up -d --wait --wait-timeout 90
+docker compose up -d --wait --wait-timeout 300
 "$bootstrap_python" scripts/migrate_hub.py commit --root "$root"
 migration_started=0
 echo 'CodePier 已启动且健康检查通过。查看日志：docker compose logs -f hub'

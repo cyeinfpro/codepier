@@ -107,6 +107,7 @@ def test_prebuilt_image_reuses_only_compatible_split_state(tmp_path, new_epoch, 
     target = read_json(home / "jobs" / job["id"] / "target.spec.json")
     assert values["reuse_state"] is compatible
     assert (values["new_volume"] == "original-state") is compatible
+    assert target["services"]["hub"]["environment"]["SQLITE_TMPDIR"] == "/app/state"
     assert target["volumes"]["hub-state"]["name"] == values["new_volume"]
     assert target["volumes"]["hub-data"]["name"] == "original-data"
     assert target["services"]["proxy"] == spec["services"]["proxy"]
@@ -161,6 +162,7 @@ def test_managed_upgrade_activates_only_the_verified_candidate(tmp_path, mode, c
         assert command[command.index('--volume') + 1] == job['new_volume'] + ':/app/state'
         assert command.count('--volume') == 1
         assert command[command.index('--env') + 1] == 'HUB_STATE_DIR=/app/state'
+        assert 'SQLITE_TMPDIR=/app/state' in command
         assert command[command.index('--entrypoint') + 2] == image_id
         assert command[command.index('--network') + 1] == 'none'
         assert '--read-only' in command
@@ -187,7 +189,10 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     assert target['services']['hub']['ports']==spec['services']['hub']['ports']
     for field in ('cpus', 'mem_limit', 'mem_reservation'):
         assert old['services']['hub'][field] == target['services']['hub'][field] == spec['services']['hub'][field]
-    assert target['services']['hub']['environment']==spec['services']['hub']['environment']
+    assert target['services']['hub']['environment'] == {
+        **spec['services']['hub']['environment'], 'SQLITE_TMPDIR': '/app/data'
+    }
+    assert target['services']['hub']['healthcheck'] == {'start_period': '4m'}
     job['package']=runtime.build(job,source)
     runtime.quiesce(job);runtime.stop(job);runtime.copy_data(job);runtime.start(job,'target');runtime.verify(job);runtime.commit(job)
     assert runtime.gate.exists()  # Only Manager's durable commit decision opens admission.
@@ -199,6 +204,7 @@ def test_real_runtime_pipeline_preserves_proxy_ports_configuration_and_backup(tm
     starts=[c for c in docker.commands if 'up' in c]
     assert len(starts)==1 and starts[0][-1]=='hub' and '--no-deps' in starts[0] and '--no-build' in starts[0]
     assert '--pull' in starts[0] and 'never' in starts[0]
+    assert starts[0][starts[0].index('--wait-timeout') + 1] == '300'
     assert not any('rm' in c or 'down' in c or 'prune' in c for c in docker.commands)
     assert not any('sh' in c or 'bash' in c for c in docker.commands)
     runtime.rollback(job)
@@ -217,6 +223,20 @@ def test_environment_drift_detected_before_service_stop(tmp_path):
     (tmp_path/'compose.yml').write_text('# edited by operator\n')
     with pytest.raises(UpdateError) as e:runtime.quiesce(job)
     assert e.value.code=='DEPLOYMENT_CHANGED' and not docker.commands and not runtime.gate.exists()
+
+
+@pytest.mark.parametrize('probe', [{'start_period': '2m', 'test': ['CMD', 'site-probe']}, {'disable': True}])
+def test_managed_upgrade_preserves_site_probe_and_sqlite_tmpdir(tmp_path, probe):
+    home, config, job, spec = deployment(tmp_path)
+    hub = spec['services']['hub']
+    hub['environment']['SQLITE_TMPDIR'] = '/app/data/scratch'
+    hub['healthcheck'] = probe
+    atomic_json(home / 'current.json', {**read_json(home / 'current.json'), 'compose': spec})
+    runtime = DockerRuntime(tmp_path, home, config, execute=DockerBoundary(tmp_path, spec))
+    runtime.prepare(job, tmp_path)
+    target = read_json(home / 'jobs' / job['id'] / 'target.spec.json')['services']['hub']
+    assert target['environment']['SQLITE_TMPDIR'] == '/app/data/scratch'
+    assert target['healthcheck'] == probe
 
 
 def test_compose_cli_keeps_literal_dollars_without_docker_daemon(tmp_path):

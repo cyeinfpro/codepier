@@ -2,7 +2,7 @@
 
 通过 ChatGPT、Gemini、Antigravity、Claude 或 Grok，在已授权的电脑和服务器上读代码、改文件、跑测试，并核对执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.33.27-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.33.28-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -79,7 +79,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
-当前源码为 **v1.33.27**，保留 v1.33.26 的 Hub 投递和面板读取优化。本次维护发布归并历史分支，没有新增运行时行为。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
+当前源码为 **v1.33.28**，本次维护发布修复 SQLite 迁移临时空间不足、维护期间存活探针被拦截，以及 Hub 启动等待过早结束的问题。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
 
 ## 使用示例
 
@@ -130,9 +130,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.33.27 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.33.28 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.33.27
+- **Version:** 1.33.28
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

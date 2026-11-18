@@ -66,6 +66,7 @@ class PanelMaintenanceMiddleware:
                 path
                 in {
                     "/",
+                    "/livez",
                     "/healthz",
                     "/api/session",
                     "/api/settings",
