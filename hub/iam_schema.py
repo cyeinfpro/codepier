@@ -7,6 +7,7 @@ constraints, not resource IDs. No network or user admission occurs in migration.
 
 from __future__ import annotations
 import json
+from hub.operation_categories import DEVICE_ACTION_PREDICATE
 
 SCHEMA_VERSION = "10"
 
@@ -124,15 +125,16 @@ def _rebuild(db, table, substitutions):
 
 def migrate(db):
     _migrate(db)
-    # Panel counts and recent activity must not fetch every large operation
-    # payload through the space-only index. Include the privacy predicates
-    # so owner/grant-scoped counts are covered too; authorization is unchanged.
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS operations_panel_recent ON operations(space_id,created DESC,state,owner_user_id,visibility,grant_id,project_id)"
-    )
+    # The overview filters by tool as well as visibility. Keep both in the
+    # timeline index so counting today's work never needs the wide journal rows.
+    db.execute("""CREATE INDEX IF NOT EXISTS operations_panel_timeline
+        ON operations(space_id,created DESC,id DESC,state,tool,owner_user_id,visibility,grant_id,project_id)""")
+    db.execute("DROP INDEX IF EXISTS operations_panel_recent")
     db.execute(
         "CREATE INDEX IF NOT EXISTS operations_panel_active ON operations(space_id,state,owner_user_id,visibility,grant_id,project_id)"
     )
+    db.execute(f"""CREATE INDEX IF NOT EXISTS operations_device_lifecycle
+        ON operations(device_id,created DESC) WHERE {DEVICE_ACTION_PREDICATE}""")
 
 
 def _migrate(db):

@@ -113,9 +113,12 @@ def test_home_excludes_map_but_resource_queue_keeps_it(panel):
     app.state.store.execute(
         "UPDATE operations SET state='queued' WHERE tool IN ('read','project_knowledge_build')"
     )
+    app.state.store.execute("UPDATE operations SET state='failed' WHERE tool='write'")
     before = app.state.store.one("SELECT count(*) AS n FROM operations")["n"]
     result = client.get("/api/overview").json()
     assert result["today_operations"] == 3
+    assert result["today_succeeded"] == 1
+    assert result["today_failed"] == 1
     assert result["active_operations"] == 1
     assert all(
         row["tool"] not in {"project_knowledge_build", "project_knowledge_query"}
@@ -124,6 +127,48 @@ def test_home_excludes_map_but_resource_queue_keeps_it(panel):
     queue = client.get("/api/operations/queue").json()
     assert {row["tool"] for row in queue["operations"]} == {"read", "project_knowledge_build"}
     assert app.state.store.one("SELECT count(*) AS n FROM operations")["n"] == before
+
+
+def test_existing_history_uses_indexes_for_counts_and_latest_device_action(panel, monkeypatch):
+    from hub.iam_schema import migrate
+    from hub.store_contract import CheckedConnection
+
+    app, client = panel
+    store = app.state.store
+    seed(app)
+    operation(app, "restart", tool="agent_restart", state="succeeded")
+    # Exercise the upgrade path with existing records and the original recent index.
+    with store.transaction() as db:
+        db.execute("DROP INDEX IF EXISTS operations_panel_timeline")
+        db.execute("DROP INDEX IF EXISTS operations_device_lifecycle")
+        db.execute("""CREATE INDEX IF NOT EXISTS operations_panel_recent
+                   ON operations(space_id,created DESC,state,owner_user_id,visibility,grant_id,project_id)""")
+        migrate(db)
+        migrate(db)
+    store.execute("UPDATE iam_users SET instance_admin=0 WHERE user_id='owner'")
+    plans = {}
+    execute = CheckedConnection.execute
+
+    def observe(connection, sql, parameters=()):
+        if "FROM operations WHERE " in sql and "AND created>=?" in sql and "count(*)" in sql:
+            label = "daily"
+        elif sql.startswith("SELECT id,tool,state,created,updated,error FROM operations"):
+            label = "device"
+        else:
+            return execute(connection, sql, parameters)
+        plans[label] = [
+            row["detail"] for row in execute(connection, "EXPLAIN QUERY PLAN " + sql, parameters)
+        ]
+        return execute(connection, sql, parameters)
+
+    monkeypatch.setattr(CheckedConnection, "execute", observe)
+    response = client.get("/api/overview?include_token_usage=false")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert len(data["recent_operations"]) == 4
+    assert data["devices"][0]["agent"]["latest_action"]["id"] == "restart"
+    assert len(plans["daily"]) == 1 and "COVERING INDEX" in plans["daily"][0], plans
+    assert len(plans["device"]) == 1 and "operations_device_lifecycle" in plans["device"][0], plans
 
 
 def test_only_admission_metadata_is_a_source_not_user_arguments():

@@ -21,7 +21,7 @@ def make_projects_router(context: HubContext):
     store, runtime, auth = context.store, context.runtime, context.auth
 
     @router.get("/api/projects")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def projects(request: Request):
         return {"projects": runtime.list_projects(auth.panel(request))}
 

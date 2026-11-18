@@ -1304,7 +1304,7 @@ class OIDCService:
             return response
 
         @router.get("/api/auth/providers")
-        @database_endpoint(store)
+        @database_endpoint(store, read_only=True)
         def providers():
             return {
                 "providers": store.all(

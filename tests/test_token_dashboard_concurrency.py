@@ -127,6 +127,62 @@ def test_expensive_http_statistics_do_not_block_health_or_light_overview(api, mo
     assert len(calls) == 1
 
 
+def test_panel_startup_reads_complete_while_writer_is_busy(api):
+    app, client, _ = api
+    store = app.state.store
+    entered, release = threading.Event(), threading.Event()
+
+    def hold_writer():
+        with store.transaction():
+            entered.set()
+            assert release.wait(15)
+
+    writer = client.portal.start_task_soon(store.run, hold_writer)
+    with ThreadPoolExecutor(max_workers=1) as requests:
+        try:
+            assert entered.wait(5)
+            for path, key in (
+                ("/api/session", "authenticated"),
+                ("/api/iam/me", "spaces"),
+                ("/api/auth/providers", "providers"),
+                ("/api/devices", "devices"),
+                ("/api/projects", "projects"),
+                ("/api/overview?include_token_usage=false", "recent_operations"),
+            ):
+                response = requests.submit(client.get, path).result(timeout=3)
+                assert response.status_code == 200, (path, response.text)
+                assert key in response.json()
+                if path == "/api/session":
+                    assert response.json()["authenticated"] is True
+        finally:
+            release.set()
+    writer.result(timeout=5)
+
+
+def test_slow_overview_allows_health_and_observes_concurrent_logout(api, monkeypatch):
+    import hub.api.system as system
+
+    _, client, _ = api
+    entered, release = threading.Event(), threading.Event()
+    device_rows = system.device_rows
+
+    def paused(*args):
+        entered.set()
+        assert release.wait(15)
+        return device_rows(*args)
+
+    monkeypatch.setattr(system, "device_rows", paused)
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        overview = requests.submit(client.get, "/api/overview?include_token_usage=false")
+        try:
+            assert entered.wait(5)
+            assert requests.submit(client.get, "/healthz").result(timeout=3).status_code == 200
+            assert requests.submit(client.post, "/api/logout").result(timeout=3).status_code == 200
+        finally:
+            release.set()
+        assert overview.result(timeout=5).status_code == 401
+
+
 def test_combined_overview_rechecks_short_retention_after_final_worker_wait(api, monkeypatch):
     import hub.token_dashboard as module
     app, client, token = api
@@ -134,7 +190,7 @@ def test_combined_overview_rechecks_short_retention_after_final_worker_wait(api,
     identifier = _seed(app, _principal(app, token), real_time() - 60)
     store.execute("UPDATE mcp_usage SET created=? WHERE activity_id=?",
                   (real_time() - RETENTION_SECONDS + 2, identifier))
-    run, combined_phases = store.run, []
+    run_read, combined_phases = store.run_read, []
 
     async def delayed(function, *args, **kwargs):
         if function.__name__ == "overview_snapshot":
@@ -142,9 +198,9 @@ def test_combined_overview_rechecks_short_retention_after_final_worker_wait(api,
             # The token read already validated its two-second retention TTL.
             # Model time passing while the final overview DB phase was queued.
             monkeypatch.setattr(module.time, "time", lambda: real_time() + 3)
-        return await run(function, *args, **kwargs)
+        return await run_read(function, *args, **kwargs)
 
-    monkeypatch.setattr(store, "run", delayed)
+    monkeypatch.setattr(store, "run_read", delayed)
     response = client.get("/api/overview")
     assert combined_phases == [1]
     assert response.status_code == 409

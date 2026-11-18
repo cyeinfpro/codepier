@@ -18,7 +18,7 @@ def make_accounts_router(context: HubContext):
     store, auth = context.store, context.auth
 
     @router.get("/api/session")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def session(request: Request):
         configured = bool(store.one("SELECT id FROM users LIMIT 1"))
         try:

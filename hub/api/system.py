@@ -109,15 +109,15 @@ def make_system_router(context: HubContext):
         category_clause, category_args = operation_category_sql("tools")
         clause += " AND " + category_clause
         args.extend(category_args)
-        counts = {
-            r["state"]: r["n"]
-            for r in store.all(
-                "SELECT state,count(*) AS n FROM operations WHERE "
-                + clause
-                + " AND created>=? GROUP BY state",
-                (*args, today),
-            )
-        }
+        counts = store.one(
+            """SELECT count(*) AS total,
+                      count(*) FILTER (WHERE state='succeeded') AS succeeded,
+                      count(*) FILTER (WHERE state='failed') AS failed
+               FROM operations WHERE """
+            + clause
+            + " AND created>=?",
+            (*args, today),
+        )
         now = time.time()
         active_grants = store.one(
             """SELECT count(*) AS n FROM grants g
@@ -133,9 +133,9 @@ def make_system_router(context: HubContext):
             "projects": projects,
             "online_devices": sum(1 for d in devices if d["online"]),
             "active_grants": active_grants,
-            "today_operations": sum(counts.values()),
-            "today_succeeded": counts.get("succeeded", 0),
-            "today_failed": counts.get("failed", 0),
+            "today_operations": counts["total"],
+            "today_succeeded": counts["succeeded"],
+            "today_failed": counts["failed"],
             "active_operations": store.one(
                 "SELECT count(*) AS n FROM operations WHERE "
                 + clause
@@ -176,11 +176,11 @@ def make_system_router(context: HubContext):
         # parsing metrics or replaying retained context scenarios.
         token_usage, token_snapshot = None, None
         if include_token_usage:
-            principal = await store.run(auth.panel, request)
+            principal = await store.run_read(auth.panel, request)
             token_usage, token_snapshot = await overview_token_snapshot(
                 runtime, principal, config.timezone
             )
-        return await store.run(overview_snapshot, request, token_usage, token_snapshot)
+        return await store.run_read(overview_snapshot, request, token_usage, token_snapshot)
 
     @router.get("/api/token-usage")
     async def token_usage(

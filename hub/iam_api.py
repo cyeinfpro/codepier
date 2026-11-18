@@ -110,7 +110,7 @@ def make_iam_router(auth, runtime):
         runtime.wake_delivery()
 
     @router.get("/me")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def me(request: Request):
         session = auth.session(request)
         u = iam.user_security(store, session["user_id"])

@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from hub.db_worker import database_endpoint
 from hub import iam
 from hub.api.context import HubContext
+from hub.operation_categories import DEVICE_ACTION_PREDICATE
 import json
 import time
 import uuid
@@ -27,7 +28,6 @@ def device_rows(store, runtime, principal):
         except DevError:
             continue
         rows.append(row)
-    lifecycle_names = tuple(sorted(DEVICE_ACTIONS))
     for row in rows:
         try:
             info = json.loads(row["info"] or "{}")
@@ -46,12 +46,13 @@ def device_rows(store, runtime, principal):
         actions = sorted(set(actions) & DEVICE_ACTIONS)
         version = str(info.get("version") or management.get("installed_version") or "")[:80]
         latest = store.one(
-            "SELECT id,tool,state,created,updated,error FROM operations WHERE device_id=? AND tool IN (?,?,?) ORDER BY created DESC LIMIT 1",
-            (row["id"], *lifecycle_names),
+            "SELECT id,tool,state,created,updated,error FROM operations "
+            f"WHERE device_id=? AND {DEVICE_ACTION_PREDICATE} ORDER BY created DESC LIMIT 1",
+            (row["id"],),
         )
         if latest:
             try:
-                runtime.operation_row(latest["id"], principal)
+                runtime.operation_row(latest["id"], principal, status_only=True)
             except DevError:
                 latest = None
         reason = str(management.get("reason") or "")[:300]
@@ -94,7 +95,7 @@ def make_devices_router(context: HubContext):
     public_url = context.public_url
 
     @router.get("/api/devices")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def devices(request: Request):
         principal = auth.panel(request)
         return {"devices": device_rows(store, runtime, principal)}

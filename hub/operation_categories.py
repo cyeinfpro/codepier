@@ -1,8 +1,13 @@
 """Read-only classification by admitted tool identity, never request summaries."""
 
+from shared.agent_lifecycle import DEVICE_ACTIONS
 from shared.util import DevError
 
 PROJECT_MAP_TOOLS = ("project_knowledge_build", "project_knowledge_query")
+# SQLite matches a partial index against the literal predicate in the query.
+DEVICE_ACTION_PREDICATE = (
+    "tool IN (" + ",".join(f"'{tool}'" for tool in sorted(DEVICE_ACTIONS)) + ")"
+)
 
 
 def operation_category_sql(category="all", prefix=""):
