@@ -351,7 +351,7 @@ class ChannelRouter:
                         now,
                     ),
                 )
-            self.store.after_commit(lambda: self.c.loops.wake_channels("channel_mirrors"))
+            self.c.wake_channel_after_commit("channel_mirrors")
             queued.append({"id": did, "channel": channel, "state": "queued"})
             if dispositions is not None:
                 dispositions.append(

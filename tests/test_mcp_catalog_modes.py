@@ -149,7 +149,7 @@ def test_duplicate_options_help_preserves_schema_boundaries_and_cache(name):
     # No validation-bearing field or other annotation was removed by help deduplication.
     assert advertised == factor(expected)
     assert catalog['exec']['inputSchema']['properties']['options']['description'] == (
-        'order=default|strict; wait_policy=queue|fail_fast.')
+        'order=default|strict; wait_policy=queue|fail_fast; max_queue_ms bounds Agent admission.')
 
     Draft202012Validator.check_schema(original)
     Draft202012Validator.check_schema(advertised)

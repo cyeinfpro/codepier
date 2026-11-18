@@ -426,11 +426,13 @@ class CollaborationService:
             (room["id"], actor, action, target, canonical(redact(detail or {})), self.clock()),
         )
         self.store.after_commit(self.relay_hints.wake)
+        if any(channel in action for channel in ("channel", "telegram", "weixin")):
+            self.wake_channel_after_commit()
+
+    def wake_channel_after_commit(self, name=None):
         loops = getattr(self, "loops", None)
-        if loops is not None and any(
-            channel in action for channel in ("channel", "telegram", "weixin")
-        ):
-            self.store.after_commit(loops.wake_channels)
+        if loops is not None:
+            self.store.after_commit(lambda: loops.wake_channels(name))
 
     def emit(self, room, name, object_id, version, data, *, grant_id="", queue=""):
         body = redact(

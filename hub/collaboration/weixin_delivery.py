@@ -366,7 +366,7 @@ class WeixinDelivery:
             )
             self.refresh(identifier)
         delivery = self.store.one("SELECT * FROM weixin_deliveries WHERE id=?", (identifier,))
-        self.store.after_commit(lambda: self.c.loops.wake_channels("weixin_delivery"))
+        self.c.wake_channel_after_commit("weixin_delivery")
         return EnqueueResult("queued", reason, binding_id, delivery)
 
     def status_source(self, source):
@@ -471,7 +471,7 @@ class WeixinDelivery:
                 ),
             )
             self.add_part(identifier, 0, "text", {"text": notice})
-            self.store.after_commit(lambda: self.c.loops.wake_channels("weixin_delivery"))
+            self.c.wake_channel_after_commit("weixin_delivery")
             self.c.rooms.change(
                 source["conversation_id"], "message", projection_message_id or source["id"]
             )
