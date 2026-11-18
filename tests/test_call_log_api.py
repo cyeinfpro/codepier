@@ -390,3 +390,94 @@ def test_sse_idle_heartbeat_always_rechecks_authority():
     # yet the heartbeat still reaches the database and ends the stream.
     assert reads == [None] and revoked is True and visible is False
     assert activity.SSE_FAST_AUTH_WINDOW_S <= 15
+
+
+@pytest.mark.parametrize("fmt", ["csv", "ndjson"])
+def test_export_streams_bounded_chunks_and_freezes_selected_ids(log_api, monkeypatch, fmt):
+    from hub import call_log
+    import csv
+    import io
+
+    client, store, _ = log_api
+    for number in range(405):
+        store.add(f"{number:032x}", created=10 + number, args={"path": "safe.txt"})
+    sizes = []
+    render = call_log._render_export
+    def observe(rows, *args, **kwargs):
+        sizes.append(len(rows))
+        if len(sizes) == 1:
+            # It must not leak into any later batch, even with a timestamp
+            # inside the selected range rather than newer than its head.
+            store.add("f" * 32, created=200, args={"path": "late.txt"})
+        return render(rows, *args, **kwargs)
+    monkeypatch.setattr(call_log, "_render_export", observe)
+    response = client.get("/api/call-log-export", params={"format": fmt}, headers=AUTH)
+    assert response.status_code == 200
+    assert response.headers["X-Export-Rows"] == "405"
+    assert response.headers["X-Export-Snapshot"] == "selected-identifiers"
+    assert "content-length" not in response.headers
+    assert sizes == [200, 200, 5]
+    if fmt == "csv":
+        rows = list(csv.DictReader(io.StringIO(response.text.lstrip("\ufeff"))))
+        assert response.text.count("utc_time") == 1
+    else:
+        rows = [json.loads(line) for line in response.text.splitlines()]
+    assert len(rows) == 405
+    assert "f" * 32 not in {row["id"] for row in rows}
+    assert len({row["id"] for row in rows}) == 405
+
+
+def test_export_stream_rechecks_authorized_scope_before_next_chunk(log_api):
+    import asyncio
+    from fastapi import Request
+    from starlette.responses import StreamingResponse
+
+    client, store, _ = log_api
+    for number in range(201):
+        store.add(f"{number:032x}", created=10 + number)
+    endpoint = next(route.endpoint for route in client.app.routes
+                    if getattr(route, "path", "") == "/api/call-log-export")
+    request = Request({"type": "http", "method": "GET", "path": "/api/call-log-export",
+                       "query_string": b"", "headers": [(b"x-test-admin", b"yes")]},
+                      receive=lambda: None)
+    async def connected():
+        return False
+    request.is_disconnected = connected
+    async def consume():
+        response = await endpoint(request, cursor="", q="", source="", trigger_source="",
+                                  status="", preset="", min_elapsed_ms=0, project="",
+                                  tool="", format="ndjson", category="tools")
+        assert isinstance(response, StreamingResponse)
+        first = await anext(response.body_iterator)
+        assert len(first.splitlines()) == 200
+        # Narrow visibility after the first batch. The remaining private record
+        # must not be emitted under the original read authorization.
+        store.db.execute("UPDATE operations SET space_id='other' WHERE id=?", ("0" * 32,))
+        store.db.commit()
+        with pytest.raises(DevError, match="导出范围已变化"):
+            await anext(response.body_iterator)
+    asyncio.run(consume())
+
+
+def test_call_export_cap_cursor_and_filter_binding(log_api):
+    client, store, _ = log_api
+    store.db.executemany(
+        "INSERT INTO operations(id,project_id,device_id,tool,actor,state,created,updated,args_summary) "
+        "VALUES (?, 'p1', 'd1', 'fs_read', 'mcp:test', 'succeeded', 10, 11, '{}')",
+        [(f"{number:032x}",) for number in range(10002)])
+    store.db.commit()
+    first = client.get("/api/call-log-export", params={"format": "ndjson"}, headers=AUTH)
+    assert first.headers["X-Export-Rows"] == "10000"
+    assert first.headers["X-Export-Truncated"] == "true"
+    ids = [json.loads(line)["id"] for line in first.text.splitlines()]
+    assert len(ids) == 10000 and len(set(ids)) == 10000
+    cursor = first.headers["X-Export-Next-Cursor"]
+    rest = client.get("/api/call-log-export",
+                      params={"format": "ndjson", "cursor": cursor}, headers=AUTH)
+    assert rest.headers["X-Export-Rows"] == "2"
+    assert rest.headers["X-Export-Truncated"] == "false"
+    remainder = [json.loads(line)["id"] for line in rest.text.splitlines()]
+    assert not set(ids) & set(remainder)
+    changed = client.get("/api/call-log-export",
+                         params={"format": "ndjson", "cursor": cursor, "tool": "exec"}, headers=AUTH)
+    assert changed.status_code == 400

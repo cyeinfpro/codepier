@@ -20,7 +20,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import Query, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 
 from hub import iam
 from hub.db_worker import database_endpoint, run_db, run_db_read
@@ -547,7 +547,9 @@ def _attach_active_contention(
                 item["waiting"] = note["waiting"]
 
 
-def _format_export_payload(rows: list[dict], fmt: str) -> tuple[str, str, str]:
+def _format_export_payload(
+    rows: list[dict], fmt: str, *, include_header: bool = True
+) -> tuple[str, str, str]:
     if fmt == "ndjson":
         body = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
         if body:
@@ -555,21 +557,22 @@ def _format_export_payload(rows: list[dict], fmt: str) -> tuple[str, str, str]:
         return body, "application/x-ndjson; charset=utf-8", "codepier-call-log.ndjson"
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(
-        [
-            "id",
-            "utc_time",
-            "project",
-            "device",
-            "tool",
-            "state",
-            "elapsed_ms",
-            "actor",
-            "trigger_source",
-            "summary",
-            "error",
-        ]
-    )
+    if include_header:
+        writer.writerow(
+            [
+                "id",
+                "utc_time",
+                "project",
+                "device",
+                "tool",
+                "state",
+                "elapsed_ms",
+                "actor",
+                "trigger_source",
+                "summary",
+                "error",
+            ]
+        )
 
     def cell(value):
         text = "" if value is None else str(value)
@@ -597,7 +600,11 @@ def _format_export_payload(rows: list[dict], fmt: str) -> tuple[str, str, str]:
                 cell(item.get("error") or ""),
             ]
         )
-    return "\ufeff" + out.getvalue(), "text/csv; charset=utf-8", "codepier-call-log.csv"
+    return (
+        ("\ufeff" if include_header else "") + out.getvalue(),
+        "text/csv; charset=utf-8",
+        "codepier-call-log.csv",
+    )
 
 
 def _output_digest(text: str) -> str:
@@ -691,9 +698,15 @@ def _parse_watch(watch: str) -> list[str]:
     return watched
 
 
-def _render_export(raw_rows: list[dict], observed: float, fmt: str):
+EXPORT_BATCH_SIZE = 200
+
+
+def _render_export(raw_rows: list[dict], observed: float, fmt: str, *, include_header=True):
     sanitized = [public_row(row, observed) for row in raw_rows]
-    return (len(sanitized), *_format_export_payload(sanitized, fmt))
+    return (
+        len(sanitized),
+        *_format_export_payload(sanitized, fmt, include_header=include_header),
+    )
 
 
 def _audit_export(store, principal, *, rows: int, fmt: str, truncated: bool):
@@ -709,6 +722,163 @@ def _audit_export(store, principal, *, rows: int, fmt: str, truncated: bool):
         )
     finally:
         iam.audit_context.reset(token)
+
+
+def _read_export_batch(store, auth, request, snapshot_filters, select_base, batch, **options):
+    from shared.util import DevError
+
+    with iam.read_scope(store):
+        current = auth.panel(request)
+        filters, clause, scope_args, _, _ = _prepare_list_query(current, **options)
+        if filters != snapshot_filters:
+            raise DevError("AUTHORIZATION_CHANGED", "导出期间身份发生变化，请重新导出", 403)
+        ids = [item["id"] for item in batch]
+        marks = ",".join("?" for _ in ids)
+        # Repeat current tenant/owner/project authorization on each chunk, but
+        # retain originally selected filter membership.
+        rows = store.all(
+            select_base()
+            + " WHERE "
+            + clause
+            + f" AND o.id IN ({marks}) ORDER BY o.created DESC,o.id DESC",
+            (*scope_args, *ids),
+        )
+        if len(rows) != len(ids):
+            # Never silently deliver an apparently complete export after
+            # access is narrowed or a selected record disappears.
+            raise DevError("AUTHORIZATION_CHANGED", "导出范围已变化，请重新导出", 403)
+        return rows
+
+
+def _register_call_log_export(app, runtime, auth, select_base):
+    store = runtime.store
+
+    @app.get("/api/call-log-export")
+    async def call_log_export(
+        request: Request,
+        cursor: str = Query("", max_length=1024),
+        q: str = Query("", max_length=200),
+        source: str = Query("", max_length=20),
+        trigger_source: str = Query("", max_length=30),
+        status: str = Query("", max_length=30),
+        preset: str = Query("", max_length=30),
+        min_elapsed_ms: int = Query(0, ge=0, le=86400000),
+        project: str = Query("", max_length=100),
+        tool: str = Query("", max_length=100),
+        format: Literal["csv", "ndjson"] = "csv",
+        category: Literal["all", "tools", "project_map"] = "tools",
+    ):
+        def read_snapshot():
+            with iam.read_scope(store):
+                principal = auth.panel(request)
+                filters, _, _, where, values = _prepare_list_query(
+                    principal,
+                    q=q,
+                    source=source,
+                    trigger_source=trigger_source,
+                    status=status,
+                    preset=preset,
+                    min_elapsed_ms=min_elapsed_ms,
+                    project=project,
+                    tool=tool,
+                    category=category,
+                )
+                if cursor:
+                    created, identifier = _decode_cursor(cursor, filters)
+                    where.append("(o.created < ? OR (o.created = ? AND o.id < ?))")
+                    values.extend([created, created, identifier])
+                # Freeze only the bounded ID set, not 10k wide summaries. New
+                # arrivals cannot slip into later chunks (even with tied times).
+                joins = (
+                    " LEFT JOIN projects p ON p.id=o.project_id"
+                    " LEFT JOIN devices d ON d.id=o.device_id"
+                    if filters["q"]
+                    else ""
+                )
+                keys = store.all(
+                    "SELECT o.id,o.created FROM operations o"
+                    + joins
+                    + " WHERE "
+                    + " AND ".join(where)
+                    + " ORDER BY o.created DESC,o.id DESC LIMIT ?",
+                    (*values, 10001),
+                )
+                truncated = len(keys) > 10000
+                keys = keys[:10000]
+                next_cursor = (
+                    _cursor(keys[-1]["created"], keys[-1]["id"], filters)
+                    if truncated and keys
+                    else ""
+                )
+                return principal, keys, filters, truncated, next_cursor, time.time()
+
+        principal, keys, snapshot_filters, truncated, next_cursor, observed = await run_db_read(
+            store, read_snapshot
+        )
+
+        def read_batch(batch):
+            return _read_export_batch(
+                store,
+                auth,
+                request,
+                snapshot_filters,
+                select_base,
+                batch,
+                q=q,
+                source=source,
+                trigger_source=trigger_source,
+                status=status,
+                preset=preset,
+                min_elapsed_ms=min_elapsed_ms,
+                project=project,
+                tool=tool,
+                category=category,
+            )
+
+        first_rows = await run_db_read(store, read_batch, keys[:EXPORT_BATCH_SIZE]) if keys else []
+        _, first_body, media_type, filename = await asyncio.to_thread(
+            _render_export, first_rows, observed, format
+        )
+        if hasattr(store, "audit"):
+            await run_db(
+                store,
+                _audit_export,
+                store,
+                principal,
+                rows=len(keys),
+                fmt=format,
+                truncated=truncated,
+            )
+
+        async def stream():
+            # No database transaction or writer lock is held across yield.
+            # Memory for summaries and serialized output is bounded to 200 rows;
+            # the snapshot contains at most 10k small (id, created) pairs.
+            yield first_body
+            for offset in range(EXPORT_BATCH_SIZE, len(keys), EXPORT_BATCH_SIZE):
+                if await request.is_disconnected():
+                    return
+                rows = await run_db_read(
+                    store, read_batch, keys[offset : offset + EXPORT_BATCH_SIZE]
+                )
+                _, body, _, _ = await asyncio.to_thread(
+                    _render_export, rows, observed, format, include_header=False
+                )
+                yield body
+
+        return StreamingResponse(
+            stream(),
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-Export-Limit": "10000",
+                "X-Export-Truncated": str(truncated).lower(),
+                "X-Export-Rows": str(len(keys)),
+                "X-Export-Next-Cursor": next_cursor,
+                "X-Export-Snapshot": "selected-identifiers",
+            },
+        )
 
 
 def register_call_log(app, runtime, auth):
@@ -855,85 +1025,7 @@ def register_call_log(app, runtime, auth):
                 payload["queue"] = queue_rows(store, runtime, principal)
             return payload
 
-    @app.get("/api/call-log-export")
-    async def call_log_export(
-        request: Request,
-        cursor: str = Query("", max_length=1024),
-        q: str = Query("", max_length=200),
-        source: str = Query("", max_length=20),
-        trigger_source: str = Query("", max_length=30),
-        status: str = Query("", max_length=30),
-        preset: str = Query("", max_length=30),
-        min_elapsed_ms: int = Query(0, ge=0, le=86400000),
-        project: str = Query("", max_length=100),
-        tool: str = Query("", max_length=100),
-        format: Literal["csv", "ndjson"] = "csv",
-        category: Literal["all", "tools", "project_map"] = "tools",
-    ):
-        def read_snapshot():
-            with iam.read_scope(store):
-                principal = auth.panel(request)
-                filters, _, _, where, values = _prepare_list_query(
-                    principal,
-                    q=q,
-                    source=source,
-                    trigger_source=trigger_source,
-                    status=status,
-                    preset=preset,
-                    min_elapsed_ms=min_elapsed_ms,
-                    project=project,
-                    tool=tool,
-                    category=category,
-                )
-                if cursor:
-                    created, identifier = _decode_cursor(cursor, filters)
-                    where.append("(o.created < ? OR (o.created = ? AND o.id < ?))")
-                    values.extend([created, created, identifier])
-                sql = _select_base() + (" WHERE " + " AND ".join(where) if where else "")
-                raw_rows = store.all(
-                    sql + " ORDER BY o.created DESC,o.id DESC LIMIT ?", (*values, 10001)
-                )
-                truncated = len(raw_rows) > 10000
-                raw_rows = raw_rows[:10000]
-                next_cursor = (
-                    _cursor(raw_rows[-1]["created"], raw_rows[-1]["id"], filters)
-                    if truncated and raw_rows
-                    else ""
-                )
-                # Only SQL runs inside the retryable snapshot. Redaction and
-                # serialization of up to 10k rows must neither extend the read
-                # transaction nor run again on each data_version retry/fence.
-                return principal, raw_rows, truncated, next_cursor, time.time()
-
-        principal, raw_rows, truncated, next_cursor, observed = await run_db_read(
-            store, read_snapshot
-        )
-
-        count, body, media_type, filename = await asyncio.to_thread(
-            _render_export, raw_rows, observed, format
-        )
-        if hasattr(store, "audit"):
-            await run_db(
-                store,
-                _audit_export,
-                store,
-                principal,
-                rows=count,
-                fmt=format,
-                truncated=truncated,
-            )
-        return Response(
-            body,
-            media_type=media_type,
-            headers={
-                "Cache-Control": "no-store",
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Export-Limit": "10000",
-                "X-Export-Truncated": str(truncated).lower(),
-                "X-Export-Rows": str(count),
-                "X-Export-Next-Cursor": next_cursor,
-            },
-        )
+    _register_call_log_export(app, runtime, auth, _select_base)
 
     @app.get("/api/call-log/{identifier}")
     @database_endpoint(store, read_only=True)

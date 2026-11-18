@@ -508,3 +508,157 @@ def test_incremental_detail_that_finishes_is_settled_with_full_timing(log_page):
     assert '实际执行 900 毫秒' in entry.locator('.call-waterfall').inner_text()
     assert any('after_output_seq=3' in u for u in requests)
     assert requests[-1].endswith(op_id)
+
+
+def test_late_pinned_detail_cannot_cross_session_or_space(log_page):
+    page, rows, details, _ = log_page
+    private = {**details[rows[0]['id']], 'id': 'c' * 32, 'actor': 'private-old-space'}
+    page.evaluate("""() => {
+      window.originalRead = window.readCallLog;
+      window.readCallLog = () => new Promise(resolve => window.finishOldPin = resolve);
+      void CodePierCallLog.focusOperation('c'.repeat(32));
+    }""")
+    page.wait_for_function("typeof finishOldPin === 'function'")
+    page.evaluate("""async () => {
+      CodePierCallLog.clear();
+      S.session = {user_id:'new-owner'};
+      S.space_id = 'new-space';
+      window.readCallLog = window.originalRead;
+      await renderPage();
+    }""")
+    page.evaluate("(d) => window.finishOldPin(d)", private)
+    page.wait_for_timeout(30)
+    assert page.locator('.call-pinned-inspector').count() == 0
+    assert page.evaluate("S.callLog.pinnedOp === null")
+    assert 'private-old-space' not in page.locator('#page').inner_text()
+
+
+def test_pinned_detail_latest_request_close_and_manual_refresh(log_page):
+    page, rows, details, _ = log_page
+    page.evaluate("""() => {
+      window.finishPins = {};
+      window.originalRead = window.readCallLog;
+      window.readCallLog = (path) => new Promise(resolve => {
+        window.finishPins[path.split('/').pop()] = resolve;
+      });
+      void CodePierCallLog.focusOperation('c'.repeat(32));
+      void CodePierCallLog.focusOperation('d'.repeat(32));
+    }""")
+    first = {**details[rows[0]['id']], 'id': 'c' * 32, 'output': 'old request'}
+    latest = {**details[rows[0]['id']], 'id': 'd' * 32, 'output': 'latest request'}
+    page.evaluate("(d) => finishPins[d.id](d)", latest)
+    page.locator('.call-pinned-inspector').wait_for()
+    page.evaluate("(d) => finishPins[d.id](d)", first)
+    assert page.evaluate("S.callLog.pinnedOp.id") == latest['id']
+    page.evaluate("void CodePierCallLog.focusOperation('e'.repeat(32))")
+    page.get_by_role('button', name='关闭定位', exact=True).click()
+    page.evaluate("(d) => finishPins['e'.repeat(32)](d)", {**latest, 'id':'e'*32})
+    page.wait_for_timeout(30)
+    assert page.locator('.call-pinned-inspector').count() == 0
+    # Manual refresh works even though a pinned inspector has no list-entry ancestor.
+    page.evaluate("(d) => { window.readCallLog = async () => d; }", latest)
+    page.evaluate("CodePierCallLog.focusOperation('d'.repeat(32))")
+    latest['output'] = 'refreshed pinned evidence'
+    page.evaluate("(d) => { window.readCallLog = async () => d; }", latest)
+    page.locator('.call-pinned-inspector').get_by_role('button',name='刷新详情',exact=True).click()
+    page.wait_for_function("document.querySelector('.call-pinned-inspector pre').textContent.includes('refreshed pinned evidence')")
+    page.evaluate("window.readCallLog = window.originalRead; void 0")
+
+
+def test_incremental_output_keeps_terminal_identity_and_has_search(log_page):
+    page, rows, details, requests = log_page
+    op_id = rows[0]['id']
+    data = details[op_id]
+    data['output'] = '\n'.join(f'line {i}' for i in range(100))
+    data['output_seq'] = 1
+    data['output_clean_chars'] = len(data['output'])
+    data['output_clean_sha'] = 'a' * 64
+    page.evaluate("""() => {
+      const original = window.readCallLog;
+      window.readCallLog = path => original(path.startsWith('/api/call-log/') ? path.split('?')[0] : path);
+    }""")
+    entry = page.locator('[data-call-id]').first
+    entry.locator('summary').first.click()
+    entry.locator('.call-facts').wait_for()
+    output = entry.locator('[data-call-section="output"]')
+    output.locator('summary').click()
+    output.locator('pre').evaluate("(el) => { window.originalTerminal = el; el.scrollTop = el.scrollHeight; }")
+    page.evaluate("document.activeElement.blur()")
+    data['output'] += '\nunique-needle\nnext line'
+    data['output_seq'] = 2
+    data['updated'] = 103
+    page.evaluate('CodePierCallLog.refresh(true)')
+    assert output.locator('pre').evaluate('(el) => el === window.originalTerminal')
+    assert output.locator('pre').inner_text().endswith('unique-needle\nnext line')
+    assert output.locator('.call-output-lines').inner_text().splitlines()[-1] == '102'
+    output.get_by_role('searchbox',name='查找当前输出').fill('unique-needle')
+    assert '1 / 1' in output.locator('.call-output-matches').inner_text()
+    assert output.locator('pre').evaluate('(el) => el.scrollTop > 0')
+
+
+def test_stale_sse_and_snapshot_cannot_revert_visible_terminal_row(log_page):
+    page, rows, _, _ = log_page
+    page.add_script_tag(path=str(ROOT / 'web/queue.js'))
+    done = {**rows[0], 'state':'succeeded', 'updated':200}
+    page.evaluate("(d) => CodePierCallLog.onServerEvent({type:'operation',data:d})", done)
+    page.evaluate("(d) => CodePierCallLog.onServerEvent({type:'operation',data:d})", rows[0])
+    entry = page.locator('[data-call-id]').first
+    assert '已完成' in entry.locator('.call-state').inner_text()
+    # The list response is also stale; expanded reading prevents a full replacement.
+    page.evaluate("document.querySelector('[data-call-id]').open = true")
+    page.evaluate('CodePierCallLog.refresh(true)')
+    assert '已完成' in entry.locator('.call-state').inner_text()
+    assert page.evaluate("(id) => CodePierOperationStore.get(id).state", rows[0]['id']) == 'succeeded'
+
+
+def test_missing_timing_stage_is_not_inferred_as_return_time(log_page):
+    page, rows, details, _ = log_page
+    details[rows[0]['id']]['timing'] = {'wait_ms': None, 'execution_ms': 100}
+    page.locator('[data-call-id]').first.locator('summary').first.click()
+    page.locator('.call-waterfall').wait_for()
+    text = page.locator('.call-waterfall').inner_text()
+    assert '未记录阶段 未记录' in text
+    assert '回传与落盘' not in text
+
+
+def test_keyboard_intent_prefetch_is_reused_on_open(log_page):
+    page, rows, _, requests = log_page
+    summary = page.locator('[data-call-id]').first.locator('summary').first
+    summary.focus()
+    for _ in range(60):
+        if any(u.endswith(rows[0]['id']) for u in requests):
+            break
+        page.wait_for_timeout(50)
+    assert len([u for u in requests if u.endswith(rows[0]['id'])]) == 1
+    summary.press('Enter')
+    page.locator('.call-facts').wait_for()
+    assert len([u for u in requests if u.endswith(rows[0]['id'])]) == 1
+
+
+def test_shell_binds_before_initial_snapshot_without_separate_queue_fetch(log_page):
+    page, _, _, _ = log_page
+    page.add_script_tag(path=str(ROOT / 'web/queue.js'))
+    page.evaluate("""() => {
+      CodePierCallLog.clear();
+      window.originalRead = window.readCallLog;
+      window.queueFetchCount = 0;
+      window.readCallLog = path => {
+        if (path === '/api/operations/queue') { window.queueFetchCount++; return {}; }
+        return new Promise(resolve => window.finishInitial = resolve);
+      };
+      document.querySelector('#page').innerHTML = CodePierCallLog.renderShellHTML();
+      CodePierCallLog.bind({shellOnly:true});
+      void CodePierCallLog.load();
+    }""")
+    page.locator('#audit-query').focus()
+    assert page.evaluate("document.activeElement.id") == 'audit-query'
+    assert page.evaluate("window.queueFetchCount") == 0
+    page.evaluate("""async () => {
+      const data = await window.originalRead('/api/call-log');
+      data.queue = {operations:[], observed_at:101, diagnostics_available:false};
+      window.finishInitial(data);
+      window.readCallLog = window.originalRead;
+    }""")
+    page.wait_for_function("document.querySelectorAll('[data-call-id]').length === 2")
+    assert page.evaluate("document.activeElement.id") == 'audit-query'
+    assert page.evaluate("window.queueFetchCount") == 0

@@ -136,6 +136,17 @@ def migrate(db):
     db.execute(
         "CREATE INDEX IF NOT EXISTS operations_space_tools ON operations(space_id,tool,project_id)"
     )
+    # Match call_log's exact expression, including legacy/malformed summaries.
+    # The leading tenant/origin columns avoid parsing every historical row when
+    # filtering automatic maintenance versus user requests.
+    db.execute("""CREATE INDEX IF NOT EXISTS operations_space_trigger_timeline ON operations(
+        space_id,
+        CASE WHEN json_valid(args_summary)
+            THEN CASE WHEN json_extract(args_summary,'$._log.version')=2
+                 AND json_extract(args_summary,'$._log.trigger_source') IN ('system_maintenance','request')
+                 THEN json_extract(args_summary,'$._log.trigger_source')
+                 ELSE 'unknown' END ELSE 'unknown' END,
+        created DESC,id DESC)""")
     db.execute("CREATE INDEX IF NOT EXISTS audit_space_timeline ON audit(space_id,id DESC)")
     db.execute(
         "CREATE INDEX IF NOT EXISTS audit_owner_timeline ON audit(space_id,owner_user_id,id DESC)"

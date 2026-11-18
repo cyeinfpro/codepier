@@ -132,6 +132,21 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
             # Switch through existing events view and back, with all handlers intact.
             page.locator('[data-action="audit-mode"][data-mode="events"]').click()
             page.locator('[data-event-index]').first.wait_for()
+            page.locator('[data-event-index]').first.click()
+            assert page.locator('[data-event-drawer]').first.is_visible()
+            assert page.locator('.modal').count() == 0
+            page.locator('[data-action="audit-mode"][data-mode="operations"]').click()
+            page.locator('.call-log').wait_for()
+            # A warm events-mode switch paints its scoped cache before network.
+            held = []
+            page.route('**/api/audit?*', lambda route: held.append(route))
+            page.locator('[data-action="audit-mode"][data-mode="events"]').click()
+            page.locator('[data-event-index]').first.wait_for(timeout=2000)
+            assert page.evaluate('S.auditEventsCache !== null')
+            page.wait_for_timeout(50)
+            for route in held:
+                route.continue_()
+            page.unroute('**/api/audit?*')
             page.locator('[data-action="audit-mode"][data-mode="operations"]').click()
             page.locator('.call-log').wait_for()
             page.locator('#call-tool').select_option('fs_write')
@@ -142,6 +157,7 @@ def test_real_panel_navigation_live_details_export_themes_and_logout(call_stack)
             page.evaluate('endSession(true)')
             page.locator('#login-form').wait_for()
             assert page.evaluate('S.callLog===null')
+            assert page.evaluate('S.auditEventsCache===null')
             assert not errors
         finally:
             browser.close()

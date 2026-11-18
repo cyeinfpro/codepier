@@ -172,7 +172,7 @@ def test_project_search_disclosure_tools_and_modal_focus(stack):
         expect(page.locator('.tool-chip:visible')).to_contain_text('workspace')
         layout(page,'expanded-tools')
         navigate(page,'workbench')
-        page.locator('.tool-menu summary').click()
+        page.locator('.tool-menu').filter(has=page.locator('[data-wf-action="context"]')).locator('summary').click()
         page.click('[data-wf-action="context"]')
         expect(page.locator('.context-document summary').first).to_contain_text('README.md')
         assert page.locator('#app').evaluate('(el)=>el.inert')
@@ -183,6 +183,7 @@ def test_project_search_disclosure_tools_and_modal_focus(stack):
         assert focused
         page.keyboard.press('Escape')
         assert not page.locator('#app').evaluate('(el)=>el.inert')
+        page.locator('.tool-menu').filter(has=page.locator('[data-local-skills]')).locator('summary').click()
         page.click('[data-local-skills]')
         expect(page.locator('#modal-title')).to_have_text('本地技能')
         expect(page.locator('#local-skills-results')).not_to_contain_text('读取技能目录…')

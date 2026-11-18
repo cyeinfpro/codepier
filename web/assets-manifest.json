@@ -1,5 +1,5 @@
 {
-  "version": "1.33.29",
+  "version": "1.33.30",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -27,8 +27,8 @@
       "bytes": 22291
     },
     "app.js": {
-      "sha256": "fde1a3e6882dbb5216e9f3a2ff4216309dfadfc2a214d1fc4e56cd4b08362e6f",
-      "bytes": 162348
+      "sha256": "a48aed46c693ed740971f7d96e8d78ccf74dd2cff4a65f9d1337e2ee7c8ee85a",
+      "bytes": 164209
     },
     "appearance.js": {
       "sha256": "4a955158dff23e08e9bf172df5839dbb9a108607674f254f87049d20d0fd13da",
@@ -43,12 +43,12 @@
       "bytes": 14190
     },
     "call-log.css": {
-      "sha256": "80e6bd7982be371ad62f09198d0587613b3bfa1c089d9a56cdf9d2f0fbb8f872",
-      "bytes": 19077
+      "sha256": "2d757eced991cd2df2ff99202843896ef6876319b90c7ae84bc8e48002f9b40e",
+      "bytes": 20042
     },
     "call-log.js": {
-      "sha256": "1af441294582421bef67b579a0b1232d4551c38777cacb9be762af1b06733677",
-      "bytes": 83809
+      "sha256": "effd2d11540bed0e11cdd677d5af060bb299f9693ddfb3f413a4f1946d9fa7fd",
+      "bytes": 93714
     },
     "chat-catalog.js": {
       "sha256": "23ff4f8c3684359b6594ac46d47ca0c2c3fac5367d531340ca5e0ab994a645ab",
@@ -187,8 +187,8 @@
       "bytes": 9978
     },
     "queue.js": {
-      "sha256": "120cad911816391caa529105c6012ef16702428b26c89432ce07fe13a09c71ce",
-      "bytes": 29579
+      "sha256": "54518772ff2faf4ee1b3b2a9588ea88cefe8f8a9023498a359990a9f6c562ff4",
+      "bytes": 33639
     },
     "roles.js": {
       "sha256": "d0a985b8a059762a4b63b15ddc64fe2423163dcc0dbe5881afe2ca858758c83b",

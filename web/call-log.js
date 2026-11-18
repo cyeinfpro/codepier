@@ -26,7 +26,11 @@ window.CodePierCallLog = (() => {
     refreshQueued = false,
     unsubscribeStore = null,
     keyListener = null,
-    visListener = null;
+    visListener = null,
+    focusController = null,
+    focusTurn = 0,
+    retryAt = 0,
+    retryTicker = null;
   const cache = new Map(),
     opened = new Set(),
     expandedBursts = new Set(),
@@ -416,6 +420,9 @@ window.CodePierCallLog = (() => {
 
   function detach() {
     window.CodePierQueue?.detach();
+    cancelFocus();
+    clearInterval(retryTicker);
+    retryTicker = null;
     clearTimeout(timer);
     clearInterval(tickTimer);
     clearTimeout(searchTimer);
@@ -488,6 +495,7 @@ window.CodePierCallLog = (() => {
   }
 
   function rowHTML(r) {
+    r = { ...r, ...(window.CodePierOperationStore?.get(r.id) || {}) };
     const [tone, label] = group(r),
       saved = cache.get(r.id),
       argsBlock = summaryHTML(r),
@@ -593,8 +601,9 @@ window.CodePierCallLog = (() => {
     const execPct =
       execMs !== null ? Math.min(100 - waitPct, Math.round((execMs / safeTotal) * 100)) : 0;
     const tailPct = Math.max(0, 100 - waitPct - execPct);
-    const tailMs = Math.max(0, total - (waitMs || 0) - (execMs || 0));
-    return `<div class="call-waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail" style="width:${tailPct}%" title="回传与落盘 ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>回传与落盘 ${duration(tailMs)}</span></div></div>`;
+    // Unknown stages must not be mislabeled as measured return/persistence time.
+    const tailMs = waitMs !== null && execMs !== null ? Math.max(0, total - waitMs - execMs) : null;
+    return `<div class="call-waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail" style="width:${tailPct}%" title="${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}</span></div></div>`;
   }
 
   function section(
@@ -605,7 +614,7 @@ window.CodePierCallLog = (() => {
   ) {
     const text = typeof value === 'string' ? value : json(value);
     if (text === undefined || text === null || text === '') return '';
-    return `<details class="call-section" data-call-section="${name}" ${open ? 'open' : ''}><summary>${esc(secTitle)}<small>${text.length.toLocaleString()} 字符${truncated ? ' · 已截断' : ''}</small></summary><div class="call-section-tools">${liveFollow ? '<button type="button" class="btn ghost small call-jump-bottom" data-call-action="scroll-output-bottom" hidden>↓ 跳至最新输出</button>' : ''}<button type="button" class="btn ghost small" data-call-copy="${name}">${icon('copy')}复制已脱敏内容</button></div><pre tabindex="0">${esc(text)}</pre></details>`;
+    return `<details class="call-section" data-call-section="${name}" ${open ? 'open' : ''}><summary>${esc(secTitle)}<small>${text.length.toLocaleString()} 字符${truncated ? ' · 已截断' : ''}</small></summary><div class="call-section-tools">${liveFollow ? '<label class="call-output-search-label">查找输出 <input type="search" class="call-output-search" aria-label="查找当前输出" maxlength="200"><span class="call-output-matches" role="status"></span></label><button type="button" class="btn ghost small" data-call-action="find-output-next">下一处</button><button type="button" class="btn ghost small call-jump-bottom" data-call-action="scroll-output-bottom" hidden>↓ 跳至最新输出</button>' : ''}<button type="button" class="btn ghost small" data-call-copy="${name}">${icon('copy')}复制已脱敏内容</button></div><div class="${liveFollow ? 'call-output-terminal' : 'call-section-content'}">${liveFollow ? '<div class="call-output-lines" aria-hidden="true">' + Array.from({ length: text.split('\n').length }, (_, i) => i + 1).join('\n') + '</div>' : ''}<pre tabindex="0">${esc(text)}</pre></div></details>`;
   }
 
   function detailHTML(d) {
@@ -637,6 +646,111 @@ window.CodePierCallLog = (() => {
       : '';
     // AUD-14: Inverted detail hierarchy — Errors & Waterfall & Diff/Output/Arguments first, compact semantic <dl class="call-facts"> & Timeline below.
     return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span>${d.project_id ? `<button type="button" class="btn ghost small" data-call-action="filter-project" data-project="${esc(d.project_id)}">筛选此项目</button>` : ''}${d.tool ? `<button type="button" class="btn ghost small" data-call-action="filter-tool" data-tool="${esc(d.tool)}">筛选此工具</button>` : ''}<button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div>${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${window.CodePierQueue?.waitingHTML(d) || ''}${window.CodePierQueue?.liveHTML(d) || ''}${window.CodePierQueue?.runHTML(d) || ''}${waterfallHTML(d)}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${diffSection}${section(isKnowledge(d) ? '程序输出（保存的尾部）' : '任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error, liveFollow: true })}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}<dl class="call-facts">${originFacts(d)}<div><dt>授权依据（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
+  }
+
+  // Incremental output must keep the terminal element, selection and scroll identity.
+  // Reconcile the other evidence sections independently, not the entire detail body.
+  function reconcileDetailDOM(body, rendered) {
+    const template = document.createElement('template');
+    template.innerHTML = rendered;
+    const oldSections = new Map(
+      [...body.children].map((el) => [
+        el.dataset.callSection || el.className + ':' + el.tagName,
+        el,
+      ]),
+    );
+    const keep = new Set();
+    let cursor = body.firstElementChild;
+    for (const incoming of [...template.content.children]) {
+      const key = incoming.dataset.callSection || incoming.className + ':' + incoming.tagName;
+      let target = oldSections.get(key);
+      if (target && target.tagName === incoming.tagName) {
+        if (incoming.dataset.callSection === 'output') {
+          const pre = target.querySelector('pre'),
+            nextPre = incoming.querySelector('pre');
+          if (pre && nextPre) {
+            const oldText = pre.textContent,
+              nextText = nextPre.textContent;
+            if (nextText.startsWith(oldText)) {
+              if (nextText.length > oldText.length)
+                pre.append(document.createTextNode(nextText.slice(oldText.length)));
+            } else if (nextText !== oldText) pre.textContent = nextText;
+            const summary = target.querySelector('summary');
+            if (summary) summary.innerHTML = incoming.querySelector('summary').innerHTML;
+            const lines = target.querySelector('.call-output-lines');
+            if (lines) lines.textContent = incoming.querySelector('.call-output-lines').textContent;
+            findOutput(target, false, false);
+          }
+        } else if (incoming.dataset.callSection === 'trace') {
+          const oldList = target.querySelector('ol'),
+            nextList = incoming.querySelector('ol');
+          if (oldList && nextList) {
+            const oldRows = [...oldList.children];
+            const nextRows = [...nextList.children];
+            let samePrefix = oldRows.length <= nextRows.length;
+            for (let i = 0; samePrefix && i < oldRows.length; i++)
+              samePrefix = oldRows[i].outerHTML === nextRows[i].outerHTML;
+            if (samePrefix) {
+              for (const row of nextRows.slice(oldRows.length)) oldList.append(row);
+            } else if (oldList.innerHTML !== nextList.innerHTML)
+              oldList.replaceChildren(...nextRows);
+            target.querySelector('summary').innerHTML = incoming.querySelector('summary').innerHTML;
+          }
+        } else if (target.innerHTML !== incoming.innerHTML) {
+          // A section whose actual evidence changed may update independently.
+          target.innerHTML = incoming.innerHTML;
+        }
+      } else target = incoming;
+      keep.add(target);
+      if (target !== cursor) body.insertBefore(target, cursor);
+      cursor = target.nextElementSibling;
+    }
+    for (const child of [...body.children]) if (!keep.has(child)) child.remove();
+    bindOutputScroll(body);
+  }
+
+  function bindOutputScroll(body) {
+    for (const section of body.querySelectorAll('[data-call-section="output"]')) {
+      const pre = section.querySelector('pre'),
+        gutter = section.querySelector('.call-output-lines');
+      if (!pre) continue;
+      pre.onscroll = () => {
+        if (gutter) gutter.scrollTop = pre.scrollTop;
+        const button = section.querySelector('.call-jump-bottom');
+        if (button) button.hidden = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 28;
+      };
+    }
+  }
+
+  function findOutput(section, advance = false, navigate = true) {
+    const input = section?.querySelector('.call-output-search'),
+      pre = section?.querySelector('pre'),
+      label = section?.querySelector('.call-output-matches');
+    if (!input || !pre || !label) return;
+    const query = input.value.toLocaleLowerCase();
+    const text = pre.textContent.toLocaleLowerCase();
+    const positions = [];
+    if (query) {
+      let at = text.indexOf(query);
+      while (at >= 0 && positions.length < 10000) {
+        positions.push(at);
+        at = text.indexOf(query, at + Math.max(1, query.length));
+      }
+    }
+    const oldIndex = Number(input.dataset.matchIndex || 0);
+    const index = positions.length ? (advance ? oldIndex + 1 : oldIndex) % positions.length : 0;
+    input.dataset.matchIndex = String(index);
+    label.textContent = query
+      ? positions.length
+        ? `${index + 1} / ${positions.length} 处`
+        : '无匹配'
+      : '';
+    if (positions.length && navigate) {
+      const line = pre.textContent.slice(0, positions[index]).split('\n').length - 1;
+      const lineHeight = parseFloat(getComputedStyle(pre).lineHeight) || 20;
+      pre.scrollTop = Math.max(0, (line - 2) * lineHeight);
+      section.querySelector('.call-output-lines')?.scrollTo(0, pre.scrollTop);
+    }
   }
 
   function syncPodHTML() {
@@ -840,7 +954,7 @@ window.CodePierCallLog = (() => {
   }
 
   // AUD-02: Zero-wipe local list reload — preserves #operation-queue and search input focus/IME!
-  async function reloadList({ resetCursor = false, clearDetails = false } = {}) {
+  async function reloadList({ resetCursor = false, clearDetails = false, initial = false } = {}) {
     ensureOwner();
     if (!root?.isConnected || !root.querySelector('.call-log')) {
       return renderPage(false);
@@ -877,9 +991,16 @@ window.CodePierCallLog = (() => {
       }
     }, 120);
     try {
-      const r = await api('/api/call-log?' + filter + '&include_filters=false&include_total=true', {
-        signal: controller.signal,
-      });
+      const r = await api(
+        '/api/call-log?' +
+          filter +
+          (initial
+            ? '&include_queue=true&include_filters=true&include_total=true'
+            : '&include_filters=false&include_total=true'),
+        {
+          signal: controller.signal,
+        },
+      );
       if (
         listController !== controller ||
         session !== S.session ||
@@ -888,6 +1009,24 @@ window.CodePierCallLog = (() => {
       )
         return;
       window.CodePierOperationStore?.ingestCallLog(r);
+      if (r.queue) window.CodePierQueue?.hydrate(r.queue);
+      if (initial) {
+        st().projects = r.projects || st().projects;
+        st().tools = r.tools || st().tools;
+        const updateOptions = (selector, items, selected, label, title) => {
+          const input = root.querySelector(selector);
+          if (!input) return;
+          input.replaceChildren(
+            new Option(title, ''),
+            ...items.map((item) => {
+              const value = item.id ?? item;
+              return new Option(item[label] ?? item, value, false, value === selected);
+            }),
+          );
+        };
+        updateOptions('#call-project', st().projects, st().project, 'alias', '全部项目');
+        updateOptions('#call-tool', st().tools, st().tool, 'name', '全部工具');
+      }
       lastSyncedTime = new Date().toLocaleTimeString('zh-CN', { hour12: false });
       consecutiveFailures = 0;
       prepareProjectColors(st().projects, r.operations || []);
@@ -950,7 +1089,19 @@ window.CodePierCallLog = (() => {
   function schedule() {
     clearTimeout(timer);
     if (root?.isConnected && st().live) {
-      timer = setTimeout(() => refresh(true), pollDelayMs());
+      const delay = pollDelayMs();
+      retryAt = Date.now() + delay;
+      timer = setTimeout(() => refresh(true), delay);
+      clearInterval(retryTicker);
+      retryTicker = consecutiveFailures
+        ? setInterval(() => {
+            if (root?.isConnected && st().live && consecutiveFailures)
+              setSync(
+                `连接暂不可用，保留 ${lastSyncedTime || '上次'} 快照 · ${Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))} 秒后重试`,
+                'reconnecting',
+              );
+          }, 1000)
+        : null;
     }
   }
 
@@ -1027,6 +1178,7 @@ window.CodePierCallLog = (() => {
         const body = node.querySelector('.call-detail');
         const rendered = detailHTML(old.data);
         body.innerHTML = rendered;
+        bindOutputScroll(body);
         old.rendered = rendered;
       }
       return;
@@ -1100,6 +1252,14 @@ window.CodePierCallLog = (() => {
           trace: mergedTrace,
         };
       }
+      window.CodePierOperationStore?.ingestCallLog({ operations: [d] });
+      const canonical = window.CodePierOperationStore?.get(id);
+      if (canonical) {
+        d = { ...d, state: canonical.state, updated: canonical.updated };
+        for (const field of ['elapsed_ms', 'exit_code', 'error']) {
+          if (canonical[field] !== undefined) d[field] = canonical[field];
+        }
+      }
       entry.data = d;
       node.querySelector('.call-state').innerHTML = status(d);
       const body = node.querySelector('.call-detail'),
@@ -1129,7 +1289,11 @@ window.CodePierCallLog = (() => {
       );
       const rendered = detailHTML(d);
       if (rendered !== entry.rendered) {
-        body.innerHTML = rendered;
+        if (old?.data) reconcileDetailDOM(body, rendered);
+        else {
+          body.innerHTML = rendered;
+          bindOutputScroll(body);
+        }
         if (old?.data)
           body.querySelectorAll('details[data-call-section]').forEach((x) => {
             x.open = expanded.has(x.dataset.callSection);
@@ -1142,7 +1306,6 @@ window.CodePierCallLog = (() => {
             if (
               secNode.dataset.callSection === 'output' &&
               nearBottom &&
-              top > 0 &&
               p.scrollHeight > oldHeight
             ) {
               p.scrollTop = p.scrollHeight;
@@ -1277,7 +1440,7 @@ window.CodePierCallLog = (() => {
       }
       for (const item of [...(r.operations || []), ...(r.updates || [])]) {
         const node = nodes.get(item.id);
-        if (node) patchVisibleRowInPlace(node, item);
+        if (node) patchVisibleRowInPlace(node, window.CodePierOperationStore?.get(item.id) || item);
       }
       const liveNodes = [...nodes.values()].filter(
         (n) =>
@@ -1397,16 +1560,16 @@ window.CodePierCallLog = (() => {
     }
   }
 
-  function onServerEvent(m) {
+  function onServerEvent(m, { ingested = false } = {}) {
     if (!m || typeof m !== 'object') return;
-    window.CodePierOperationStore?.ingestEvent(m);
+    if (!ingested) window.CodePierOperationStore?.ingestEvent(m);
     if (!root?.isConnected || S.page !== 'audit' || S.auditMode !== 'operations' || !st().live)
       return;
     if (m.type === 'operation' && m.data?.id) {
       const id = m.data.id;
       const node = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
       if (node) {
-        patchVisibleRowInPlace(node, m.data);
+        patchVisibleRowInPlace(node, window.CodePierOperationStore?.get(id) || m.data);
         syncLiveTicker();
         if (opened.has(id) || ['failed', 'interrupted'].includes(m.data.state)) {
           triggerThrottledHeadRefresh();
@@ -1452,8 +1615,31 @@ window.CodePierCallLog = (() => {
     }
   }
 
-  async function focusOperation(id) {
+  function cancelFocus() {
+    focusTurn++;
+    focusController?.abort();
+    focusController = null;
+  }
+
+  async function focusOperation(id, { refreshPinned = false } = {}) {
     if (!id || !root?.isConnected) return false;
+    cancelFocus();
+    const request = new AbortController(),
+      turn = focusTurn,
+      target = root,
+      session = S.session,
+      space = S.space_id,
+      generation = epoch;
+    focusController = request;
+    const current = () =>
+      turn === focusTurn &&
+      generation === epoch &&
+      root === target &&
+      target.isConnected &&
+      session === S.session &&
+      space === S.space_id &&
+      S.page === 'audit' &&
+      S.auditMode === 'operations';
     const burstWrap = [...root.querySelectorAll('.call-burst')].find((b) =>
       b.querySelector(`[data-call-id="${CSS.escape(id)}"]`),
     );
@@ -1462,26 +1648,37 @@ window.CodePierCallLog = (() => {
       expandedBursts.add(burstWrap.dataset.burstId);
     }
     const existing = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
-    if (existing) {
+    if (existing && !refreshPinned) {
       existing.open = true;
       opened.add(id);
       existing.classList.add('call-entry-highlight');
       setTimeout(() => existing.classList.remove('call-entry-highlight'), 1800);
-      existing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      existing.scrollIntoView({
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+        block: 'center',
+      });
       await detail(existing);
       return true;
     }
-    const d = await api('/api/call-log/' + encodeURIComponent(id));
-    if (!root?.isConnected) return true;
-    st().pinnedOp = d;
-    const existingPin = root.querySelector('.call-pinned-inspector');
-    const markup = `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(d.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(d.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail">${detailHTML(d)}</div></div>`;
-    if (existingPin) existingPin.outerHTML = markup;
-    else root.querySelector('.call-stream-banner')?.insertAdjacentHTML('afterend', markup);
-    root
-      .querySelector('.call-pinned-inspector')
-      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    return true;
+    try {
+      const d = await api('/api/call-log/' + encodeURIComponent(id), { signal: request.signal });
+      if (!current()) return false;
+      st().pinnedOp = d;
+      const existingPin = target.querySelector('.call-pinned-inspector');
+      const markup = `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(d.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(d.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail">${detailHTML(d)}</div></div>`;
+      if (existingPin) existingPin.outerHTML = markup;
+      else target.querySelector('.call-stream-banner')?.insertAdjacentHTML('afterend', markup);
+      target.querySelector('.call-pinned-inspector')?.scrollIntoView({
+        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+        block: 'nearest',
+      });
+      return true;
+    } catch (error) {
+      if (!current() || error.name === 'AbortError') return false;
+      throw error;
+    } finally {
+      if (focusController === request) focusController = null;
+    }
   }
 
   async function exportFilteredAll(format) {
@@ -1595,7 +1792,7 @@ window.CodePierCallLog = (() => {
     document.addEventListener('keydown', keyListener);
   }
 
-  function bind() {
+  function bind({ shellOnly = false } = {}) {
     const cachedInitialQueue = initialQueueData;
     initialQueueData = null;
     detach();
@@ -1604,7 +1801,8 @@ window.CodePierCallLog = (() => {
     window.CodePierQueue?.setLive(st().live, { silent: true });
     window.CodePierQueue?.bind({
       initialData: cachedInitialQueue,
-      managedPolling: !!cachedInitialQueue,
+      managedPolling: shellOnly || !!cachedInitialQueue,
+      deferInitial: shellOnly,
     });
     if (window.CodePierOperationStore) {
       unsubscribeStore = window.CodePierOperationStore.subscribe((ev) => {
@@ -1706,10 +1904,18 @@ window.CodePierCallLog = (() => {
       const cancelIntent = () => clearTimeout(hoverTimer);
       listContainer.addEventListener('pointerover', startIntent);
       listContainer.addEventListener('pointerout', cancelIntent);
+      listContainer.addEventListener('focusin', startIntent);
+      listContainer.addEventListener('focusout', cancelIntent);
     }
 
     // Unified event delegation on root shell so dynamic list updates keep all handlers.
     const shell = root.querySelector('.call-audit-shell') || root;
+    shell.oninput = (e) => {
+      if (e.target.matches('.call-output-search')) {
+        e.target.dataset.matchIndex = '0';
+        findOutput(e.target.closest('[data-call-section="output"]'));
+      }
+    };
     shell.onclick = (e) => {
       const copyIdBtn = e.target.closest('[data-call-copy-id]');
       if (copyIdBtn) {
@@ -1755,7 +1961,7 @@ window.CodePierCallLog = (() => {
     document.addEventListener('visibilitychange', visListener);
     installKeyboardShortcuts();
     syncLiveTicker();
-    schedule();
+    if (!shellOnly) schedule();
     if (pendingFocusId) {
       const idToOpen = pendingFocusId;
       pendingFocusId = '';
@@ -1780,6 +1986,10 @@ window.CodePierCallLog = (() => {
             : d[b.dataset.callCopy];
       return copy(typeof v === 'string' ? v : json(v));
     }
+    if (name === 'find-output-next') {
+      findOutput(b.closest('[data-call-section="output"]'), true);
+      return;
+    }
     if (name === 'scroll-output-bottom') {
       const pre = b.closest('[data-call-section="output"]')?.querySelector('pre');
       if (pre) {
@@ -1789,6 +1999,7 @@ window.CodePierCallLog = (() => {
       return;
     }
     if (name === 'close-pinned') {
+      cancelFocus();
       st().pinnedOp = null;
       root?.querySelector('.call-pinned-inspector')?.remove();
       return;
@@ -1847,7 +2058,11 @@ window.CodePierCallLog = (() => {
       });
       return;
     }
-    if (name === 'detail-refresh') return detail(node, true, true);
+    if (name === 'detail-refresh') {
+      if (b.closest('.call-pinned-inspector') && st().pinnedOp)
+        return focusOperation(st().pinnedOp.id, { refreshPinned: true });
+      return detail(node, true, true);
+    }
     if (name === 'export')
       return download(
         'codepier-calls-page.json',
@@ -1868,6 +2083,8 @@ window.CodePierCallLog = (() => {
         return refresh(true);
       }
       clearTimeout(timer);
+      clearInterval(retryTicker);
+      retryTicker = null;
       clearInterval(tickTimer);
       tickTimer = null;
       setSync('实时更新已暂停', 'paused');
@@ -1896,6 +2113,7 @@ window.CodePierCallLog = (() => {
     refresh,
     schedule,
     reset,
+    load: () => reloadList({ initial: true }),
     onServerEvent,
     onConnectionState,
     focusOperation,

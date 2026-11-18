@@ -588,6 +588,14 @@ class Store:
             re.I,
         ):
             self.session_revision += 1
+            # A reader can observe the increment while this writer is still
+            # uncommitted, and cache the old permissions with the new revision.
+            # Invalidate again after COMMIT so that cache cannot survive the
+            # revocation becoming durable. Rollbacks need no second increment.
+            self._writer_db.after_commit(self._advance_session_revision)
+
+    def _advance_session_revision(self):
+        self.session_revision += 1
 
     def after_commit(self, callback):
         if self.lock.owned:

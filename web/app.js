@@ -201,6 +201,7 @@ function clearSpaceSnapshots() {
     auditBeforeHistory: [],
     auditNextBeforeId: null,
     auditModeSnapshots: null,
+    auditEventsCache: null,
     auditQuery: '',
     auditStatus: '',
     auditSource: '',
@@ -876,8 +877,8 @@ function connectEvents() {
       return;
     }
     if (m.type === 'operation') {
-      navActivityOperation(m.data);
       window.CodePierOperationStore?.ingestEvent(m);
+      navActivityOperation(window.CodePierOperationStore?.get(m.data?.id) || m.data);
     }
     if (['device', 'project'].includes(m.type)) invalidateBasics();
     if (['device', 'workflow'].includes(m.type))
@@ -902,7 +903,7 @@ function connectEvents() {
       ['operation', 'output', 'trace', 'device', 'project'].includes(m.type)
     ) {
       if (typeof CodePierCallLog.onServerEvent === 'function') {
-        CodePierCallLog.onServerEvent(m);
+        CodePierCallLog.onServerEvent(m, { ingested: m.type === 'operation' });
       } else {
         clearTimeout(S.eventTimer);
         S.eventTimer = setTimeout(() => {
@@ -1069,6 +1070,17 @@ async function renderPage(showLoading = true) {
   try {
     await window.CodePierAssets?.load(page);
     if (seq !== S.renderSeq || !S.session || page !== S.page) return;
+    if (page === 'audit' && S.auditMode === 'operations' && window.CodePierCallLog?.load) {
+      // Bind the real shell before awaiting data. Filter changes can abort the
+      // initial request without losing focus or destroying the queue component.
+      if (!$('#page .call-audit-shell'))
+        $('#page').innerHTML = pageTabsHTML(page) + CodePierCallLog.renderShellHTML();
+      CodePierCallLog.bind({ shellOnly: true });
+      await CodePierCallLog.load();
+      if (seq === S.renderSeq && S.session && S.page === page)
+        $('#page').removeAttribute('aria-busy');
+      return;
+    }
     let html = '';
     if (['identity', 'members', 'identity-admin'].includes(page)) {
       html = await CodePierIdentity.html(page);
@@ -2753,13 +2765,34 @@ async function auditHTML(seq = S.renderSeq) {
     ...(type === 'events' ? { q: S.auditQuery } : {}),
     ...(useCursor ? { before_id: String(S.auditBeforeId) } : {}),
   });
+  const session = S.session,
+    space = S.space_id;
   const r = await api('/api/' + (type === 'operations' ? 'operations' : 'audit') + '?' + query);
+  if (seq !== S.renderSeq || session !== S.session || space !== S.space_id || type !== S.auditMode)
+    return '';
+  if (type === 'events')
+    S.auditEventsCache = {
+      session,
+      space,
+      key: auditEventsKey(),
+      data: r,
+    };
+  return auditRowsHTML(r, type);
+}
+function auditEventsKey() {
+  return JSON.stringify([
+    S.auditSource,
+    S.auditStatus,
+    S.auditQuery,
+    S.auditBeforeId || 0,
+    S.auditOffset || 0,
+  ]);
+}
+function auditRowsHTML(r, type = S.auditMode) {
   const rows = type === 'operations' ? r.operations : r.events;
-  if (seq === S.renderSeq) {
-    S.auditNext = r.next_offset;
-    S.auditNextBeforeId = r.next_before_id ?? null;
-    S.auditRows = rows;
-  }
+  S.auditNext = r.next_offset;
+  S.auditNextBeforeId = r.next_before_id ?? null;
+  S.auditRows = rows;
   const hasPrev =
     type === 'events'
       ? (S.auditBeforeHistory?.length || 0) > 0 || S.auditOffset > 0
@@ -3388,6 +3421,8 @@ panelActions.register(['operation-detail'], async (b, e) => {
 panelActions.register(['audit-mode'], async (b, e) => {
   const nextMode = b.dataset.mode;
   if (nextMode === S.auditMode) return;
+  // A cached switch must invalidate any older page request as well.
+  S.renderSeq++;
   if (!S.auditModeSnapshots) S.auditModeSnapshots = {};
   S.auditModeSnapshots[S.auditMode] = {
     query: S.auditQuery || '',
@@ -3412,8 +3447,22 @@ panelActions.register(['audit-mode'], async (b, e) => {
     window.CodePierCallLog?.renderShellHTML
   ) {
     $('#page').innerHTML = pageTabsHTML('audit') + CodePierCallLog.renderShellHTML();
-    CodePierCallLog.bind();
-    CodePierCallLog.refresh(true).catch(() => {});
+    CodePierCallLog.bind({ shellOnly: true });
+    CodePierCallLog.load().catch((error) => toast(error.message, true));
+    return;
+  }
+  const cachedEvents = S.auditEventsCache;
+  if (
+    nextMode === 'events' &&
+    cachedEvents &&
+    cachedEvents.session === S.session &&
+    cachedEvents.space === S.space_id &&
+    cachedEvents.key === auditEventsKey()
+  ) {
+    $('#page').innerHTML = pageTabsHTML('audit') + auditRowsHTML(cachedEvents.data, 'events');
+    bindAudit();
+    // Revalidation never blocks showing the account/Space-scoped memory snapshot.
+    renderPage(false).catch((error) => toast(error.message, true));
     return;
   }
   await renderPage(false);

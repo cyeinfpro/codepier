@@ -112,6 +112,95 @@ def test_refresh_preserves_focused_evidence_and_denial_clears_view(queue_page):
     assert not page.locator("[data-queue-report]").count()
 
 
+def test_terminal_sse_updates_focused_queue_without_losing_focus(queue_page):
+    page = queue_page
+    page.locator("[data-queue-cancel=writer]").focus()
+    page.evaluate("""() => {
+      window.focused = document.activeElement;
+      CodePierOperationStore.ingestEvent({type:'operation', data:{id:'writer',state:'succeeded',updated:200}});
+    }""")
+    assert page.evaluate("window.focused===document.activeElement && window.focused.isConnected")
+    assert page.locator("[data-queue-id=writer] [data-queue-state]").inner_text() == "已完成"
+    assert page.locator("[data-queue-cancel=writer]").is_disabled()
+    assert page.locator("[data-queue-stage=running] strong").inner_text() == "0"
+    page.evaluate("document.activeElement.blur()")
+    page.wait_for_function("!document.querySelector('[data-queue-id=writer]')")
+
+
+def test_stale_queue_and_list_snapshots_cannot_resurrect_terminal_sse(queue_page):
+    page = queue_page
+    page.evaluate("""() => {
+      CodePierOperationStore.ingestEvent({type:'operation',data:{id:'writer',state:'succeeded',updated:200}});
+      window.queueData.operations[2].updated = 100;
+      CodePierQueue.hydrate(structuredClone(window.queueData));
+      window.listSnapshot = {operations:[{id:'writer',state:'running',updated:100}],updates:[]};
+      CodePierOperationStore.ingestCallLog(window.listSnapshot);
+      CodePierOperationStore.ingestEvent({type:'operation',data:{id:'writer',state:'running',updated:100}});
+    }""")
+    assert not page.locator("[data-queue-id=writer]").count()
+    assert page.evaluate("CodePierOperationStore.get('writer').state") == "succeeded"
+    assert page.evaluate("window.listSnapshot.operations[0].state") == "succeeded"
+    assert not page.evaluate("CodePierOperationStore.activeSet().has('writer')")
+    # A later durable recovery is distinct from stale evidence.
+    page.evaluate("CodePierOperationStore.ingestEvent({type:'operation',data:{id:'writer',state:'running',updated:201}})")
+    assert page.evaluate("CodePierOperationStore.get('writer').state") == "running"
+
+
+def test_selected_queue_receives_terminal_evidence_then_flushes(queue_page):
+    page = queue_page
+    page.evaluate("""() => {
+      const node=document.querySelector('[data-queue-id=writer] .queue-summary');
+      const range=document.createRange(); range.selectNodeContents(node);
+      window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+      CodePierOperationStore.ingestEvent({type:'operation',data:{id:'writer',state:'failed',updated:200}});
+    }""")
+    assert page.locator("[data-queue-id=writer] [data-queue-state]").inner_text() == "失败"
+    assert page.evaluate("window.getSelection().toString()") == "npm test"
+    page.evaluate("window.getSelection().removeAllRanges()")
+    page.wait_for_function("!document.querySelector('[data-queue-id=writer]')")
+
+
+def test_operation_clock_does_not_rewind_on_delayed_snapshot(queue_page):
+    page = queue_page
+    page.clock.install()
+    page.evaluate("CodePierOperationStore.ingestCallLog({observed_at:200,operations:[]})")
+    page.clock.fast_forward(2000)
+    before = page.evaluate("CodePierOperationStore.liveElapsedMs(100,0)")
+    page.evaluate("CodePierOperationStore.ingestCallLog({observed_at:190,operations:[]})")
+    assert page.evaluate("CodePierOperationStore.liveElapsedMs(100,0)") >= before
+
+
+def test_managed_shell_defers_queue_request_until_combined_snapshot(queue_page):
+    page = queue_page
+    before = page.evaluate("window.readCalls.length")
+    page.evaluate("""() => {
+      CodePierQueue.detach();
+      document.querySelector('#page').innerHTML=CodePierQueue.placeholder();
+      CodePierQueue.bind({managedPolling:true,deferInitial:true});
+    }""")
+    assert page.evaluate("window.readCalls.length") == before
+    assert not page.locator("[data-queue-id]").count()
+    page.evaluate("CodePierQueue.hydrate(structuredClone(window.queueData))")
+    assert page.locator("[data-queue-id]").count() == 3
+    assert page.evaluate("window.readCalls.length") == before
+
+
+def test_delayed_empty_queue_cannot_remove_newer_sse_admission(queue_page):
+    page = queue_page
+    page.evaluate("""() => {
+      CodePierOperationStore.ingestEvent({type:'operation',data:{
+        id:'new-running',state:'running',updated:20,created:19,tool:'exec',queue_stage:'running'
+      }});
+      CodePierQueue.hydrate({observed_at:10,complete:true,operations:[]});
+    }""")
+    assert page.evaluate("CodePierOperationStore.activeSet().has('new-running')")
+    assert page.locator("[data-queue-id=new-running]").count() == 1
+    assert page.locator("[data-queue-stage=running] strong").inner_text() == "1"
+    page.evaluate("CodePierQueue.hydrate({observed_at:21,complete:true,operations:[]})")
+    assert not page.evaluate("CodePierOperationStore.activeSet().has('new-running')")
+    assert not page.locator("[data-queue-id=new-running]").count()
+
+
 def test_admin_diagnostics_and_role_revocation(queue_page):
     page = queue_page
     page.get_by_text("实例队列诊断（24 小时）",exact=True).click()

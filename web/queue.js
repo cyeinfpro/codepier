@@ -42,11 +42,31 @@ if (!window.CodePierOperationStore) {
     }
     function anchorClock(observedAt) {
       if (typeof observedAt === 'number' && Number.isFinite(observedAt) && observedAt > 0)
-        clockAnchor = { serverNow: observedAt, monoNow: performance.now() };
+        clockAnchor = {
+          serverNow: Math.max(
+            observedAt,
+            clockAnchor
+              ? clockAnchor.serverNow + (performance.now() - clockAnchor.monoNow) / 1000
+              : 0,
+          ),
+          monoNow: performance.now(),
+        };
     }
     function upsertRow(item) {
       if (!item || typeof item.id !== 'string') return null;
       const prev = byId.get(item.id) || {};
+      // A poll begun before a terminal SSE event must never resurrect its row.
+      // Explicitly newer evidence may still represent a legitimate recovery.
+      const newer =
+        Number.isFinite(item.updated) &&
+        (!Number.isFinite(prev.updated) || item.updated > prev.updated);
+      if (
+        (Number.isFinite(item.updated) &&
+          Number.isFinite(prev.updated) &&
+          item.updated < prev.updated) ||
+        (isTerminal(prev.state) && isActive(item.state) && !newer)
+      )
+        return prev;
       const merged = { ...prev, ...item };
       byId.set(item.id, merged);
       if (isTerminal(merged.state)) activeIds.delete(item.id);
@@ -60,19 +80,29 @@ if (!window.CodePierOperationStore) {
       health = 'live';
       lastError = '';
       const seenActive = new Set();
-      const ops = Array.isArray(data.operations) ? data.operations : [];
-      for (const item of ops) {
-        if (item && typeof item.id === 'string') {
-          seenActive.add(item.id);
-          upsertRow(item);
-        }
-      }
+      const ops = (Array.isArray(data.operations) ? data.operations : [])
+        .map(upsertRow)
+        .filter((item) => item && isActive(item.state));
+      data.operations = ops;
+      for (const item of ops) seenActive.add(item.id);
       const vanished = [];
       if (data.complete !== false && !data.truncated) {
         for (const id of [...activeIds]) {
           if (!seenActive.has(id)) {
-            activeIds.delete(id);
-            vanished.push(id);
+            const known = byId.get(id);
+            if (
+              Number.isFinite(data.observed_at) &&
+              Number.isFinite(known?.updated) &&
+              known.updated > data.observed_at
+            ) {
+              // Absence is only authoritative at the snapshot's own time.
+              // A newer SSE admission must survive a delayed empty response.
+              ops.push(known);
+              seenActive.add(id);
+            } else {
+              activeIds.delete(id);
+              vanished.push(id);
+            }
           }
         }
       }
@@ -84,8 +114,8 @@ if (!window.CodePierOperationStore) {
       lastSyncedAt = Date.now();
       health = 'live';
       lastError = '';
-      for (const list of [data.operations, data.updates]) {
-        if (Array.isArray(list)) for (const item of list) upsertRow(item);
+      for (const key of ['operations', 'updates']) {
+        if (Array.isArray(data[key])) data[key] = data[key].map(upsertRow).filter(Boolean);
       }
       if (data.queue && typeof data.queue === 'object') ingestQueue(data.queue);
       emit({ type: 'call-log' });
@@ -94,8 +124,10 @@ if (!window.CodePierOperationStore) {
       if (!ensureScope() || !message || typeof message !== 'object') return;
       if (message.type === 'operation' && message.data?.id) {
         if (typeof message.at === 'number' && Number.isFinite(message.at)) anchorClock(message.at);
+        const previous = byId.get(message.data.id);
         const merged = upsertRow(message.data);
-        emit({ type: 'operation', id: message.data.id, row: merged, raw: message.data });
+        if (merged !== previous)
+          emit({ type: 'operation', id: message.data.id, row: merged, raw: merged });
       } else if ((message.type === 'output' || message.type === 'trace') && message.data?.id) {
         emit({ type: message.type, id: message.data.id });
       }
@@ -149,7 +181,9 @@ window.CodePierQueue = (() => {
     truncated = false,
     completenessReason = '',
     lastSyncedClock = '',
-    unsubscribeStore = null;
+    unsubscribeStore = null,
+    pendingPaint = false,
+    flushTimer = null;
   const pending = new Set();
   const rows = new Map();
   const stages = { hub_queue: 'Hub 待投递', agent_waiting: 'Agent 等资源', running: '运行中' };
@@ -187,6 +221,10 @@ window.CodePierQueue = (() => {
     controller = null;
     unsubscribeStore?.();
     unsubscribeStore = null;
+    clearTimeout(flushTimer);
+    flushTimer = null;
+    pendingPaint = false;
+    document.removeEventListener('selectionchange', flushDeferredPaint);
     root = null;
     managed = false;
     rows.clear();
@@ -409,6 +447,7 @@ window.CodePierQueue = (() => {
   }
   function paint() {
     if (!root?.isConnected) return;
+    pendingPaint = false;
     updateMode();
     const target = root.querySelector('[data-queue-content]');
     if (!target) return;
@@ -433,14 +472,15 @@ window.CodePierQueue = (() => {
   function applySnapshot(data) {
     if (!root?.isConnected || !data) return false;
     window.CodePierOperationStore?.ingestQueue(data);
-    let applied = false;
-    if (canMutateDOM()) {
-      rows.clear();
-      list(data.operations).forEach((item) => rows.set(item.id, item));
-      truncated = !!data.truncated || data.complete === false;
-      completenessReason = data.completeness_reason || '';
-      paint();
-      applied = true;
+    rows.clear();
+    list(data.operations).forEach((item) => rows.set(item.id, item));
+    truncated = !!data.truncated || data.complete === false;
+    completenessReason = data.completeness_reason || '';
+    const applied = canMutateDOM();
+    if (applied) paint();
+    else {
+      pendingPaint = true;
+      patchStateEvidence();
     }
     delete root.dataset.stale;
     lastSyncedClock = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -650,23 +690,76 @@ window.CodePierQueue = (() => {
       }
     }
   }
+  function flushDeferredPaint() {
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+      if (pendingPaint && canMutateDOM()) paint();
+    }, 0);
+  }
+  function patchStateEvidence() {
+    // Keep focused/selected evidence in place, but do not present stale actions
+    // or a terminal operation as active while waiting for a structural repaint.
+    if (!root?.isConnected) return;
+    for (const node of root.querySelectorAll('[data-queue-id]')) {
+      const item = rows.get(node.dataset.queueId);
+      const known = item || window.CodePierOperationStore?.get(node.dataset.queueId);
+      const terminal =
+        known &&
+        ['succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted'].includes(known.state);
+      const stateNode = node.querySelector('[data-queue-state], .queue-head-right .badge');
+      if (stateNode && (known || !item)) {
+        stateNode.textContent = terminal
+          ? {
+              succeeded: '已完成',
+              failed: '失败',
+              cancelled: '已取消',
+              needs_review: '待核查',
+              interrupted: '已中断',
+            }[known.state]
+          : item
+            ? stages[item.queue_stage] || item.state
+            : '已离开活动快照，待核对';
+      }
+      if (!item || terminal) {
+        const cancelButton = node.querySelector('[data-queue-cancel]');
+        if (cancelButton) {
+          cancelButton.setAttribute('aria-disabled', 'true');
+          // Native disabled may blur on a later browser task. Keep the inert
+          // focused control until the reader leaves, then remove the old row.
+          if (document.activeElement !== cancelButton) cancelButton.disabled = true;
+        }
+        node
+          .querySelectorAll('[data-live-created]')
+          .forEach((clock) => clock.removeAttribute('data-live-created'));
+      }
+    }
+    const all = [...rows.values()];
+    for (const pill of root.querySelectorAll('[data-queue-stage]')) {
+      const stage = pill.dataset.queueStage;
+      const count = stage ? all.filter((item) => item.queue_stage === stage).length : all.length;
+      const value = pill.querySelector('strong');
+      if (value) value.textContent = String(count);
+      pill.dataset.zero = String(count === 0);
+    }
+  }
   function reconcileEvent(event) {
     if (!root?.isConnected || event?.type !== 'operation' || !event.id) return;
     const state = event.raw?.state || event.row?.state;
     if (!state) return;
     if (['succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted'].includes(state)) {
-      if (rows.has(event.id) && canMutateDOM()) {
-        rows.delete(event.id);
-        paint();
-      }
-    } else if (rows.has(event.id) && canMutateDOM()) {
+      if (rows.has(event.id)) rows.delete(event.id);
+    } else if (rows.has(event.id)) {
       const existing = rows.get(event.id);
       rows.set(event.id, {
         ...existing,
         state,
         ...(event.raw?.queue_stage ? { queue_stage: event.raw.queue_stage } : {}),
       });
-      paint();
+    }
+    if (canMutateDOM()) paint();
+    else {
+      pendingPaint = true;
+      patchStateEvidence();
     }
   }
   function bind(options = {}) {
@@ -674,12 +767,14 @@ window.CodePierQueue = (() => {
     root = document.querySelector('#operation-queue');
     if (!root) return;
     managed = !!options.managedPolling;
+    root.addEventListener('focusout', flushDeferredPaint);
+    document.addEventListener('selectionchange', flushDeferredPaint);
     if (window.CodePierOperationStore) {
       unsubscribeStore = window.CodePierOperationStore.subscribe(reconcileEvent);
     }
     root.addEventListener('click', async (event) => {
       const button = event.target.closest('button');
-      if (!button || button.disabled) return;
+      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return;
       if (button.hasAttribute('data-queue-stage')) {
         stageFilter = button.dataset.queueStage;
         paint();
@@ -708,7 +803,7 @@ window.CodePierQueue = (() => {
     if (options.initialData && typeof options.initialData === 'object') {
       applySnapshot(options.initialData);
       schedule();
-    } else {
+    } else if (!options.deferInitial) {
       refresh();
     }
   }

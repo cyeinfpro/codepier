@@ -264,3 +264,61 @@ def asyncio_run_read(store, fn):
     import asyncio
 
     return asyncio.run(store.run_read(fn))
+
+
+def test_security_revision_invalidates_precommit_snapshot_after_commit(tmp_path):
+    import asyncio
+    import threading
+    from hub.store import Store
+
+    store = Store(str(tmp_path / "security-race"))
+    store.execute("INSERT INTO users VALUES (?,?,?,?)", ("race", "before", "unused", time.time()))
+    written, release = threading.Event(), threading.Event()
+    failures = []
+    def writer():
+        try:
+            with store.transaction():
+                store.db.execute("UPDATE users SET username='after' WHERE id='race'")
+                written.set()
+                assert release.wait(10), "reader did not finish"
+        except BaseException as exc:
+            failures.append(exc)
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        assert written.wait(10)
+        def snapshot():
+            return store.one("SELECT username FROM users WHERE id='race'"), store.session_revision
+        row, cached_revision = asyncio.run(store.run_read(snapshot))
+        assert row["username"] == "before"
+        release.set()
+        thread.join(10)
+        assert not thread.is_alive() and not failures
+        assert store.one("SELECT username FROM users WHERE id='race'")["username"] == "after"
+        assert store.session_revision > cached_revision
+    finally:
+        release.set()
+        thread.join(10)
+        store.close()
+
+
+def test_origin_filter_uses_expression_index_with_legacy_summaries(tmp_path):
+    from hub.call_log import _prepare_list_query
+    from hub.store import Store
+
+    store = Store(str(tmp_path / "origin-index"))
+    try:
+        store.execute(
+            "INSERT INTO operations(id,actor,tool,args_summary,fingerprint,state,created,updated) "
+            "VALUES ('legacy','panel:test','read','malformed','fp','succeeded',10,11)")
+        principal = SimpleNamespace(space_id="legacy", user_id="owner", user_epoch=1,
+                                    instance_admin=True, admin=True, grant_id=None)
+        _, _, _, where, args = _prepare_list_query(
+            principal, q="", source="", trigger_source="unknown", status="", preset="",
+            min_elapsed_ms=0, project="", tool="", category="all")
+        sql = "SELECT o.id FROM operations o WHERE " + " AND ".join(where) + " ORDER BY o.created DESC,o.id DESC"
+        plan = store.all("EXPLAIN QUERY PLAN " + sql, args)
+        assert any("operations_space_trigger_timeline" in row["detail"] for row in plan), plan
+        assert store.all(sql, args) == [{"id": "legacy"}]
+    finally:
+        store.close()
