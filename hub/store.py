@@ -39,10 +39,16 @@ CREATE TABLE IF NOT EXISTS oauth_requests (id TEXT PRIMARY KEY, client_id TEXT N
 CREATE TABLE IF NOT EXISTS oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, resource TEXT NOT NULL, grant_id TEXT NOT NULL, expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, device_id TEXT, project_id TEXT, actor TEXT NOT NULL, grant_id TEXT, tool TEXT NOT NULL, args_summary TEXT NOT NULL, fingerprint TEXT NOT NULL, idem TEXT, state TEXT NOT NULL, result TEXT, error TEXT, output TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
 
+CREATE INDEX IF NOT EXISTS oauth_requests_expiry ON oauth_requests(expires);
+CREATE INDEX IF NOT EXISTS oauth_requests_used ON oauth_requests(used) WHERE used=1;
+CREATE INDEX IF NOT EXISTS oauth_codes_expiry ON oauth_codes(expires);
+CREATE INDEX IF NOT EXISTS tokens_expiry ON tokens(expires);
+CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires);
 CREATE INDEX IF NOT EXISTS op_recent ON operations(created DESC);
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, status TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_recent ON audit(at DESC);
 CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT NOT NULL, at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS login_attempts_ip_time ON login_attempts(ip,at);
 CREATE TABLE IF NOT EXISTS operation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, source TEXT NOT NULL, seq INTEGER NOT NULL, stage TEXT NOT NULL, at REAL NOT NULL, elapsed_ms INTEGER, detail TEXT NOT NULL DEFAULT '{}', UNIQUE(operation_id,source,seq));
 CREATE INDEX IF NOT EXISTS operation_events_lookup ON operation_events(operation_id,id);
 CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, device_id TEXT NOT NULL, grant_id TEXT, actor TEXT NOT NULL, root TEXT NOT NULL, name TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL, source_operation_id TEXT NOT NULL DEFAULT '');
@@ -61,6 +67,9 @@ class Store:
         if type(read_workers) is not int or not 2 <= read_workers <= 4:
             raise ValueError("read_workers must be between 2 and 4")
         self._reader_state = threading.local()
+        self._read_started = {}
+        self._wal_sample_lock = threading.Lock()
+        self._wal_checkpoint = None
         self._read_connections = []
         self._read_connections_lock = threading.Lock()
         self.directory = Path(directory).resolve()
@@ -97,6 +106,8 @@ class Store:
         self.worker_metrics = WorkerMetrics()
         with self.lock:
             try:
+                if not self.db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
+                    self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
                 # Changing a new database to WAL can return BUSY without invoking
                 # SQLite's busy handler when another opener is doing the same.
                 deadline = time.monotonic() + 30
@@ -129,6 +140,7 @@ class Store:
                     if check_database(self.db, VERSION):
                         raise_floor_in_transaction(self.db)
                     self.cipher = self._load_cipher()
+                    self._install_security_epoch()
                     if self.db.execute("PRAGMA foreign_key_check").fetchall():
                         raise RuntimeError("Hub migration has invalid foreign-key relationships")
                 self.db.execute("PRAGMA foreign_keys=ON")
@@ -151,6 +163,44 @@ class Store:
     def db(self):
         binding = getattr(self._reader_state, "binding", None)
         return binding[1] if binding else self._writer_db
+
+    def _install_security_epoch(self):
+        # A fast read may depend only on tables with transactional triggers.
+        # Unknown tables and later schema changes keep the conservative fence.
+        from re import fullmatch
+
+        pattern = (
+            r"sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|"
+            r"external_identities|oidc_providers|access_roles|access_profiles|role_assignments|"
+            r"role_created_projects|grants|tokens|projects|devices|vps_connections|vps_projects|"
+            r"gateway_[a-z_]+"
+        )
+        self._epoch_tables = frozenset(
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            if fullmatch(pattern, row[0])
+        )
+        self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('security_epoch','0')")
+        for table in sorted(self._epoch_tables):
+            for operation in ("INSERT", "UPDATE", "DELETE"):
+                self.db.execute(
+                    f'CREATE TRIGGER IF NOT EXISTS cp_epoch_{table}_{operation} AFTER {operation} ON "{table}" '
+                    "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='security_epoch'; END"
+                )
+        self._epoch_schema = self.db.execute("PRAGMA schema_version").fetchone()[0]
+
+    @contextmanager
+    def _read_transaction_timing(self):
+        worker = threading.get_ident()
+        with self._wal_sample_lock:
+            self._read_started[worker] = time.monotonic()
+        try:
+            yield
+        finally:
+            with self._wal_sample_lock:
+                self._read_started.pop(worker, None)
 
     def _read_phase(self, call):
         # One connection belongs to each worker. No transaction, authorization
@@ -182,16 +232,45 @@ class Store:
                 # briefly fencing the writer, rather than return stale authority.
                 fence = self._writer_lock if attempt == 3 else nullcontext()
                 with fence:
+                    fence_started = time.monotonic() if attempt == 3 else None
                     revision = self.session_revision
                     with self.lock:
                         version = self.db.execute("PRAGMA data_version").fetchone()[0]
-                    with self.lock, self.db:
+                    with self.lock, self._read_transaction_timing(), self.db:
                         self.db.execute("BEGIN")
-                        value = call()
+                        epoch = self.db.execute(
+                            "SELECT value FROM meta WHERE key='security_epoch'"
+                        ).fetchone()
+                        with self.db.read_dependencies() as dependencies:
+                            value = call()
                     with self.lock:
                         current_version = self.db.execute("PRAGMA data_version").fetchone()[0]
-                    if revision == self.session_revision and version == current_version:
+                        if (
+                            current_version != version
+                            and epoch
+                            and dependencies <= self._epoch_tables
+                        ):
+                            # Validate both values in one current snapshot. A schema edit
+                            # (including removal of a trigger) disables this shortcut.
+                            with self.db:
+                                self.db.execute("BEGIN")
+                                schema = self.db.execute("PRAGMA schema_version").fetchone()[0]
+                                current_epoch = self.db.execute(
+                                    "SELECT value FROM meta WHERE key='security_epoch'"
+                                ).fetchone()
+                            if (
+                                schema == self._epoch_schema
+                                and current_epoch
+                                and current_epoch[0] == epoch[0]
+                            ):
+                                current_version = version
+                    changed = revision != self.session_revision
+                    data_changed = version != current_version
+                    if fence_started is not None:
+                        self.read_worker_metrics.read_fenced(fence_started)
+                    if not changed and not data_changed:
                         return value
+                    self.read_worker_metrics.read_retry(changed, data_changed)
             from shared.util import DevError
 
             raise DevError(
@@ -585,8 +664,36 @@ class Store:
                 future.exception()
             raise
 
+    def sample_wal_checkpoint(self):
+        """Measure a nonblocking PASSIVE checkpoint on the writer connection."""
+        with self.lock:
+            row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        with self._wal_sample_lock:
+            self._wal_checkpoint = {
+                "at": time.time(), "busy": row[0], "log": row[1], "checkpointed": row[2],
+            }
+            return dict(self._wal_checkpoint)
+
+    def wal_snapshot(self):
+        path = self.state_directory / "hub.sqlite3-wal"
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        except OSError:
+            size = None
+        with self._wal_sample_lock:
+            oldest = min(self._read_started.values(), default=None)
+            return {
+                "bytes": size,
+                "checkpoint": dict(self._wal_checkpoint) if self._wal_checkpoint else None,
+                "oldest_read_transaction_ms": (
+                    max(0, round((time.monotonic() - oldest) * 1000)) if oldest is not None else None
+                ),
+            }
+
     def stats_snapshot(self):
-        """Internal bounded process metrics; never queries or mutates SQLite.
+        """Internal bounded process and WAL metrics; never queries or mutates SQLite.
 
         Each group is consistent under its own lock. This aggregate is not a
         tenant endpoint and must not be exposed as a user's room statistics.
@@ -599,6 +706,7 @@ class Store:
             "read_worker": self.read_worker_metrics.snapshot(),
             "lock": self.lock_metrics.snapshot(),
             "transactions": self.transaction_metrics.snapshot(),
+            "wal": self.wal_snapshot(),
         }
 
     async def aclose(self):

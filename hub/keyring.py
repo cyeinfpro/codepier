@@ -351,9 +351,10 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
         atomic_private(directory / RING_FILE, encode_ring(active, keys))
         _stage(directory, journal, "keyring_published")
         store.cipher = CipherSuite(directory, private_read(directory / "master.key").strip())
+        from hub.operation_history import task_rekey_session
+
         changed = 0
-        with store.lock, store.db:
-            store.db.execute("BEGIN IMMEDIATE")
+        with store.transaction(immediate=True), task_rekey_session(store) as rewrite_task:
             columns = [(table, column, "") for table, column in CIPHER_COLUMNS]
             for table, column, prefix in [*columns, *PREFIXED_CIPHER_COLUMNS]:
                 if column not in {
@@ -377,9 +378,7 @@ def rotate_key(directory: str | Path, *, resume: bool = False) -> dict:
                             "terminal_operation",
                             "terminal_result",
                         }:
-                            from hub.operation_history import rewrite_task_ciphertext
-
-                            rewrite_task_ciphertext(store, row["id"], column, encrypted)
+                            rewrite_task(row["id"], column, encrypted)
                         else:
                             store.db.execute(
                                 f"UPDATE {table} SET {column}=? WHERE {primary}=?",

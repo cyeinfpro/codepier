@@ -232,9 +232,12 @@ def main():
         shard_count=args.shard_count,
         resource_shard=args.resource_shard,
     )
+    from scripts.regression_plan import batch_jobs
+
+    jobs = batch_jobs(jobs, markers)
     selected = {nodeid for job in jobs for nodeid in job["nodeids"]}
     expected = [nodeid for nodeid in full_collection if nodeid in selected]
-    modules = sorted({job["module"] for job in jobs})
+    modules = sorted({nodeid.split("::", 1)[0] for nodeid in selected})
     write_json(output / "plan.json", jobs)
     exclusive_jobs = [job for job in jobs if job.get("exclusive")]
     limited_jobs = [job for job in jobs if not job.get("exclusive") and job.get("limited")]
@@ -263,6 +266,8 @@ def main():
             command = pytest_command(
                 prefix, directory, job["selectors"], coverage=args.coverage, scratch=managed.scratch
             )
+            if job.get("browser_reuse"):
+                command.append("--chat-browser-reuse")
             with lock:
                 active[name] = managed
                 if cancelled.is_set():

@@ -315,9 +315,13 @@ def register_call_log(app, runtime, auth):
                 "(" + " OR ".join(column + " LIKE ? ESCAPE '\\'" for column in columns) + ")"
             )
             values.extend(["%" + literal + "%"] * len(columns))
+        joins = (
+            " LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id"
+            if filters["q"]
+            else ""
+        )
         count_sql = (
-            "SELECT count(*) AS n FROM operations o LEFT JOIN projects p ON p.id=o.project_id LEFT JOIN devices d ON d.id=o.device_id WHERE "
-            + " AND ".join(where)
+            "SELECT count(*) AS n FROM operations o" + joins + " WHERE " + " AND ".join(where)
         )
         total = store.all(count_sql, values)[0]["n"]
         if cursor:

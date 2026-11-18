@@ -7,6 +7,7 @@ an immutable URL serve different content between requests.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import mimetypes
@@ -41,11 +42,29 @@ RETIRED_COLLABORATION_UI = frozenset(
 )
 
 
+def accepts_gzip(header):
+    weights = {}
+    for item in header.lower().split(","):
+        coding, *parameters = item.strip().split(";")
+        weight = 1.0
+        for parameter in parameters:
+            name, _, value = parameter.strip().partition("=")
+            if name == "q":
+                weight = (
+                    float(value)
+                    if re.fullmatch(r"(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)", value)
+                    else 0
+                )
+        weights[coding.strip()] = weight
+    return weights.get("gzip", weights.get("*", 0)) > 0
+
+
 class ReleaseAssets(StaticFiles):
     def __init__(self, *, directory):
         super().__init__(directory=directory, follow_symlink=False)
         root = Path(directory).resolve()
         manifest = root / "assets-manifest.json"
+        self.compressed: dict[str, bytes] = {}
         self.assets: dict[str, tuple[str, bytes, str]] = {}
         if not manifest.exists() and not manifest.is_symlink():
             # Without an inventory there are no published files; never expose a directory.
@@ -94,6 +113,10 @@ class ReleaseAssets(StaticFiles):
                 raise ValueError("Panel asset content does not match its inventory: " + name)
             media = mimetypes.guess_type(name)[0] or "application/octet-stream"
             self.assets[name] = (digest, raw, media)
+            if len(raw) >= 512 and path.suffix in {".css", ".js", ".svg", ".html", ".md", ".json"}:
+                compressed = gzip.compress(raw, compresslevel=9, mtime=0)
+                if len(compressed) < len(raw):
+                    self.compressed[name] = compressed
 
     async def get_response(self, path, scope):
         if path.casefold() in RETIRED_COLLABORATION_UI or path not in self.assets:
@@ -117,6 +140,12 @@ class ReleaseAssets(StaticFiles):
         digest, raw, media = entry
         etag = '"sha256:' + digest + '"'
         headers = {"Cache-Control": "public, max-age=31536000, immutable", "ETag": etag}
+        if path in self.compressed:
+            headers["Vary"] = "Accept-Encoding"
+            if accepts_gzip(request.headers.get("accept-encoding", "")):
+                raw = self.compressed[path]
+                etag = '"sha256:' + digest + '-gzip"'
+                headers.update({"Content-Encoding": "gzip", "ETag": etag})
         candidates = [
             value.strip().removeprefix("W/")
             for value in request.headers.get("if-none-match", "").split(",")

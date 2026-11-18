@@ -30,6 +30,7 @@ def manager(tmp_path):
 def clone(monkeypatch):
     # Unit tests exercise lifecycle independent of the host filesystem.
     monkeypatch.setattr("agent.snapshots._clone_file", shutil.copy2)
+    monkeypatch.setattr("agent.snapshots._clone_directory", lambda *_: False)
 
 
 def test_run_lifecycle_and_active_ttl(project):
@@ -100,6 +101,7 @@ def test_clone_failure_does_not_run_or_fallback(project, manager, monkeypatch):
     def unsupported(*args):
         raise DevError("SNAPSHOT_UNSUPPORTED", "no reflink")
     monkeypatch.setattr("agent.snapshots._clone_file", unsupported)
+    monkeypatch.setattr("agent.snapshots._clone_directory", lambda *_: False)
     with pytest.raises(DevError) as caught:
         manager.create(project, "unsupported")
     assert caught.value.code == "SNAPSHOT_UNSUPPORTED"
@@ -135,6 +137,20 @@ def test_editable_escapes_rejected(project, manager, name, content):
     with pytest.raises(DevError) as caught:
         manager.create(project, "unsafe")
     assert caught.value.code == "SNAPSHOT_UNSAFE"
+
+
+def test_snapshot_relocates_contained_python_entrypoint_without_touching_source(project, manager, clone):
+    bin_dir = project / ".venv/bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").write_bytes(b"interpreter")
+    entry = bin_dir / "pip"
+    original = b"#!" + bytes(bin_dir / "python") + b" -I\nprint('fixture')\n"
+    entry.write_bytes(original)
+    entry.chmod(0o755)
+    snap = manager.create(project, "relocate")
+    cloned = snap.root / ".venv/bin/pip"
+    assert cloned.read_bytes() == original.replace(bytes(project), bytes(snap.root), 1)
+    assert cloned.stat().st_mode & 0o111 and entry.read_bytes() == original
 
 
 def test_artifact_extraction_and_containment(project, manager, clone):
@@ -191,23 +207,26 @@ def test_real_clone_is_cow_or_explicitly_unsupported(tmp_path):
     assert source.read_bytes() == b"original" * 100
 
 
-@pytest.mark.parametrize("error_kind", ["unsupported", "missing", "timeout"])
-def test_linux_clone_never_falls_back(monkeypatch, tmp_path, error_kind):
+@pytest.mark.parametrize("err", ["EOPNOTSUPP", "ENOSYS", "EINTR"])
+def test_linux_clone_never_falls_back(monkeypatch, tmp_path, err):
+    import errno
+    import sys
+    from types import SimpleNamespace
+
     monkeypatch.setattr("agent.snapshots.sys.platform", "linux")
-    commands = []
-    def run(argv, **kwargs):
-        commands.append(argv)
-        if error_kind == "missing":
-            raise FileNotFoundError("cp")
-        if error_kind == "timeout":
-            raise subprocess.TimeoutExpired(argv, 60)
-        return subprocess.CompletedProcess(argv, 1)
-    monkeypatch.setattr("agent.snapshots.subprocess.run", run)
+    calls = []
+    def ioctl(destination, request, source):
+        calls.append(request)
+        raise OSError(getattr(errno, err), err)
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(ioctl=ioctl))
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.write_bytes(b"original")
     with pytest.raises(DevError) as caught:
-        _clone_file(str(tmp_path / "source"), str(tmp_path / "destination"))
+        _clone_file(str(source), str(destination))
     assert caught.value.code == "SNAPSHOT_UNSUPPORTED"
-    assert len(commands) == 1
-    assert "--reflink=always" in commands[0]
+    assert calls == [0x40049409]
+    assert source.read_bytes() == b"original"
+    assert not destination.exists() or destination.stat().st_size == 0
 
 
 def test_original_venv_shebang_rejected(project, manager):
@@ -291,3 +310,15 @@ def test_ttl_cleanup_preserves_io_errors_and_symlink_rejection(project, manager,
     with pytest.raises(OSError):
         cleanup()
     assert (target / "keep").read_text() == "keep"
+
+
+def test_snapshot_excludes_nested_generated_and_credentials(project, manager, clone):
+    extras = project / "src" / ".codepier-test-runs"
+    extras.mkdir(parents=True, exist_ok=True)
+    (extras / "test.log").write_text("discardable data")
+    (project / "src" / ".env").write_text("FIXTURE_PRIVATE=1")
+    (project / "src" / "source.py").write_text("value = 42")
+    snapshot = manager.create(project, "a" * 32)
+    assert (snapshot.root / "src" / "source.py").read_text() == "value = 42"
+    assert not (snapshot.root / "src" / ".env").exists()
+    assert not (snapshot.root / "src" / ".codepier-test-runs").exists()

@@ -77,9 +77,15 @@ def _analyze_in_process(path, source):
                     if isinstance(node, ast.AsyncFunctionDef)
                     else "function"
                 )
+                signature = {}
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    params = ast.unparse(node.args)
+                    returns = " -> " + ast.unparse(node.returns) if node.returns else ""
+                    signature["signature"] = f"{name}({params}){returns}"[:2048]
                 append(
                     symbols,
                     {
+                        **signature,
                         "name": name,
                         "qualified_name": qualified,
                         "kind": kind,
@@ -200,9 +206,31 @@ def _analyze_in_process(path, source):
                 child_parents = (*parents, name)
                 line, column = coordinates(node.start_byte)
                 end_line, _ = coordinates(node.end_byte)
+                signature = {}
+                declaration = (
+                    node.child_by_field_name("value")
+                    if node.type == "variable_declarator"
+                    else node
+                )
+                if declaration is not None:
+                    params = declaration.child_by_field_name(
+                        "parameters"
+                    ) or declaration.child_by_field_name("parameter")
+                    returns = declaration.child_by_field_name("return_type")
+                    if params is not None:
+                        end_byte = returns.end_byte if returns is not None else params.end_byte
+                        fragment = source[
+                            params.start_byte : min(end_byte, params.start_byte + 8192)
+                        ].decode("utf-8", "ignore")
+                        signature["signature"] = (
+                            name + fragment
+                            if fragment.startswith("(")
+                            else name + "(" + fragment + ")"
+                        )[:2048]
                 append(
                     symbols,
                     {
+                        **signature,
                         "name": name,
                         "qualified_name": qualified,
                         "kind": kind,

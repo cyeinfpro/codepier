@@ -52,7 +52,7 @@ def iso(value):
     )
 
 
-def render_exec_v1(snapshot, *, scopes=None, result_filter=None):
+def render_exec_v1(snapshot, *, scopes=None, result_filter=None, presentation=None):
     from hub.core_tools import result as core_result
     from hub.runtime import Runtime
 
@@ -88,7 +88,7 @@ def render_exec_v1(snapshot, *, scopes=None, result_filter=None):
             "structuredContent": value,
             "isError": True,
         }
-    rendered = core_result("exec", {}, value, scopes=scopes)
+    rendered = core_result("exec", {}, value, scopes=scopes, **(presentation or {}))
     rendered["isError"] = rendered["isError"] or snapshot["state"] != "succeeded"
     return rendered
 
@@ -186,7 +186,7 @@ class TaskService:
             return CreatedTask(body)
 
     @iam.read_decision
-    def get(self, identifier, principal):
+    def get(self, identifier, principal, *, presentation=None):
         principal = refresh_principal(self.store, principal)
         with self.store.transaction():
             row, operation = self._binding(identifier, principal)
@@ -217,6 +217,7 @@ class TaskService:
                         body["result"] = render_exec_v1(
                             snapshot,
                             scopes=principal.scopes,
+                            presentation=presentation,
                             result_filter=lambda value: self.runtime._filter_concurrency(
                                 value, principal, operation["device_id"]
                             ),

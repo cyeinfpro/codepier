@@ -119,6 +119,20 @@ def test_no_teardown_skip_or_missing_phase_can_make_a_green_receipt(mode, expect
     assert duplicates == [NODES[0]]
 
 
+def test_unit_batches_preserve_shard_ownership_and_exclude_mixed_and_isolated_cases():
+    from scripts.regression_plan import batch_jobs
+    nodes = [f"tests/test_pure_{i:02d}.py::test_case" for i in range(38)] + NODES
+    markers = {**MARKERS, nodes[0]: ["browser", "sync_browser_reuse"], nodes[1]: ["slow"]}
+    original = plan_jobs(nodes, markers)
+    batched = batch_jobs(original, markers)
+    assert sorted(n for job in batched for n in job["nodeids"]) == sorted(nodes)
+    assert len({job["name"] for job in batched}) == len(batched)
+    assert max(len(job["selectors"]) for job in batched) == 16
+    assert next(job for job in batched if nodes[0] in job["nodeids"])["browser_reuse"]
+    for node in [nodes[0], nodes[1], *MARKERS]:
+        assert next(job for job in batched if node in job["nodeids"])["nodeids"] == [node]
+
+
 def test_large_collection_has_linear_node_parsing_budget():
     class CountedNode(str):
         splits = 0

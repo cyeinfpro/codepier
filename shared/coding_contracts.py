@@ -81,8 +81,17 @@ class ShowChanges(CodingArgs):
         return self
 
 
+class Replacement(CodingArgs):
+    old_text: str = Field(min_length=1, max_length=1048576)
+    new_text: str = Field(max_length=1048576)
+    replace_all: bool = Field(default=False, exclude_if=lambda value: not value)
+
+
 class PatchChange(CodingArgs):
-    action: Literal["write", "delete", "move"] = "write"
+    action: Literal["write", "delete", "move", "edit"] = "write"
+    edits: list[Replacement] = Field(
+        default_factory=list, max_length=20, exclude_if=lambda value: not value
+    )
     path: str = Field(min_length=1, max_length=1024)
     expected_sha256: str = Field(pattern=r"^(?:[a-f0-9]{64}|new)$")
     content: str | None = Field(default=None, max_length=1048576)
@@ -90,12 +99,14 @@ class PatchChange(CodingArgs):
 
     @model_validator(mode="after")
     def action_fields(self):
+        if (self.action == "edit") != bool(self.edits):
+            raise ValueError("Only edit requires replacements")
         if (self.action == "write") != (self.content is not None):
             raise ValueError("Only write requires content (empty text is allowed)")
         if (self.action == "move") != (self.destination is not None):
             raise ValueError("Only move requires destination; destination must be absent on disk")
         if self.action != "write" and self.expected_sha256 == "new":
-            raise ValueError("Move/delete requires an existing-file SHA")
+            raise ValueError("Edit/move/delete requires an existing-file SHA")
         return self
 
 

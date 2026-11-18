@@ -10,6 +10,31 @@ def scope():
     return {"type": "http", "path": "/api/fixture", "method": "POST", "headers": []}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", [False, True])
+@pytest.mark.parametrize("size,accepted", [(6 * 2**20 + 1, True), (8 * 2**20, True), (8 * 2**20 + 1, False)])
+async def test_room_attachment_limit(size, accepted, declared):
+    delivered = []
+    async def app(scope, receive, send):
+        delivered.append(len((await receive())["body"]))
+
+    gate = BodyLimit(app)
+    route = dict(scope(), path="/api/collaboration/rooms/test/attachments")
+    if declared:
+        route["headers"] = [(b"content-length", str(size).encode())]
+    chunks = iter([b"x" * (size - 1), b"x"])
+    async def receive():
+        data = next(chunks)
+        return {"type": "http.request", "body": data, "more_body": len(data) > 1}
+
+    messages, send = collector()
+    await gate(route, receive, send)
+    assert delivered == ([size] if accepted else [])
+    if not accepted:
+        assert messages[0]["status"] == 413
+    assert gate.inflight == gate.buffered_bytes == 0
+
+
 def request(data):
     async def receive():
         return {"type": "http.request", "body": data, "more_body": False}

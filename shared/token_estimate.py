@@ -90,7 +90,8 @@ def _excluded(key):
 
 
 class Projection:
-    def __init__(self):
+    def __init__(self, *, output=False):
+        self.output = output
         self.parts = []
         self.characters = 0
         self.scanned_characters = 0
@@ -154,6 +155,28 @@ class Projection:
                 if self.nodes >= MAX_NODES or self.characters >= MAX_CHARACTERS:
                     self.truncated = True
                     break
+                if (
+                    self.output
+                    and key == "files"
+                    and value.get("batch") is True
+                    and isinstance(item, list)
+                ):
+                    # Only count returned text pages. Attachment descriptors and
+                    # arbitrary metadata in a files array stay excluded.
+                    for page in item:
+                        self.nodes += 1
+                        if self.nodes >= MAX_NODES or self.characters >= MAX_CHARACTERS:
+                            self.truncated = True
+                            break
+                        if (
+                            isinstance(page, dict)
+                            and page.get("ok") is True
+                            and isinstance(page.get("path"), str)
+                            and isinstance(page.get("content"), str)
+                        ):
+                            self.value(page["content"], depth + 1)
+                            self.source_truncated |= page.get("truncated") is True
+                    continue
                 if (
                     not isinstance(key, str)
                     or _excluded(key)
@@ -228,7 +251,7 @@ def estimate_input(arguments):
 def estimate_output(result):
     if not isinstance(result, dict):
         return unavailable()
-    projection = Projection()
+    projection = Projection(output=True)
     content = result.get("content")
     found_text = False
     if isinstance(content, list):

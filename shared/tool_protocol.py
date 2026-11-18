@@ -77,6 +77,7 @@ def advertisement(catalog_sha256):
         "contract_protocol": CONTRACT_PROTOCOL,
         "project_view_protocol": 1,
         "tree_options_protocol": 1,
+        "file_options_protocol": 1,
         "catalog_sha256": catalog_sha256,
         "tool_contracts": {name: wire_version(name) for name in sorted(names)},
     }

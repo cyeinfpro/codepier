@@ -39,8 +39,9 @@ test('routes load nothing on initialization and coalesce ordered dependencies', 
   assert.equal(nodes.length, 0);
   const first = load('collaboration');
   const second = load('collaboration');
-  assert.equal(nodes.length, 1);
+  assert.equal(nodes.length, 2);
   assert.equal(nodes[0].href, '/static/room.css');
+  assert.equal(nodes[1].src, '/static/store.js');
   nodes[0].onload();
   await tick();
   assert.equal(nodes.length, 2);

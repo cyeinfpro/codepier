@@ -80,6 +80,29 @@ async def test_read_phase_retries_external_commit(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_security_reads_ignore_unrelated_commits_but_retry_raw_identity_writes(tmp_path):
+    store = Store(tmp_path / "hub")
+    store.execute("INSERT INTO users(id,username,password_hash,created) VALUES('fixture','first','opaque',0)")
+    try:
+        for security_write, expected_count in [(False, 1), (True, 2)]:
+            seen = []
+            def read():
+                name = store.one("SELECT username FROM users WHERE id='fixture'")["username"]
+                seen.append(name)
+                if len(seen) == 1:
+                    with sqlite3.connect(store.state_directory / "hub.sqlite3") as external:
+                        if security_write:
+                            external.execute("UPDATE users SET username='second' WHERE id='fixture'")
+                        else:
+                            external.execute("INSERT INTO meta(key,value) VALUES('unrelated','1')")
+                return name
+            assert await store.run_read(read) == ("second" if security_write else "first")
+            assert len(seen) == expected_count
+    finally:
+        await store.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_reader_drains_and_closes(tmp_path):
     store = Store(tmp_path / 'hub')
     entered, release = threading.Event(), threading.Event()
@@ -186,18 +209,25 @@ async def test_queue_age_survives_repeated_wait_events(runtime, monkeypatch, rep
 async def test_queue_and_live_hide_unauthorized_operation_ids(runtime, monkeypatch):
     r, p = runtime
     visible, hidden, waiting = [await submit(r, p, key) for key in ('visible-writer', 'hidden-writer', 'waiting-reader')]
-    original = r.operation_row
-    def authorized(identifier, *args, **kwargs):
-        if identifier == hidden:
-            raise DevError('NOT_FOUND', 'restricted', 404)
-        return original(identifier, *args, **kwargs)
-    monkeypatch.setattr(r, 'operation_row', authorized)
+    from hub import iam
+    original = iam.record_visible
+    def visible_record(store, principal, row):
+        return bool(row and row['id'] != hidden and original(store, principal, row))
+    monkeypatch.setattr(iam, 'record_visible', visible_record)
     r.diagnostics.record(waiting, 'waiting_resource', source='agent', seq=1,
         detail={'queue_reason': 'resource_conflict', 'lane': 'read', 'blocked_by': [visible, hidden]})
     receipt = r._pending_receipt(waiting, p)
     assert receipt['queue_stage'] == 'agent_waiting'
     assert [row['operation_id'] for row in receipt['waiting']['blocked_by']] == [visible]
     assert receipt['waiting']['blocker_visibility'] == 'restricted_or_unavailable'
+    assert receipt['stage'] == 'waiting_resource'
+    assert receipt['queue_reason'] == 'resource_conflict'
+    assert receipt['blocked_count'] == 2
+    assert receipt['stage_age_ms'] >= 0
+    assert len(receipt['restricted_blockers']) == 1
+    assert set(receipt['restricted_blockers'][0]) == {'kind', 'same_identity', 'held_ms', 'can_cancel'}
+    assert not receipt['restricted_blockers'][0]['can_cancel']
+    assert hidden not in json.dumps(receipt)
     raw = {'ok': True, 'data': {'concurrency': {'mode': 'live', 'overlapping_writers': [visible, hidden]}}}
     result = r.authorized_result(waiting, raw, p)
     assert [row['operation_id'] for row in result['concurrency']['overlapping_writers']] == [visible]

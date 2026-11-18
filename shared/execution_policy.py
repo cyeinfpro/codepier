@@ -246,6 +246,17 @@ class InvocationInspector:
             if name in {"node", "nodejs", "deno"}
             else "shell"
         )
+        # The exact two-argument Node syntax check only parses the input.
+        # Additional flags, loaders, eval and environment preloads use normal inspection.
+        if (
+            name in {"node", "nodejs"}
+            and len(arguments) == 2
+            and arguments[0] in {"--check", "-c"}
+            and arguments[1]
+            and not arguments[1].startswith("-")
+            and not self.env.get("NODE_OPTIONS")
+        ):
+            return False
         i, stdin_script = 0, False
         while i < len(arguments):
             arg = arguments[i]

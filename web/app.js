@@ -1008,10 +1008,12 @@ async function renderPage(showLoading = true) {
     $('#page').removeAttribute('aria-busy');
     const seq = ++S.renderSeq;
     try {
+      await window.CodePierAssets?.load('native');
+      if (!S.session || S.page !== 'native' || seq !== S.renderSeq) return;
       await chatPage();
     } catch (e) {
       if (S.session && S.page === 'native' && seq === S.renderSeq) {
-        chatDetach();
+        if (typeof chatDetach === 'function') chatDetach();
         $('#page').innerHTML =
           notice(esc(e.message)) + `<button class="btn" data-action="refresh">重试</button>`;
       }
@@ -1113,7 +1115,7 @@ async function renderPage(showLoading = true) {
     if (page === 'vps' && !showLoading) vpsReplacePage(html);
     else if (
       !showLoading &&
-      ['overview', 'devices', 'projects', 'audit'].includes(page) &&
+      ['overview', 'devices', 'projects', 'audit', 'workflows'].includes(page) &&
       !(page === 'audit' && S.auditMode === 'operations' && window.CodePierCallLog)
     )
       CP.dom.replacePage($('#page'), html);

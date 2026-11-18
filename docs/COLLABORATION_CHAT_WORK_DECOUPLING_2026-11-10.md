@@ -47,7 +47,7 @@ v2.1 修正 v2 的产品边界：**用户始终在和同一个 dot 连续对话�
 
 | 位置 | 已核对行为 | 影响 |
 | --- | --- | --- |
-| `hub/collaboration/consumer_engine.py::begin` | 先 `scope()`，再查旧请求；`scope_digest` 不同拒绝重放；新租约截止时间与订阅到期取最小值 | 路线短暂失效会同时阻断新领取、原领取恢复和回合延续 |
+| `hub/collaboration/consumer_engine.py::FencedConsumerEngine.begin` | 先 `scope()`，再查旧请求；`scope_digest` 不同拒绝重放；新租约截止时间与订阅到期取最小值 | 路线短暂失效会同时阻断新领取、原领取恢复和回合延续 |
 | `consumer_engine.py::_credential` | 同时核对身份、订阅、世代、proof、范围摘要、活动租约和当前 fence | 对象范围变化被提升为整个回合失效 |
 | `room_consumers.py::scope_updated` | 仅兼容新增时刷新摘要；收窄或替换使活动回合过期 | 撤销项目 A 会打断话题 B |
 | `room_consumers.py::binding` | 要求订阅 active、未到期，并重新 `event_authorize` | 已领取回合也依赖后续唤醒是否健康 |

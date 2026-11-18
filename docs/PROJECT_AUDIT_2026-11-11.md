@@ -143,7 +143,7 @@
 
 ### 11. 项目停止只读取本项目的浏览器记录
 
-位置：`agent/integration_state.py::Records.project_entries`。
+位置：`agent/integration_state.py::Records` 的历史接口 project_entries。
 
 此前普通列表已经按范围查询，内部“停止整个项目”仍然先读取同类的全部记录，再在 Python 中过滤。无关项目的损坏绑定 JSON 会让当前项目的停止流程直接失败。
 

@@ -66,6 +66,11 @@ def test_sync_search_distinguishes_empty_scope_empty_matches_and_page_limit(work
         args = TOOLS['fs_search'].model.model_validate(
             {'project': 'P', 'path': 'src', 'query': query, 'file_glob': file_glob, **options})
         return engine.search(project, args.model_dump())
+    from shared.crypto import digest
+    nearby = search(file_glob='*code.py', context_lines=1)['matches']
+    assert [(m["line"], m["context_start"], m["total_lines"]) for m in nearby] == [(1, 1, 2), (2, 1, 2)]
+    assert all(m["sha256"] == digest((root / "src/code.py").read_bytes()) for m in nearby)
+    assert nearby[0]["context"] == ["needle", "needle"]
     empty = search(file_glob='code.py')
     assert empty['scan_status'] == 'no_files' and empty['scanned_files'] == 0
     assert 'file_glob' in empty['hint']

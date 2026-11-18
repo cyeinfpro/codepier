@@ -387,7 +387,7 @@ def write_rows(path, rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="New report directory; default is the CodePier user state directory")
     parser.add_argument("--variant", choices=["before", "after"], required=True)
     parser.add_argument(
         "--before-module",
@@ -406,11 +406,14 @@ def main():
     parser.add_argument("--allow-noisy", action="store_true")
     parser.add_argument("--host-context", required=True)
     args = parser.parse_args()
-    repository, output = args.repository.resolve(), args.output.resolve()
+    repository = args.repository.resolve()
+    state = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    default_output = state / "codepier" / "benchmarks" / time.strftime("gateway-%Y%m%dT%H%M%S")
+    output = (args.output or default_output).resolve()
     if not (repository / ".git").exists():
         parser.error("repository must be an existing Git checkout")
-    if not output.is_relative_to(Path.cwd().resolve() / ".work") or output.exists():
-        parser.error("output must be a NEW directory under current workspace .work")
+    if output.exists():
+        parser.error("output must be a new directory")
     try:
         levels = [int(x) for x in args.concurrency.split(",")]
     except ValueError:

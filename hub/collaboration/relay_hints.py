@@ -146,6 +146,7 @@ class RelayHints:
                 raise DevError("TOO_MANY_STREAMS", "实时连接已达上限，请关闭重复页面后重试", 429)
             self._subscribers[queue] = (loop, owner)
         # Native operation transitions also wake the compact projection.
+        queue._stream_space = owner[0]
         self.c.runtime.watchers.add(queue)
         return queue
 
@@ -175,7 +176,9 @@ class RelayHints:
                 if await request.is_disconnected():
                     return
                 try:
-                    current = await self.store.run(lambda: self.snapshot(raw, auth.panel(request)))
+                    current = await self.store.run_read(
+                        lambda: self.snapshot(raw, auth.panel(request))
+                    )
                 except DevError:
                     yield "event: access_changed\ndata: {}\n\n"
                     return

@@ -164,12 +164,22 @@ def forward(
     request must already be prepared; generating keys inside this loop would
     duplicate writes/tests after a lost response.
     """
-    if profile not in {"core", "full", "coding"}:
-        raise ValueError("MCP profile must be core, full or coding")
+    if profile not in {"unified", "core", "full", "coding"}:
+        raise ValueError("MCP profile must be unified, core, full or coding")
     # The HTTP default catalog is unified; preserve the bridge's core default
     # and every explicitly selected legacy profile across all request attempts.
     endpoint = base + "/mcp?profile=" + profile
-    deadline = clock() + retry_seconds
+    arguments = request.get("params", {}).get("arguments", {})
+    requested_wait = (
+        arguments.get("wait", arguments.get("wait_seconds", 0))
+        if isinstance(arguments, dict)
+        else 0
+    )
+    wait = min(60, max(0, requested_wait)) if type(requested_wait) is int else 0
+    if profile == "unified" and wait > 10:
+        endpoint += "&stream=1"
+    attempt_timeout = max(20, wait + 5)
+    deadline = clock() + max(retry_seconds, wait + 5)
     attempt = 0
     while True:
         attempt += 1
@@ -187,7 +197,7 @@ def forward(
                 endpoint,
                 headers=wire_headers,
                 json=wire,
-                timeout=httpx.Timeout(min(12, left), connect=min(4, left)),
+                timeout=httpx.Timeout(min(attempt_timeout, left), connect=min(4, left)),
             )
             if response.status_code in (202, 204) and "id" not in request:
                 return None
@@ -203,7 +213,26 @@ def forward(
             response.raise_for_status()
             if "id" not in request:
                 return None
-            payload = response.json(parse_constant=reject_constant)
+            if (
+                response.headers.get("content-type", "").split(";")[0].strip()
+                == "text/event-stream"
+            ):
+                payload = None
+                for line in response.iter_lines():
+                    if line.startswith("data:"):
+                        message = json.loads(line[5:], parse_constant=reject_constant)
+                        if (
+                            isinstance(message, dict)
+                            and message.get("method") == "notifications/progress"
+                        ):
+                            continue
+                        if payload is not None:
+                            raise ValueError("Duplicate MCP response in event stream")
+                        payload = message
+                if payload is None:
+                    raise ValueError("Event stream ended without the original response")
+            else:
+                payload = response.json(parse_constant=reject_constant)
             validate_response(payload, wire)
             payload["id"] = request["id"]
             return payload
@@ -367,8 +396,8 @@ def main():
     try:
         base = normalize_url(os.environ.get("CODEPIER_HUB_URL", "http://127.0.0.1:8765"))
         profile = os.environ.get("CODEPIER_MCP_PROFILE", "core")
-        if profile not in {"core", "full", "coding"}:
-            raise ValueError("CODEPIER_MCP_PROFILE must be core, full or coding")
+        if profile not in {"unified", "core", "full", "coding"}:
+            raise ValueError("CODEPIER_MCP_PROFILE must be unified, core, full or coding")
         upload_roots = local_upload_roots(os.environ.get("CODEPIER_FILE_IMPORT_ROOTS", ""))
         token_file = Path(os.environ["CODEPIER_TOKEN_FILE"]).expanduser()
         token_from_file(token_file)

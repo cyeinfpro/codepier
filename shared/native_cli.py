@@ -165,7 +165,7 @@ def worker_present(directory, sid):
 
 def retained_bytes(db):
     """Logical retained bytes, not SQLite's reusable free pages or WAL copies."""
-    output = db.execute("SELECT COALESCE(sum(length(data)),0) FROM output").fetchone()[0]
+    output = db.execute("SELECT COALESCE(sum(size),0) FROM sessions").fetchone()[0]
     commands = db.execute(
         "SELECT COALESCE(sum(length(CAST(payload AS BLOB))),0) FROM commands"
     ).fetchone()[0]

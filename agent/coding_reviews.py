@@ -21,7 +21,7 @@ import time
 import uuid
 from agent.context import project_context
 from agent import review_content
-from agent.filesystem import MAX_FILE, CHECKPOINT_ARTIFACTS
+from agent.filesystem import MAX_FILE, CHECKPOINT_ARTIFACTS, scan_ignored
 from shared.util import DevError, atomic_json, fsync_directory
 
 MAX_FILES = 2000
@@ -73,7 +73,7 @@ def excluded(path):
 def review_excluded(path):
     # Review capture has a smaller budget than validation/source fingerprints.
     # Internal scratch histories must not crowd actual project source out of it.
-    return excluded(path) or bool({".work", ".codepier-test-runs"} & set(PurePosixPath(path).parts))
+    return excluded(path) or scan_ignored(path)
 
 
 class ReviewStore:

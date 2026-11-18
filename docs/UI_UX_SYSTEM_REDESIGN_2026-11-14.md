@@ -47,7 +47,7 @@
 
 ### 后端与测试续审补充
 
-- **P2 最后观测阶段不可冒充当前执行（BE-11）。** `hub/runtime.py::queue_annotations` 在 reconnecting、unknown 或 cancelling 时仍可依据一天前 executing 事件返回 queue_stage=running。隔离纯函数已复现（（内部研究记录），exit 0）；整体响应另有 state/recovery，因此不能称前端已证实误报。设计为 last_observed_stage+observed_at，未知/离线优先显示结果待核实，禁止用这一字段单独统计并发位。
+- **P2 最后观测阶段不可冒充当前执行（BE-11）。** `hub/runtime.py::Runtime.queue_annotations` 在 reconnecting、unknown 或 cancelling 时仍可依据一天前 executing 事件返回 queue_stage=running。隔离纯函数已复现（（内部研究记录），exit 0）；整体响应另有 state/recovery，因此不能称前端已证实误报。设计为 last_observed_stage+observed_at，未知/离线优先显示结果待核实，禁止用这一字段单独统计并发位。
 - **P2 跨渠道身份标签。** `hub/collaboration/chatroom.py` 241–288 的可信 Telegram 来源分支仍可被统一写为“微信本人”。改为按验证来源呈现渠道与本人身份，验收覆盖微信、Telegram、面板、未验证来源；目前静态分支证据，未运行真实渠道验证。
 - **证据不能跨代或跨平台转用。** `test_native_cli_integration.py` 的移动终端用例明确 mount_archived_terminal，属于旧终端而非当前聊天界面。另一个 retired hash 用例才验证旧入口导向当前 chat 且不加载终端资源。`test_native_windows.py` 明确使用 FakePTY/FakeGuard/WinDLL；`test_agent_bootstrap_download.py` 执行 PS1 内嵌 Python 下载器，但 PowerShell 5.1 调用仅做源码断言。均不构成 Windows 实机通过。
 - **测试质量候选也要独立验收。** operation_diagnostics 的每次 IO 超时与总 deadline 不等价，持续小流量可能超总预算；incoming_read_authorization 多拒绝分支共用已过期条件可能遮蔽真正的拒绝原因。先增加独立正反控制与总时限场景，不把当前静态阅读变成已运行失败的结论。

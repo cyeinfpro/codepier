@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import select
+from contextlib import ExitStack
 
 from agent.owned_process_group import stop_owned_group
 
@@ -39,6 +41,40 @@ class OwnedProcess:
         return self._observed
 
     async def wait(self):
+        if self.returncode is not None or self._released:
+            return self.returncode
+        loop = asyncio.get_running_loop()
+        with ExitStack() as stack:
+            try:
+                if hasattr(os, "pidfd_open"):
+                    fd = os.pidfd_open(self.pid)
+                    stack.callback(os.close, fd)
+                elif hasattr(select, "kqueue"):
+                    queue = select.kqueue()
+                    stack.callback(queue.close)
+                    event = select.kevent(
+                        self.pid,
+                        filter=select.KQ_FILTER_PROC,
+                        flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                        fflags=select.KQ_NOTE_EXIT,
+                    )
+                    queue.control([event], 0, 0)
+                    fd = queue.fileno()
+                else:
+                    fd = None
+                if fd is not None:
+                    ready = loop.create_future()
+
+                    def wake():
+                        if not ready.done():
+                            ready.set_result(None)
+
+                    loop.add_reader(fd, wake)
+                    stack.callback(loop.remove_reader, fd)
+                    if self.returncode is None and not self._released:
+                        await ready
+            except (OSError, NotImplementedError):
+                pass
         while self.returncode is None and not self._released:  # noqa: ASYNC110 - Observe external process/cancellation state; bounded by the owning lifecycle.
             await asyncio.sleep(0.02)
         return self.returncode

@@ -27,8 +27,8 @@
       "bytes": 22291
     },
     "app.js": {
-      "sha256": "7b59580d25d3ac87b21bf46819841278d28d194bb4e84e23b43d10bcdebd3d9d",
-      "bytes": 157679
+      "sha256": "d59a2ebd6fcfdeb572fe5c177f728773d51843a73be0908a73b7b33fe734d5e9",
+      "bytes": 157857
     },
     "appearance.js": {
       "sha256": "4a955158dff23e08e9bf172df5839dbb9a108607674f254f87049d20d0fd13da",
@@ -87,8 +87,8 @@
       "bytes": 55593
     },
     "collaboration-room.js": {
-      "sha256": "da69a4eb57744747f7744e9a4332b568959ce38ff5b234b0a959f44f6585ff47",
-      "bytes": 283835
+      "sha256": "140b6ee39e8a27aa15ed38a3f8d0fec46fc8ac58b734e0f3fe703cb1e372bf47",
+      "bytes": 222802
     },
     "computer.css": {
       "sha256": "6a20cf9dff524f54444f4690dd5804ffb8086c5e008437979cfadab6cead066c",
@@ -103,8 +103,8 @@
       "bytes": 9148
     },
     "core/bundle.js": {
-      "sha256": "a9d61c282de6eacbe44c6d990a013d85f7532268a0c9984765df5911da51196d",
-      "bytes": 33024
+      "sha256": "711c94ec7032ba89558af87ad53a85c10880a1fd322e67948ce097816ce31d2d",
+      "bytes": 25251
     },
     "favicon.svg": {
       "sha256": "f99761d39d805b7f995e20bb44df1b1adfe17fc9cef8caf47c965e1af713032f",
@@ -143,8 +143,8 @@
       "bytes": 88316
     },
     "lazy-assets.js": {
-      "sha256": "22cb543f887ff65e27a97e5494959710c12019a37cd48204379a6dde2c0cf80d",
-      "bytes": 1265
+      "sha256": "e48f2e93b81b852861ebc5a9b342f90269ccb0dee03e8db874be6ae87c21262f",
+      "bytes": 1559
     },
     "mcp-gateway.css": {
       "sha256": "c762a2794b92a8b4684ff2325a06abc575b8e8330ae493537627cfc9cae8a796",
@@ -219,8 +219,8 @@
       "bytes": 98263
     },
     "token-usage.css": {
-      "sha256": "6999e24964b7871671d6e75ae77816c5c4819dc631358e1706f0eb85692a8bff",
-      "bytes": 9312
+      "sha256": "62e9d3159a7aa05d4a2e484fed6e668bee3fa356d56f6b6729f2e712e184b2f6",
+      "bytes": 9322
     },
     "token-usage.js": {
       "sha256": "9164ce20cd87fd4134296fe0926b77940280dfc7c9d4b92cab8b356812d1c458",
@@ -247,13 +247,13 @@
       "bytes": 19536
     },
     "workflows.js": {
-      "sha256": "df63017bde2fa7733f2a6f728c5748e505e10855cd9645d804e8eeab7683f3e7",
-      "bytes": 21726
+      "sha256": "681001d14df5b01d99548a282ced85d12f3211cf37cc8af713b5c24897d55d19",
+      "bytes": 21771
     },
     "workspace.css": {
-      "sha256": "872f46706aca5822459c6bd1ba587d465c1b9330b5783ba8ea7b9c465496c102",
+      "sha256": "73c918e33a4a32e646eca3e8e81c81868074384c5c63670d13327e9134b3940d",
       "bytes": 43245
     }
   },
-  "template_sha256": "bcc822cf5a3fd12cab6f189380408d659dd64140173c3801720acee993b88e16"
+  "template_sha256": "0526dfbaebaf965f35c0b48eefe6785b942956199c889e9105665706e741085e"
 }

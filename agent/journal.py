@@ -161,6 +161,16 @@ class Journal:
             )
         return None
 
+    def completed_run(self, identifier):
+        with self.lock:
+            return (
+                self.db.execute(
+                    "SELECT 1 FROM calls WHERE id=? AND tool='exec' AND status='done'",
+                    (identifier,),
+                ).fetchone()
+                is not None
+            )
+
     def mark_running(self, id):
         with self.lock, self.db:
             self.db.execute(
@@ -235,20 +245,24 @@ class Journal:
         after_sha: str,
         before_mode: int | None = None,
     ):
-        # Persist backup before mutating the project; a failed write may leave an unused backup.
-        if before is not None:
-            dest = self.backups / id
-            with dest.open("xb") as f:
-                f.write(before)
-                f.flush()
-                os.fsync(f.fileno())
-            os.chmod(dest, 0o600)
-            fsync_directory(self.backups)
-        with self.lock, self.db:
-            self.db.execute(
-                "INSERT INTO backups(id,root,path,existed,before_sha,after_sha,at,before_mode) VALUES (?,?,?,?,?,?,?,?)",
+        self.add_backups_batch([(id, root, path, before, after_sha, before_mode)])
+
+    def add_backups_batch(self, items):
+        """Make every original durable before publishing any catalog rows."""
+        rows = []
+        wrote_files = False
+        for identifier, root, path, before, after_sha, before_mode in items:
+            if before is not None:
+                dest = self.backups / identifier
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(before)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                wrote_files = True
+            rows.append(
                 (
-                    id,
+                    identifier,
                     root,
                     path,
                     int(before is not None),
@@ -256,7 +270,14 @@ class Journal:
                     after_sha,
                     time.time(),
                     before_mode,
-                ),
+                )
+            )
+        if wrote_files:
+            fsync_directory(self.backups)
+        with self.lock, self.db:
+            self.db.executemany(
+                "INSERT INTO backups(id,root,path,existed,before_sha,after_sha,at,before_mode) VALUES (?,?,?,?,?,?,?,?)",
+                rows,
             )
 
     def history(self, root: str, path: str = "", limit: int = 30):

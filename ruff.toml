@@ -1,6 +1,6 @@
 target-version = "py313"
 line-length = 100
-exclude = [".venv*", ".work", "dist", "node_modules", "web/vendor"]
+exclude = [".git", ".codepier-test-runs", ".venv*", ".work", "dist", "node_modules", "web/vendor"]
 
 [per-file-target-version]
 "scripts/migrate_hub*.py" = "py39"

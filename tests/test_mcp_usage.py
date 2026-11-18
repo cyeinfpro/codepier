@@ -32,6 +32,17 @@ def test_exact_included_unicode_counts_and_labelled_range(text):
     assert result["state"] == "available"
 
 
+def test_batch_read_counts_visible_text_once_and_skips_attachment_fields():
+    page = {"ok": True, "path": "example.txt", "content": "代码 abc\n" * 200}
+    batch = {"batch": True, "files": [page, {"download_url": "private", "blob": "private"}]}
+    measured = estimate_output({"structuredContent": batch})
+    assert measured == estimate_output(output(json.dumps(batch), structuredContent=batch))
+    assert measured["characters"] > len(page["content"])
+    assert estimate_input(batch)["characters"] == estimate_input({"batch": True})["characters"]
+    page["content"] *= 4
+    assert estimate_output({"structuredContent": batch})["estimated_tokens"] > measured["estimated_tokens"]
+
+
 def test_unicode_density_is_not_calls_times_constant():
     english = estimate_output(output("a " * 100))
     chinese = estimate_output(output("中 " * 100))
@@ -335,3 +346,41 @@ def test_all_missing_is_unknown_not_zero():
     result = summarize([{"id": 1, "operation_id": None, "token_usage": None}])
     assert result["unavailable_attempts"] == 1 and result["input"]["estimated_tokens"] is None
     assert result["actual_usage"] is None
+
+
+def test_poll_without_project_counts_usage_in_single_visible_project(api, monkeypatch):
+    app, client, token = api
+    project = app.state.store.one("SELECT id,device_id FROM projects WHERE alias='fixture'")
+    operation_id = "a" * 32
+    receipt = {
+        "operation_id": operation_id,
+        "project_id": project["id"],
+        "device_id": project["device_id"],
+        "state": "running",
+        "pending": True,
+    }
+
+    async def invoke(*_):
+        return {"operations": [receipt]}
+
+    monkeypatch.setattr(app.state.runtime, "invoke", invoke)
+    response = rpc(client, token, {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "task_query", "arguments": {
+            "operation": "get", "operation_ids": [operation_id],
+        }},
+    })
+    assert response.status_code == 200 and not response.json()["result"].get("isError")
+    items = rows(app, token)["activities"]
+    assert len(items) == 1 and not items[0]["meaningful"]
+    assert items[0]["operation_id"] == operation_id
+    assert items[0]["token_usage"]["output"]["estimated_tokens"] > 0
+
+    receipt["project_id"] = "unavailable-project"
+    assert rpc(client, token, {
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "task_query", "arguments": {
+            "operation": "get", "operation_ids": [operation_id],
+        }},
+    }).status_code == 200
+    assert len(rows(app, token)["activities"]) == 1

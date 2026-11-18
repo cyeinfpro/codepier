@@ -29,6 +29,34 @@ def local_agent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_warm_worker_rechecks_root_and_reaps_failed_lease(local_agent):
+    agent, root = local_agent
+    (root / 'a').write_text('alpha')
+    project = {'id':'fixture', 'alias':'fixture', 'root':str(root), 'mode':'write', 'allow_tasks':True}
+    args = TOOLS['read'].model.model_validate({'project':'fixture', 'path':'a'}).model_dump()
+    pool = workspace_probe.ReadPool(1)
+    try:
+        async with workspace_probe.ReadWorker(admission=True, pool=pool) as lease:
+            await workspace_probe.probe(agent.engine,'read',project,args,phase='admission',worker=lease)
+            await lease.abandon_admission()
+            process = lease.process
+        async with workspace_probe.ReadWorker(pool=pool) as lease:
+            assert lease.process is process
+            for _ in range(2):
+                await workspace_probe.root(agent.engine,'read',project,args,worker=lease,expected_root=root)
+            value = await workspace_probe.probe(agent.engine,'read',project,args,worker=lease,expected_root=root)
+            assert value['content'] == 'alpha'
+        with pytest.raises(DevError):
+            async with workspace_probe.ReadWorker(pool=pool) as lease:
+                assert lease.process is process
+                await workspace_probe.root(agent.engine,'read',{**project,'root':str(root.parent)},args,
+                                           worker=lease,expected_root=root)
+        assert not pool.idle and process.returncode is not None
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_discovery_matches_in_process_and_keeps_authorization(local_agent):
     agent, root = local_agent
     (root / 'AGENTS.md').write_text('Project instructions\n')

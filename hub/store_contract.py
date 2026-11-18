@@ -105,6 +105,25 @@ class CheckedConnection:
         self._require()
         return self._connection.set_trace_callback(callback)
 
+    @contextmanager
+    def read_dependencies(self):
+        """Record tables accessed by this callback, including views and subqueries."""
+        self._require()
+        dependencies = set()
+
+        def observe(action, arg1, arg2, database, origin):
+            if action == sqlite3.SQLITE_READ:
+                dependencies.add(arg1 if database == "main" else None)
+            elif action == sqlite3.SQLITE_PRAGMA:
+                dependencies.add(None)
+            return sqlite3.SQLITE_OK
+
+        self._connection.set_authorizer(observe)
+        try:
+            yield dependencies
+        finally:
+            self._connection.set_authorizer(None)
+
     def execute(self, sql, parameters=()):
         self._require()
         started = (

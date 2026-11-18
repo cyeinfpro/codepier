@@ -766,7 +766,7 @@ def task_command(seconds, filename):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="New report directory; default is the CodePier user state directory")
     parser.add_argument("--variant", choices=["before", "after"], required=True)
     parser.add_argument("--concurrency", default="8,16,32,64,128")
     parser.add_argument("--workloads", default="read,read_write,long_short")
@@ -799,11 +799,12 @@ def main():
     )
     options = parser.parse_args()
     repository = options.repository.resolve()
-    output = options.output.resolve()
+    cache = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "codepier" / "benchmarks"
+    output = (options.output or cache / time.strftime("hub-agent-%Y%m%dT%H%M%S")).resolve()
     if not (repository / ".git").exists():
         parser.error("repository must be an existing Git checkout")
-    if not output.is_relative_to(Path.cwd().resolve() / ".work") or output.exists():
-        parser.error("output must be a NEW directory under current workspace .work")
+    if output.exists():
+        parser.error("output must be a new directory")
     levels = [int(v) for v in options.concurrency.split(",")]
     names = options.workloads.split(",")
     if (
@@ -828,7 +829,8 @@ def main():
     from tests.support import running_stack
     from shared.util import atomic_json
 
-    output.mkdir(parents=True)
+    output.mkdir(mode=0o700, parents=True)
+    print(f"Benchmark report directory: {output}", file=sys.stderr)
     manifest = {
         "variant": options.variant,
         "repository": git_identity(repository),

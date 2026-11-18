@@ -26,13 +26,13 @@ def host_bundle(tmp_path_factory):
     assert result.returncode==0,result.stdout+result.stderr
     return path
 
-@pytest.mark.parametrize('width',[1100,390])
-def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_stack,host_bundle,width):
+@pytest.mark.parametrize(('width','catalog'),[(1100,'core'),(390,'core'),(1100,'unified'),(390,'unified')])
+def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_stack,host_bundle,width,catalog):
     s=integrated_stack;calls=[]
     opened=s.mcp('workspace',{'project': 'ProjectAlpha', 'capture_baseline': True, 'operation': 'open'})
     data=opened['structuredContent']
     if data.get('pending'):data=s.poll(data['operation_id'],timeout=30)['result']['data']
-    fixture='apps-host-'+str(width)+'.txt'
+    fixture='apps-host-'+catalog+'-'+str(width)+'.txt'
     (s.projectalpha/fixture).write_text(''.join(f'row {i:04d} immutable original text '+('x'*50)+'\n' for i in range(500))+'<img src=x onerror="window.INJECTED=true">\nEND_OF_FROZEN_REVIEW\n')
     review=s.mcp('read',{'project': 'ProjectAlpha', 'operation': 'changes', 'options': {'baseline_ref': data['baseline_ref']}})
     frozen=review['structuredContent']
@@ -43,7 +43,10 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         response=s.mcp(params['name'],params.get('arguments',{}))
         # Deliver the legitimate initial receipt late, even when already settled.
         # This tests a host replay of an earlier pending projection, not fake data.
-        if params['name']=='read' and params.get('arguments',{}).get('operation')=='changes' and not response['structuredContent'].get('pending'):
+        arguments = params.get('arguments',{})
+        changes = (params['name']=='read' and arguments.get('operation')=='changes'
+                   or params['name']=='query' and arguments.get('action')=='changes')
+        if changes and not response['structuredContent'].get('pending') and response['structuredContent'].get('operation_id'):
             op=response['structuredContent']['operation_id']
             response={**response,'structuredContent':{'pending':True,'operation_id':op}}
         return response
@@ -56,7 +59,7 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         page.evaluate('html=>window.codepierMount(html)',(BASE/'web/mcp-apps/changes-v1.html').read_text())
         page.wait_for_function('window.codepierHostReady')
         restored=copy.deepcopy(review);restored['structuredContent']={'review_ref':frozen['review_ref'],'summary':frozen['summary'],'coverage':frozen['coverage']}
-        restored['_meta']={'com.codepier/binding':{'kind':'changes','project':'ProjectAlpha','review_ref':frozen['review_ref']}}
+        restored['_meta']={'com.codepier/binding':{'kind':'changes','catalog_mode':catalog,'project':'ProjectAlpha','review_ref':frozen['review_ref']}}
         page.evaluate('v=>window.codepierDeliver(v)',{'args':{'project':'ProjectAlpha','review_ref':frozen['review_ref']},'result':restored})
         app=page.frame_locator('#app-frame')
         expect(app.get_by_role('heading',name='本轮改动')).to_be_visible()
@@ -76,7 +79,11 @@ def test_sdk_cards_restore_pending_and_immutable_paginated_review(integrated_sta
         expect(app.locator('pre')).not_to_contain_text('LATER_CONTENT_MUST_NOT')
         assert app.locator('img').count()==0
         assert all('baseline_ref' not in c['arguments'] for c in calls if c['name']=='read')
-        assert any(c['name']=='process' and c['arguments'].get('operation')=='wait' for c in calls)
+        if catalog == 'unified':
+            assert {c['name'] for c in calls} == {'query'}
+            assert {c['arguments']['action'] for c in calls} >= {'job', 'changes'}
+        else:
+            assert any(c['name']=='process' and c['arguments'].get('operation')=='wait' for c in calls)
         assert not page.evaluate('window.codepierHostErrors') and not errors
         folder=Path(os.getenv('CODEPIER_EVIDENCE_DIR',str(BASE/'.work'/('mcp-apps-host-'+uuid.uuid4().hex))));folder.mkdir(parents=True,exist_ok=True)
         page.screenshot(path=str(folder/f'apps-review-{width}.png'),full_page=True)

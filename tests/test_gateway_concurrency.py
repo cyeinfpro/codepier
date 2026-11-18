@@ -578,7 +578,7 @@ def make_gateway(monkeypatch, *, concurrency=1):
     gateway = Gateway.__new__(Gateway)
     gateway.store, gateway.enabled, gateway.inflight = store, True, 0
     gateway.secret = b'synthetic-receipt-test'
-    gateway.validator = SimpleNamespace(validate=validate)
+    gateway.validator = SimpleNamespace(validate=validate, close=validate)
     gateway.resolve = require
     gateway.pool = RemotePool(resolver=resolve, transport=httpx.MockTransport(backend.handle),
                               concurrency=concurrency)

@@ -248,13 +248,19 @@ class SyncFlow:
             if sid in self.paused and sid not in rejected:
                 del self.paused[sid]
                 self.dirty = True
+        coalesced = data.get("coalesced_seqs")
+        omitted = (
+            {seq for seq in coalesced[:1024] if type(seq) is int}
+            if isinstance(coalesced, list)
+            else set()
+        )
         for entry in entries:
             for sid, end in entry["chunks"].items():
                 if sid in rejected:
                     continue
                 if offsets.get(sid, -1) >= end:
                     self.backoff.pop(sid, None)
-                else:
+                elif entry["seq"] not in omitted or sid in deferred:
                     self._no_progress(sid, deferred.get(sid))
 
     def _no_progress(self, sid, reason=None) -> None:

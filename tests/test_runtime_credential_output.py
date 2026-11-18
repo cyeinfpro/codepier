@@ -12,6 +12,20 @@ from shared.tool_protocol import wire_version
 from shared.util import atomic_json
 
 
+def test_process_output_patterns_pem_and_database_password_across_reads():
+    from shared.secret_output import ProcessOutput, credential_output_values
+    secrets = credential_output_values({"DATABASE_URL": "postgres://fixture:syn%2Bthetic@localhost/db",
+                                       "PWD": "/work/fixture", "OLDPWD": "/work/previous"})
+    assert "/work/fixture" not in secrets and "/work/previous" not in secrets
+    stream = ("ordinary\nAuthorization: Bearer unseen-value\n-----BEGIN " "PRIVATE KEY-----\n"
+              "private bytes\n-----END PRIVATE KEY-----\nlast syn+thetic\n")
+    for split in range(len(stream) + 1):
+        masker = ProcessOutput(secrets)
+        actual = masker.feed(stream[:split]) + masker.feed(stream[split:], final=True)
+        assert "ordinary\n" in actual and "last <redacted>\n" in actual
+        assert all(value not in actual for value in ("unseen-value", "private bytes", "PRIVATE KEY", "syn+thetic"))
+
+
 def test_multiple_credentials_are_redacted_at_every_stream_split():
     values = ['synthetic-github-token-one', 'synthetic-enterprise-token-two']
     source = 'before ' + values[0] + ' between ' + values[1] + ' after'

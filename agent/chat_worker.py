@@ -1096,20 +1096,46 @@ def run(directory, sid, config_path=None):
             reviews = TurnReviews(directory, row, config_path)
         size = row["size"]
 
+        pending = bytearray()
+        flush_at = None
+
+        def flush():
+            nonlocal size, flush_at
+            if not pending:
+                return
+            with db:
+                for start in range(0, len(pending), 65536):
+                    db.execute(
+                        "INSERT INTO output VALUES (?,?,?)",
+                        (sid, size + start, pending[start : start + 65536]),
+                    )
+                db.execute(
+                    "UPDATE sessions SET size=?,updated=? WHERE id=?",
+                    (size + len(pending), time.time(), sid),
+                )
+            size += len(pending)
+            pending.clear()
+            flush_at = None
+
         def emit(kind, **values):
-            nonlocal size
+            nonlocal flush_at
             event = {"type": kind, "receipt": protocol.active if protocol else None, **values}
             data = bounded_event(event)
-            if len(data) > MAX_LINE or size + len(data) > SESSION_QUOTA:
+            if len(data) > MAX_LINE or size + len(pending) + len(data) > SESSION_QUOTA:
+                flush()
                 raise RuntimeError("TRANSCRIPT_QUOTA")
-            for start in range(0, len(data), 65536):
-                chunk = data[start : start + 65536]
-                db.execute("INSERT INTO output VALUES (?,?,?)", (sid, size, chunk))
-                size += len(chunk)
-            db.execute("UPDATE sessions SET size=?,updated=? WHERE id=?", (size, time.time(), sid))
-            db.commit()
+            if not pending:
+                flush_at = time.monotonic() + 0.05
+            pending.extend(data)
+            if (
+                kind not in {"delta", "reasoning"}
+                or len(pending) >= 16384
+                or time.monotonic() >= flush_at
+            ):
+                flush()
 
         def finish(receipt, state):
+            flush()
             db.execute("UPDATE commands SET state=? WHERE id=?", (state, receipt))
             db.commit()
             if reviews:
@@ -1118,6 +1144,7 @@ def run(directory, sid, config_path=None):
                     emit("review", receipt=receipt, **review)
 
         def persist(thread):
+            flush()
             db.execute(
                 "UPDATE sessions SET native_thread=?,chat_settings=?,updated=? WHERE id=?",
                 (thread, protocol.row.get("chat_settings", "{}"), time.time(), sid),
@@ -1193,6 +1220,8 @@ def run(directory, sid, config_path=None):
         initialize_deadline = time.monotonic() + 60
         last_history_check = 0
         while not child_exited(child.pid) and not stop:
+            if flush_at is not None and time.monotonic() >= flush_at:
+                flush()
             now = time.time()
             if not protocol.ready and time.monotonic() > initialize_deadline:
                 raise RuntimeError(
@@ -1238,6 +1267,7 @@ def run(directory, sid, config_path=None):
                 (sid, *kinds),
             ).fetchone()
             if command:
+                flush()
                 claimed = db.execute(
                     "UPDATE commands SET state='claimed' WHERE id=? AND session=? AND state='queued'",
                     (command["id"], sid),
@@ -1327,6 +1357,7 @@ def run(directory, sid, config_path=None):
                 if not data:
                     break
                 receive_output(data)
+        flush()
         if not protocol.ready and not stop:
             raise RuntimeError(
                 "Native CLI exited before initialization; check login/configuration in node-local CLI"

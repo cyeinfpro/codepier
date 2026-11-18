@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import re
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
+from hub.collaboration.room_attachments import MAX_UPLOAD
 from hub.mcp_request_audit import error_headers
 from shared.util import DevError
 
@@ -81,15 +83,19 @@ class BodyLimit:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        limit = self.limit
+        if scope.get("method") == "POST" and re.fullmatch(
+            r"/api/collaboration/rooms/[^/]+/attachments", scope.get("path", "")
+        ):
+            limit = MAX_UPLOAD
+        too_large = {"error": {"code": "BODY_TOO_LARGE", "message": f"请求体上限为 {limit} 字节"}}
         headers = dict(scope.get("headers", []))
         try:
             length = int(headers.get(b"content-length", b"0"))
         except ValueError:
-            length = self.limit + 1
-        if length < 0 or length > self.limit:
-            return await JSONResponse(
-                {"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}}, status_code=413
-            )(scope, receive, send)
+            length = limit + 1
+        if length < 0 or length > limit:
+            return await JSONResponse(too_large, status_code=413)(scope, receive, send)
         if self.inflight >= self.max_inflight:
             return await self.busy()(scope, receive, send)
         # Count the reading phase independently from handler/stream lifetime.
@@ -106,11 +112,8 @@ class BodyLimit:
                     if message["type"] == "http.disconnect":
                         return
                     chunk = message.get("body", b"")
-                    if len(body) + len(chunk) > self.limit:
-                        error = JSONResponse(
-                            {"error": {"code": "BODY_TOO_LARGE", "message": "请求超过 6 MiB"}},
-                            status_code=413,
-                        )
+                    if len(body) + len(chunk) > limit:
+                        error = JSONResponse(too_large, status_code=413)
                         break
                     if self.buffered_bytes + len(chunk) > self.max_buffered_bytes:
                         error = self.busy()

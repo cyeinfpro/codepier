@@ -13,6 +13,55 @@ from shared.util import DevError
 OUTPUT_BYTES = 50 * 1024
 
 
+def edited_bytes(engine, before, edits):
+    original = engine.text(before)
+    text = original.replace("\r\n", "\n")
+    line_ending = "\r\n" if "\r\n" in original else "\n"
+    replacements = []
+    for edit in edits:
+        needle = edit["old_text"].replace("\r\n", "\n")
+        start = text.find(needle)
+        if start < 0:
+            raise DevError("EDIT_NOT_FOUND", "old_text 未匹配原文件，未修改")
+        if not edit.get("replace_all") and text.find(needle, start + 1) >= 0:
+            raise DevError("EDIT_AMBIGUOUS", "old_text 在原文件中不唯一，请补充上下文，未修改")
+        end = start + len(needle)
+        replacement = edit["new_text"].replace("\r\n", "\n").replace("\n", line_ending)
+        replacements.append((start, end, replacement))
+        if edit.get("replace_all"):
+            start = text.find(needle, end)
+            while start >= 0:
+                end = start + len(needle)
+                replacements.append((start, end, replacement))
+                if len(replacements) > 65536:
+                    raise DevError("EDIT_LIMIT", "替换匹配超过 65536 处，请缩小修改范围")
+                start = text.find(needle, end)
+    replacements.sort()
+    if any(left[1] > right[0] for left, right in zip(replacements, replacements[1:], strict=False)):
+        raise DevError("EDIT_OVERLAP", "多处编辑在原文件中重叠，未修改")
+    # Convert only replacement boundaries back to original byte-preserving
+    # text positions. A CRLF contributes one extra original character.
+    growth = sum(len(new) - (end - start) for start, end, new in replacements)
+    if len(text) + growth > 1048576:
+        raise DevError("FILE_TOO_LARGE", "替换后的文件超过 1 MiB")
+    chunks = []
+    previous = 0
+    extra = 0
+    crlf = original.find("\r\n")
+    for start, end, replacement in replacements:
+        while crlf != -1 and crlf < start + extra:
+            extra += 1
+            crlf = original.find("\r\n", crlf + 2)
+        chunks.append(original[previous : start + extra])
+        chunks.append(replacement)
+        while crlf != -1 and crlf < end + extra:
+            extra += 1
+            crlf = original.find("\r\n", crlf + 2)
+        previous = end + extra
+    chunks.append(original[previous:])
+    return engine.encode_content("".join(chunks))
+
+
 class CoreFiles:
     def __init__(self, engine):
         self.engine = engine
@@ -154,11 +203,17 @@ class CoreFiles:
         engine = self.engine
         root, _ = engine.root(project, tool != "read")
         if tool == "read":
-            result = (
-                self.read_batch(root, args)
-                if args.get("operation") == "batch"
-                else self.read_one(root, args)
-            )
+            snapshot = args.get("options", {}).get("read_snapshot")
+            if snapshot:
+                from agent.read_snapshots import read_snapshot
+
+                result = read_snapshot(engine, root, project, args, snapshot)
+            elif args.get("operation") == "batch":
+                result = self.read_batch(root, args)
+            else:
+                result = self.read_one(root, args)
+            if args.get("options", {}).get("include_knowledge") is False:
+                return result
             from agent.project_knowledge import auto_context
 
             paths = (
@@ -189,48 +244,5 @@ class CoreFiles:
                 before = engine.read_bytes(path)
                 if digest(before) != args["expected_sha256"]:
                     raise DevError("SHA_CONFLICT", "文件已改变，请重新读取后再修改", 409)
-                original = engine.text(before)
-                # Index normalization back into the original preserves untouched
-                # CRLF/LF bytes, including mixed files and a UTF-8 BOM.
-                normalized, positions = [], []
-                for index, char in enumerate(original):
-                    if char == "\r" and original[index : index + 2] == "\r\n":
-                        continue
-                    positions.append(
-                        index - 1
-                        if char == "\n" and index and original[index - 1] == "\r"
-                        else index
-                    )
-                    normalized.append(char)
-                positions.append(len(original))
-                text = "".join(normalized)
-                replacements = []
-                for edit in args["edits"]:
-                    needle = edit["old_text"].replace("\r\n", "\n")
-                    start = text.find(needle)
-                    if start < 0:
-                        raise DevError("EDIT_NOT_FOUND", "old_text 未匹配原文件，未修改")
-                    if text.find(needle, start + 1) >= 0:
-                        raise DevError(
-                            "EDIT_AMBIGUOUS", "old_text 在原文件中不唯一，请补充上下文，未修改"
-                        )
-                    end = start + len(needle)
-                    line_ending = (
-                        "\r\n"
-                        if "\r\n" in original[positions[start] : positions[end]]
-                        or "\r\n" in original
-                        else "\n"
-                    )
-                    replacement = edit["new_text"].replace("\r\n", "\n").replace("\n", line_ending)
-                    replacements.append((start, end, replacement))
-                replacements.sort()
-                if any(
-                    left[1] > right[0]
-                    for left, right in zip(replacements, replacements[1:], strict=False)
-                ):
-                    raise DevError("EDIT_OVERLAP", "多处编辑在原文件中重叠，未修改")
-                updated = original
-                for start, end, replacement in reversed(replacements):
-                    updated = updated[: positions[start]] + replacement + updated[positions[end] :]
-                after = engine.encode_content(updated)
+                after = edited_bytes(engine, before, args["edits"])
             return engine.mutate(project, args["path"], args["expected_sha256"], after)

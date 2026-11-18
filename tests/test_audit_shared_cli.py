@@ -8,7 +8,8 @@ import zipfile
 import pytest
 from pydantic import ValidationError
 
-from hub.__main__ import main, write_backup
+from hub.__main__ import main
+from hub.backup import restore_backup, write_backup
 from hub.store import Store
 from hub.runtime import Runtime
 from shared.contracts import TOOLS
@@ -95,50 +96,79 @@ def test_malformed_authenticated_packet_rejected_without_consuming_sequence(clea
 def test_failed_backup_leaves_no_published_partial_archive(tmp_path, monkeypatch):
     store = Store(tmp_path / "store")
     output = tmp_path / "backups" / "hub.zip"
-    original = zipfile.ZipFile.write
-    def failing_write(archive, filename, *args, **kwargs):
-        if str(filename).endswith("master.key"):
+    keys = tmp_path / "keys" / "keys.zip"
+    original = zipfile.ZipFile.writestr
+
+    def failing_write(archive, name, *args, **kwargs):
+        if name == "master.key":
             raise OSError("injected full disk")
-        return original(archive, filename, *args, **kwargs)
-    monkeypatch.setattr(zipfile.ZipFile, "write", failing_write)
+        return original(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", failing_write)
     try:
         with pytest.raises(OSError, match="full disk"):
-            write_backup(store, output)
-        assert not output.exists()
+            write_backup(store.state_directory, output, keys)
         assert list(output.parent.iterdir()) == []
+        assert list(keys.parent.iterdir()) == []
     finally:
         store.close()
 
 
 def test_backup_exclusive_private_and_restorable(tmp_path):
     store = Store(tmp_path / "store")
-    output = tmp_path / "hub.zip"
+    output = tmp_path / "backups" / "hub.zip"
+    keys = tmp_path / "keys" / "keys.zip"
     try:
-        write_backup(store, output)
+        manifest = write_backup(store.state_directory, output, keys)
         original = output.read_bytes()
         with pytest.raises(FileExistsError):
-            write_backup(store, output)
+            write_backup(store.state_directory, output, keys)
         assert output.read_bytes() == original
         if os.name != "nt":
             assert output.stat().st_mode & 0o777 == 0o600
+            assert keys.stat().st_mode & 0o777 == 0o600
         with zipfile.ZipFile(output) as archive:
             assert archive.testzip() is None
-            # ZipFile.extractall ignores Unix permissions. Restore encryption
-            # metadata privately, as required by the production key loader.
-            from hub.keyring import atomic_private
-            directory = tmp_path / "restored"
-            directory.mkdir(mode=0o700)
-            archive.extract("hub.sqlite3", directory)
-            for name in ("master.key", "master.keys.json"):
-                if name in archive.namelist():
-                    atomic_private(directory / name, archive.read(name))
-        restored = Store(tmp_path / "restored")
+            assert set(archive.namelist()) == {"hub.sqlite3", "manifest.json"}
+        with zipfile.ZipFile(keys) as archive:
+            assert set(archive.namelist()) == {"master.key"}
+        assert restore_backup(output, keys) == manifest
+        directory = tmp_path / "restored"
+        restore_backup(output, keys, destination=directory)
+        with pytest.raises(FileExistsError):
+            restore_backup(output, keys, destination=directory)
+        restored = Store(directory)
         try:
             assert restored.one("PRAGMA quick_check")["quick_check"] == "ok"
             assert restored.decrypt(store.encrypt("roundtrip")) == "roundtrip"
         finally:
             restored.close()
     finally:
+        store.close()
+
+
+def test_restore_rejects_mismatched_keys_and_database(tmp_path):
+    store = Store(tmp_path / "store")
+    other = Store(tmp_path / "other")
+    output = tmp_path / "data" / "hub.zip"
+    keys = tmp_path / "keys" / "keys.zip"
+    other_keys = keys.with_name("other.zip")
+    try:
+        write_backup(store.state_directory, output, keys)
+        write_backup(other.state_directory, output.with_name("other.zip"), other_keys)
+        with pytest.raises(RuntimeError, match="Key archive does not match"):
+            restore_backup(output, other_keys)
+        with zipfile.ZipFile(output) as archive:
+            manifest = archive.read("manifest.json")
+        corrupted = output.with_name("corrupted.zip")
+        with zipfile.ZipFile(corrupted, "w") as archive:
+            archive.writestr("manifest.json", manifest)
+            archive.writestr("hub.sqlite3", b"not SQLite")
+        with pytest.raises(sqlite3.DatabaseError):
+            restore_backup(corrupted, keys, destination=tmp_path / "restored")
+        assert not (tmp_path / "restored").exists()
+    finally:
+        other.close()
         store.close()
 
 

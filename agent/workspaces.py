@@ -229,20 +229,29 @@ class Workspaces:
                 try:
                     resolved = await self.agent.disk_call(self.resolve, parent, r["workspace_id"])
                     path = Path(resolved["root"])
-                    result["dirty"] = bool(
-                        await self.git(
-                            identifier,
-                            resolved,
-                            path,
-                            ["status", "--porcelain=v1", "--untracked-files=all"],
-                        )
+                    status = await self.git(
+                        identifier,
+                        resolved,
+                        path,
+                        ["status", "--porcelain=v2", "--branch", "--untracked-files=all"],
                     )
-                    result["head"] = await self.git(
-                        identifier, resolved, path, ["rev-parse", "--verify", "HEAD"]
-                    )
-                    result["branch"] = (
-                        await self.git(identifier, resolved, path, ["branch", "--show-current"])
-                        or None
+                    headers = {}
+                    dirty = False
+                    for line in status.splitlines():
+                        if line.startswith("# "):
+                            key, _, value = line[2:].partition(" ")
+                            headers[key] = value
+                        else:
+                            dirty = True
+                    head = headers.get("branch.oid", "")
+                    if not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", head):
+                        raise DevError("WORKTREE_GIT_FAILED", "Git 未返回可验证的工作树版本", 409)
+                    result.update(
+                        dirty=dirty,
+                        head=head,
+                        branch=None
+                        if headers.get("branch.head") == "(detached)"
+                        else headers.get("branch.head"),
                     )
                     try:
                         if base is None:

@@ -1,6 +1,7 @@
 """Encrypted history and explicit bounded maintenance, never run at startup."""
 
 from __future__ import annotations
+from contextlib import contextmanager, nullcontext
 import json
 import math
 import re
@@ -261,7 +262,10 @@ def encrypt_legacy_history(store, *, batch=100, dry_run=False):
     if type(dry_run) is not bool:
         raise ValueError("dry_run must be an explicit boolean")
     counts = {}
-    with store.transaction(immediate=not dry_run):
+    with (
+        store.transaction(immediate=not dry_run),
+        nullcontext() if dry_run else task_rekey_session(store) as rewrite,
+    ):
         for table, primary, column in (
             ("operations", "id", "result"),
             ("operations", "id", "output"),
@@ -291,7 +295,7 @@ def encrypt_legacy_history(store, *, batch=100, dry_run=False):
                         )
                 encrypted = seal(store, unseal(store, row["body"]))
                 if table == "mcp_tasks":
-                    rewrite_task_ciphertext(store, row["id"], column, encrypted)
+                    rewrite(row["id"], column, encrypted)
                 else:
                     store.execute(
                         f"UPDATE {table} SET {column}=? WHERE {primary}=?", (encrypted, row["id"])
@@ -315,46 +319,64 @@ def encrypt_legacy_history(store, *, batch=100, dry_run=False):
     return counts
 
 
-def rewrite_task_ciphertext(store, task_id, column, encrypted):
-    """Authenticated one-pair rewrite, guarded by an atomic schema savepoint.
+@contextmanager
+def task_rekey_session(store):
+    """Permit one authenticated ciphertext pair at a time in a single writer transaction.
 
-    No UDF is installed in the durable schema. Within the existing writer
-    transaction, the replacement invariant permits only this exact row and
-    old/new ciphertext pair after checking equal authenticated plaintext.
-    Every other mutation remains forbidden. Restore the ordinary invariant
-    before return; exceptions/crashes roll schema and data back together.
+    The allowlist and temporary trigger definitions exist only inside this savepoint.
+    Other connections always see the normal immutable schema, including after a crash.
     """
     from hub.mcp_tasks_schema import immutable_trigger_name, immutable_trigger_sql
 
     store.require_transaction()
     if not store.db.in_transaction:
         raise RuntimeError("Task re-encryption requires an explicit writer transaction")
-    name = immutable_trigger_name(column)  # Validate before using identifiers.
-    row = store.one(f"SELECT {column} AS body FROM mcp_tasks WHERE task_id=?", (task_id,))
-    if row is None:
-        raise ValueError("Frozen task does not exist")
-    previous = row["body"]
-    if previous == encrypted:
-        return
-    if (
-        not isinstance(encrypted, str)
-        or not encrypted.startswith(PREFIX)
-        or not same_body(store, previous, encrypted)
-    ):
-        raise ValueError("Frozen task re-encryption must preserve authenticated plaintext")
-    # quote() is SQLite's string literal encoder; data cannot become SQL syntax.
-    quoted = store.one(
-        "SELECT quote(?) AS id,quote(?) AS old,quote(?) AS new", (task_id, previous, encrypted)
-    )
-    exception = (
-        f"OLD.task_id={quoted['id']} AND OLD.{column} IS {quoted['old']} "
-        f"AND NEW.{column} IS {quoted['new']}"
-    )
+    columns = ("terminal_operation", "terminal_result")
     with store.savepoint():
-        store.execute("DROP TRIGGER " + name)
-        store.execute(immutable_trigger_sql(column, exception=exception))
-        try:
-            store.execute(f"UPDATE mcp_tasks SET {column}=? WHERE task_id=?", (encrypted, task_id))
-        finally:
+        store.execute(
+            "CREATE TABLE mcp_task_rekey_allowlist(task_id TEXT, field TEXT, old_value TEXT, new_value TEXT)"
+        )
+        for column in columns:
+            name = immutable_trigger_name(column)
+            allowed = (
+                "EXISTS(SELECT 1 FROM mcp_task_rekey_allowlist WHERE task_id=OLD.task_id "
+                f"AND field='{column}' AND old_value IS OLD.{column} AND new_value IS NEW.{column})"
+            )
             store.execute("DROP TRIGGER " + name)
+            store.execute(immutable_trigger_sql(column, exception=allowed))
+
+        def rewrite(task_id, column, encrypted):
+            immutable_trigger_name(column)
+            row = store.one(f"SELECT {column} AS body FROM mcp_tasks WHERE task_id=?", (task_id,))
+            if row is None:
+                raise ValueError("Frozen task does not exist")
+            previous = row["body"]
+            if previous == encrypted:
+                return
+            if (
+                not isinstance(encrypted, str)
+                or not encrypted.startswith(PREFIX)
+                or not same_body(store, previous, encrypted)
+            ):
+                raise ValueError("Frozen task re-encryption must preserve authenticated plaintext")
+            with store.savepoint():
+                store.execute(
+                    "INSERT INTO mcp_task_rekey_allowlist VALUES(?,?,?,?)",
+                    (task_id, column, previous, encrypted),
+                )
+                store.execute(
+                    f"UPDATE mcp_tasks SET {column}=? WHERE task_id=? AND {column} IS ?",
+                    (encrypted, task_id, previous),
+                )
+                store.execute("DELETE FROM mcp_task_rekey_allowlist")
+
+        yield rewrite
+        for column in columns:
+            store.execute("DROP TRIGGER " + immutable_trigger_name(column))
             store.execute(immutable_trigger_sql(column))
+        store.execute("DROP TABLE mcp_task_rekey_allowlist")
+
+
+def rewrite_task_ciphertext(store, task_id, column, encrypted):
+    with task_rekey_session(store) as rewrite:
+        rewrite(task_id, column, encrypted)

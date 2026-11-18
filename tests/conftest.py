@@ -22,6 +22,10 @@ def pytest_collection_modifyitems(config, items):
         integration = integration or 'stack' in item.fixturenames
         if browser:
             item.add_marker(pytest.mark.browser)
+            import inspect
+            if ('chat_browser_pool' in item.fixturenames and not inspect.iscoroutinefunction(item.obj)
+                    and not item.get_closest_marker('asyncio') and not item.get_closest_marker('anyio')):
+                item.add_marker(pytest.mark.sync_browser_reuse)
         if integration:
             item.add_marker(pytest.mark.integration)
             item.add_marker(pytest.mark.slow)

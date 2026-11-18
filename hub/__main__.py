@@ -5,55 +5,59 @@ import json
 from shared.config import ConfigurationError, DEFAULT_HUB_PORT
 from hub.config import HubConfig
 from shared.process_logging import configure_logging
-from shared.instance_lock import InstanceLock
 import os
 import sqlite3
-import tempfile
 import time
 import uuid
-import zipfile
 from pathlib import Path
 from hub.store import Store
 from shared.crypto import password_hash
-from shared.util import VERSION, fsync_directory
+from shared.util import VERSION
 
 
-def write_backup(store: Store, output: Path):
-    key_lock = InstanceLock(store.state_directory / ".keys.lock")
+def serve_hub(args, parser):
+    if not 1 <= args.port <= 65535:
+        parser.error("端口范围应为 1–65535")
+    os.environ["HUB_PORT"] = str(args.port)
     try:
-        return _write_backup(store, output)
-    finally:
-        key_lock.close()
+        config = HubConfig.from_env()
+        configure_logging(config.log_level)
+    except ConfigurationError as exc:
+        parser.error(str(exc))
+    import uvicorn
 
+    from hub.app import create_app
 
-def _write_backup(store: Store, output: Path):
-    """Publish a private, completed online backup without overwriting any file."""
-    output.parent.mkdir(parents=True, exist_ok=True)
-    # Keep staging on the output filesystem so exclusive publication is atomic.
-    with tempfile.TemporaryDirectory(prefix=".codepier-backup-", dir=output.parent) as temp:
-        target = Path(temp) / "hub.sqlite3"
-        connection = sqlite3.connect(target)
-        try:
-            with store.lock:
-                store.db.backup(connection)
-        finally:
-            connection.close()
-        archive = Path(temp) / "backup.zip"
-        fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            with zipfile.ZipFile(handle, "w", zipfile.ZIP_DEFLATED) as z:
-                z.write(target, "hub.sqlite3")
-                z.write(store.state_directory / "master.key", "master.key")
-                keyring = store.state_directory / "master.keys.json"
-                if keyring.exists() or keyring.is_symlink():
-                    from hub.keyring import private_read
+    runtime = None
 
-                    z.writestr("master.keys.json", private_read(keyring))
-            handle.flush()
-            os.fsync(handle.fileno())
-        # An output appearing during backup must not be overwritten or removed.
-        os.link(archive, output)
-        fsync_directory(output.parent)
+    def create_hub():
+        nonlocal runtime
+        app = create_app()
+        runtime = app.state.runtime
+        return app
+
+    class HubServer(uvicorn.Server):
+        async def shutdown(self, sockets=None):
+            if runtime is not None:
+                await runtime.announce_shutdown()
+            await super().shutdown(sockets=sockets)
+
+    server = HubServer(
+        uvicorn.Config(
+            create_hub,
+            factory=True,
+            host=args.host,
+            port=args.port,
+            workers=1,
+            log_level=config.log_level,
+            ws_max_size=16 * 1024 * 1024,
+            proxy_headers=True,
+            forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+            access_log=False,
+            timeout_graceful_shutdown=10,
+        )
+    )
+    server.run()
 
 
 def main():
@@ -72,8 +76,15 @@ def main():
     run = sub.add_parser("run")
     run.add_argument("--host", default=os.getenv("HUB_HOST", "0.0.0.0"))
     run.add_argument("--port", default=os.getenv("HUB_PORT", str(DEFAULT_HUB_PORT)), type=int)
-    backup = sub.add_parser("backup", help="一致性备份数据库和 master.key；备份含敏感凭据")
-    backup.add_argument("--output", required=True)
+    backup = sub.add_parser("backup", help="校验并分别备份数据库和密钥")
+    backup.add_argument("--output", required=True, type=Path)
+    backup.add_argument("--keys-output", required=True, type=Path)
+    restore = sub.add_parser("restore", help="验证备份，或将其恢复到全新的数据目录")
+    restore.add_argument("--backup", required=True, type=Path)
+    restore.add_argument("--keys", required=True, type=Path)
+    mode = restore.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--verify", action="store_true")
+    mode.add_argument("--output", type=Path)
     rekey = sub.add_parser(
         "rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换"
     )
@@ -87,6 +98,34 @@ def main():
     backfill_hosts.add_argument("--restart-scan", action="store_true")
     args = parser.parse_args()
     os.environ["HUB_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
+    if args.command in {"backup", "restore"}:
+        import zipfile
+
+        from cryptography.fernet import InvalidToken
+
+        from hub.backup import restore_backup, write_backup
+        from hub.state_layout import state_directory
+
+        try:
+            manifest = (
+                write_backup(
+                    state_directory(args.data_dir),
+                    args.output.expanduser(),
+                    args.keys_output.expanduser(),
+                )
+                if args.command == "backup"
+                else restore_backup(
+                    args.backup.expanduser(),
+                    args.keys.expanduser(),
+                    destination=args.output.expanduser() if args.output else None,
+                )
+            )
+        except InvalidToken:
+            parser.error("备份密钥无法解密数据库中的样本")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error, zipfile.BadZipFile) as exc:
+            parser.error(str(exc))
+        print(json.dumps(manifest, ensure_ascii=False))
+        return
     if args.command in {"run", "check-compatibility", "rekey"}:
         from hub.collaboration.delivery_compatibility import check_database
         from hub.state_layout import state_directory
@@ -98,29 +137,7 @@ def main():
         if args.command == "check-compatibility":
             return
     if args.command == "run":
-        if not 1 <= args.port <= 65535:
-            parser.error("端口范围应为 1–65535")
-        os.environ["HUB_PORT"] = str(args.port)
-        try:
-            config = HubConfig.from_env()
-            configure_logging(config.log_level)
-        except ConfigurationError as exc:
-            parser.error(str(exc))
-        import uvicorn
-
-        uvicorn.run(
-            "hub.app:create_app",
-            factory=True,
-            host=args.host,
-            port=args.port,
-            workers=1,
-            log_level=config.log_level,
-            ws_max_size=16 * 1024 * 1024,
-            proxy_headers=True,
-            forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
-            access_log=False,
-            timeout_graceful_shutdown=10,
-        )
+        serve_hub(args, parser)
         return
     if args.command in {"room-host-activate", "room-host-backfill"}:
         from hub.collaboration.room_host_rollout import activate, backfill
@@ -221,12 +238,6 @@ def main():
                     )
             store.audit("local-cli", "account." + args.command, args.username)
             print(f"账号 {args.username} 已就绪。没有默认密码。")
-        elif args.command == "backup":
-            output = Path(args.output).expanduser().resolve()
-            if output.exists():
-                parser.error("输出文件已存在，不覆盖旧备份")
-            write_backup(store, output)
-            print(f"备份已保存：{output}。包含设备密钥解密材料，请私密保管。")
     finally:
         store.close()
 

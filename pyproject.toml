@@ -7,6 +7,7 @@ markers = [
   "browser: requires a real isolated Playwright browser or its shared browser fixture",
   "integration: exercises processes, transports, or a real Hub/Agent stack",
   "slow: browser or multi-process acceptance; exclude for the shortest feedback loop",
+  "sync_browser_reuse: synchronous UI case eligible for a shared engine and fresh context",
   "smoke: bounded login/project/Agent/tool/audit golden path",
   "windows_core: portable core plus Windows-specific recovery contracts run in Windows CI",
   "isolated_case: independent expensive parameter case that can run in its own pytest process",
@@ -34,6 +35,8 @@ files = [
   "shared/config.py", "hub/config.py", "scripts/regression_plan.py",
   "agent/async_work.py", "agent/integration_state.py", "hub/collaboration/history_retention.py",
   "shared/execution_policy.py", "shared/runtime_requirements.py", "shared/runtime_results.py",
+  "shared/tool_protocol.py", "shared/mcp_protocol.py", "shared/token_estimate.py",
+  "hub/api/connection.py", "hub/api/context.py", "hub/api/file_import_settings.py",
 ]
 check_untyped_defs = true
 warn_unused_ignores = true

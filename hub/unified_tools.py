@@ -9,6 +9,7 @@ same operation ID, and help that answers in unified terms.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import typing
@@ -306,14 +307,32 @@ async def _wait(runtime, plan, value, principal):
     """Wait on the SAME operation; never restarts or replays work."""
     call = {"operation": "wait", "operation_ids": [value["operation_id"]]}
     deadline = time.monotonic() + plan.wait
+    from hub.mcp_streams import wait_cancelled
+
+    stop = wait_cancelled.get()
     latest = None
-    while True:
+    while stop is None or not stop.is_set():
         remaining = deadline - time.monotonic()
         if remaining < 1:
             break
-        latest = await runtime.invoke(
+        read = runtime.invoke(
             "process", {**call, "wait_seconds": max(1, min(10, int(remaining)))}, principal
         )
+        if stop is None:
+            latest = await read
+        else:
+            poll = asyncio.create_task(read)
+            cancelled = asyncio.create_task(stop.wait())
+            try:
+                done, _ = await asyncio.wait({poll, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+                if poll not in done:
+                    break
+                latest = poll.result()
+            finally:
+                for task in (poll, cancelled):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(poll, cancelled, return_exceptions=True)
         rows = latest.get("operations") if isinstance(latest, dict) else None
         row = rows[0] if isinstance(rows, list) and rows else {}
         if not isinstance(row, dict) or row.get("error") or not row.get("pending"):

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import tempfile
 from pathlib import Path
 from jsonschema import Draft202012Validator
@@ -47,11 +46,9 @@ class AppServerClient(NativeClient):
                 + "\n"
             )
             (home / "config.toml").write_text(config)
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if k in {"PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL"}
-            }
+            from agent.computer_process import desktop_environment
+
+            env = desktop_environment()
             env["CODEX_HOME"] = str(home)
             return binary, home, env
 

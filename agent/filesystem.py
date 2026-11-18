@@ -23,6 +23,16 @@ from shared.file_publish import (
 from shared.util import DevError, fsync_directory
 from agent.journal import Journal
 
+
+def search_context(lines, line, radius):
+    start = max(0, line - radius - 1)
+    return {
+        "context_start": start + 1,
+        "context": [value[:256] for value in lines[start : line + radius]],
+        "context_truncated": any(len(value) > 256 for value in lines[start : line + radius]),
+    }
+
+
 MAX_FILE = 1024 * 1024
 MAX_DIFF = 100000
 MAX_DIFF_CHANGED_LINES = 4000
@@ -46,20 +56,11 @@ IGNORED_DIRS = {
     ".codepier",
     ".cache",
 }
-GENERATED_SCAN_DIRS = frozenset(
-    {".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo"}
-)
-CHECKPOINT_ARTIFACTS = {
-    ".build",
-    ".next",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".turbo",
-    "coverage",
-    "playwright-report",
-    "test-results",
-}
+GENERATED_SCAN_DIRS = frozenset({
+    ".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo",
+    ".work", ".codepier-test-runs",
+})
+CHECKPOINT_ARTIFACTS = GENERATED_SCAN_DIRS | {"coverage", "playwright-report", "test-results"}
 STORAGE_UNAVAILABLE = frozenset(
     getattr(errno, name)
     for name in (
@@ -79,7 +80,7 @@ STORAGE_UNAVAILABLE = frozenset(
 )
 
 
-def protected(relative: str) -> bool:
+def protected(relative: str, *, snapshot_dependencies=False) -> bool:
     parts = tuple(part.rstrip(" .").lower() for part in PurePosixPath(relative).parts)
     private_runtime = {".codex": {"sessions", "archived_sessions"}, ".claude": {"projects"}}
     if any(
@@ -87,6 +88,8 @@ def protected(relative: str) -> bool:
     ):
         return True
     for low in parts:
+        if snapshot_dependencies and low in {"node_modules", ".venv", "venv"}:
+            continue
         if low in IGNORED_DIRS or low.startswith((".rd-", ".venv-", ".venv.")):
             return True
         if low in {
@@ -122,9 +125,16 @@ def scan_ignored(relative: str) -> bool:
     # Generated work is excluded from enumeration, not an authorization rule.
     # Explicitly authorized projects can themselves live under a .work parent.
     return any(
-        (part.casefold() in GENERATED_SCAN_DIRS or part.casefold() == ".work")
-        or part.casefold().startswith(".venv")
+        part.casefold() in GENERATED_SCAN_DIRS or part.casefold().startswith((".venv", "venv-"))
         for part in PurePosixPath(relative).parts
+    )
+
+
+def snapshot_ignored(relative: str) -> bool:
+    # Keep dependencies needed by commands, including the relocatable .venv.
+    # Project credentials and prior validation outputs are still excluded.
+    return protected(relative, snapshot_dependencies=True) or any(
+        part.casefold() in GENERATED_SCAN_DIRS for part in PurePosixPath(relative).parts
     )
 
 
@@ -530,6 +540,7 @@ class FileEngine:
         deadline=None,
         files_first=False,
         descend=None,
+        indexed_children=None,
     ):
         # Bound directory enumeration as well as matching files. A tree containing
         # only directories or ignored names must not bypass search/checkpoint limits.
@@ -544,11 +555,20 @@ class FileEngine:
             names = []
             try:
                 self.path(root, directory.relative_to(root).as_posix())
-                with os.scandir(directory) as iterator:
+                from contextlib import nullcontext
+
+                if indexed_children is None:
+                    entries_source = os.scandir(directory)
+                else:
+                    parent = directory.relative_to(root).as_posix()
+                    entries_source = nullcontext(
+                        directory / name for name in indexed_children.get(parent, ())
+                    )
+                with entries_source as iterator:
                     for entry in iterator:
                         scanned += 1
                         check_budget()
-                        p = Path(entry.path)
+                        p = entry if isinstance(entry, Path) else Path(entry.path)
                         try:
                             rel = relative_path(p.relative_to(root).as_posix())
                         except DevError as exc:
@@ -561,10 +581,15 @@ class FileEngine:
                         if (
                             protected(rel)
                             or (exclude is not None and exclude(rel))
-                            or scan_ignored(rel)
+                            or scan_ignored(p.relative_to(start).as_posix())
                         ):
                             continue
-                        st = entry.stat(follow_symlinks=False)
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            if indexed_children is not None:
+                                continue  # A tracked file can be deleted in the working tree.
+                            raise
                         names.append((p, st))
             except OSError as exc:
                 raise DevError("SCAN_FAILED", "目录在扫描期间改变或无法读取；未完成扫描") from exc
@@ -594,7 +619,7 @@ class FileEngine:
             rel = p.relative_to(root).as_posix()
             if (
                 protected(rel)
-                or scan_ignored(rel)
+                or scan_ignored(p.relative_to(start).as_posix())
                 or stat.S_ISLNK(s.st_mode)
                 or (hasattr(p, "is_junction") and p.is_junction())
             ):
@@ -631,6 +656,7 @@ class FileEngine:
         indexed = self.git_candidates(root, start, paths_only=True) if scope == "git" else None
         visible = None
         scan_error = None
+        indexed_children = None
         if indexed is not None:
             paths, capped = indexed
             visible = set()
@@ -643,6 +669,11 @@ class FileEngine:
                     visible.update(
                         prefix + "/".join(parts[:end]) for end in range(1, len(parts) + 1)
                     )
+            indexed_children = {}
+            for rel in visible:
+                parent, _, name = rel.rpartition("/")
+                if name and name not in {".", ".."}:
+                    indexed_children.setdefault(parent or ".", []).append(name)
             if capped:
                 scan_error = "SCAN_LIMIT"
 
@@ -664,6 +695,7 @@ class FileEngine:
                 exclude=excluded,
                 deadline=time.monotonic() + 8,
                 descend=lambda rel: rel not in pruned,
+                indexed_children=indexed_children,
             ):
                 parent = rel.rpartition("/")[0] or "."
                 shown[parent] = shown.get(parent, 0) + 1
@@ -751,7 +783,7 @@ class FileEngine:
 
     def git_candidates(self, root, start, *, max_files=20000, paths_only=False):
         """Bounded Git enumeration; content still passes every filesystem guard."""
-        if not (root / ".git").exists():
+        if scan_ignored(start.relative_to(root).as_posix()) or not (root / ".git").exists():
             return None
         environment = {
             key: value for key, value in os.environ.items() if not key.startswith("GIT_")
@@ -796,6 +828,8 @@ class FileEngine:
         if capped:
             raw = raw[: 8 * 1024 * 1024].rsplit(b"\0", 1)[0] + b"\0"
         rows, seen = [], set()
+        start_name = start.relative_to(root).as_posix()
+        prefix = "" if start_name == "." else start_name + "/"
         for name in raw.split(b"\0"):
             if time.monotonic() > deadline:
                 capped = True
@@ -804,7 +838,7 @@ class FileEngine:
                 continue
             try:
                 rel = name.decode("utf-8")
-                if scan_ignored(rel):
+                if not rel.startswith(prefix) or scan_ignored(rel[len(prefix):]):
                     continue
                 if paths_only:
                     if rel not in seen:
@@ -850,6 +884,7 @@ class FileEngine:
         results, seen, read_total, matches, skipped = [], 0, 0, 0, 0
         truncated, page_full, scan_error = False, False, None
         skipped_reasons = {}
+        context_bytes = 0
         iterator = iter(entries)
         while True:
             try:
@@ -880,7 +915,15 @@ class FileEngine:
             if read_total > 32 * MAX_FILE:
                 truncated = True
                 break
-            for n, line in enumerate(text.splitlines(), 1):
+            # Preserve encoding/error accounting, but avoid splitting and walking
+            # every line of files that cannot match.
+            haystack = text if args["case_sensitive"] else text.casefold()
+            if needle not in haystack:
+                continue
+            lines = text.splitlines()
+            radius = args.get("context_lines", 0)
+            checksum = digest(data) if radius or args.get("include_sha256") else None
+            for n, line in enumerate(lines, 1):
                 if needle not in (line if args["case_sensitive"] else line.casefold()):
                     continue
                 matches += 1
@@ -889,14 +932,21 @@ class FileEngine:
                 if len(results) >= args["limit"]:
                     truncated = page_full = True
                     break
-                results.append(
-                    {
-                        "path": rel,
-                        "line": n,
-                        "text": line[:1600],
-                        "line_truncated": len(line) > 1600,
-                    }
-                )
+                match = {
+                    "path": rel,
+                    "line": n,
+                    "text": line[:1600],
+                    "line_truncated": len(line) > 1600,
+                }
+                if checksum:
+                    match.update(sha256=checksum, total_lines=len(lines))
+                if radius:
+                    match.update(search_context(lines, n, radius))
+                    context_bytes += len(json.dumps(match, ensure_ascii=False).encode())
+                    if results and context_bytes > 32 * 1024:
+                        truncated = page_full = True
+                        break
+                results.append(match)
             if truncated:
                 break
         if candidates_capped or (truncated and not page_full):
@@ -952,9 +1002,17 @@ class FileEngine:
         after: bytes | None,
         *,
         restore_mode: int | None = None,
+        prepared_backup=None,
     ):
         with self.mutation_lock:
-            return self._mutate(project, path, expected, after, restore_mode=restore_mode)
+            return self._mutate(
+                project,
+                path,
+                expected,
+                after,
+                restore_mode=restore_mode,
+                prepared_backup=prepared_backup,
+            )
 
     def _mutate(
         self,
@@ -964,6 +1022,7 @@ class FileEngine:
         after: bytes | None,
         *,
         restore_mode: int | None = None,
+        prepared_backup=None,
     ):
         root, _ = self.root(project, True)
         p = self.path(root, path, False)
@@ -1000,16 +1059,22 @@ class FileEngine:
             }
         if not p.parent.is_dir():
             raise DevError("PARENT_MISSING", "父目录不存在，请先调用 fs_mkdir")
-        backup_id = uuid.uuid4().hex
         after_sha = digest(after) if after is not None else "new"
-        self.journal.add_backup(
-            backup_id,
-            str(root),
-            p.relative_to(root).as_posix(),
-            before,
-            after_sha,
-            before_mode=before_mode,
-        )
+        if prepared_backup is None:
+            backup_id = uuid.uuid4().hex
+            self.journal.add_backup(
+                backup_id,
+                str(root),
+                p.relative_to(root).as_posix(),
+                before,
+                after_sha,
+                before_mode=before_mode,
+            )
+        else:
+            # Only apply_patch supplies this internal reference, after its durable manifest.
+            backup_id, saved_root, saved_mode = prepared_backup
+            if root != saved_root or before_mode != saved_mode:
+                raise DevError("SHA_CONFLICT", "文件路径或权限在批量预检后发生变化", 409)
         # Re-check immediately before replacement. This is not an OS sandbox against hostile local processes.
         self.path(root, path, False)
         again = self.read_bytes(p, True)

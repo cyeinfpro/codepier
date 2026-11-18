@@ -65,7 +65,8 @@ jobs:
           .venv/bin/python -m ruff format --check agent hub shared scripts
           .venv/bin/python scripts/update_source_inventory.py --check
           .venv/bin/python scripts/check_repository_contracts.py
-          node --test tests/test_lazy_assets.mjs tests/test_diff_html.mjs
+          .venv/bin/python scripts/check_function_complexity.py
+          node --test tests/*.mjs web/browser-extension/*.test.mjs
           .venv/bin/python scripts/check_host_python.py
           .venv/bin/python scripts/sync_standalone_helpers.py --check
           git diff --check
@@ -427,6 +428,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Prepare bounded Ubuntu package downloads
         if: runner.os == 'Linux'
         timeout-minutes: 4
@@ -435,7 +438,7 @@ jobs:
         timeout-minutes: 15
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install -r requirements-dev.txt
+          .venv/bin/python -m pip install --require-hashes -r requirements-dev.txt
           .venv/bin/python -m playwright install --with-deps chromium
       - name: Real isolated provider, two users, OAuth consent and offboarding
         run: .venv/bin/python scripts/check_oidc_authentik.py --output dist/authentik-acceptance.json

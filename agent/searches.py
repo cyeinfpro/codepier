@@ -7,7 +7,7 @@ import stat
 import threading
 import time
 from agent.symbols import analyze
-from agent.filesystem import protected
+from agent.filesystem import protected, search_context
 from shared.crypto import digest
 from shared.util import DevError
 
@@ -238,6 +238,10 @@ class Searches:
                 if row["read_bytes"] > READ_BUDGET:
                     row.update(state="completed", truncated=1, error="SEARCH_BUDGET")
                     break
+                if args["mode"] == "text" and needle not in (
+                    text if args["case_sensitive"] else text.casefold()
+                ):
+                    continue
                 sha = digest(data)
                 lines = text.splitlines()
                 if args["mode"] == "text":
@@ -272,6 +276,10 @@ class Searches:
                         )
                     )
                 for item in matches:
+                    if radius := args.get("context_lines", 0):
+                        item.update(search_context(lines, item["line"], radius))
+                    if args.get("include_sha256") or args.get("context_lines"):
+                        item["total_lines"] = len(lines)
                     payload = json.dumps({"path": path, "sha256": sha, **item}, ensure_ascii=False)
                     size = len(payload.encode())
                     if (
@@ -354,8 +362,16 @@ class Searches:
         files = {}
         results = []
         root, _ = self.engine.root(project)
+        cursor = args["cursor"]
+        page_bytes = 0
         for hit in hits:
             item = json.loads(hit[1])
+            if "context" in item:
+                page_bytes += len(hit[1].encode())
+                if results and page_bytes > 32 * 1024:
+                    more = True
+                    break
+            cursor = hit[0]
             path = item["path"]
             # Retained hits predate today's path policy; do not replay protected text.
             if protected(path):
@@ -390,7 +406,7 @@ class Searches:
             "search_id": row["id"],
             "state": row["state"],
             "results": results,
-            "cursor": hits[-1][0] if hits else args["cursor"],
+            "cursor": cursor,
             "scan_status": scan_status,
             "has_more": more or row["state"] == "running",
             "scanned_files": row["scanned"],

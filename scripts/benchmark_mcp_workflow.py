@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -193,10 +194,9 @@ def directory_metrics(stack):
 
 
 def main():
-    work = Path.cwd() / ".work"
-    work.mkdir(exist_ok=True)
+    state = "/tmp" if os.name == "posix" else None
     with (
-        TemporaryDirectory(prefix="mcp-workflow-", dir=work) as scratch,
+        TemporaryDirectory(prefix="mcp-workflow-", dir=state) as scratch,
         running_stack(Path(scratch)) as stack,
     ):
         (stack.projectalpha / "large.py").write_text(

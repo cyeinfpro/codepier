@@ -100,9 +100,11 @@ def make_router(auth, runtime):
 
     @router.get("/attachments/{identifier}")
     async def attachment(request: Request, identifier: str):
-        return await store.run(
+        return await store.run_read(
             lambda: service.channels.media.public(
-                service.channels.media.row(identifier, attachment_actor(request))
+                service.channels.media.row(
+                    identifier, attachment_actor(request), include_content=False
+                )
             )
         )
 
@@ -111,16 +113,23 @@ def make_router(auth, runtime):
     @router.get("/attachments/{identifier}/content")
     async def attachment_content(request: Request, identifier: str):
         async with attachment_download_slots:
-            row = await store.run(
+            row = await store.run_read(
                 lambda: service.channels.media.row(identifier, attachment_actor(request))
             )
             content, row, start, end, partial = await asyncio.to_thread(
                 service.channels.media.decode_range, row, request.headers.get("range")
             )
-            # Re-check current authority after the CPU work before releasing bytes.
-            await store.run(
-                lambda: service.channels.media.row(identifier, attachment_actor(request))
+            # Re-check both current authority and immutable identity without reading the BLOB again.
+            verified = await store.run_read(
+                lambda: service.channels.media.row(
+                    identifier, attachment_actor(request), include_content=False
+                )
             )
+            if verified["state"] != "ready" or (verified["sha256"], verified["size"]) != (
+                row["sha256"],
+                row["size"],
+            ):
+                raise DevError("ATTACHMENT_CHANGED", "附件在读取期间发生变化，请重新读取", 409)
         headers = {
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",

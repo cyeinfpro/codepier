@@ -59,10 +59,19 @@ def _drop_room_route_group(source):
         return source, []
     groups = json.loads(match.group(2))
     room = groups.pop('collaboration', [])
+    # The historical room also uses the shared rich-text renderer. Keep its
+    # release-versioned URL when substituting the legacy collaboration surface.
+    shared = [url for url in room if re.fullmatch(r'/static/chat-markdown\.js(?:\?.*)?', url)]
+    room = [url for url in room if url not in shared]
     if not room or not all(ROOM_ASSET.match(url) for url in room):
         return source, []
     body = json.dumps(groups, ensure_ascii=False, separators=(',', ':')).replace('</', '<\\/')
-    return source[:match.start(2)] + body + source[match.end(2):], room
+    rewritten = source[:match.start(2)] + body + source[match.end(2):]
+    if shared:
+        import html
+        marker = '<script src="/static/app.js'
+        rewritten = rewritten.replace(marker, '<script src="' + html.escape(shared[0], quote=True) + '" defer></script>\n' + marker, 1)
+    return rewritten, room
 
 
 def legacy_document(source):

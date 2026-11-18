@@ -11,20 +11,28 @@ function compatible(a, b) {
     (a.nodeType !== 1 || (a.tagName === b.tagName && a.namespaceURI === b.namespaceURI))
   );
 }
+function shape(node) {
+  return node.nodeType === 1 ? `${node.namespaceURI}:${node.tagName}` : node.nodeType;
+}
 function reconcile(parent, source) {
   const old = [...parent.childNodes],
     used = new Set();
   const keyed = new Map();
+  const unkeyed = new Map();
   for (const node of old) {
     const value = key(node);
     if (value) keyed.set(value, keyed.has(value) ? null : node);
+    else {
+      const type = shape(node);
+      if (!unkeyed.has(type)) unkeyed.set(type, { nodes: [], next: 0 });
+      unkeyed.get(type).nodes.push(node);
+    }
   }
   let cursor = parent.firstChild;
   for (const incoming of [...source.childNodes]) {
     const identity = key(incoming);
-    let target = identity
-      ? keyed.get(identity)
-      : old.find((node) => !used.has(node) && !key(node) && compatible(node, incoming));
+    const bucket = identity ? null : unkeyed.get(shape(incoming));
+    let target = identity ? keyed.get(identity) : bucket?.nodes[bucket.next++];
     if (!target || used.has(target) || !compatible(target, incoming))
       target = incoming.cloneNode(true);
     else patch(target, incoming);

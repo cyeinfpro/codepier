@@ -11,6 +11,7 @@ import os
 import time
 import uuid
 
+from hub.db_worker import run_db_read
 from hub.gateway.validation import Validator
 
 from hub.gateway import catalog, policy
@@ -117,7 +118,10 @@ class Gateway:
             raise DevError("GATEWAY_DISABLED", "实例尚未启用 CODEPIER_MCP_GATEWAY", 403)
 
     async def close(self):
-        await self.pool.close()
+        try:
+            await self.pool.close()
+        finally:
+            await self.validator.close()
 
     def tools(self, principal):
         if not self.enabled:
@@ -458,22 +462,22 @@ class Gateway:
         async def before_send():
             nonlocal dispatched
             # Called AFTER negotiation and bounded FIFO admission, before sending.
-            await self.store.run(current)
+            await run_db_read(self.store, current)
             dispatched = True
 
-        def complete(value):
+        def complete(value, ciphertext):
             with self.store.transaction():
                 current()
                 state = "tool_error" if value.get("isError") else "completed"
                 self.store.db.execute(
                     "UPDATE gateway_calls SET state=?,result=?,updated=? WHERE id=?",
-                    (state, self.store.encrypt(catalog.encoded(value)), time.time(), identifier),
+                    (state, ciphertext, time.time(), identifier),
                 )
                 return self._with_receipt(value, identifier)
 
         try:
             async with asyncio.timeout(45):
-                plan, secret = await self.store.run(prepare)
+                plan, secret = await run_db_read(self.store, prepare)
                 principal, binding, account, connector, tool = plan
                 signature = self._signature(plan)
                 await self.validator.validate(tool["inputSchema"], arguments)
@@ -512,7 +516,10 @@ class Gateway:
                         value.get("structuredContent"),
                         "GATEWAY_RESULT_INVALID",
                     )
-                return await self.store.run(complete, value)
+                ciphertext = await asyncio.to_thread(
+                    lambda: self.store.encrypt(catalog.encoded(value))
+                )
+                return await self.store.run(complete, value, ciphertext)
         except BaseException as exc:
             # An admission cancelled after committing may not return its ID. Such
             # rows remain running until restart recovery, never eligible for replay.

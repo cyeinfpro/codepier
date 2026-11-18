@@ -16,6 +16,13 @@ async def run_db(store, function, /, *args, **kwargs):
     return await asyncio.to_thread(function, *args, **kwargs)
 
 
+async def run_db_read(store, function, /, *args, **kwargs):
+    reader = getattr(store, "run_read", None)
+    if reader is not None:
+        return await reader(function, *args, **kwargs)
+    return await run_db(store, function, *args, **kwargs)
+
+
 def database_endpoint(store, *, read_only=False):
     """Keep the async endpoint contract while the entire body runs as one job.
 
@@ -29,8 +36,8 @@ def database_endpoint(store, *, read_only=False):
 
         @wraps(function)
         async def endpoint(*args, **kwargs):
-            if read_only and hasattr(store, "run_read"):
-                return await store.run_read(function, *args, **kwargs)
+            if read_only:
+                return await run_db_read(store, function, *args, **kwargs)
             return await run_db(store, function, *args, **kwargs)
 
         endpoint.__signature__ = inspect.signature(function, eval_str=True)

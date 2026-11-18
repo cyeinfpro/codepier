@@ -440,7 +440,25 @@ def _render_text(rendered, public, *, text_mode, body_key, mirror, tool_name="",
     from shared.mcp_presentation import compact_output_text
 
     rendered["structuredContent"] = public
-    if body_key:
+    if (
+        text_mode == "compact"
+        and mirror == "meta"
+        and public.get("batch") is True
+        and isinstance(public.get("files"), list)
+    ):
+        # Text-only clients keep all business fields. Structured clients receive
+        # each file's status and cursor plus an explicit pointer to its body.
+        files = []
+        for row in public["files"]:
+            if isinstance(row.get("content"), str):
+                files.append(
+                    {**{k: v for k, v in row.items() if k != "content"}, "content_in": "text"}
+                )
+            else:
+                files.append(row)
+        rendered["structuredContent"] = {**public, "files": files}
+        text = json.dumps(public, ensure_ascii=False, separators=(",", ":"))
+    elif body_key:
         header = {key: value for key, value in public.items() if key != body_key}
         text = (
             json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n" + public[body_key]
@@ -499,7 +517,15 @@ def bound_batch_response(
 
     # The HTTP boundary runs after protocol metadata is attached. Recover the
     # raw body from the first rendering so the final cap measures the same shape.
-    if text_mode == "compact" and rendered.get("content") and not rendered.get("isError"):
+    if (
+        text_mode == "compact"
+        and public.get("batch") is True
+        and rendered.get("content")
+        and any(row.get("content_in") == "text" for row in public.get("files", []))
+    ):
+        public = json.loads(rendered["content"][0]["text"])
+        mirror = "meta"
+    if text_mode == "compact" and rendered.get("content"):
         first, separator, body = rendered["content"][0]["text"].partition("\n")
         if separator:
             for key in ("content", "output"):
@@ -835,7 +861,7 @@ def result(
             view=view,
         )
     body_key = None
-    if text_mode == "compact" and not rendered.get("isError") and not public.get("pending"):
+    if text_mode == "compact" and not public.get("pending"):
         action = getattr(unified, "action", "")
         if (
             (name == "read" or action == "file")
@@ -845,7 +871,7 @@ def result(
             body_key = "content"
         elif (
             (name == "exec" or action == "exec")
-            and public.get("exit_code") == 0
+            and type(public.get("exit_code")) is int
             and isinstance(public.get("output"), str)
         ):
             body_key = "output"

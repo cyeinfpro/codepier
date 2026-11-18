@@ -366,6 +366,7 @@ class WeixinDelivery:
             )
             self.refresh(identifier)
         delivery = self.store.one("SELECT * FROM weixin_deliveries WHERE id=?", (identifier,))
+        self.store.after_commit(lambda: self.c.loops.wake_channels("weixin_delivery"))
         return EnqueueResult("queued", reason, binding_id, delivery)
 
     def status_source(self, source):
@@ -470,6 +471,7 @@ class WeixinDelivery:
                 ),
             )
             self.add_part(identifier, 0, "text", {"text": notice})
+            self.store.after_commit(lambda: self.c.loops.wake_channels("weixin_delivery"))
             self.c.rooms.change(
                 source["conversation_id"], "message", projection_message_id or source["id"]
             )
@@ -1581,14 +1583,22 @@ class WeixinDelivery:
             )
 
     def for_messages(self, identifiers):
-        identifiers = list(dict.fromkeys(identifiers))[:124]
+        identifiers = list(dict.fromkeys(identifiers))
+        grouped = {}
+        for start in range(0, len(identifiers), 124):
+            batch = identifiers[start : start + 124]
+            grouped.update(self._for_message_batch(batch))
+        return grouped
+
+    def _for_message_batch(self, identifiers):
         if not identifiers:
             return {}
         keys = ",".join("?" for _ in identifiers)
         rows = self.store.all(
             f"""SELECT id,binding_id,COALESCE(projection_message_id,message_id) AS message_id,state,version,
             message_version,updated,kind,status_code,ordering_key,ordering_revision,ordering_evidence FROM weixin_deliveries
-            WHERE message_id IN ({keys}) OR projection_message_id IN ({keys})
+            WHERE (projection_message_id IS NULL AND message_id IN ({keys}))
+                OR projection_message_id IN ({keys})
             ORDER BY message_id,created,id""",
             (*identifiers, *identifiers),
         )

@@ -12,6 +12,8 @@ from itertools import islice
 REDACTED = "<redacted>"
 _SECRET = r"(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|credential|sshp[a-z]*|verifier)"
 _SECRET_KEY = re.compile(_SECRET, re.I)
+PEM_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+PEM_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)"
 )
@@ -29,6 +31,10 @@ _ENV_ASSIGN = re.compile(rf"""(?<![\w/])([A-Z][A-Z0-9_]*=){_VALUE}""")
 _CONTROL = re.compile(
     r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\Z))|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"
 )
+
+
+def sensitive_key(name: str) -> bool:
+    return bool(_SECRET_KEY.search(name))
 
 
 def redact_text(text: str) -> str:
@@ -61,7 +67,7 @@ def display_value(value, *, text_limit: int = 32768, budget: int = 65536):
         if depth > 16 or nodes > 1000 or remaining <= 0:
             truncated = True
             return "<truncated>"
-        if _SECRET_KEY.search(key) or key.lower() in {"env", "headers", "request_headers"}:
+        if sensitive_key(key) or key.lower() in {"env", "headers", "request_headers"}:
             if item is not None:
                 redacted = True
                 remaining -= len(REDACTED)

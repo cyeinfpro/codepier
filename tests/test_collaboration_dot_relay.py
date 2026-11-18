@@ -39,6 +39,17 @@ async def subscribe(c):
     return receiver, sub
 
 
+def test_channel_receipts_include_both_sides_of_batch_boundary(collab, monkeypatch):
+    c = duplex(collab)
+    ids = [f"m{i}" for i in range(125)]
+    def dispositions(batch):
+        return {mid: [{"channel": "telegram", "binding_id": "binding", "disposition": "rejected"}]
+                for mid in batch if mid in ids[-2:]}
+    monkeypatch.setattr(c.s.channels, "reply_dispositions", dispositions)
+    expected = {mid: c.s.channels.for_messages([mid])[mid] for mid in ids[-2:]}
+    assert c.s.channels.for_messages(ids + ids[-2:]) == expected
+
+
 def test_reply_updates_keep_identity_and_terminal_text_under_replay_and_reordering(collab):
     c = duplex(collab)
     original, _ = owner_message(c)

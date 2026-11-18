@@ -75,6 +75,53 @@ def file_call(agent, name, **args):
     return CoreFiles(instance.engine).call(name, project, call['args'])
 
 
+def test_pinned_read_separates_versions_owners_and_expiry(agent):
+    from contextlib import closing
+    import sqlite3
+    instance, project, root = agent
+    project.update(_coding_owner="fixture-owner", _coding_device="fixture-device")
+    original = b"line1\r\nline2\nline3\n"
+    path = root / "fixed.txt"
+    path.write_bytes(original)
+    args = dict(path="fixed.txt", limit=1, options={"read_snapshot":"create"})
+    page = file_call(agent, "read", **args)
+    token = page["read_snapshot"]
+    assert page["content"] == "line1\r\n" and page["next_offset"] == 2
+    path.write_text("new live version")
+    args.update(offset=2, options={"read_snapshot":token})
+    assert file_call(agent, "read", **args)["content"] == "line2\n"
+    with pytest.raises(DevError, match="改变"):
+        file_call(agent,"read",path="fixed.txt",expected_sha256=digest(original))
+    project["_coding_owner"] = "different-owner"
+    with pytest.raises(DevError) as denied:
+        file_call(agent,"read",**args)
+    assert denied.value.code == "READ_SNAPSHOT_UNAVAILABLE"
+    project["_coding_owner"] = "fixture-owner"
+    with closing(sqlite3.connect(instance.journal.directory / "read-pages.sqlite3")) as db:
+        with db:
+            db.execute("UPDATE pages SET expires=0")
+    with pytest.raises(DevError) as expired:
+        file_call(agent,"read",**args)
+    assert expired.value.code == "READ_SNAPSHOT_UNAVAILABLE"
+
+
+def test_local_replacements_preview_batch_conflict_and_apply(agent):
+    _, _, root = agent
+    source = root / "a.txt"
+    original = b"one\r\ntwo one\n"
+    source.write_bytes(original)
+    edits = [{"old_text": "one", "new_text": "X", "replace_all": True}]
+    args = {"path": "a.txt", "expected_sha256": digest(original), "edits": edits}
+    preview = file_call(agent, "edit", idempotency_key="preview-one", dry_run=True, **args)
+    assert preview["outcome"] == "preview" and source.read_bytes() == original
+    changes = [dict(action="edit", **args), dict(action="delete", path="absent", expected_sha256="a"*64)]
+    with pytest.raises(DevError) as conflict:
+        file_call(agent, "edit", idempotency_key="conflict-one", changes=changes)
+    assert conflict.value.code == "SHA_CONFLICT" and source.read_bytes() == original
+    result = file_call(agent, "edit", idempotency_key="apply-edits", changes=changes[:1])
+    assert result["success"] and source.read_bytes() == b"X\r\ntwo X\n"
+
+
 def test_catalog_compact_and_legacy_compatibility():
     core = tool_definitions('core')
     assert {t['name'] for t in core} == CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS | {'get_profile', 'get_access_context'}

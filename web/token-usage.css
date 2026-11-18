@@ -289,7 +289,7 @@
 }
 .token-trend-section h4 {
   margin: 0 0 8px;
-  font-size: var(--ui-text-sm, 14px);
+  font-size: var(--ui-text-sm);
   font-weight: var(--ui-weight-semibold, 600);
 }
 .token-dashboard .token-usage-help {
@@ -383,7 +383,7 @@
 .token-dashboard-placeholder .token-dashboard-metric strong {
   color: transparent;
   background: color-mix(in srgb, var(--ui-muted) 12%, transparent);
-  border-radius: 4px;
+  border-radius: var(--ui-radius-xs);
   width: 5ch;
 }
 [data-token-dashboard] > .token-dashboard-status {

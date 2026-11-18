@@ -298,7 +298,9 @@ class SSHDiagnostics:
         if code and client_output:
             # Preserve actual client errors in the original operation result;
             # stream output still belongs exclusively to the running workload.
-            diagnostic = redactor.redact(client_output)
+            from shared.audit_redaction import redact_text
+
+            diagnostic = redact_text(redactor.redact(client_output))
             output = result.get("output", "")
             output += ("\n" if output and not output.endswith("\n") else "") + diagnostic
             data["output"] = output[-131072:]

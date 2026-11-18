@@ -108,6 +108,11 @@ _RECEIPT = frozenset(
         "retry_after_seconds",
         "deadline",
         "elapsed_seconds",
+        "stage",
+        "stage_age_ms",
+        "queue_reason",
+        "blocked_count",
+        "restricted_blockers",
         "recovery",
         "error",
         "request_id",
@@ -964,6 +969,10 @@ def _native(name, args, value):
         from shared.contracts import OUTPUT_SCHEMAS
 
         fields = set(OUTPUT_SCHEMAS[name].get("properties", {})) | _RECEIPT | {"_computer_content"}
+        if name == "read":
+            fields.update(("read_snapshot", "snapshot_expires_at"))
+        if name == "read" and (args.get("options") or {}).get("include_knowledge"):
+            fields.add("project_knowledge")
         result = _pick(value, fields)
         if value.get("batch") is True and isinstance(result.get("files"), list):
             result["files"] = [
@@ -1122,13 +1131,28 @@ def _tree_lines(entries, prefix, *, indent):
 
 def _compact_search(result):
     groups = {}
+    annotated = any("sha256" in item for item in result["matches"])
+    windows = {}
     for match in result["matches"]:
+        if annotated and "sha256" in match:
+            path = path_label(match["path"])
+            header = f"{path}\t@{match['sha256']}\tL{match['total_lines']}"
+            rows = windows.setdefault(header, {})
+            for n, value in enumerate(match.get("context", []), match.get("context_start", 1)):
+                rows.setdefault(n, f"{n}-{value}")
+            n = match["line"]
+            rows[n] = f"{n}:{match['text']}" + (" …" if match.get("line_truncated") else "")
+            continue
         line = f"{match.get('line')}:{match.get('text', '').strip()}"
         groups.setdefault(path_label(match.get("path", "")), []).append(
             line + (" …" if match.get("line_truncated") else "")
         )
+    for header, window in windows.items():
+        groups[header] = [window[n] for n in sorted(window)]
     result["matches"] = "\n".join(path + "\n" + "\n".join(rows) for path, rows in groups.items())
-    result["matches_format"] = "path_line_then_line_colon_text"
+    result["matches_format"] = (
+        "path_sha_lines_then_match_or_context" if annotated else "path_line_then_line_colon_text"
+    )
     status = result.get("scan_status")
     if status in {
         "matches",

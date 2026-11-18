@@ -4,6 +4,15 @@ import sys
 from pathlib import Path
 
 
+def test_signatures_include_annotations_and_arrow_parameters():
+    from agent.symbols import analyze
+
+    python = analyze("module.py", b"def tag(x: int, *, force=False) -> str: return str(x)")
+    typed = analyze("module.ts", b"const tag = (x: number): string => String(x);")
+    assert python["symbols"][0]["signature"] == "tag(x: int, *, force=False) -> str"
+    assert typed["symbols"][0]["signature"] == "tag(x: number): string"
+
+
 def test_large_coordinates_survive_gc_and_concurrent_analysis():
     # Values above CPython's small-integer cache expose the borrowed-reference
     # bug in Tree-sitter 0.26.0 Point.row/column getters. Tiny fixtures miss it.

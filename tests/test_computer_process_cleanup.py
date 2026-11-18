@@ -135,7 +135,8 @@ Path.open = gated_open
 def test_windows_provider_command_keeps_existing_direct_path():
     from agent.computer_process import provider_argv
     command = ['fixture-provider.exe', 'mcp']
-    assert provider_argv(command, 'nt') == command
+    windows = provider_argv(command, 'nt')
+    assert windows[-3:] == ['--windows', *command] and '-I' in windows
     assert provider_argv(command, 'posix')[-3:] == ['--', *command]
 
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from fastapi import APIRouter, Query
 from hub.db_worker import database_endpoint
 from hub.api.context import HubContext
@@ -10,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from shared.core_contracts import CORE_TOOLS
 from shared.contracts import tool_definitions
 from hub import iam
-from shared.util import VERSION
+from shared.util import DevError, VERSION
 from shared.token_cost import DEFAULT_CACHE_READ_PERCENT
 from hub.api.models import ComputerDecision, ToolCall
 from hub.api.devices import device_rows
@@ -30,22 +31,59 @@ def make_system_router(context: HubContext):
     config, maintenance = context.config, context.maintenance
     public_url, BASE = context.public_url, context.base
 
-    @router.get("/healthz")
-    @database_endpoint(store)
-    def health():
+    probe = None
+
+    def live():
+        return runtime.worker is not None and not runtime.worker.done()
+
+    def status(ok):
+        return JSONResponse(
+            {"status": "ok" if ok else "unavailable"}, status_code=200 if ok else 503
+        )
+
+    @router.get("/livez")
+    async def liveness():
+        return status(live())
+
+    async def database_probe():
         try:
-            ready = bool(
-                not runtime.stopping
-                and runtime.worker
-                and not runtime.worker.done()
-                and store.one("SELECT 1 AS ok")
-            )
-        except sqlite3.Error:
-            ready = False
-        if not ready:
-            return JSONResponse({"status": "unavailable", "version": VERSION}, status_code=503)
+            return bool(await store.run_read(store.one, "SELECT 1 AS ok"))
+        except (sqlite3.Error, RuntimeError, DevError):
+            return False
+
+    async def ready():
+        nonlocal probe
+        if (
+            runtime.stopping
+            or not live()
+            or not store.worker_metrics.responsive(max_queue=64, max_running_seconds=15)
+        ):
+            return False
+        # Bound client latency without cancelling an admitted Store phase.
+        # Concurrent probes share one read while the pool is under pressure.
+        if probe is None or probe.done():
+            probe = asyncio.create_task(database_probe())
+        done, _ = await asyncio.wait((probe,), timeout=0.75)
+        return bool(done and next(iter(done)).result() and live() and not runtime.stopping)
+
+    @router.get("/readyz")
+    async def readiness():
+        return status(await ready())
+
+    @router.get("/healthz")
+    async def health():
+        # Older updater installations use this shape during a maintenance drain.
+        ok = await ready()
+        payload = {"status": "ok" if ok else "unavailable", "version": VERSION}
+        if ok:
+            payload["panel_update"] = maintenance.status()
+        return JSONResponse(payload, status_code=200 if ok else 503)
+
+    @router.get("/api/system/health")
+    @database_endpoint(store, read_only=True)
+    def diagnostics(request: Request):
+        auth.instance(request)
         return {
-            "status": "ok",
             "version": VERSION,
             "panel_update": maintenance.status(),
             "diagnostics": {

@@ -93,7 +93,7 @@ def finish_run_directory(path: Path) -> None:
 
 
 def cleanup_run_directories(
-    root: Path, ttl_seconds: float = 7 * 86400, *, now: float | None = None
+    root: Path, ttl_seconds: float = 7 * 86400, *, now: float | None = None, terminal=None
 ) -> list[str]:
     if ttl_seconds < 0:
         raise ValueError("TTL must be nonnegative")
@@ -110,8 +110,20 @@ def cleanup_run_directories(
         if marker.is_symlink():
             continue
         try:
-            finished = json.loads(marker.read_text(encoding="utf-8")).get("finished")
-            if not isinstance(finished, (int, float)) or finished > cutoff:
+            record = json.loads(marker.read_text(encoding="utf-8"))
+            finished = record.get("finished")
+            if finished is None and terminal is not None:
+                created = record.get("created")
+                if (
+                    type(created) not in (int, float)
+                    or not 0 < created <= cutoff
+                    or not terminal(path.name)
+                ):
+                    continue
+                # Completion time was lost. Start a fresh retention interval.
+                finish_run_directory(path)
+                continue
+            if type(finished) not in (int, float) or not 0 < finished <= cutoff:
                 continue
         except (OSError, ValueError, AttributeError):
             continue

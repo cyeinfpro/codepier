@@ -89,10 +89,10 @@ class RoomAttachments:
                 "work_created": False,
             }
 
-    def row(self, identifier, principal):
+    def row(self, identifier, principal, *, include_content=True):
         actor = refresh_principal(self.store, principal)
         row = self.store.one(
-            "SELECT * FROM channel_attachments WHERE id=? AND channel='panel' AND space_id=? AND owner_user_id=?",
+            f"SELECT {'*' if include_content else media_cache.METADATA_COLUMNS} FROM channel_attachments WHERE id=? AND channel='panel' AND space_id=? AND owner_user_id=?",
             (identifier, actor.space_id, actor.user_id),
         )
         if not row:

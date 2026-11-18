@@ -43,10 +43,7 @@ class TaskQuery(Process):
     operation: Literal["list", "get", "wait", "trace", "diagnostics", "activity"] = "list"
 
 
-def register(tool, tools, schemas):
-    from shared.core_output_schemas import build_core_output_schemas
-
-    query_schemas = build_core_output_schemas(schemas, include_queries=True)
+def register(tool, tools):
     specs = {
         "project_query": (
             ProjectQuery,
@@ -61,4 +58,3 @@ def register(tool, tools, schemas):
     }
     for name, (model, description, local) in specs.items():
         tools[name] = tool(model, "read", description, False, local)
-        schemas[name] = query_schemas[name]

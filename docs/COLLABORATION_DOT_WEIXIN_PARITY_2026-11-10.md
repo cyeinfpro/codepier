@@ -148,7 +148,7 @@ dot 回复：room_runtime.reply → weixin_delivery.queue_reply → weixin_parts
 
 ### P1 过期票据停止发送（B4）
 
-在 `hub/collaboration/events.py::ready` 将现有的过期检查扩展至房间收件箱事件，保持探测事件行为：
+在 `hub/collaboration/events.py::EventService.ready` 将现有的过期检查扩展至房间收件箱事件，保持探测事件行为：
 
 ```diff
 -            if event['name'] == MAILBOX_EVENT and not json.loads(event['data']).get('test'):

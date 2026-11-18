@@ -15,6 +15,13 @@ MAX_CACHE = 256 * 1024 * 1024
 PER_OWNER_CACHE = 64 * 1024 * 1024
 UNATTACHED_TTL = 24 * 3600
 MARKER = b"codepier-media-v1\0"
+# Metadata and authorization need neither the payload nor its delivery credentials.
+METADATA_COLUMNS = (
+    "id,schema_version,space_id,owner_user_id,room_id,conversation_id,project_id,message_id,"
+    "ordinal,direction,binding_id,generation,binding_version,peer_id,channel,kind,name,mime,size,"
+    "sha256,artifact_id,state,attempts,next_attempt,lease_owner,lease_fence,lease_until,reason_code,"
+    "expires_at,created,updated"
+)
 
 
 def encode(store, data):

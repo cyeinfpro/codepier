@@ -154,17 +154,51 @@ def decode_result(output):
         raise DevError("PROJECT_DISCOVERY_FAILED", "项目概览读取进程返回无效结果") from exc
 
 
+class ReadPool:
+    """Lease whole subprocesses. No paths, credentials or returned data live here."""
+
+    def __init__(self, limit=4):
+        self.limit = limit
+        self.idle = []
+        self.leased = 0
+        self.epoch = 0
+        self.closed = False
+
+    def take(self):
+        if self.closed or self.leased >= self.limit:
+            return None
+        self.epoch += 1
+        self.leased += 1
+        process, uses = self.idle.pop() if self.idle else (None, 0)
+        if process is not None and process.returncode is not None:
+            process, uses = None, 0
+        return self.epoch, process, uses
+
+    async def close(self):
+        self.closed = True
+        idle, self.idle = self.idle, []
+        await asyncio.gather(*(_reap(process) for process, _ in idle))
+
+
 class ReadWorker:
-    # One execution-slot lifetime, exactly root/root/execute, never a pool.
-    def __init__(self, *, admission=False):
+    def __init__(self, *, admission=False, pool=None):
+        self.pool = pool
+        self.epoch = None
+        self.uses = 0
+        self.complete = False
         self.admission = admission
         self.process = None
         self.index = 0
         self.failed = False
 
     async def __aenter__(self):
+        lease = self.pool.take() if self.pool is not None else None
+        if lease:
+            self.epoch, self.process, self.uses = lease
+            if self.process is not None:
+                return self
         base, command = worker_command(
-            "admission_session_main" if self.admission else "session_main"
+            "pool_main" if lease else "admission_session_main" if self.admission else "session_main"
         )
         spawning = asyncio.create_task(
             asyncio.create_subprocess_exec(
@@ -180,12 +214,26 @@ class ReadWorker:
         try:
             self.process = await asyncio.shield(spawning)
         except BaseException:
+            if self.epoch is not None:
+                self.pool.leased -= 1
             self.process, _ = await _finish(spawning)
             await _finish(asyncio.create_task(_reap(self.process)))
             raise
         return self
 
     async def __aexit__(self, *exc):
+        if self.epoch is not None:
+            self.pool.leased -= 1
+            if (
+                exc[0] is None
+                and not self.pool.closed
+                and self.complete
+                and not self.failed
+                and self.process.returncode is None
+                and self.uses + 1 < 256
+            ):
+                self.pool.idle.append((self.process, self.uses + 1))
+                return
         _, cancelled = await _finish(asyncio.create_task(_reap(self.process)))
         if cancelled:
             raise asyncio.CancelledError
@@ -194,6 +242,15 @@ class ReadWorker:
         """Normal contention fallback: EOF, coverage flush, then reap before queuing."""
         if not self.admission or self.index != 1 or self.failed:
             raise DevError("INVALID_REQUEST", "仅已完成的准入会话可正常结束")
+        if self.epoch is not None:
+            async with asyncio.timeout(PROBE_TIMEOUT):
+                self.process.stdin.write(json.dumps({"release_lease": self.epoch}).encode() + b"\n")
+                await self.process.stdin.drain()
+                ack = decode_result(await self.process.stdout.readline())
+                if ack.get("lease_epoch") != self.epoch or not ack["ok"]:
+                    raise DevError("PROJECT_DISCOVERY_FAILED", "独立读取进程租约结束回执无效")
+                self.complete = True
+            return
         self.failed = True
         self.process.stdin.close()
         try:
@@ -212,12 +269,17 @@ class ReadWorker:
         self.index += 1
         try:
             async with asyncio.timeout(PROBE_TIMEOUT):
+                if self.epoch is not None:
+                    payload = {**payload, "lease_epoch": self.epoch}
                 self.process.stdin.write(json.dumps(payload).encode() + b"\n")
                 await self.process.stdin.drain()
                 result = decode_result(await self.process.stdout.readline())
+                if self.epoch is not None and result.get("lease_epoch") != self.epoch:
+                    raise DevError("PROJECT_DISCOVERY_FAILED", "独立读取进程返回了其他租约的数据")
                 if not result["ok"]:
                     self.failed = True
-                if self.index == len(phases) or not result["ok"]:
+                self.complete = self.index == len(phases) and result["ok"]
+                if self.epoch is None and (self.index == len(phases) or not result["ok"]):
                     # A terminal frame is not proof of a clean process exit.
                     # Allow normal shutdown (including coverage) before reaping.
                     await self.process.wait()
@@ -310,18 +372,54 @@ def admission_session_main():
     _session_main(True)
 
 
-def _session_main(admission):
+def pool_main():
+    # Only an epoch survives between leases. All request and engine state is
+    # local to _session_main/dispatch and is discarded when control returns.
+    import os
+    import tempfile
+
+    os.chdir(tempfile.gettempdir())
+    previous = 0
+    for _ in range(256):
+        first = sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
+        if not first or len(first) > 64 * 1024 * 1024:
+            return
+        request = json.loads(first)
+        epoch, admission = request.get("lease_epoch"), request.get("phase") == "admission"
+        del request
+        if type(epoch) is not int or epoch <= previous:
+            return
+        previous = epoch
+        ok = _session_main(admission, epoch, first)
+        del first
+        if not ok:
+            return
+
+
+def _session_main(admission, epoch=None, first=None):
     identity = None
     admitted_root = None
     phases = (("admission",) if admission else ()) + ("root", "root", "execute")
     for phase in phases:
-        line = sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
+        line = first if first is not None else sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
+        first = None
         if not line:
             return
         try:
             if len(line) > 64 * 1024 * 1024:
                 raise ValueError("frame too large")
             request = json.loads(line)
+            if epoch is not None:
+                if (
+                    admission
+                    and phase == "root"
+                    and identity is not None
+                    and request == {"release_lease": epoch}
+                ):
+                    print(json.dumps({"lease_epoch": epoch, "ok": True, "data": {}}), flush=True)
+                    return True
+                if request.get("lease_epoch") != epoch:
+                    raise ValueError("wrong lease")
             current = (request["tool"], request["args"])
             if request.get("phase") != phase or (identity is not None and current != identity):
                 raise ValueError("invalid order or changed operation")
@@ -344,11 +442,13 @@ def _session_main(admission):
                 "ok": False,
                 "error": {"code": "INVALID_REQUEST", "message": "独立读取会话阶段或请求无效"},
             }
+        if epoch is not None:
+            result["lease_epoch"] = epoch
         sys.stdout.write(json.dumps(result, ensure_ascii=True) + "\n")
         sys.stdout.flush()
         if not result["ok"]:
             return
-    # Exactly one execute; no further frame is consumed.
+    return True  # Exactly one execute per lease.
 
 
 def main():

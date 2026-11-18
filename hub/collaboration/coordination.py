@@ -414,25 +414,35 @@ class CoordinationService:
                 "expected_inbox_revision",
             }
         }
-        result = self.c.mutation(principal, room, action, stable, perform)
+        executed = False
+
+        def execute():
+            nonlocal executed
+            result = perform()
+            executed = True
+            return result
+
+        result = self.c.mutation(principal, room, action, stable, execute)
         # Stored idempotency receipts are evidence, never stale UI authority.
         if "goal" in result:
             goal = self.object(room, result["goal"]["id"])
             if self.c.room_work_bridge.native.reference(goal) and args.get("consumer_session_id"):
                 _, _, goal = self.scope(principal, {**args, "goal_id": goal["id"]})
             self.authorize(principal, room, goal)
-            result = {**result, "goal": self.view(goal, principal)}
-            if "operations" in result:
+            if not executed or args.get("consumer_session_id"):
+                result = {**result, "goal": self.view(goal, principal)}
+            if "operations" in result and not executed:
                 result["operations"] = self.operations(goal)
         if "work_item" in result:
             goal = self.object(room, result["work_item"]["goal_id"])
             if self.c.room_work_bridge.native.reference(goal) and args.get("consumer_session_id"):
                 _, _, goal = self.scope(principal, {**args, "goal_id": goal["id"]})
             self.authorize(principal, room, goal)
-            result = {
-                **result,
-                "work_item": self.work_view(self.work(goal, result["work_item"]["id"])),
-            }
+            if not executed:
+                result = {
+                    **result,
+                    "work_item": self.work_view(self.work(goal, result["work_item"]["id"])),
+                }
         return result
 
     def create(self, raw, principal, *, native_scope=None):
@@ -901,6 +911,26 @@ class CoordinationService:
                 "allowed_outcomes": ["succeeded", "partial", "blocked"],
                 "credential_required": "current_coordinator_member_identity_and_consumer_proof",
             }
+        assignment_index = {}
+        for table in ("team_work_assignments", "room_native_work_assignments"):
+            assignments = self.store.all(
+                f"SELECT a.* FROM {table} a JOIN coordination_work w ON w.id=a.work_id WHERE w.goal_id=?",
+                (goal["id"],),
+            )
+            assignment_index[table] = {
+                a["work_id"]: a for a in assignments if a["work_id"] in visible_ids
+            }
+        team_link = self.teams.link(goal)
+        team_epoch = (
+            team_link["coordinator_epoch"]
+            if assignment_index["team_work_assignments"] and team_link
+            else None
+        )
+        native_epoch = (
+            self.c.room_goal_recovery.epoch(goal["id"])
+            if assignment_index["room_native_work_assignments"]
+            else None
+        )
         return {
             "goal": self.view(goal, principal),
             "can_approve": bool(
@@ -919,7 +949,15 @@ class CoordinationService:
                 if self.teams.link(goal)
                 else {}
             ),
-            "work_items": [self.work_view(row) for row in visible_rows],
+            "work_items": [
+                self.work_view(
+                    row,
+                    assignment_index=assignment_index,
+                    team_epoch=team_epoch,
+                    native_epoch=native_epoch,
+                )
+                for row in visible_rows
+            ],
             "messages": messages,
             "operations": [op for op in self.operations(goal) if op["work_item_id"] in visible_ids],
         }
@@ -969,10 +1007,15 @@ class CoordinationService:
             raise DevError("WORK_NOT_FOUND", "此工作项不属于当前目标", 404)
         return row
 
-    def work_view(self, row):
-        assignment = self.store.one(
-            "SELECT * FROM team_work_assignments WHERE work_id=?", (row["id"],)
-        )
+    def work_view(self, row, *, assignment_index=None, team_epoch=None, native_epoch=None):
+        result = json.loads(row["result"]) if row["result"] else None
+
+        def assignment_for(table):
+            if assignment_index is not None:
+                return assignment_index[table].get(row["id"])
+            return self.store.one(f"SELECT * FROM {table} WHERE work_id=?", (row["id"],))
+
+        assignment = assignment_for("team_work_assignments")
         team_fields = (
             {
                 "assignee_dot_id": assignment["dot_id"],
@@ -983,37 +1026,39 @@ class CoordinationService:
             else {}
         )
         if assignment:
-            team_fields["coordinator_epoch"] = self.teams.link(row["goal_id"])["coordinator_epoch"]
+            team_fields["coordinator_epoch"] = (
+                team_epoch
+                if assignment_index is not None
+                else self.teams.link(row["goal_id"])["coordinator_epoch"]
+            )
         if assignment and row["result"]:
             team_fields["artifact_ref"] = {
                 "work_item_id": row["id"],
                 "version": row["version"],
-                "digest": digest(json.loads(row["result"])),
+                "digest": digest(result),
             }
-        native_assignment = self.store.one(
-            "SELECT * FROM room_native_work_assignments WHERE work_id=?", (row["id"],)
-        )
+        native_assignment = assignment_for("room_native_work_assignments")
         if native_assignment:
             team_fields.update(
                 assignee_member_id=native_assignment["member_id"],
                 intent_revision=native_assignment["intent_revision"],
-                coordinator_epoch=self.c.room_goal_recovery.epoch(row["goal_id"]),
+                coordinator_epoch=native_epoch
+                if assignment_index is not None
+                else self.c.room_goal_recovery.epoch(row["goal_id"]),
             )
             if row["result"]:
                 team_fields["artifact_ref"] = {
                     "work_item_id": row["id"],
                     "version": row["version"],
-                    "digest": digest(json.loads(row["result"])),
+                    "digest": digest(result),
                 }
         return {
             **row,
             **team_fields,
             "dependencies": json.loads(row["dependencies"]),
             "required_capabilities": json.loads(row["required_capabilities"]),
-            "result": json.loads(row["result"]) if row["result"] else None,
-            "provenance_project_ids": json.loads(row["result"]).get(
-                "provenance_project_ids", [row["project_id"]]
-            )
+            "result": result,
+            "provenance_project_ids": result.get("provenance_project_ids", [row["project_id"]])
             if row["result"]
             else [row["project_id"]],
         }

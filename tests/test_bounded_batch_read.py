@@ -61,7 +61,7 @@ def envelope(value, *, modern=False, poll=False, padding=''):
 
 @pytest.mark.parametrize('items', [[], [{'path': 'a'}] * (READ_BATCH_MAX_ITEMS + 1),
                                   [{'path': 'a', 'limit': 2001}],
-                                  [{'path': 'a', 'offset': 0}],
+                                  [{'path': 'a', 'offset': -1}],
                                   [{'path': 'a', 'expected_sha256': 'bad'}]])
 def test_invalid_batch_shape(items):
     with pytest.raises(ValidationError):
@@ -73,6 +73,11 @@ def test_items_cannot_override_authority_or_operation(field):
     with pytest.raises(ValidationError):
         Read(project='Fixture', operation='batch',
              options={'items': [{'path': 'a', field: 'other'}]})
+
+
+def test_zero_offset_starts_batch_file_at_first_line():
+    read = Read(project='Fixture', operation='batch', options={'items': [{'path': 'a', 'offset': 0}]})
+    assert read.options['items'][0]['offset'] == 1
 
 
 def test_batch_has_no_top_level_file_parameters_and_revalidates():

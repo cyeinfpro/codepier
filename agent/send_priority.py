@@ -7,10 +7,9 @@ lock lets a burst of 256 KiB transcript frames delay an ``accepted`` receipt by
 seconds; the Hub then redelivers the call and records late acceptance.
 
 This gate keeps FIFO order *within* each class, hands the lock directly to the
-next waiter (no barging), and always serves waiting control frames first. A
-frame already being written is never interrupted, so the worst-case control
-delay is one bulk frame. Bulk senders are additionally windowed by their own
-protocol (see ``agent.native_sync_flow``), so bulk cannot starve either.
+next waiter (no barging), and normally serves waiting control frames first.
+After eight consecutive control handoffs while bulk is queued, a single bulk
+frame gets the next turn. Frames already being written are never interrupted.
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ def is_bulk(body) -> bool:
 class PrioritySendLock:
     def __init__(self):
         self._locked = False
+        self._control_burst = 0
         self._control: deque[asyncio.Future] = deque()
         self._bulk: deque[asyncio.Future] = deque()
 
@@ -87,11 +87,19 @@ class PrioritySendLock:
     def release(self) -> None:
         if not self._locked:
             raise RuntimeError("PrioritySendLock released while not held")
-        for queue in (self._control, self._bulk):
+        queues = (self._control, self._bulk)
+        if self._control_burst >= 8:
+            queues = (self._bulk, self._control)
+        for queue in queues:
             while queue:
                 waiter = queue.popleft()
                 if not waiter.done():
                     # Direct hand-off: the lock stays held for the next owner.
+                    if queue is self._control and self._bulk:
+                        self._control_burst += 1
+                    else:
+                        self._control_burst = 0
                     waiter.set_result(True)
                     return
+        self._control_burst = 0
         self._locked = False

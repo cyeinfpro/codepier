@@ -408,6 +408,7 @@ class ProjectScheduler:
         on_bypass=None,
         wait_policy="queue",
         initial_wait_seconds=1,
+        max_queue_ms=None,
     ):
         if lane not in LANES or not isinstance(project, str) or not project:
             raise ValueError("Invalid scheduler admission identity")
@@ -438,7 +439,19 @@ class ProjectScheduler:
                     )
                     self._resource_tokens.add(item.token)
                 self._drain_all()
-            if wait_policy == "fail_fast":
+            if max_queue_ms is not None:
+                try:
+                    await asyncio.wait_for(event.wait(), max_queue_ms / 1000)
+                except TimeoutError:
+                    async with self.condition:
+                        blockers = self._blockers(item)
+                    raise DevError(
+                        "RESOURCE_BUSY",
+                        "超过最大资源等待时间，未开始执行",
+                        409,
+                        blocked_by=blockers,
+                    ) from None
+            elif wait_policy == "fail_fast":
                 try:
                     await asyncio.wait_for(event.wait(), initial_wait_seconds)
                 except TimeoutError:

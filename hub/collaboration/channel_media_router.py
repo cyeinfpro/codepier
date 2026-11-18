@@ -28,15 +28,17 @@ class ChannelMediaRouter:
                 return item
         return self.legacy.public(row)
 
-    def row(self, identifier, principal):
+    def row(self, identifier, principal, *, include_content=True):
         found = self.store.one("SELECT channel FROM channel_attachments WHERE id=?", (identifier,))
         if not found or found["channel"] == "weixin":
-            return self.legacy.row(identifier, principal)
+            return self.legacy.row(identifier, principal, include_content=include_content)
         if found["channel"] == "panel":
-            return self.c.room_attachments.row(identifier, principal)
+            return self.c.room_attachments.row(
+                identifier, principal, include_content=include_content
+            )
         principal = refresh_principal(self.store, principal)
         row = self.store.one(
-            "SELECT * FROM channel_attachments WHERE id=? AND space_id=? AND owner_user_id=?",
+            f"SELECT {'*' if include_content else media_cache.METADATA_COLUMNS} FROM channel_attachments WHERE id=? AND space_id=? AND owner_user_id=?",
             (identifier, principal.space_id, principal.user_id),
         )
         if not row:

@@ -1171,7 +1171,19 @@ def _compact_projects(value):
 
 def unwrap_waited(value, plan):
     """Return the same business result as direct delivery for proven read success."""
-    if plan.action not in {"file", "tree", "search", "symbols", "history", "changes"}:
+    if plan.action not in {
+        "file",
+        "tree",
+        "search",
+        "symbols",
+        "history",
+        "changes",
+        "project",
+        "knowledge",
+        "tasks",
+    }:
+        return value
+    if plan.unified != "query" or plan.view not in CORE_ACTIONS["query"][plan.action]:
         return value
     if plan.action == "search" and plan.view == "cancel":
         return value
@@ -1208,6 +1220,23 @@ def _compact_catalog(value):
         value["collab"] = collab
         value["note"] += " Collaboration views: query help with args.action='collab.<name>'."
     return value
+
+
+def _compact_pending_receipt(receipt):
+    if not receipt.get("pending") or not receipt.get("operation_id"):
+        return
+    next_call = receipt.get("next_call")
+    previous = receipt.get("next")
+    if (
+        isinstance(next_call, dict)
+        and isinstance(previous, dict)
+        and next_call.get("name") == previous.get("name") == "query"
+        and next_call["arguments"].get("action") == previous["arguments"].get("action") == "job"
+    ):
+        receipt.pop("next")
+    recovery = receipt.get("recovery")
+    if isinstance(recovery, dict) and recovery.get("category") == "pending" and next_call:
+        receipt["recovery"] = {"category": "pending"}
 
 
 def present_unified(value, *, verbosity="lean", plan=None, visible=None, convert=None, view=2):
@@ -1249,6 +1278,12 @@ def present_unified(value, *, verbosity="lean", plan=None, visible=None, convert
     _rewrite_hints(
         result, visible=visible, project=project, workspace_id=workspace_id, convert=convert
     )
+    if lean and view >= 3 and plan:
+        if plan.action == "job" and plan.view in {"get", "wait"}:
+            for receipt in result.get("operations", []):
+                _compact_pending_receipt(receipt)
+        else:
+            _compact_pending_receipt(result)
     if lean and view >= 3 and plan and not result.get("pending") and not result.get("error"):
         action = (plan.action, plan.view)
         if (

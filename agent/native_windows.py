@@ -18,6 +18,7 @@ import time
 
 from shared.native_cli import database, identifier, SESSION_QUOTA, WorkerLock
 from agent.native_terminal import TerminalQueries
+from agent.native_terminal_wake import signal_backlog, terminal_wake
 
 
 def capabilities():
@@ -65,6 +66,7 @@ def resolve_argv(argv, env):
     packages = {
         "pi": ("@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"),
         "codex": ("@openai/codex",),
+        "claude": ("@anthropic-ai/claude-code",),
     }.get(cli, ())
     node = first.parent / "node.exe"
     node_path = str(node) if node.is_file() else shutil.which("node.exe", path=env.get("PATH"))
@@ -181,6 +183,15 @@ class ProcessJob:
             self.close()
             raise
 
+    def wait_and_close(self):
+        # A descendant may still hold the protocol pipes when the wrapper exits.
+        # Wait on the owned process HANDLE, independently of pipe EOF.
+        try:
+            if self.kernel.WaitForSingleObject(self.process, 0xFFFFFFFF) != 0:
+                raise self.c.WinError(self.c.get_last_error())
+        finally:
+            self.close()
+
     def alive(self):
         result = self.kernel.WaitForSingleObject(self.process, 0)
         if result == 0xFFFFFFFF:
@@ -223,10 +234,26 @@ def create_pty(argv, cwd, env, rows=30, cols=120):
     return process
 
 
+def _record_terminal_output(db, sid, size, raw, terminal, guard, outgoing):
+    db.execute("INSERT INTO output VALUES (?,?,?)", (sid, size, raw))
+    size += len(raw)
+    db.execute("UPDATE sessions SET size=?,updated=? WHERE id=?", (size, time.time(), sid))
+    db.commit()
+    if size >= SESSION_QUOTA:
+        raise RuntimeError("TRANSCRIPT_QUOTA: export/clear the retained transcript")
+    reply = terminal.feed(raw)
+    if reply and guard.alive():
+        try:
+            outgoing.put_nowait(("", reply.decode("ascii")))
+        except queue.Full as exc:
+            raise RuntimeError("CONPTY_QUERY_BACKPRESSURE") from exc
+    return size
+
+
 def run(directory, sid, *, pty_factory=None, guard_factory=None):
     """The injectable factories are for contract tests, not an alternate backend."""
     sid = identifier(sid)
-    with WorkerLock(directory, sid):
+    with WorkerLock(directory, sid), terminal_wake(directory, sid) as wake:
         db = database(directory)
         row = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
         if not row or row["status"] != "starting":
@@ -247,21 +274,24 @@ def run(directory, sid, *, pty_factory=None, guard_factory=None):
         stopping = None
         stop_receipts = []
         terminal = TerminalQueries()
+        blocking_reads = pty_factory is None
 
         def fail(kind):
             with contextlib.suppress(queue.Full):
                 failures.put_nowait(kind)
+                wake.set()
 
         def read_channel():
             try:
                 while not closing.is_set():
-                    text = pty.read(blocking=False)
+                    text = pty.read(blocking=blocking_reads)
                     if text:
                         raw = text.encode("utf-8")
                         for position in range(0, len(raw), 65536):
                             while not closing.is_set():
                                 try:
                                     incoming.put(raw[position : position + 65536], timeout=0.1)
+                                    wake.set()
                                     break
                                 except queue.Full:
                                     pass
@@ -274,6 +304,7 @@ def run(directory, sid, *, pty_factory=None, guard_factory=None):
                     fail("CONPTY_READ_FAILED")
             finally:
                 reader_done.set()
+                wake.set()
 
         def write_channel():
             while not closing.is_set():
@@ -289,6 +320,7 @@ def run(directory, sid, *, pty_factory=None, guard_factory=None):
                         raise RuntimeError("CONPTY_PARTIAL_WRITE")
                     if receipt:
                         written.put(receipt, timeout=1)
+                        wake.set()
                 except Exception:
                     if not closing.is_set():
                         fail("CONPTY_INPUT_UNCERTAIN")
@@ -296,18 +328,7 @@ def run(directory, sid, *, pty_factory=None, guard_factory=None):
 
         def record(raw):
             nonlocal size
-            db.execute("INSERT INTO output VALUES (?,?,?)", (sid, size, raw))
-            size += len(raw)
-            db.execute("UPDATE sessions SET size=?,updated=? WHERE id=?", (size, time.time(), sid))
-            db.commit()
-            if size >= SESSION_QUOTA:
-                raise RuntimeError("TRANSCRIPT_QUOTA: export/clear the retained transcript")
-            reply = terminal.feed(raw)
-            if reply and guard.alive():
-                try:
-                    outgoing.put_nowait(("", reply.decode("ascii")))
-                except queue.Full as exc:
-                    raise RuntimeError("CONPTY_QUERY_BACKPRESSURE") from exc
+            size = _record_terminal_output(db, sid, size, raw, terminal, guard, outgoing)
 
         try:
             env = dict(os.environ)
@@ -399,7 +420,9 @@ def run(directory, sid, *, pty_factory=None, guard_factory=None):
                                 "UPDATE commands SET state='cancelled' WHERE id=?", (command["id"],)
                             )
                             db.commit()
-                time.sleep(0.01)
+                        wake.set()
+                signal_backlog(wake, incoming)
+                wake.wait(0.25)
             exit_code = guard.exit_code()
             # Some ConPTY versions do not signal EOF after child exit. Drain
             # until actual EOF or bounded silence and explicitly report a tail

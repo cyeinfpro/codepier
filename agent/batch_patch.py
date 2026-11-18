@@ -68,7 +68,7 @@ def apply_patch(engine, project, args):
                 }
         plans, touched, budget = [], set(), 0
 
-        def prepare(relative, expected, after, mode=None):
+        def prepare(relative, expected, after, mode=None, *, edits=None):
             nonlocal budget
             path = engine.path(root, relative, False)
             relative = path.relative_to(root).as_posix()
@@ -92,6 +92,10 @@ def apply_patch(engine, project, args):
                 )
             if not path.parent.is_dir():
                 raise DevError("PARENT_MISSING", "先创建父目录：" + relative, 409)
+            if edits is not None:
+                from agent.core_files import edited_bytes
+
+                after = edited_bytes(engine, before, edits)
             before_mode = stat.S_IMODE(path.stat().st_mode) if before is not None else None
             budget += len(before or b"") + len(after or b"")
             if budget > MAX_BATCH_BYTES:
@@ -112,9 +116,11 @@ def apply_patch(engine, project, args):
             action, path, expected = change["action"], change["path"], change["expected_sha256"]
             if action == "write":
                 prepare(path, expected, engine.encode_content(change["content"]))
+            elif action == "edit":
+                prepare(path, expected, None, edits=change["edits"])
             elif action == "delete":
                 prepare(path, expected, None)
-            else:
+            elif action == "move":
                 source = engine.path(root, path, False)
                 data = engine.read_bytes(source)
                 engine.text(data)
@@ -122,6 +128,8 @@ def apply_patch(engine, project, args):
                     raise DevError("SHA_CONFLICT", "移动源文件已改变；整批未写入", 409)
                 prepare(change["destination"], "new", data, stat.S_IMODE(source.stat().st_mode))
                 prepare(path, expected, None)
+            else:
+                raise DevError("INVALID_ARGUMENT", "未知的补丁操作")
 
         previews = []
         remaining = 64000
@@ -157,15 +165,18 @@ def apply_patch(engine, project, args):
             "files": [],
         }
         # Back up the WHOLE batch before publishing its first filesystem change.
+        backups = []
         for plan in plans:
             backup = uuid.uuid4().hex
-            engine.journal.add_backup(
-                backup,
-                str(root),
-                plan["path"],
-                plan["before"],
-                plan["after_sha"],
-                before_mode=plan["before_mode"],
+            backups.append(
+                (
+                    backup,
+                    str(root),
+                    plan["path"],
+                    plan["before"],
+                    plan["after_sha"],
+                    plan["before_mode"],
+                )
             )
             plan["backup_id"] = backup
             manifest["files"].append(
@@ -177,6 +188,7 @@ def apply_patch(engine, project, args):
                     "state": "pending",
                 }
             )
+        engine.journal.add_backups_batch(backups)
         atomic_json(manifest_path, manifest)
         attempted = []
         try:
@@ -191,6 +203,7 @@ def apply_patch(engine, project, args):
                     plan["expected"],
                     plan["after"],
                     restore_mode=plan["mode"],
+                    prepared_backup=(plan["backup_id"], root, plan["before_mode"]),
                 )
                 row["state"] = "completed"
             manifest["outcome"] = "completed"

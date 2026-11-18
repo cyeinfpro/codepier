@@ -125,8 +125,8 @@ def transform(text, deb822):
                 prefix = ""
                 if line.lower().startswith("uris:"):
                     prefix, line = line[:5], line[5:]
-                for old, new in zip(addresses, replacements):
-                    line = re.sub(r"(?<!\S)" + re.escape(old) + r"(?!\S)", lambda _: new, line)
+                for old, new in zip(addresses, replacements, strict=True):
+                    line = re.sub(r"(?<!\S)" + re.escape(old) + r"(?!\S)", lambda _, new=new: new, line)
                 line = prefix + line
             lines.append(line)
         blocks[i] = "".join(lines)
@@ -199,7 +199,7 @@ def direct_deb822(text):
                 in_uris = line.lower().startswith("uris:")
             if in_uris:
                 prefix, value = (line[:5], line[5:]) if line.lower().startswith("uris:") else ("", line)
-                value = re.sub(r"(?<!\S)" + re.escape(MIRROR_URI) + r"(?!\S)", lambda _: target, value)
+                value = re.sub(r"(?<!\S)" + re.escape(MIRROR_URI) + r"(?!\S)", lambda _, target=target: target, value)
                 line = prefix + value
             lines.append(line)
         blocks[index] = "".join(lines)

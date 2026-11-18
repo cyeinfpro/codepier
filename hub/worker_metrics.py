@@ -28,7 +28,10 @@ class WorkerMetrics:
         self._queue = deque(maxlen=sample_limit)
         self._run = deque(maxlen=sample_limit)
         self.submitted = self.started = self.completed = self.failed = self.rejected = 0
+        self.read_retries = {"session_revision": 0, "data_version": 0}
+        self.read_fence_ms = deque(maxlen=sample_limit)
         self.peak_pending = 0
+        self.running_since = None
         self.since = time.time()
 
     def submit(self):
@@ -47,6 +50,8 @@ class WorkerMetrics:
     def start(self, submitted):
         now = time.monotonic()
         with self._lock:
+            if self.started == self.completed:
+                self.running_since = now
             self.started += 1
             self._queue.append(max(0, (now - submitted) * 1000))
         return now
@@ -54,8 +59,27 @@ class WorkerMetrics:
     def finish(self, started, *, failed=False):
         with self._lock:
             self.completed += 1
+            if self.started == self.completed:
+                self.running_since = None
             self.failed += bool(failed)
             self._run.append(max(0, (time.monotonic() - started) * 1000))
+
+    def read_retry(self, revision_changed, data_changed):
+        with self._lock:
+            self.read_retries["session_revision"] += int(revision_changed)
+            self.read_retries["data_version"] += int(data_changed)
+
+    def read_fenced(self, started):
+        with self._lock:
+            self.read_fence_ms.append((time.monotonic() - started) * 1000)
+
+    def responsive(self, *, max_queue, max_running_seconds):
+        with self._lock:
+            queued = self.submitted - self.started - self.rejected
+            running = self.running_since
+            return queued < max_queue and (
+                running is None or time.monotonic() - running < max_running_seconds
+            )
 
     def snapshot(self):
         with self._lock:
@@ -76,4 +100,6 @@ class WorkerMetrics:
                 "percentile_method": "nearest_rank",
                 "queue_ms": percentiles(self._queue),
                 "phase_ms": percentiles(self._run),
+                "read_retries": dict(self.read_retries),
+                "read_fence_ms": percentiles(self.read_fence_ms),
             }

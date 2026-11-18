@@ -177,23 +177,9 @@ class NativeClient:
                 "COMPUTER_PROVIDER_MISSING",
                 "未找到可执行的本机 Codex Computer Use；请在本机安装/启用后重试",
             )
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k
-            in {
-                "PATH",
-                "HOME",
-                "USER",
-                "TMPDIR",
-                "LANG",
-                "LC_ALL",
-                "XDG_RUNTIME_DIR",
-                "DISPLAY",
-                "SYSTEMROOT",
-                "SystemRoot",
-            }
-        }
+        from agent.computer_process import desktop_environment
+
+        env = desktop_environment()
         env["CODEX_HOME"] = self.info["codex_home"]
         from agent.computer_process import spawn_provider
 
@@ -393,6 +379,9 @@ class NativeClient:
                             "COMPUTER_CLEANUP_UNCONFIRMED",
                             "本机桌面运行器仍在清理自身进程；未确认停止，请核查本机后再建立新会话",
                         ) from exc
+                job_closed = getattr(p, "codepier_job_closed", None)
+                if job_closed is not None:
+                    await asyncio.wait_for(asyncio.shield(job_closed), 8)
                 if p.returncode == CLEANUP_FAILED:
                     raise DevError(
                         "COMPUTER_CLEANUP_UNCONFIRMED",

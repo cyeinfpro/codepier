@@ -21,7 +21,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from hub.db_worker import run_db
+from hub.db_worker import run_db, run_db_read
 from hub.principal import refresh_principal
 from shared.util import DevError
 
@@ -273,12 +273,12 @@ class IncomingFileService:
             _error("FILE_IMPORT_EXPIRED", "File import expired", 410)
         return row, principal, current
 
-    def checked(self, auth, request, upload_id):
+    def checked(self, auth, request, upload_id, *, persist_recovery=True):
         if not _ID.fullmatch(upload_id):
             _error("FILE_IMPORT_NOT_FOUND", "File import was not found", 404)
         principal = self.principal(auth, request)
         row = self.store.one("SELECT * FROM incoming_file_imports WHERE upload_id=?", (upload_id,))
-        row, principal, project = self._check(row, principal)
+        row, principal, project = self._check(row, principal, persist_recovery=persist_recovery)
         # Optional selectors may assert the original context, never switch it.
         if request.query_params.get("project") not in (
             None,
@@ -894,12 +894,13 @@ def make_incoming_file_router(auth, runtime):
             async with asyncio.timeout(BODY_TIMEOUT):
                 iterator = request.stream().__aiter__()
                 while True:
-                    await run_db(runtime.store, check)
                     try:
                         segment = await iterator.__anext__()
                     except StopAsyncIteration:
                         break
-                    await run_db(runtime.store, check)
+                    # The route authorized before reading, and the next await
+                    # starts from this same decision. Recheck each received segment.
+                    await run_db_read(runtime.store, check)
                     if len(data) + len(segment) > limit:
                         _error(
                             "FILE_IMPORT_TOO_LARGE",
@@ -967,7 +968,7 @@ def make_incoming_file_router(auth, runtime):
             raw = await body(
                 request,
                 min(CHUNK, row["bytes"] - offset),
-                lambda: service.checked(auth, request, upload_id),
+                lambda: service.checked(auth, request, upload_id, persist_recovery=False),
             )
             if not raw or hashlib.sha256(raw).hexdigest() != digest:
                 _error("FILE_IMPORT_HASH_MISMATCH", "Chunk bytes do not match X-Chunk-Sha256")

@@ -6,6 +6,16 @@ from shared.native_cli import database
 from tests.test_native_cli import native
 
 
+def test_omitted_sequence_releases_slot_without_advancing_cursor_or_delaying_retry():
+    from agent.native_sync_flow import SyncFlow
+    flow = SyncFlow()
+    flow.inflight.extend([{"seq": 4, "chunks": {"dropped": 5}}, {"seq": 5, "chunks": {"persisted": 8}}])
+    offsets = {"dropped": 1}
+    flow.on_ack({"seqs": [4, 5], "coalesced_seqs": [4], "offsets": {"persisted": 8}}, offsets)
+    assert offsets == {"dropped": 1, "persisted": 8}
+    assert not flow.inflight and not flow.backoff
+
+
 def test_many_small_history_chunks_stay_under_hub_packet_limit(native):
     obj,project=native
     ids=[]

@@ -54,8 +54,11 @@ def test_production_http_does_not_expose_legacy_ui_or_test_fixture_routes(stack)
     index = stack.client.get('/')
     assert index.status_code == 200
     assert LEGACY_PREFIX not in index.text
+    manifest = re.search(r'<script id="codepier-route-assets" type="application/json">(.*?)</script>', index.text, re.S)
+    assert manifest
+    routed = json.loads(manifest.group(1))['collaboration']
     for name in ROOM_ASSETS:
-        links = re.findall(r'(?:src|href)="(/static/' + re.escape(name) + r'\?[^" ]+)"', index.text)
+        links = [url for url in routed if url.split('?', 1)[0] == '/static/' + name]
         assert len(links) == 1
         response = stack.client.get(unescape(links[0]))
         assert response.status_code == 200

@@ -351,6 +351,7 @@ class ChannelRouter:
                         now,
                     ),
                 )
+            self.store.after_commit(lambda: self.c.loops.wake_channels("channel_mirrors"))
             queued.append({"id": did, "channel": channel, "state": "queued"})
             if dispositions is not None:
                 dispositions.append(
@@ -780,7 +781,14 @@ class ChannelRouter:
         return rows
 
     def for_messages(self, ids):
-        ids = list(dict.fromkeys(ids))[:124]
+        ids = list(dict.fromkeys(ids))
+        result = {}
+        for start in range(0, len(ids), 124):
+            batch = ids[start : start + 124]
+            result.update(self._for_message_batch(batch))
+        return result
+
+    def _for_message_batch(self, ids):
         result = self.c.weixin.delivery.for_messages(ids)
         for values in result.values():
             for value in values:

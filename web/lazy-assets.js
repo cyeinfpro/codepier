@@ -32,7 +32,13 @@
     async load(page) {
       // Keep classic-script dependencies ordered. Successful assets survive a
       // later failure so retries never re-execute top-level declarations.
-      for (const url of groups[page] || []) await asset(url);
+      const urls = groups[page] || [];
+      const styles = urls.filter((url) => new URL(url, location.href).pathname.endsWith('.css'));
+      const styleSet = new Set(styles);
+      const scripts = async () => {
+        for (const url of urls) if (!styleSet.has(url)) await asset(url);
+      };
+      await Promise.all([...styles.map(asset), scripts()]);
     },
   });
 })();

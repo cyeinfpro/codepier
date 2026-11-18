@@ -71,7 +71,7 @@ def read_resource(uri, public_url):
     }
 
 
-def attach(result, name, args, value, public_url):
+def attach(result, name, args, value, public_url, profile="core"):
     if name == "read" and args.get("operation") == "changes":
         name = "show_changes"
         args = {**args, **args.get("options", {})}
@@ -79,6 +79,7 @@ def attach(result, name, args, value, public_url):
         return result
     binding = {
         "kind": "changes",
+        "catalog_mode": profile,
         "project": args.get("project", ""),
         "workspace_id": args.get("workspace_id", ""),
         "operation_id": value.get("operation_id"),

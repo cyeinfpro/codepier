@@ -171,6 +171,7 @@ def inspect_project_mount(root, *, max_entries=200000, max_seconds=8):
     root = validate_mount_root(root)
     device = root.stat().st_dev
     deadline, count = time.monotonic() + max_seconds, 0
+    linked = {}
     pending = [root]
     try:
         while pending:
@@ -201,6 +202,16 @@ def inspect_project_mount(root, *, max_entries=200000, max_seconds=8):
                                 403,
                             )
                         pending.append(entry.path)
+                    elif stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                        key = (info.st_dev, info.st_ino)
+                        seen, expected = linked.get(key, (0, info.st_nlink))
+                        if expected != info.st_nlink:
+                            raise DevError(
+                                "RUNTIME_MOUNT_UNVERIFIED",
+                                "Hard links changed during mount inspection",
+                                409,
+                            )
+                        linked[key] = (seen + 1, expected)
                     elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise DevError(
                             "RUNTIME_MOUNT_UNSAFE",
@@ -213,6 +224,10 @@ def inspect_project_mount(root, *, max_entries=200000, max_seconds=8):
             "Project mount inspection was incomplete; no workload was started",
             409,
         ) from exc
+    if any(seen != expected for seen, expected in linked.values()):
+        raise DevError(
+            "RUNTIME_MOUNT_UNSAFE", "Project contains a file hard-linked outside the mount", 403
+        )
     return {"entries": count, "scope": "bounded_prestart_metadata_scan"}
 
 

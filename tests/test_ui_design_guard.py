@@ -27,6 +27,16 @@ BASELINE = {
 }
 
 
+def test_workspace_compact_touch_targets_win_the_cascade():
+    from scripts.css_override_report import responsive_overrides
+    selectors = {(".workspace-project-actions .btn", "min-height"),
+                 (".workspace-project-actions > .icon-btn", "height"),
+                 (".workspace-project-actions > .icon-btn", "width")}
+    css = (ROOT / "web/workspace.css").read_text()
+    assert not [(s, p, m) for s, p, m, _, _ in responsive_overrides(css) if (s, p) in selectors]
+    assert list(responsive_overrides("@media (max-width:500px){.btn{height:44px}}.btn{height:32px}"))
+
+
 def test_design_drift_never_grows():
     current = metrics()
     grown = {key_: (current[key_], limit) for key_, limit in BASELINE.items() if current[key_] > limit}

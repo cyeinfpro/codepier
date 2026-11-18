@@ -1,7 +1,13 @@
 {
   "routes": {
+    "native": [
+      "chat.css", "chat-markdown.js", "chat-panels.js", "chat-chrome.js",
+      "chat-history.js", "chat-catalog.js", "chat.js"
+    ],
+    "roles": ["roles.js"],
     "collaboration": [
       "collaboration-room.css",
+      "chat-markdown.js",
       "collaboration-room-store.js",
       "collaboration-room.js"
     ],

@@ -19,6 +19,8 @@ from hub.collaboration.event_errors import CallbackEndpointError, event_error
 from hub.tool_router import ToolRouter
 from shared.role_contracts import ROLE_SCOPE
 import json
+import os
+import time
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from hub.auth import Auth
@@ -56,10 +58,74 @@ from shared.mcp_protocol import (
 VERSIONS = set(LEGACY)
 
 
+def presentation_options(query):
+    """Resolve presentation settings independently of request authentication."""
+    profile = query.get("profile", "unified")
+    if profile not in {"unified", "core", "full", "coding"}:
+        raise ValueError("Unknown MCP profile; choose unified, core, full or coding")
+    schemas = query.get("schemas", "full")
+    if schemas not in {"full", "lean", "none"}:
+        raise ValueError("Unknown schemas mode; choose full, lean or none")
+    default_view = os.getenv("CODEPIER_MCP_DEFAULT_VIEW", "2") if profile == "unified" else "2"
+    view = query.get("view", default_view)
+    verbosity = query.get("verbosity", "lean")
+    lean_v3 = profile == "unified" and view == "3" and verbosity == "lean"
+    text_mode = query.get("text", "compact" if lean_v3 else "json")
+    mirror = query.get("mirror", "meta" if lean_v3 and text_mode == "compact" else "full")
+    output_mode = query.get("output", "raw")
+    if (
+        view not in {"1", "2", "3"}
+        or verbosity not in {"lean", "full"}
+        or text_mode not in {"json", "compact"}
+        or output_mode not in {"raw", "normalized"}
+    ):
+        raise ValueError(
+            "Invalid presentation options: view=1|2|3, verbosity=lean|full, text=json|compact, output=raw|normalized"
+        )
+    if mirror not in {"full", "meta"} or (
+        mirror == "meta" and (profile != "unified" or text_mode != "compact")
+    ):
+        raise ValueError("mirror must be full or meta; meta requires unified text=compact")
+    if verbosity == "full":
+        mirror = "full"
+    if profile != "unified" and view == "3":
+        view = "2"
+    return profile, schemas, view, verbosity, text_mode, mirror, output_mode
+
+
+async def _begin_project_trace(runtime, principal, name, metadata, arguments):
+    alias = arguments.get("project")
+    if name in COLLABORATION_TOOLS or not isinstance(alias, str) or not alias:
+        return None
+    project = await runtime.store.run(runtime.project, alias, principal)
+    try:
+        return await runtime.store.run(
+            runtime.integrations.begin, principal, project, name, metadata, arguments
+        )
+    except Exception:
+        runtime.integrations.write_errors += 1
+        return None
+
+
+async def _begin_poll_trace(runtime, principal, name, metadata, arguments, value, started):
+    if arguments.get("project") or not runtime.integrations.operation_poll(name, arguments):
+        return None
+    try:
+        return await runtime.store.run(
+            runtime.integrations.begin_poll, principal, name, metadata, arguments, value, started
+        )
+    except Exception:
+        runtime.integrations.write_errors += 1
+        return None
+
+
 def make_router(auth: Auth, runtime: Runtime, public_url):
     router = APIRouter()
     tools = ToolRouter(runtime.store, runtime.gateway)
     tasks = TaskService(runtime)
+    from hub.mcp_streams import Streams
+
+    streams = Streams()
 
     async def observe(principal, stage, **details):
         try:
@@ -125,6 +191,9 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
 
     @router.post("/mcp")
     async def mcp(request: Request):
+        return await streams.respond(request, handle)
+
+    async def handle(request, stream_ready):
         if not await runtime.store.run(origin_allowed, request):
             return failure(None, -32000, "Origin not allowed", 403)
         origin = request.headers.get("origin")
@@ -195,7 +264,10 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         if not isinstance(metadata, dict):
             return failure(identifier, -32602, "_meta must be an object", 400 if modern else 200)
         if modern:
-            if notification and method != "notifications/roots/list_changed":
+            if notification and method not in {
+                "notifications/roots/list_changed",
+                "notifications/cancelled",
+            }:
                 return failure(
                     None, -32601, "No HTTP client notifications are implemented for 2026-07-28", 404
                 )
@@ -220,53 +292,19 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             if version and version not in LEGACY:
                 return failure(identifier, -32600, "Unsupported MCP-Protocol-Version", 400)
         mark("protocol_validated", protocol="modern" if modern else "legacy")
-        profile = request.query_params.get("profile", "unified")
-        if profile not in {"unified", "core", "full", "coding"}:
-            return failure(
-                identifier, -32602, "Unknown MCP profile; choose unified, core, full or coding", 400
+        try:
+            profile, schemas, view, verbosity, text_mode, mirror, output_mode = presentation_options(
+                request.query_params
             )
-        schemas = request.query_params.get("schemas", "full")
-        if schemas not in {"full", "lean", "none"}:
-            return failure(
-                identifier, -32602, "Unknown schemas mode; choose full, lean or none", 400
-            )
-        view = request.query_params.get("view", "2")
-        verbosity = request.query_params.get("verbosity", "lean")
-        lean_v3 = profile == "unified" and view == "3" and verbosity == "lean"
-        text_mode = request.query_params.get("text", "compact" if lean_v3 else "json")
-        mirror = request.query_params.get(
-            "mirror", "meta" if lean_v3 and text_mode == "compact" else "full"
-        )
-        output_mode = request.query_params.get("output", "raw")
-        if (
-            view not in {"1", "2", "3"}
-            or verbosity not in {"lean", "full"}
-            or text_mode not in {"json", "compact"}
-            or output_mode not in {"raw", "normalized"}
-        ):
-            return failure(
-                identifier,
-                -32602,
-                "Invalid presentation options: view=1|2|3, verbosity=lean|full, text=json|compact, output=raw|normalized",
-                400,
-            )
-        if (
-            mirror not in {"full", "meta"}
-            or mirror == "meta"
-            and (profile != "unified" or text_mode != "compact")
-        ):
-            return failure(
-                identifier,
-                -32602,
-                "mirror must be full or meta; meta requires unified text=compact",
-                400,
-            )
-        if verbosity == "full":
-            mirror = "full"
-        if profile != "unified" and view == "3":
-            view = "2"
+        except ValueError as exc:
+            return failure(identifier, -32602, str(exc), 400)
         instructions = CORE_WORKFLOW_INSTRUCTIONS if view == "1" else CORE_INSTRUCTIONS
         if notification:
+            if method == "notifications/cancelled":
+                target = params.get("requestId")
+                if type(target) not in (int, str) or len(str(target)) > 1024:
+                    return failure(None, -32602, "Invalid cancellation requestId", 400)
+                streams.cancel(request, principal, target)
             return Response(status_code=202)
         try:
             principal = await runtime.store.run(refresh_principal, runtime.store, principal)
@@ -346,7 +384,18 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 result = await tasks.call(method, task_id, principal)
                 principal = await runtime.store.run_read(auth.bearer, request)
                 # Refresh the original credential again after cooperative cancel.
-                latest = await runtime.store.run(tasks.get, task_id, principal)
+                latest = await runtime.store.run(
+                    tasks.get,
+                    task_id,
+                    principal,
+                    presentation={
+                        "view": int(view),
+                        "text_mode": text_mode,
+                        "mirror": mirror,
+                        "verbosity": verbosity,
+                        "output_mode": output_mode,
+                    },
+                )
                 if method == "tasks/get":
                     result = latest
                 if method == "tasks/cancel":
@@ -389,26 +438,31 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
 
                             plan = await unified_tools.prepare(runtime, name, arguments, principal)
                             name, arguments = plan.tool, plan.args
-                        if (
-                            name not in COLLABORATION_TOOLS
-                            and arguments.get("project")
-                            and isinstance(arguments["project"], str)
-                        ):
-                            project = await runtime.store.run(
-                                runtime.project, arguments["project"], principal
-                            )
-                            try:
-                                trace = await runtime.store.run(
-                                    runtime.integrations.begin,
-                                    principal,
-                                    project,
-                                    name,
-                                    metadata,
-                                    arguments,
+                            if (
+                                name == "read"
+                                and arguments.get("operation", "file") in {"file", "batch"}
+                                and verbosity == "lean"
+                                and view != "1"
+                                and not arguments.get("idempotency_key")
+                            ):
+                                arguments.setdefault("options", {}).setdefault(
+                                    "include_knowledge", False
                                 )
-                                request.state.codepier_call_trace = trace
-                            except Exception:
-                                runtime.integrations.write_errors += 1
+                        trace = await _begin_project_trace(
+                            runtime, principal, name, metadata, arguments
+                        )
+                        request.state.codepier_call_trace = trace
+                        if (
+                            plan is not None
+                            and plan.wait
+                            and (
+                                "progressToken" in metadata
+                                or request.query_params.get("stream") == "1"
+                                and plan.wait > 10
+                            )
+                        ):
+                            stream_ready.set_result(streams.begin(request, principal, identifier))
+                        started = time.monotonic()
                         mark("invoke_started")
                         if plan is not None:
                             value, name, arguments = await unified_tools.execute(
@@ -417,6 +471,10 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                         else:
                             value = await runtime.invoke(name, arguments, principal)
                         principal = await runtime.store.run_read(auth.bearer, request)
+                        trace = trace or await _begin_poll_trace(
+                            runtime, principal, name, metadata, arguments, value, started
+                        )
+                        request.state.codepier_call_trace = trace
                         unified_views = (
                             unified_tools.runtime_directory(runtime, principal.scopes)
                             if plan is not None
@@ -476,6 +534,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                                 arguments,
                                 value,
                                 request_public_url,
+                                profile,
                             )
                         try:
                             await runtime.store.run(
@@ -488,7 +547,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                         except Exception:
                             runtime.diagnostics.connection.write_errors += 1
                         if trace:
-                            trace["operation_id"] = value.get("operation_id")
+                            trace["operation_id"] = value.get("operation_id") or trace["operation_id"]
                             trace["status"] = "tool_error" if result.get("isError") else "complete"
                         if modern and name == "exec" and task_supported(metadata):
                             created = await runtime.store.run(
@@ -705,7 +764,12 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     "events/list",
                 }:
                     # Protected project data must never be cached by shared proxies.
-                    result = {**result, "ttlMs": 0, "cacheScope": "private"}
+                    ttl = (
+                        300000
+                        if method == "resources/read" and params.get("uri") in mcp_apps.RESOURCES
+                        else 0
+                    )
+                    result = {**result, "ttlMs": ttl, "cacheScope": "private"}
                 if isinstance(result, CreatedTask):
                     result = {**complete(result.body), "resultType": "task"}
                 else:

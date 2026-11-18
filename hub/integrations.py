@@ -211,10 +211,38 @@ class HubIntegrations:
             "trust": "摘要只是已保存的工作记录；重新读取当前代码核实，不得重放结果不明的写入。",
         }
 
-    def begin(self, principal, project, name, metadata, arguments=None):
-        meaningful = name not in SAFE and name not in {
-            "operations_get",
-            "operations_wait",
+    @staticmethod
+    def operation_poll(name, arguments):
+        return name in {"operations_get", "operations_wait"} or (
+            name in {"task_query", "process"} and arguments.get("operation") in {"get", "wait"}
+        )
+
+    def begin_poll(self, principal, name, metadata, arguments, value, started):
+        # Read only the already authorized result rows. Polling mixed projects
+        # cannot be attributed to one project without inventing a token split.
+        operations = value.get("operations", ()) if isinstance(value, dict) else ()
+        if not operations and isinstance(value, dict) and "operation_id" in value:
+            operations = [value]
+        if not operations or any(
+            not isinstance(row, dict) or not row.get("project_id") for row in operations
+        ):
+            return None
+        projects = {row["project_id"] for row in operations}
+        if len(projects) != 1:
+            return None
+        try:
+            project = self.runtime.project(projects.pop(), principal)
+        except DevError:
+            return None
+        if any(row.get("device_id") and row["device_id"] != project["device_id"] for row in operations):
+            return None
+        trace = self.begin(principal, project, name, metadata, arguments, started=started)
+        if len(operations) == 1:
+            trace["operation_id"] = operations[0].get("operation_id")
+        return trace
+
+    def begin(self, principal, project, name, metadata, arguments=None, *, started=None):
+        meaningful = name not in SAFE and not self.operation_poll(name, arguments or {}) and name not in {
             "operations_list",
             "activity_list",
             "diagnostics_get",
@@ -234,6 +262,7 @@ class HubIntegrations:
         )
         key = hmac.new(self.salt, identity.encode(), "sha256").hexdigest() if window else None
         now = time.monotonic()
+        started = now if started is None else started
         transition = "no_host_correlation" if key is None else "gap_unavailable"
         if meaningful and key:
             prior = self.previous.pop(key, None)
@@ -264,7 +293,7 @@ class HubIntegrations:
                 principal.actor,
                 key,
                 name,
-                time.time(),
+                time.time() - (now - started),
                 "running",
                 transition,
                 int(meaningful),
@@ -274,7 +303,7 @@ class HubIntegrations:
         trace = {
             "id": row.lastrowid,
             "key": key,
-            "started": now,
+            "started": started,
             "meaningful": meaningful,
             "transition": transition,
             "finished": False,

@@ -93,7 +93,7 @@ def make_activity_router(context: HubContext):
     store, runtime, auth = context.store, context.runtime, context.auth
 
     @router.get("/api/operations")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def operations(
         request: Request,
         limit: int = 40,
@@ -136,7 +136,7 @@ def make_activity_router(context: HubContext):
         return runtime.operation(id, auth.panel(request))
 
     @router.get("/api/audit")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def audit(
         request: Request,
         limit: int = 40,

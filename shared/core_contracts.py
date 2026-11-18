@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from pydantic import AfterValidator, Field, model_validator
 from shared.computer_contracts import ComputerArgs, DesktopAction
-from shared.coding_contracts import PatchChange
+from shared.coding_contracts import PatchChange, Replacement
 from shared.integration_contracts import NativeFile
 
 CORE_REMOTE = frozenset({"read", "write", "edit", "exec"})
@@ -207,7 +207,23 @@ def queue_options(value):
     return QueueOptions.model_validate(value).model_dump(exclude_defaults=True)
 
 
-class ReadBatchOptions(QueueOptions):
+class ExecQueueOptions(QueueOptions):
+    max_queue_ms: int | None = Field(default=None, ge=1, le=600000)
+
+
+class ReadOptions(QueueOptions):
+    include_knowledge: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class ReadFileOptions(ReadOptions):
+    read_snapshot: str = Field(
+        default="",
+        pattern=r"^(|create|[a-f0-9]{32})$",
+        description="Use create for an immutable text version, then pass its returned token for later pages.",
+    )
+
+
+class ReadBatchOptions(ReadOptions):
     items: list[ReadBatchItem] = Field(min_length=1, max_length=READ_BATCH_MAX_ITEMS)
 
 
@@ -229,7 +245,9 @@ class Read(Project):
         if self.operation == "file":
             if not self.path:
                 raise ValueError("file read requires path")
-            self.options = queue_options(self.options)
+            self.options = ReadFileOptions.model_validate(self.options).model_dump(
+                exclude_defaults=True
+            )
         if self.operation == "batch":
             if self.path or self.offset != 1 or self.limit != 2000 or self.expected_sha256:
                 raise ValueError("batch read uses only options.items for file arguments")
@@ -268,11 +286,6 @@ class Write(Mutation):
         return self
 
 
-class Replacement(ComputerArgs):
-    old_text: str = Field(min_length=1, max_length=1048576)
-    new_text: str = Field(max_length=1048576)
-
-
 class Edit(Mutation):
     operation: Literal["file", "restore", "checkpoint", "reviews"] = "file"
     options: dict[str, Any] = Field(
@@ -284,11 +297,9 @@ class Edit(Mutation):
     changes: list[PatchChange] = Field(
         default_factory=list,
         max_length=32,
-        description="Alternative SHA-checked multi-file write/delete/move batch.",
+        description="Alternative SHA-checked multi-file write/edit/delete/move batch.",
     )
-    dry_run: bool = Field(
-        default=False, description="Preview changes without applying; only with changes."
-    )
+    dry_run: bool = Field(default=False, description="Preflight edits without writing.")
 
     @model_validator(mode="after")
     def edit_mode(self):
@@ -298,8 +309,19 @@ class Edit(Mutation):
         if self.changes:
             if self.path or self.edits or self.expected_sha256:
                 raise ValueError("changes cannot be combined with path/edits/expected_sha256")
-        elif not self.path or not self.edits or not self.expected_sha256 or self.dry_run:
+        elif not self.path or not self.edits or not self.expected_sha256:
             raise ValueError("Supply changes, or path + edits + expected_sha256")
+        elif self.dry_run:
+            # Route previews through the same all-path preflight as a patch.
+            self.changes = [
+                PatchChange(
+                    action="edit",
+                    path=self.path,
+                    expected_sha256=self.expected_sha256,
+                    edits=[item.model_dump() for item in self.edits],
+                )
+            ]
+            self.path, self.expected_sha256, self.edits = "", "", []
         return self
 
 
@@ -346,14 +368,18 @@ class Exec(Mutation):
         description="Relative snapshot artifacts to export to CODEPIER_RUN_DIR.",
     )
     options: dict[str, Any] = Field(
-        default_factory=dict, description="order=default|strict; wait_policy=queue|fail_fast."
+        default_factory=dict, description="order=default|strict; wait_policy=queue|fail_fast; max_queue_ms bounds Agent admission."
     )
 
     @model_validator(mode="after")
     def execution_values(self):
         from shared.contracts import ShellExec
 
-        self.options = queue_options(self.options)
+        self.options = ExecQueueOptions.model_validate(self.options).model_dump(exclude_defaults=True)
+        if self.options.get("max_queue_ms") is not None and (
+            self.isolation == "snapshot" or self.options.get("wait_policy") == "fail_fast"
+        ):
+            raise ValueError("max_queue_ms requires ordinary queued execution")
         if self.isolation == "snapshot" and (self.task or self.target != "agent"):
             raise ValueError(
                 "snapshot requires a local agent command, not a configured task or VPS"
@@ -538,7 +564,7 @@ class Computer(ComputerArgs):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
 
 
-def register(tool, tools, schemas):
+def register(tool, tools):
     from shared.contracts import VPSList
 
     specs = {
@@ -606,9 +632,5 @@ def register(tool, tools, schemas):
             True,
         ),
     }
-    from shared.core_output_schemas import build_core_output_schemas
-
-    output_schemas = build_core_output_schemas(schemas)
     for name, (model, scope, description, destructive, local) in specs.items():
         tools[name] = tool(model, scope, description, destructive, local)
-        schemas[name] = output_schemas[name]

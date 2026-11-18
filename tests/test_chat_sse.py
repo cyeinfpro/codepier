@@ -36,6 +36,20 @@ def service(tmp_path):
     store.close()
 
 
+def test_indexed_replay_matches_scan_across_boundaries_and_gaps(service):
+    from hub.native_cli import output_rows
+
+    obj, _, sid = service
+    with closing(database(obj.directory)) as db:
+        db.executemany("INSERT INTO output VALUES (?,?,?)", [(sid, 4, b"abc"), (sid, 9, b"12345")])
+        for cursor in range(16):
+            for boundary in (5, 10, 14, 200):
+                expected = db.execute("SELECT offset,data FROM output WHERE session=? AND "
+                                      "offset+length(data)>? AND offset<? ORDER BY offset LIMIT 4",
+                                      (sid, cursor, boundary)).fetchall()
+                assert output_rows(db, sid, cursor, limit=4, boundary=boundary).fetchall() == expected
+
+
 async def sync(obj,sid,raw,offset=0):
     with closing(database(obj.directory)) as db:
         row=public(db.execute('SELECT * FROM sessions WHERE id=?',(sid,)).fetchone())

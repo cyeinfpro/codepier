@@ -45,6 +45,21 @@ async def test_control_frames_jump_queued_bulk_frames_fifo_within_class():
 
 
 @pytest.mark.asyncio
+async def test_bulk_progress_under_sustained_control_contention():
+    lock, order = PrioritySendLock(), []
+    async def sender(label, bulk):
+        async with lock.hold(bulk):
+            order.append(label)
+    async with lock:
+        bulk = asyncio.create_task(sender("bulk", True))
+        controls = [asyncio.create_task(sender(i, False)) for i in range(64)]
+        await asyncio.sleep(0)
+    await asyncio.gather(bulk, *controls)
+    assert order.index("bulk") == 8
+    assert [value for value in order if value != "bulk"] == list(range(64))
+
+
+@pytest.mark.asyncio
 async def test_cancelled_waiter_hands_lock_on():
     lock = PrioritySendLock()
     await lock.acquire()

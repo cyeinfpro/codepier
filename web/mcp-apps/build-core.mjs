@@ -6,7 +6,8 @@ await build({
   globalName: 'CP',
   platform: 'browser',
   target: 'es2022',
-  minify: false,
+  minifyWhitespace: true,
+  minifySyntax: true,
   legalComments: 'eof',
   outfile: '../core/bundle.js',
 });

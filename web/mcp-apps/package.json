@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "node build-core.mjs && node build-room.mjs && node build.mjs",
-    "format": "prettier --write ../*.js ../*.css ../core/*.mjs *.mjs ../collaboration-room/*.mjs ../chat/*.js ../chat/styles/*.css ../collaboration-room/styles/*.css",
-    "format:check": "prettier --check ../*.js ../*.css ../core/*.mjs *.mjs ../collaboration-room/*.mjs ../chat/*.js ../chat/styles/*.css ../collaboration-room/styles/*.css"
+    "format": "prettier --write '../*.js' '!../collaboration-room.js' ../*.css ../core/*.mjs *.mjs ../collaboration-room/*.mjs ../chat/*.js ../chat/styles/*.css ../collaboration-room/styles/*.css",
+    "format:check": "prettier --check '../*.js' '!../collaboration-room.js' ../*.css ../core/*.mjs *.mjs ../collaboration-room/*.mjs ../chat/*.js ../chat/styles/*.css ../collaboration-room/styles/*.css"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "2.0.4"

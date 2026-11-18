@@ -2,8 +2,8 @@
   "sdk": "@modelcontextprotocol/ext-apps@2.0.4",
   "outputs": {
     "changes-v1.html": {
-      "bytes": 636323,
-      "sha256": "08c2d5169375ededac6774bf448b877b4db25de625474c06f1325e6549b874d1"
+      "bytes": 17628,
+      "sha256": "a277ecac8a3daf39539ecf3c0a15142e171c26fa47d266020aec6b099bbc4d3d"
     }
   }
 }

@@ -1,4 +1,4 @@
-import {App} from '@modelcontextprotocol/ext-apps';
+import {App} from './host-bridge.js';
 import {el, button, notice} from './ui.js';
 import {mountReview} from './review.js';
 
@@ -28,7 +28,20 @@ function valueOf(result, name = '') {
   return value;
 }
 async function request(name, args) {
-  return valueOf(await app.callServerTool({name, arguments: args}), name);
+  let call = {name, arguments: args};
+  if (binding.catalog_mode === 'unified') {
+    if (name === 'read' && args.operation === 'changes') {
+      const {project, workspace_id, options} = args;
+      call = {name: 'query', arguments: {action: 'changes', view: 'changes', project,
+        ...(workspace_id ? {workspace_id} : {}), args: options}};
+    } else if (name === 'process' && args.operation === 'wait') {
+      call = {name: 'query', arguments: {action: 'job', view: 'wait', ids: args.operation_ids,
+        wait: args.wait_seconds, args: {output_limit: args.output_limit}}};
+    } else {
+      throw new Error('该卡片只支持读取固定快照和等待原操作。');
+    }
+  }
+  return valueOf(await app.callServerTool(call), name);
 }
 function stop() {
   generation++;

@@ -21,6 +21,18 @@ MAX_SEARCHES = 4
 SYNC_LANE_DEPTH = 4
 
 
+def output_rows(db, sid, cursor, *, limit=-1, boundary=2**63 - 1):
+    # Seek to the block containing the cursor (or its predecessor in a gap).
+    return db.execute(
+        """SELECT offset,data FROM output
+        WHERE session=:sid AND offset >= COALESCE((
+            SELECT MAX(offset) FROM output WHERE session=:sid AND offset<=:cursor
+        ), 0) AND offset<:boundary AND offset+length(data)>:cursor
+        ORDER BY offset LIMIT :limit""",
+        {"sid": sid, "cursor": cursor, "boundary": boundary, "limit": limit},
+    )
+
+
 class _SyncLane:
     __slots__ = ("queue", "task")
 
@@ -357,6 +369,10 @@ class NativeService:
         ack = {"type": "native_ack", "offsets": persisted["offsets"]}
         if seqs:
             ack["seqs"] = seqs
+            if len(seqs) > 1:
+                # Older frames supplied metadata only. Their omitted chunks
+                # are eligible for immediate resend from the persisted offset.
+                ack["coalesced_seqs"] = seqs[:-1]
         if persisted["rejected"]:
             ack["rejected"] = persisted["rejected"]
         if persisted["deferred"]:
@@ -652,10 +668,7 @@ class NativeService:
                 ):
                     raise DevError("CLI_OFFSET", "事件游标不是已完成的事件边界", 409)
             raw = b""
-            for out in db.execute(
-                "SELECT offset,data FROM output WHERE session=? AND offset+length(data)>? ORDER BY offset",
-                (sid, cursor),
-            ):
+            for out in output_rows(db, sid, cursor):
                 raw += out["data"][max(0, cursor - out["offset"]) :]
                 if len(raw) > 1048576:
                     break
@@ -853,10 +866,7 @@ def make_native_router(auth, runtime):
                 offset = 0
             chunks = []
             next_offset = offset
-            for out in db.execute(
-                "SELECT * FROM output WHERE session=? AND offset+length(data)>? ORDER BY offset LIMIT 4",
-                (sid, offset),
-            ):
+            for out in output_rows(db, sid, offset, limit=4):
                 raw = out["data"][max(0, offset - out["offset"]) :]
                 chunks.append(base64.b64encode(raw).decode("ascii"))
                 next_offset = out["offset"] + len(out["data"])
@@ -881,7 +891,8 @@ def make_native_router(auth, runtime):
                 if row["mode"] != "chat":
                     raise DevError("CLI_TERMINAL_SESSION", "Terminal output is not chat", 409)
                 boundary = db.execute(
-                    "SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?",
+                    """SELECT COALESCE((SELECT offset+length(data) FROM output
+                    WHERE session=? ORDER BY offset DESC LIMIT 1), 0)""",
                     (sid,),
                 ).fetchone()[0]
             return boundary
@@ -894,10 +905,7 @@ def make_native_router(auth, runtime):
                 current = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()
                 if not current or current["status"] in ("cleared", "deleted"):
                     return []
-                return db.execute(
-                    "SELECT offset,data FROM output WHERE session=? AND offset+length(data)>? AND offset<? ORDER BY offset LIMIT 4",
-                    (sid, cursor, boundary),
-                ).fetchall()
+                return output_rows(db, sid, cursor, limit=4, boundary=boundary).fetchall()
 
         def export_authorized():
             service.session_project(sid, auth.panel(request))

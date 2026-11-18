@@ -654,11 +654,18 @@ class NativeCLI:
                 >= 128
             ):
                 raise DevError("CLI_BACKPRESSURE", "输入队列繁忙；保持原回执重试", 429)
-            db.execute(
-                "INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)",
-                (receipt, sid, action, packed, time.time()),
-            )
-            return {"receipt": receipt, "state": "queued"}
+            return self._queue_terminal_command(db, receipt, sid, action, packed)
+
+    def _queue_terminal_command(self, db, receipt, sid, action, packed):
+        db.execute(
+            "INSERT INTO commands(id,session,kind,payload,created) VALUES (?,?,?,?,?)",
+            (receipt, sid, action, packed, time.time()),
+        )
+        from agent.native_terminal_wake import signal_command
+
+        db.commit()
+        signal_command(self.directory, sid)
+        return {"receipt": receipt, "state": "queued"}
 
     def chat_action(self, db, row, action, project, root, args):
         """Admit a narrow durable command, never arbitrary native RPC or a writer lease."""

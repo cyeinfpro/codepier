@@ -170,24 +170,23 @@ spec:
               mountPath: /app/data
             - name: tmp
               mountPath: /tmp
-          # /healthz answers 503 until the delivery worker runs and SQLite responds,
-          # and again while shutting down, so it serves readiness and liveness alike.
+          # A slow SQLite writer may remove the pod from service without restarting it.
           startupProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             periodSeconds: 3
             failureThreshold: 30
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             periodSeconds: 10
             timeoutSeconds: 4
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             periodSeconds: 30
             timeoutSeconds: 4

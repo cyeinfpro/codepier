@@ -13,10 +13,10 @@ import os
 from pathlib import Path
 import shutil
 import stat
-import subprocess
 import sys
 import time
 
+from agent.filesystem import snapshot_ignored
 from agent.run_directories import operation_name, safe_directory
 from shared.util import DevError
 
@@ -34,6 +34,27 @@ def _relative(value: str) -> Path:
     return path
 
 
+def _clone_directory(source: Path, destination: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+    import errno
+
+    clone = getattr(ctypes.CDLL(None, use_errno=True), "clonefile", None)
+    if clone is None:
+        return False
+    clone.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    clone.restype = ctypes.c_int
+    if clone(os.fsencode(source), os.fsencode(destination), 1) == 0:  # CLONE_NOFOLLOW
+        return True
+    if not destination.exists() and ctypes.get_errno() in (
+        errno.ENOTSUP,
+        errno.EINVAL,
+        errno.EISDIR,
+    ):
+        return False
+    raise DevError("SNAPSHOT_UNSUPPORTED", "Cannot clone snapshot directory on this filesystem")
+
+
 def _clone_file(source: str, destination: str) -> str:
     """Clone data blocks; never fall back to a full copy."""
     if sys.platform == "darwin":
@@ -49,70 +70,112 @@ def _clone_file(source: str, destination: str) -> str:
                 "SNAPSHOT_UNSUPPORTED", "APFS clonefile is unavailable for this filesystem"
             )
     elif sys.platform.startswith("linux"):
+        import fcntl
+
         try:
-            result = subprocess.run(
-                [
-                    "cp",
-                    "--reflink=always",
-                    "--preserve=mode,timestamps",
-                    "--",
-                    str(source),
-                    str(destination),
-                ],
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DevError(
-                "SNAPSHOT_UNSUPPORTED", "Required reflink clone command is unavailable"
-            ) from exc
-        if result.returncode:
+            with open(source, "rb") as src, open(destination, "xb") as dst:
+                # Linux FICLONE is _IOW(0x94, 9, int).
+                fcntl.ioctl(dst.fileno(), getattr(fcntl, "FICLONE", 0x40049409), src.fileno())
+            shutil.copystat(source, destination, follow_symlinks=False)
+        except OSError as exc:
             raise DevError(
                 "SNAPSHOT_UNSUPPORTED", "Filesystem does not support required reflink cloning"
-            )
+            ) from exc
     else:
         raise DevError("SNAPSHOT_UNSUPPORTED", "Snapshot execution requires APFS or Linux reflink")
     return str(destination)
 
 
-def _validate_tree(root: Path, *, artifacts: bool = False) -> None:
+def _snapshot_exclusions(root, parent, names):
+    return {
+        name for name in names if snapshot_ignored((parent / name).relative_to(root).as_posix())
+    }
+
+
+def _validate_link(path, root, artifacts):
+    target = os.readlink(path)
+    if artifacts or os.path.isabs(target):
+        raise DevError("SNAPSHOT_UNSAFE", "Snapshot contains an unsafe symbolic link")
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise DevError(
+            "SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source"
+        ) from exc
+    relative = resolved.relative_to(root)
+    if snapshot_ignored(relative.as_posix()):
+        raise DevError(
+            "SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata"
+        )
+
+
+def _validate_tree(root: Path, *, artifacts: bool = False, original: Path | None = None) -> set:
+    partial_clone = set()
     for directory, directories, files in os.walk(root, followlinks=False):
         parent = Path(directory)
-        if parent == root and not artifacts:
-            directories[:] = [name for name in directories if name not in {".git", ".codepier"}]
-            files = [name for name in files if name not in {".git", ".codepier"}]
+        if not artifacts:
+            excluded = _snapshot_exclusions(root, parent, directories + files)
+            if excluded and original is not None:
+                raise DevError("SNAPSHOT_UNSAFE", "Excluded path appeared during snapshot clone")
+            if excluded and parent != root:
+                partial_clone.add(parent.relative_to(root).parts[0])
+            directories[:] = [name for name in directories if name not in excluded]
+            files = [name for name in files if name not in excluded]
         for name in directories + files:
             path = parent / name
             mode = path.lstat().st_mode
             if stat.S_ISLNK(mode):
-                target = os.readlink(path)
-                if artifacts or os.path.isabs(target):
-                    raise DevError("SNAPSHOT_UNSAFE", "Snapshot contains an unsafe symbolic link")
-                try:
-                    resolved = path.resolve(strict=True)
-                    resolved.relative_to(root)
-                except (ValueError, OSError, RuntimeError) as exc:
-                    raise DevError(
-                        "SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source"
-                    ) from exc
-                relative = resolved.relative_to(root)
-                if relative.parts and relative.parts[0] in {".git", ".codepier"}:
-                    raise DevError(
-                        "SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata"
-                    )
+                _validate_link(path, root, artifacts)
             elif not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
                 raise DevError("SNAPSHOT_UNSAFE", "Snapshot contains a special file")
             elif stat.S_ISREG(mode) and not artifacts:
-                _validate_editable(path, root)
+                _validate_editable(path, root, original)
+    return partial_clone
 
 
-def _validate_editable(path: Path, root: Path) -> None:
+def _validate_editable(path: Path, root: Path, original: Path | None = None) -> None:
     if path.stat().st_mode & 0o111:
         with path.open("rb") as stream:
-            shebang = stream.read(4096).split(b"\n", 1)[0]
-        if shebang.startswith(b"#!") and os.fsencode(root) in shebang:
-            raise DevError("SNAPSHOT_UNSAFE", "Script interpreter points to the original project")
+            shebang = stream.readline(4096)
+        source = original or root
+        if shebang.startswith(b"#!") and os.fsencode(source) in shebang:
+            prefix = b"#!" + os.fsencode(source) + b"/"
+            command = shebang.rstrip(b"\r\n").split(maxsplit=1)[0]
+            relative = os.fsdecode(command[len(prefix) :]) if command.startswith(prefix) else ""
+            import re
+
+            if (
+                not re.fullmatch(r"\.venv/bin/python(?:[0-9]+(?:\.[0-9]+)?)?", relative)
+                or os.fsencode(source) in shebang[len(command) :]
+                or path.relative_to(root).parts[:2] != (".venv", "bin")
+                or not (root / relative).is_file()
+                or not (root / relative).resolve().is_relative_to(root)
+            ):
+                raise DevError(
+                    "SNAPSHOT_UNSAFE", "Script interpreter points to the original project"
+                )
+            if original is not None:
+                rewritten = b"#!" + os.fsencode(root) + b"/" + shebang[len(prefix) :]
+                if len(rewritten) > 255 or any(
+                    c in os.fsencode(root) for c in (b" ", b"\t", b"\n")
+                ):
+                    raise DevError(
+                        "SNAPSHOT_UNSAFE", "Relocated interpreter exceeds kernel shebang limits"
+                    )
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as out:
+                    temporary = Path(out.name)
+                    with path.open("rb") as source_file:
+                        if source_file.readline(4096) != shebang:
+                            raise DevError(
+                                "SNAPSHOT_UNSAFE", "Snapshot script changed during relocation"
+                            )
+                        out.write(rewritten)
+                        shutil.copyfileobj(source_file, out)
+                    os.fchmod(out.fileno(), stat.S_IMODE(path.stat().st_mode))
+                os.replace(temporary, path)
     if path.suffix == ".egg-link" or path.name.startswith("__editable__"):
         raise DevError("SNAPSHOT_UNSAFE", "Editable Python installs are not supported in snapshots")
     if path.name == "direct_url.json":
@@ -161,11 +224,11 @@ class SnapshotManager:
         source_cwd = root / relative
         safe_directory(source_cwd)
         source_cwd.relative_to(root)
-        if relative.parts and relative.parts[0] in {".git", ".codepier"}:
+        if snapshot_ignored(relative.as_posix()):
             raise DevError("SNAPSHOT_UNSAFE", "Cannot execute inside excluded metadata")
         if self.parent == root or self.parent.is_relative_to(root):
             raise DevError("SNAPSHOT_UNSAFE", "Snapshot storage must be outside the project")
-        _validate_tree(root)
+        partial_clone = _validate_tree(root)
         container = self.parent / name
         try:
             container.mkdir(mode=0o700)
@@ -173,18 +236,30 @@ class SnapshotManager:
             raise DevError("SNAPSHOT_EXISTS", "Snapshot already exists", 409) from exc
         destination = container / "tree"
         try:
-            shutil.copytree(
-                root,
-                destination,
-                symlinks=True,
-                copy_function=_clone_file,
-                ignore=lambda directory, names: [
-                    name
-                    for name in names
-                    if Path(directory) == root and name in {".git", ".codepier"}
-                ],
-            )
-            _validate_tree(destination)
+            destination.mkdir(mode=0o700)
+            # Clone top-level subtrees in one APFS syscall each. Excluded
+            # roots are never copied, even transiently, into a command workspace.
+            for source in root.iterdir():
+                if snapshot_ignored(source.name):
+                    continue
+                target = destination / source.name
+                mode = source.lstat().st_mode
+                if stat.S_ISLNK(mode):
+                    target.symlink_to(os.readlink(source), target_is_directory=source.is_dir())
+                elif stat.S_ISDIR(mode):
+                    if source.name in partial_clone or not _clone_directory(source, target):
+                        shutil.copytree(
+                            source, target, symlinks=True, copy_function=_clone_file,
+                            ignore=lambda directory, names: _snapshot_exclusions(
+                                root, Path(directory), names
+                            ),
+                        )
+                elif stat.S_ISREG(mode):
+                    _clone_file(str(source), str(target))
+                else:
+                    raise DevError("SNAPSHOT_UNSAFE", "Snapshot contains a special file")
+            shutil.copystat(root, destination, follow_symlinks=False)
+            _validate_tree(destination, original=root)
             # Empty projects still require a working clone facility.
             if not any(destination.iterdir()):
                 probe = container / "probe"

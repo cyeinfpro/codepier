@@ -103,19 +103,20 @@ sudo python3 scripts/panel_updater.py recover --root "$PWD"
 
 ## 备份 Hub 数据
 
-Hub CLI 可以一致性备份数据库及对应主密钥。在部署目录执行：
+Hub CLI 使用 SQLite 在线备份生成数据库包，并校验副本的完整性和兼容性。密钥另存为独立归档。将两份归档分别保存在受限的存储中。
 
 ```bash
-backup="codepier-$(date +%Y%m%d-%H%M%S).zip"
-docker compose exec -T hub python -m hub backup --output "/app/data/backups/$backup"
-umask 077
-mkdir -p backups
-chmod 700 backups
-docker compose cp "hub:/app/data/backups/$backup" "./backups/$backup"
-chmod 600 "./backups/$backup"
+python -m hub --data-dir /srv/codepier/data backup \
+  --output /mnt/codepier-backups/hub-20261118.zip \
+  --keys-output /mnt/codepier-keys/hub-20261118.keys.zip
+
+python -m hub restore --backup /mnt/codepier-backups/hub-20261118.zip \
+  --keys /mnt/codepier-keys/hub-20261118.keys.zip --verify
 ```
 
-将备份放到另一处可信存储，并验证可恢复性。数据库与对应密钥必须一起保留；这个 ZIP 不包含全部附件、Agent 本机状态或原生 CLI 配置。完整迁移还需规划数据卷、部署配置和各节点的备份。面板更新保留的旧数据卷也不能替代独立备份。
+Docker 部署可在容器内运行相同的备份命令，再把两份归档分别复制到持久存储。验证完成后，可将 `--verify` 改为 `--output` 并指定全新目录。在隔离环境启动恢复出的 Hub 后，核对 OAuth 授权、协作室和附件。
+
+稳定卷上的附件原件、原生 CLI 状态、部署配置和 Agent 状态需单独备份。每日成功备份对应一天的目标 RPO。RTO 以离线校验、隔离启动和切换演练的实测为准。面板更新保留的旧数据卷仍应与独立备份分别管理。
 
 ## 数据迁移与历史快照
 

@@ -220,7 +220,7 @@ def test_split_update_and_rollback_preserve_asset_mount_and_env(tmp_path):
 
 def test_split_cli_backup_uses_matching_state_keys(tmp_path, monkeypatch):
     import zipfile
-    from hub.__main__ import write_backup
+    from hub.backup import write_backup
     state = tmp_path / "state"
     store = Store(state); store.close(); marker(state)
     assets = tmp_path / "assets"; assets.mkdir()
@@ -229,8 +229,9 @@ def test_split_cli_backup_uses_matching_state_keys(tmp_path, monkeypatch):
     store = Store(assets)
     try:
         output = tmp_path / "backup.zip"
-        write_backup(store, output)
-        with zipfile.ZipFile(output) as archive:
+        keys = tmp_path / "keys" / "keys.zip"
+        write_backup(store.state_directory, output, keys)
+        with zipfile.ZipFile(keys) as archive:
             assert archive.read("master.key") == (state / "master.key").read_bytes()
             assert archive.read("master.key") != b"decoy"
     finally:

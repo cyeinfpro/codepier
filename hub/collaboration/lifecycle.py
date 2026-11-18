@@ -92,13 +92,18 @@ class CollaborationLoops:
             if self.started and self._event_wake is wake:
                 wake.set()
 
-    def wake_channels(self):
+    def wake_channels(self, name=None):
         """An owner/account change interrupts the idle backoff immediately."""
         with self._wake_lock:
             loop = self._event_loop
             if not self.started or loop is None or loop.is_closed():
                 return
-            for wake in self._channel_wakes.values():
+            wakes = (
+                self._channel_wakes.values() if name is None else (self._channel_wakes.get(name),)
+            )
+            for wake in wakes:
+                if wake is None:
+                    continue
                 try:
                     loop.call_soon_threadsafe(wake.set)
                 except RuntimeError:
@@ -156,7 +161,7 @@ class CollaborationLoops:
                 }
                 await operation()
                 idle_delay = (
-                    await self.service.store.run(lambda: self.channel_delay(name, interval))
+                    await self.service.store.run_read(lambda: self.channel_delay(name, interval))
                     if name in self._channel_wakes
                     else interval
                 )

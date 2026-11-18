@@ -738,7 +738,15 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         "next_offset": nullable(INT),
     }
     text_file = obj(
-        {**file_meta, "content": STR, "offset": INT, "end_line": INT, "total_lines": INT},
+        {
+            **file_meta,
+            "content": STR,
+            "offset": INT,
+            "end_line": INT,
+            "total_lines": INT,
+            "read_snapshot": STR,
+            "snapshot_expires_at": {"type": "number"},
+        },
         (
             "operation_id",
             "path",

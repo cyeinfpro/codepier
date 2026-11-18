@@ -104,16 +104,26 @@ def visible_tools(store, principal):
     visible, seen = [], set()
     # Bound by RolePolicy (32 rules) and gateway catalog limits. No cross-await
     # permission cache or backend discovery request is performed by tools/list.
+    identifiers = tuple(dict.fromkeys(rule.binding_id for rule in policy.connector_rules))
+    if not identifiers:
+        return []
+    placeholders = ",".join("?" for _ in identifiers)
+    rows = store.all(
+        "SELECT b.*, a.catalog AS discovered_catalog FROM gateway_bindings b "
+        "JOIN gateway_accounts a ON a.id=b.account_id AND a.space_id=b.space_id "
+        "JOIN gateway_connectors c ON c.id=a.connector_id AND c.space_id=b.space_id "
+        f"WHERE b.space_id=? AND b.id IN ({placeholders}) AND b.enabled AND a.enabled AND c.enabled "
+        "AND (a.sharing='space' OR a.owner_user_id=?)",
+        (principal.space_id, *identifiers, principal.user_id),
+    )
+    available = {}
+    for binding in rows:
+        catalog = json.loads(binding.pop("discovered_catalog"))
+        available[binding["id"]] = binding, {tool["name"]: fingerprint(tool) for tool in catalog}
     for rule in policy.connector_rules:
-        try:
-            binding, account, connector = binding_rows(store, rule.binding_id, principal.space_id)
-        except DevError:
+        if rule.binding_id not in available:
             continue
-        if not accessible(account, principal) or not all(
-            row["enabled"] for row in (binding, account, connector)
-        ):
-            continue
-        discovered = {tool["name"]: fingerprint(tool) for tool in json.loads(account["catalog"])}
+        binding, discovered = available[rule.binding_id]
         for tool in json.loads(binding["tools"]):
             key = (binding["id"], tool["name"])
             if (

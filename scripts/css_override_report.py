@@ -101,6 +101,20 @@ def overridden(earlier: str, later: str):
             yield context, selector, prop
 
 
+def responsive_overrides(css: str):
+    """Yield differing unconditional declarations following an equal-specificity media rule."""
+    conditional = defaultdict(dict)
+    for context, selector, prop, value in declarations(css):
+        for item in split_top(selector):
+            pair = (item, prop)
+            if context and all(rule.startswith("@media") for rule in context):
+                conditional[pair][context] = value
+            elif not context:
+                for media, earlier in conditional.get(pair, {}).items():
+                    if earlier != value and ("!important" not in earlier or "!important" in value):
+                        yield item, prop, media, earlier, value
+
+
 def main(earlier: str, later: str) -> int:
     dead = defaultdict(list)
     for context, selector, prop in overridden(Path(earlier).read_text(), Path(later).read_text()):

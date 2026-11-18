@@ -137,29 +137,23 @@ def test_running_hub_and_backup_exclusion_locks_reject_rotation(tmp_path):
 
 
 def test_backup_contains_exact_current_key_generation_and_restores(tmp_path):
-    from hub.__main__ import write_backup
+    from hub.backup import restore_backup, write_backup
+
     directory = tmp_path / 'hub'
     populated(directory)
     keyring.rotate_key(directory)
-    store = Store(directory)
-    archive = tmp_path / 'backup.zip'
-    try:
-        lock = InstanceLock(directory / '.keys.lock')
-        try:
-            with pytest.raises((RuntimeError, OSError)):
-                write_backup(store, archive)
-            assert not archive.exists()
-        finally:
-            lock.close()
-        write_backup(store, archive)
-    finally:
-        store.close()
+    archive = tmp_path / 'db' / 'backup.zip'
+    keys = tmp_path / 'keys' / 'keyring.zip'
+    with InstanceLock(directory / '.keys.lock'):
+        with pytest.raises((RuntimeError, OSError)):
+            write_backup(directory, archive, keys)
+        assert not archive.exists()
+        assert not keys.exists()
+    write_backup(directory, archive, keys)
+    with zipfile.ZipFile(keys) as zipped:
+        assert set(zipped.namelist()) == {'master.key', keyring.RING_FILE}
     restored = tmp_path / 'restored'
-    restored.mkdir(mode=0o700)
-    with zipfile.ZipFile(archive) as zipped:
-        assert set(zipped.namelist()) == {'hub.sqlite3', 'master.key', keyring.RING_FILE}
-        for name in zipped.namelist():
-            keyring.atomic_private(restored / name, zipped.read(name))
+    restore_backup(archive, keys, destination=restored)
     assert_readable(restored)
 
 

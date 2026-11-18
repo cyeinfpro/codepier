@@ -100,11 +100,13 @@ def test_http_range_decodes_off_database_thread_and_rechecks_authority(telegram_
     row = dict(id='synthetic', state='ready', content=media_cache.encode(app.state.store, payload),
                size=6, sha256=hashlib.sha256(payload).hexdigest(), name='file.txt')
     reads, decodes = [], []
-    def authorized_row(identifier, actor):
+    content_reads = []
+    def authorized_row(identifier, actor, *, include_content=True):
         reads.append(threading.get_ident())
-        if revoke_during_decode and len(reads) == 2:
+        content_reads.append(include_content)
+        if revoke_during_decode and decodes:
             raise DevError('ATTACHMENT_NOT_FOUND', 'Scope revoked during download', 403)
-        return row
+        return row if include_content else {k: v for k, v in row.items() if k != 'content'}
     original = media.decode_range
     def decode_range(record, header=None):
         decodes.append(threading.get_ident())
@@ -112,8 +114,9 @@ def test_http_range_decodes_off_database_thread_and_rechecks_authority(telegram_
     monkeypatch.setattr(media, 'row', authorized_row)
     monkeypatch.setattr(media, 'decode_range', decode_range)
     response = client.get('/api/collaboration/attachments/synthetic/content', headers={'Range': 'bytes=1-3'})
-    assert len(reads) == 2 and reads[0] == reads[1]
-    assert decodes and decodes[0] != reads[0]
+    assert content_reads[0] is True and content_reads[-1] is False
+    assert content_reads == sorted(content_reads, reverse=True)
+    assert decodes and decodes[0] not in reads
     if revoke_during_decode:
         assert response.status_code == 403
         assert response.content != b'bcd'

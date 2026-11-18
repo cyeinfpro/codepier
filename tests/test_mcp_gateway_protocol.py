@@ -97,11 +97,11 @@ async def test_cancelled_schema_worker_is_reaped_and_capacity_recovers(monkeypat
     async def spawn(*args, **kwargs):
         process = await real_spawn(*args, **kwargs)
         workers.append(process)
-        communicate = process.communicate
-        async def observed(data):
+        drain = process.stdin.drain
+        async def observed():
+            await drain()
             entered.set()
-            return await communicate(data)
-        process.communicate = observed
+        process.stdin.drain = observed
         return process
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
     schema = {'type': 'object', 'properties': {'text': {'type': 'string', 'pattern': '^(a+)+$'}}}
@@ -112,3 +112,8 @@ async def test_cancelled_schema_worker_is_reaped_and_capacity_recovers(monkeypat
         await task
     assert validator.active == 0
     assert len(workers) == 1 and workers[0].returncode is not None
+    await validator.validate({'type': 'string'}, 'valid')
+    await validator.validate({'type': 'number'}, 7)
+    assert len(workers) == 2
+    await validator.close()
+    assert all(worker.returncode is not None for worker in workers)

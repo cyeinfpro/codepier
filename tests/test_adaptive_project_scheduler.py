@@ -304,3 +304,15 @@ async def test_fixed_reconfigure_keeps_requested_initial_above_minimum():
     scheduler = ProjectScheduler({"initial": 2, "maximum": 12})
     await scheduler.reconfigure({"adaptive": False, "minimum": 8, "initial": 10, "maximum": 12})
     assert scheduler.capacity.limit == 10
+
+
+@pytest.mark.asyncio
+async def test_queue_deadline_releases_ticket_without_starting_operation():
+    scheduler = ProjectScheduler({"adaptive": False, "initial": 2, "project_limits": {"A": 1}})
+    async with scheduler.slot("holder", "A"):
+        with pytest.raises(DevError, match="未开始执行") as exc:
+            async with scheduler.slot("expired", "A", max_queue_ms=15):
+                pytest.fail("expired admission must not enter the caller's body")
+        assert exc.value.code == "RESOURCE_BUSY"
+    async with asyncio.timeout(1), scheduler.slot("next", "A"):
+        assert scheduler.snapshot()["running"] == 1

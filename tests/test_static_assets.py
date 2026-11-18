@@ -26,6 +26,27 @@ def client_for(path):
     return TestClient(Starlette(routes=[Mount('/static', app=ReleaseAssets(directory=path))]))
 
 
+def test_gzip_and_identity_have_independent_validators(assets):
+    directory, original, _, manifest = assets
+    raw = original * 100
+    digest = hashlib.sha256(raw).hexdigest()
+    manifest["assets"]["app.js"] = {"bytes": len(raw), "sha256": digest}
+    (directory / "app.js").write_bytes(raw)
+    (directory / "assets-manifest.json").write_text(json.dumps(manifest))
+    url = "/static/app.js?" + urlencode({"v": "codepier-" + VERSION, "h": digest})
+    with client_for(directory) as client:
+        compressed = client.get(url, headers={"Accept-Encoding": "gzip"})
+        assert compressed.headers["Content-Encoding"] == "gzip"
+        assert compressed.headers["Vary"] == "Accept-Encoding"
+        assert compressed.content == raw
+        assert int(compressed.headers["Content-Length"]) < len(raw)
+        identity = client.get(url, headers={"Accept-Encoding": "gzip;q=0, *;q=1",
+                                             "If-None-Match": compressed.headers["ETag"]})
+        assert identity.status_code == 200 and identity.content == raw
+        assert "Content-Encoding" not in identity.headers
+        assert identity.headers["ETag"] != compressed.headers["ETag"]
+
+
 def test_only_correct_generated_identity_is_immutable_and_frozen(assets):
     directory, raw, digest, _ = assets
     url = '/static/app.js?' + urlencode({'v': 'codepier-' + VERSION, 'h': digest})

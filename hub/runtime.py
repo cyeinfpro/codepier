@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import sqlite3
 import time
 import unicodedata
 import uuid
@@ -106,6 +107,7 @@ class Connection:
         self.native_security_protocol = 0
         self.tool_protocol = None
         self.resource_semantics_protocol = 0
+        self.queue_deadline_protocol = 0
         self.project_view_protocol = 0
         self.project_runtime_protocol = 0
         self.project_runtime_profiles = []
@@ -169,9 +171,12 @@ class Runtime:
         self.watchers: set[asyncio.Queue] = set()
         self.dispatch_locks = weakref.WeakValueDictionary()
         self.delivery_slots = asyncio.Semaphore(8)
+        self._handshake_tokens = 16.0
+        self._handshake_updated = time.monotonic()
         self.stopping = False
         self.wake = asyncio.Event()
         self.worker = None
+        self.wal_observer = None
         self.computer_cleanup_at = 0.0
         self.computer_approvals = ComputerApprovals(self)
         config = RuntimeConfig.from_env()
@@ -196,6 +201,18 @@ class Runtime:
         )
         self.worker = asyncio.create_task(self.delivery_loop(), name="durable-delivery")
         await self.knowledge_maintenance.start()
+        self.wal_observer = asyncio.create_task(self._observe_wal(), name="observe-wal")
+
+    async def _observe_wal(self):
+        while not self.stopping:
+            await asyncio.sleep(300)
+            if self.stopping:
+                return
+            try:
+                await self.store.run(self.store.sample_wal_checkpoint)
+            except (OSError, sqlite3.Error):
+                # A later sample can recover after a transient filesystem error.
+                continue
 
     def operation_result(self, row):
         from hub.operation_history import result
@@ -248,7 +265,12 @@ class Runtime:
         message = {"type": kind, "at": time.time(), "data": data or {}}
         if audience is not None:
             message["_audience"] = audience  # Server-only routing; stripped by SSE.
+        space = audience.get("space_id") if isinstance(audience, dict) else None
         for q in list(self.watchers):
+            owner = getattr(q, "_stream_owner", None)
+            watcher_space = getattr(q, "_stream_space", None) or (owner[0] if owner else None)
+            if space and watcher_space and watcher_space != space:
+                continue
             self._signal_owner(q, self._enqueue, q, message)
 
     def online(self, device_id: str):
@@ -441,6 +463,11 @@ class Runtime:
             else "*"
         )
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
+        return self._authorize_operation_row(row, principal, status_only, include_output)
+
+    def _authorize_operation_row(self, row, principal, status_only, include_output):
+        if row is None:
+            raise DevError("OPERATION_NOT_FOUND", "找不到此身份授权范围内的操作", 404)
         principal = iam.require_record(self.store, principal, row)
         if row["tool"] in PANEL_ROOTS_TOOLS:
             from hub.agent_roots import authorize
@@ -478,23 +505,31 @@ class Runtime:
             row["output"], _ = self.outputs.read(row)
         return row
 
-    def _visible_operations(self, identifiers, principal, device_id):
+    def _visible_operations(self, identifiers, principal, device_id, *, anonymous=None):
         visible, restricted = [], False
-        for value in identifiers[:64] if isinstance(identifiers, list) else []:
-            identifier = value.get("operation_id") if isinstance(value, dict) else value
-            if not isinstance(identifier, str) or not 1 <= len(identifier) <= 100:
-                continue
+        ids = [
+            v.get("operation_id") if isinstance(v, dict) else v
+            for v in (identifiers[:64] if isinstance(identifiers, list) else [])
+        ]
+        ids = [key for key in ids if isinstance(key, str) and 1 <= len(key) <= 100]
+        if not ids:
+            return visible, restricted
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.store.all(
+            "SELECT id,actor,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,"
+            "visibility,args_summary,created,updated,"
+            "(SELECT at FROM operation_events WHERE operation_id=operations.id "
+            "AND stage='executing' ORDER BY id DESC LIMIT 1) AS started "
+            f"FROM operations WHERE device_id=? AND id IN ({placeholders})",
+            (device_id, *ids),
+        )
+        indexed = {row["id"]: row for row in rows}
+        for identifier in ids:
+            current = None
+            candidate = indexed.get(identifier)
             try:
-                row = self.operation_row(identifier, principal, status_only=True)
-                if row["device_id"] != device_id:
-                    raise DevError("NOT_FOUND", "Operation unavailable", 404)
-                timing = self.store.one(
-                    "SELECT created,updated FROM operations WHERE id=?", (identifier,)
-                )
-                start = self.store.one(
-                    "SELECT at FROM operation_events WHERE operation_id=? AND stage='executing' ORDER BY id DESC LIMIT 1",
-                    (identifier,),
-                )
+                current = refresh_profile_principal(self.store, principal)
+                row = self._authorize_operation_row(candidate, current, True, False)
                 from hub.call_log import argument_summary
                 from shared.audit_redaction import display_value
 
@@ -514,9 +549,11 @@ class Runtime:
                                 (
                                     time.time()
                                     if row["state"] in ACTIVE | {"unknown"}
-                                    else timing["updated"]
+                                    else row["updated"]
                                 )
-                                - (start["at"] if start else timing["created"]),
+                                - (
+                                    row["started"] if row["started"] is not None else row["created"]
+                                ),
                             ),
                             1,
                         ),
@@ -525,7 +562,29 @@ class Runtime:
                 )
             except (DevError, ValueError, TypeError):
                 restricted = True
+                if anonymous is not None and current and candidate:
+                    anonymous.append(self._anonymous_blocker(candidate, current))
         return visible, restricted
+
+    @staticmethod
+    def _anonymous_blocker(row, principal):
+        same_space = row["space_id"] == principal.space_id
+        tool = row["tool"] if same_space else ""
+        if tool.startswith("worktrees_"):
+            kind = "worktree"
+        elif tool in {"exec", "shell_exec", "ssh_exec", "tasks_run", "validation_run"}:
+            kind = "command"
+        elif tool in MUTATING:
+            kind = "write"
+        else:
+            kind = "operation"
+        started = row["started"] if same_space else None
+        return {
+            "kind": kind,
+            "same_identity": same_space and row["actor"] == principal.actor,
+            "held_ms": max(0, round((time.time() - started) * 1000)) if started else None,
+            "can_cancel": False,
+        }
 
     @iam.read_decision
     def queue_annotations(self, row, principal):
@@ -536,14 +595,23 @@ class Runtime:
             "SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",
             (row["id"],),
         )
+        stage_summary = (
+            {
+                "stage": latest["stage"],
+                "stage_age_ms": max(0, round((time.time() - latest["at"]) * 1000)),
+            }
+            if latest
+            else {}
+        )
         if row["state"] in {"reconnecting", "unknown", "cancelling"}:
             return {
+                **stage_summary,
                 "queue_stage": "unknown",
                 "last_observed_stage": latest["stage"] if latest else None,
                 "last_observed_at": latest["at"] if latest else None,
             }
         if row["state"] == "running":
-            return {"queue_stage": "running"}
+            return {"queue_stage": "running", "stage": "running", **stage_summary}
         if latest and latest["stage"] in {"waiting_resource", "waiting_project", "waiting_worker"}:
             try:
                 detail = json.loads(latest["detail"])
@@ -554,8 +622,9 @@ class Runtime:
             from shared.scheduler_config import safe_queue_detail
 
             safe = safe_queue_detail(detail)
+            anonymous = []
             blockers, restricted = self._visible_operations(
-                detail.get("blocked_by", []), principal, row["device_id"]
+                detail.get("blocked_by", []), principal, row["device_id"], anonymous=anonymous
             )
             # A blocker/stage change emits another event. Preserve the Agent's
             # elapsed wait rather than restarting the clock at that event.
@@ -570,13 +639,25 @@ class Runtime:
             }
             if restricted:
                 waiting["blocker_visibility"] = "restricted_or_unavailable"
-            return {"queue_stage": "agent_waiting", "waiting": waiting}
+            return {
+                "queue_stage": "agent_waiting",
+                "waiting": waiting,
+                **stage_summary,
+                "queue_reason": waiting["reason"],
+                "blocked_count": safe.get("blocked_count", len(blockers) + len(anonymous)),
+                **({"restricted_blockers": anonymous} if anonymous else {}),
+            }
         accepted = row.get("accepted_at")
         if "accepted_at" not in row:
             current = self.store.one("SELECT accepted_at FROM operations WHERE id=?", (row["id"],))
             accepted = current["accepted_at"] if current else None
         return {
             "queue_stage": "agent_waiting" if accepted else "hub_queue",
+            "stage": "accepted" if accepted else "hub_queue",
+            "queue_reason": "agent_pending" if accepted else "hub_delivery",
+            "stage_age_ms": max(
+                0, round((time.time() - (accepted or row.get("created") or time.time())) * 1000)
+            ),
             "waiting": {
                 "reason": "agent_pending" if accepted else "hub_delivery",
                 "lane": None,
@@ -1556,7 +1637,7 @@ class Runtime:
             "show_changes",
             "apply_patch",
             "edit",
-        }:
+        } or (name == "read" and (args.get("options") or {}).get("read_snapshot")):
             snapshot["_coding_owner"] = (
                 "grant:" + principal.grant_id if principal.grant_id else principal.actor
             )
@@ -2079,7 +2160,7 @@ class Runtime:
         if row is None:
             return None
         async with self.device_dispatch_lock(row["device_id"]):
-            return await self.store.run(self._prepare_delivery, identifier)
+            return await self.store.run(self._prepare_delivery, identifier, retain_source=True)
 
     async def deliver_device(self, ids):
         from hub.delivery_pipeline import ordered_delivery
@@ -2100,8 +2181,37 @@ class Runtime:
             await self._send_prepared(id, prepared)
 
     @staticmethod
+    def require_file_options(connection, tool, args):
+        if getattr(connection, "file_options_protocol", 0) == 1:
+            return
+        if tool in {"fs_search", "searches_start"}:
+            advanced = bool(args.get("context_lines") or args.get("include_sha256"))
+        elif tool == "read":
+            advanced = bool((args.get("options") or {}).get("read_snapshot"))
+        elif tool in {"edit", "apply_patch"}:
+            advanced = any(edit.get("replace_all") for edit in args.get("edits", ())) or any(
+                change.get("action") == "edit" for change in args.get("changes", ())
+            )
+        else:
+            return
+        if advanced:
+            raise DevError(
+                "AGENT_FILE_OPTIONS_REQUIRED",
+                "当前 Agent 不支持此搜索或编辑选项，请更新 Agent",
+                409,
+            )
+
+    @staticmethod
     def require_resource_semantics(connection, args):
         options = args.get("options") or {}
+        if options.get("max_queue_ms") is not None and (
+            getattr(connection, "queue_deadline_protocol", 0) != 1
+        ):
+            raise DevError(
+                "AGENT_RESOURCE_SEMANTICS_REQUIRED",
+                "max_queue_ms requires Agent queue deadline protocol 1",
+                409,
+            )
         advanced = (
             args.get("isolation", "none") == "snapshot"
             or any(
@@ -2120,7 +2230,7 @@ class Runtime:
             )
 
     @iam.read_decision
-    def _delivery_packet_current(self, identifier, device_id, con, packet):
+    def _delivery_packet_current(self, identifier, device_id, con, packet, source=None):
         # Preparation can overlap an earlier send. Recheck current authority
         # immediately before this packet, without caching an authorization result.
         with self.store.transaction():
@@ -2138,9 +2248,14 @@ class Runtime:
                 return False
             if packet["type"] != "call":
                 return True
-            # The wire packet intentionally omits vps_ref. Use the original
-            # encrypted request for the final VPS version/binding check too.
-            request = json.loads(self.store.decrypt(op["payload"]))
+            # A prepared source carries no authorization. A changed ciphertext
+            # invalidates this packet, including any stale VPS transport data.
+            if source is not None:
+                if source[0] != op["payload"]:
+                    return False
+                request = source[1]
+            else:
+                request = json.loads(self.store.decrypt(op["payload"]))
             denied = self.permission_error(op, request)
             denied = denied or self.collaboration.coordination.operation_denial(op)
             panel = not op["grant_id"] and op["actor"].startswith("panel:")
@@ -2161,6 +2276,7 @@ class Runtime:
                 denied = denied or (policy[1] if policy else None)
                 require_compatible(getattr(con, "tool_protocol", None), op["tool"])
                 self.require_resource_semantics(con, request["args"])
+                self.require_file_options(con, op["tool"], request["args"])
                 runtime_requirement = None
                 if op["project_id"]:
                     from hub.project_runtimes import attach_requirement
@@ -2215,21 +2331,21 @@ class Runtime:
             return True
 
     async def _send_prepared(self, identifier, prepared):
-        device_id, con, packets = prepared
+        device_id, con, packets, *source = prepared
         for packet in packets:
 
             async def current(packet=packet):
                 # This final current-authority fence holds the socket send
                 # lock. It must not strand receipt ACKs behind normal DB work.
                 return await self.store.run_control(
-                    self._delivery_packet_current, identifier, device_id, con, packet
+                    self._delivery_packet_current, identifier, device_id, con, packet, *source
                 )
 
             if not await con.send(packet, before_send=current):
                 return
 
     @iam.read_decision
-    def _prepare_delivery(self, id):
+    def _prepare_delivery(self, id, *, retain_source=False):
         # Reuse existing authorization memoization only within this synchronous
         # phase. Every write invalidates it; no decision survives the next await.
         packets = []
@@ -2270,6 +2386,10 @@ class Runtime:
                 return
             denied = self.permission_error(op, request)
             denied = denied or self.collaboration.coordination.operation_denial(op)
+            if retain_source:
+                from copy import deepcopy
+
+                source = (op["payload"], deepcopy(request))
             # Never trust a client-supplied origin, UA or project field. Durable
             # actor/grant columns originate from Auth, not tool arguments.
             panel = not op["grant_id"] and op["actor"].startswith("panel:")
@@ -2357,6 +2477,7 @@ class Runtime:
                 validate_call_epoch(op["tool"], request.get("tool_contract_version"))
                 require_compatible(getattr(con, "tool_protocol", None), op["tool"])
                 self.require_resource_semantics(con, request["args"])
+                self.require_file_options(con, op["tool"], request["args"])
                 if not op["accepted_at"] and op["project_id"]:
                     from hub.project_runtimes import attach_requirement
 
@@ -2433,6 +2554,14 @@ class Runtime:
                         request = {**request, "args": dict(request["args"])}
                         for field in ("isolation", "snapshot_artifacts", "options"):
                             request["args"].pop(field, None)
+                    if (
+                        op["tool"] == "read"
+                        and getattr(con, "file_options_protocol", 0) != 1
+                        and "include_knowledge" in (request["args"].get("options") or {})
+                    ):
+                        options = dict(request["args"]["options"])
+                        options.pop("include_knowledge")
+                        request = {**request, "args": {**request["args"], "options": options}}
                     if op["tool"] == "fs_tree" and getattr(con, "tree_options_protocol", 0) != 1:
                         request = {
                             **request,
@@ -2455,6 +2584,8 @@ class Runtime:
                             "tool_contract_version": request.get("tool_contract_version", 1),
                         }
                     )
+        if retain_source:
+            return op["device_id"], con, packets, source
         return op["device_id"], con, packets
 
     def complete(self, op, result):
@@ -2931,6 +3062,61 @@ class Runtime:
             return True, None
         return True, self._receive_operation_event(device_id, connection, data, authenticated=True)
 
+    @staticmethod
+    def _read_agent_protocol(connection, hello):
+        from hub.project_runtimes import parse_advertisement
+
+        def version(name, accepted):
+            value = hello.get(name)
+            return value if type(value) is int and value in accepted else 0
+
+        connection.tool_protocol = negotiate(hello)
+        for name, accepted in (
+            ("file_options_protocol", (1,)),
+            ("queue_deadline_protocol", (1,)),
+            ("resource_semantics_protocol", (2,)),
+            ("project_view_protocol", (1,)),
+            ("cancel_pending_protocol", (1,)),
+            ("bounded_execution_protocol", (1,)),
+            ("scheduler_protocol", (1,)),
+            ("native_chat_protocol", (1, 2, 3)),
+        ):
+            setattr(connection, name, version(name, accepted))
+        tree = hello.get("tree_options_protocol")
+        connection.tree_options_protocol = tree if type(tree) is int else 0
+        connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
+        connection.project_runtime_protocol, connection.project_runtime_profiles = (
+            parse_advertisement(hello)
+        )
+        connection.journal_id = hello.get("journal_id")
+        connection.protocol = hello.get("delivery_protocol", 1)
+        if (
+            type(connection.protocol) is not int
+            or connection.protocol != 2
+            or not isinstance(connection.journal_id, str)
+            or not 1 <= len(connection.journal_id) <= 128
+        ):
+            raise ValueError("Agent must support durable delivery protocol 2 with a journal ID")
+
+    def _handshake_available(self):
+        # Only a peer that proved possession of its device key reaches this
+        # limit. Allow a burst of 16 registrations, then replenish at 8/s.
+        now = time.monotonic()
+        self._handshake_tokens = min(16, self._handshake_tokens + (now - self._handshake_updated) * 8)
+        self._handshake_updated = now
+        if self._handshake_tokens < 1:
+            return False
+        self._handshake_tokens -= 1
+        return True
+
+    async def _admit_agent_handshake(self, connection, device_id):
+        if self.stopping:
+            return False
+        if not self._handshake_available():
+            await connection.send({"type": "going_away", "reconnect_window_seconds": 10})
+            return False
+        return await self.store.run(self.connection_authorized, device_id, connection)
+
     async def agent_socket(self, websocket: WebSocket, device_id: str):
         device = await self.store.run(
             self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,)
@@ -2954,65 +3140,8 @@ class Runtime:
             hello = channel.unpack(await asyncio.wait_for(websocket.receive_text(), 10))
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
-            connection.tool_protocol = negotiate(hello)
-            connection.tree_options_protocol = (
-                hello.get("tree_options_protocol")
-                if type(hello.get("tree_options_protocol")) is int
-                else 0
-            )
-            connection.resource_semantics_protocol = (
-                2
-                if type(hello.get("resource_semantics_protocol")) is int
-                and hello["resource_semantics_protocol"] == 2
-                else 0
-            )
-            from hub.project_runtimes import parse_advertisement
-
-            connection.project_runtime_protocol, connection.project_runtime_profiles = (
-                parse_advertisement(hello)
-            )
-            connection.project_view_protocol = (
-                1
-                if type(hello.get("project_view_protocol")) is int
-                and hello["project_view_protocol"] == 1
-                else 0
-            )
-            connection.journal_id = hello.get("journal_id")
-            connection.protocol = hello.get("delivery_protocol", 1)
-            connection.cancel_pending_protocol = (
-                1
-                if type(hello.get("cancel_pending_protocol")) is int
-                and hello["cancel_pending_protocol"] == 1
-                else 0
-            )
-            connection.native_protocol = 1 if hello.get("native_protocol") == 1 else 0
-            connection.bounded_execution_protocol = (
-                1
-                if type(hello.get("bounded_execution_protocol")) is int
-                and hello["bounded_execution_protocol"] == 1
-                else 0
-            )
-            connection.scheduler_protocol = (
-                1
-                if type(hello.get("scheduler_protocol")) is int and hello["scheduler_protocol"] == 1
-                else 0
-            )
-            connection.native_chat_protocol = (
-                hello.get("native_chat_protocol")
-                if type(hello.get("native_chat_protocol")) is int
-                and hello["native_chat_protocol"] in (1, 2, 3)
-                else 0
-            )
-            if (
-                type(connection.protocol) is not int
-                or connection.protocol != 2
-                or not isinstance(connection.journal_id, str)
-                or not 1 <= len(connection.journal_id) <= 128
-            ):
-                raise ValueError("Agent must support durable delivery protocol 2 with a journal ID")
-            if self.stopping or not await self.store.run(
-                self.connection_authorized, device_id, connection
-            ):
+            self._read_agent_protocol(connection, hello)
+            if not await self._admit_agent_handshake(connection, device_id):
                 return
             authenticated = True
             info = {
@@ -3124,12 +3253,27 @@ class Runtime:
             while not self.stopping:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
                 data = channel.unpack(packet)
-                current, reply = await self.store.run_control(
-                    self._receive_agent_frame, device_id, connection, info, data
-                )
-                if not current:
-                    break  # Fence a replaced socket before accepting its late events.
                 kind = data.get("type")
+                if (
+                    kind in {"artifact_chunk", "native_sync", "native_reply"}
+                    and time.time() - getattr(connection, "_persisted_last_seen", 0) < 12
+                ):
+                    current = await self.store.run_read(
+                        self.connection_authorized, device_id, connection
+                    )
+                    reply = None
+                    if current and self.connections.get(device_id) is connection:
+                        connection.last_seen = time.time()
+                else:
+                    current, reply = await self.store.run_control(
+                        self._receive_agent_frame, device_id, connection, info, data
+                    )
+                if (
+                    not current
+                    or self.connections.get(device_id) is not connection
+                    or connection.unusable
+                ):
+                    break  # Fence a replaced socket before accepting its late events.
                 if kind == "heartbeat":
                     if reply is not None:
                         await connection.send(reply)
@@ -3176,6 +3320,24 @@ class Runtime:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(websocket.close(), 2)
 
+    async def announce_shutdown(self):
+        """Give authenticated Agents a bounded reconnect window before WebSocket drain."""
+        connections = [connection for connection in self.connections.values() if not connection.unusable]
+        window = min(60, max(3, len(connections) / 2))
+
+        async def notify(connection):
+            with contextlib.suppress(ConnectionError, OSError, TimeoutError, RuntimeError):
+                await connection.send({"type": "going_away", "reconnect_window_seconds": window})
+
+        if connections:
+            try:
+                async with asyncio.timeout(1):
+                    await asyncio.gather(
+                        *(notify(connection) for connection in connections), return_exceptions=True
+                    )
+            except TimeoutError:
+                pass
+
     async def stop(self):
         try:
             await self._stop_runtime()
@@ -3186,6 +3348,10 @@ class Runtime:
 
     async def _stop_runtime(self):
         self.stopping = True
+        if self.wal_observer:
+            self.wal_observer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.wal_observer
         await self.knowledge_maintenance.stop()
         for id in self.operation_waiters:
             self.notify_operation(id)

@@ -192,10 +192,10 @@ class ChannelMedia:
             ):
                 row["source_work_id"] = goal["work_item_id"]
 
-    def row(self, identifier, principal):
+    def row(self, identifier, principal, *, include_content=True):
         principal = refresh_principal(self.store, principal)
         row = self.store.one(
-            "SELECT * FROM channel_attachments WHERE id=? AND space_id=? AND owner_user_id=?",
+            f"SELECT {'*' if include_content else media_cache.METADATA_COLUMNS} FROM channel_attachments WHERE id=? AND space_id=? AND owner_user_id=?",
             (identifier, principal.space_id, principal.user_id),
         )
         if not row:
@@ -460,7 +460,7 @@ class ChannelMedia:
             row = self.current(claim)
             checksum = hashlib.sha256(content).hexdigest()
             old = self.store.one(
-                "SELECT * FROM channel_attachment_chunks WHERE attachment_id=? AND offset=?",
+                "SELECT sha256 FROM channel_attachment_chunks WHERE attachment_id=? AND offset=?",
                 (claim["id"], offset),
             )
             if old and old["sha256"] != checksum:
@@ -472,16 +472,16 @@ class ChannelMedia:
                     raise DevError(
                         "ATTACHMENT_CACHE_QUOTA", "加密附件缓存配额已用尽；保留原分段", 429
                     )
-            self.store.execute(
-                "INSERT OR IGNORE INTO channel_attachment_chunks VALUES (?,?,?,?,?)",
-                (
-                    claim["id"],
-                    offset,
-                    len(content),
-                    checksum,
-                    media_cache.encode(self.store, content),
-                ),
-            )
+                self.store.execute(
+                    "INSERT INTO channel_attachment_chunks VALUES (?,?,?,?,?)",
+                    (
+                        claim["id"],
+                        offset,
+                        len(content),
+                        checksum,
+                        media_cache.encode(self.store, content),
+                    ),
+                )
             self.store.execute(
                 "UPDATE channel_attachments SET lease_until=? WHERE id=?",
                 (self.c.clock() + 60, claim["id"]),

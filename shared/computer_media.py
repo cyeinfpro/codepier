@@ -3,7 +3,6 @@
 from __future__ import annotations
 import base64
 import binascii
-import copy
 import hashlib
 import json
 import struct
@@ -153,7 +152,20 @@ def mcp_result(name: str, value: dict):
     # classification belongs at the MCP boundary, not their cold import path.
     from shared.computer_contracts import COMPUTER_TOOLS
 
-    public = copy.deepcopy(value)
+    # Own every mapping that expiry or image promotion can mutate. Large
+    # immutable payloads and untouched receipt branches can be shared.
+    def copy_data(mapping):
+        result = dict(mapping)
+        if isinstance(result.get("data"), dict):
+            result["data"] = dict(result["data"])
+        return result
+
+    public = copy_data(value)
+    if isinstance(public.get("result"), dict):
+        public["result"] = copy_data(public["result"])
+        nested_data = public["result"].get("data")
+        if isinstance(nested_data, dict) and isinstance(nested_data.get("data"), dict):
+            nested_data["data"] = dict(nested_data["data"])
     browser = (
         name.startswith("browser_")
         or name in {"operations_get", "operations_wait"}

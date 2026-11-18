@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from functools import lru_cache
 import ipaddress
+import json
 import re
 from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -109,6 +111,8 @@ class ReadMany(RemoteProject):
 
 
 class Search(RemoteProject):
+    context_lines: int = Field(default=0, ge=0, le=10, exclude_if=lambda value: not value)
+    include_sha256: bool = Field(default=False, exclude_if=lambda value: not value)
     query: str = Field(min_length=1, max_length=300)
     path: str = Field(
         default=".",
@@ -496,6 +500,8 @@ class ArtifactGet(Args):
 
 
 class SearchStart(RemoteProject):
+    context_lines: int = Field(default=0, ge=0, le=10, exclude_if=lambda value: not value)
+    include_sha256: bool = Field(default=False, exclude_if=lambda value: not value)
     path: str = Field(default=".", max_length=1024)
     query: str = Field(min_length=1, max_length=200)
     mode: Literal["text", "symbols", "references"] = "text"
@@ -1487,10 +1493,13 @@ from shared.agent_roots_contracts import register as register_agent_roots
 register_agent_roots(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.core_contracts import register as register_core, CORE_TOOLS, CORE_INSTRUCTIONS
 
-register_core(Tool, TOOLS, OUTPUT_SCHEMAS)
 from shared.query_contracts import register as register_queries, QUERY_TOOLS
+from shared.frozen_core_output_schemas import CORE_OUTPUT_SCHEMA_JSON
 
-register_queries(Tool, TOOLS, OUTPUT_SCHEMAS)
+_CORE_SCHEMA_INPUTS = OUTPUT_SCHEMAS.copy()
+register_core(Tool, TOOLS)
+register_queries(Tool, TOOLS)
+OUTPUT_SCHEMAS.update(json.loads(CORE_OUTPUT_SCHEMA_JSON))
 from shared.knowledge_contracts import register as register_knowledge, KNOWLEDGE_TOOLS
 
 register_knowledge(Tool, TOOLS, OUTPUT_SCHEMAS)
@@ -1680,6 +1689,14 @@ def project_output_schemas(definitions, schemas="full"):
 
 
 def tool_definitions(profile="core", authorization="fixed", schemas="full"):
+    # Tool schemas are static. Each caller owns its projection and annotations.
+    import copy
+
+    return copy.deepcopy(_catalog_template(profile, authorization, schemas))
+
+
+@lru_cache(maxsize=18)
+def _catalog_template(profile, authorization, schemas):
     from shared.mcp_presentation import output_schema
     from shared.core_output_schemas import factor
     from shared.schema_cache import schema_for

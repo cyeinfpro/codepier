@@ -1751,8 +1751,17 @@ class EventService:
                     if wake is not None:
                         waiter = asyncio.create_task(wake.wait(), name="collaboration:event-wake")
                         waiting.add(waiter)
+                    # Production receives a post-commit wake for new work. A slow
+                    # callback only needs an independent budget/recovery deadline.
+                    timeout = (
+                        0.25
+                        if wake is None
+                        else self.next_dispatch_delay(
+                            max(0.01, self._relay_recover_after - self.c.clock())
+                        )
+                    )
                     done, _ = await asyncio.wait(
-                        waiting, timeout=0.25, return_when=asyncio.FIRST_COMPLETED
+                        waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
                     )
                     if waiter is not None:
                         waiter.cancel()

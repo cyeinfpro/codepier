@@ -90,6 +90,8 @@ class Agent:
             self.journal = Journal(self.state_dir)
             self.engine = FileEngine(self.config, self.journal, self.config_path)
             self._read_workers = {}
+            self._run_cleanup_projects = {}
+            self._run_cleanup_wake = asyncio.Event()
             self.telemetry = AgentTelemetry(
                 self.journal,
                 process_diagnostics=os.environ.get("CODEPIER_TEST_PROCESS_DIAGNOSTICS") == "1",
@@ -366,6 +368,50 @@ class Agent:
             except (ValueError, OSError, TypeError, KeyError) as exc:
                 LOGGER.warning("新配置无效，继续使用原配置（%s）", type(exc).__name__)
 
+    def _apply_reconnect_notice(self, data):
+        window = data.get("reconnect_window_seconds")
+        if type(window) in (int, float) and 1 <= window <= 60:
+            self.reconnect_window = window
+
+    def _ready_reply(self, reply):
+        if reply.get("type") == "going_away":
+            self._apply_reconnect_notice(reply)
+            return False
+        if reply.get("type") != "ready":
+            raise ValueError("面板未确认 Agent 身份")
+        return True
+
+    async def _handle_native_request(self, data, socket):
+        if self.lifecycle.handoff_pending:
+            await self.send(
+                {
+                    "type": "native_reply",
+                    "request_id": data.get("request_id"),
+                    "result": {
+                        "ok": False,
+                        "error": {
+                            "code": "AGENT_MAINTENANCE",
+                            "message": "CodePier 正在交接更新，请稍后重试",
+                        },
+                    },
+                }
+            )
+        elif len(self.transfer_tasks) >= 8:
+            await self.send(
+                {
+                    "type": "native_reply",
+                    "request_id": data.get("request_id"),
+                    "result": {
+                        "ok": False,
+                        "error": {"code": "CLI_BUSY", "message": "控制通道繁忙"},
+                    },
+                }
+            )
+        else:
+            task = asyncio.create_task(self.native.handle(data, socket))
+            self.transfer_tasks.add(task)
+            task.add_done_callback(self.transfer_done)
+
     async def connect_once(self):
         from agent.project_runtime import advertised_profiles
 
@@ -414,6 +460,7 @@ class Agent:
                         "device_actions": self.lifecycle.actions(),
                         "scheduler_protocol": 1,
                         "resource_semantics_protocol": 2,
+                        "queue_deadline_protocol": 1,
                         "snapshot_execution_protocol": 1,
                         "bounded_execution_protocol": 1,
                         "project_runtime_protocol": 1,
@@ -429,8 +476,8 @@ class Agent:
                 )
             )
             reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
-            if reply.get("type") != "ready":
-                raise ValueError("面板未确认 Agent 身份")
+            if not self._ready_reply(reply):
+                return
             await self.disk_call(verify_binding, self.journal, binding, reply)
             self.hub_protocol = negotiate(reply)
             empty_revision = hashlib.sha256(b"{}").hexdigest()
@@ -456,6 +503,9 @@ class Agent:
                 async for packet in socket:
                     data = channel.unpack(packet)
                     kind = data.get("type")
+                    if kind == "going_away":
+                        self._apply_reconnect_notice(data)
+                        continue
                     if kind in {"call", "probe", "ack", "cancel", "cancel_pending"}:
                         id = data.get("id", "")
                         if not isinstance(id, str) or not id or len(id) > 100:
@@ -469,35 +519,7 @@ class Agent:
                         self.native.on_ack(data)
                         continue
                     if kind == "native_request":
-                        if self.lifecycle.handoff_pending:
-                            await self.send(
-                                {
-                                    "type": "native_reply",
-                                    "request_id": data.get("request_id"),
-                                    "result": {
-                                        "ok": False,
-                                        "error": {
-                                            "code": "AGENT_MAINTENANCE",
-                                            "message": "CodePier 正在交接更新，请稍后重试",
-                                        },
-                                    },
-                                }
-                            )
-                        elif len(self.transfer_tasks) >= 8:
-                            await self.send(
-                                {
-                                    "type": "native_reply",
-                                    "request_id": data.get("request_id"),
-                                    "result": {
-                                        "ok": False,
-                                        "error": {"code": "CLI_BUSY", "message": "控制通道繁忙"},
-                                    },
-                                }
-                            )
-                        else:
-                            task = asyncio.create_task(self.native.handle(data, socket))
-                            self.transfer_tasks.add(task)
-                            task.add_done_callback(self.transfer_done)
+                        await self._handle_native_request(data, socket)
                         continue
                     if kind == "computer_approval_decision":
                         self.computer_approvals.decide(data)
@@ -824,6 +846,7 @@ class Agent:
                             strict_order=args.get("options", {}).get("order") == "strict",
                             wait_policy=args.get("options", {}).get("wait_policy", "queue"),
                             initial_wait_seconds=max(0.01, args.get("yield_seconds", 1)),
+                            max_queue_ms=args.get("options", {}).get("max_queue_ms"),
                             on_bypass=lambda count: self.phase(
                                 identifier, "bypassed", bypassed_count=count, lane=lane
                             ),
@@ -889,7 +912,7 @@ class Agent:
         try:
             async with asyncio.timeout(remaining) as timer:
                 async with self._read_preflight_slot(identifier, project) as ticket:
-                    async with workspace_probe.ReadWorker(admission=True) as worker:
+                    async with self._read_worker(admission=True) as worker:
                         admission = await workspace_probe.probe(
                             self.engine, tool, project, args, phase="admission", worker=worker
                         )
@@ -928,6 +951,12 @@ class Agent:
         # child; execution will open a fresh worker and recheck current authority.
         yield admission, None, False
 
+    def _read_worker(self, *, admission=False):
+        pool = getattr(self, "_read_pool", None)
+        if pool is None:
+            return workspace_probe.ReadWorker(admission=admission)
+        return workspace_probe.ReadWorker(admission=admission, pool=pool)
+
     @contextlib.asynccontextmanager
     async def _read_execution_worker(self, identifier, tool, args, root, *, existing=None):
         if not workspace_probe.eligible(tool, args):
@@ -940,7 +969,7 @@ class Agent:
             finally:
                 self._read_workers.pop(identifier, None)
             return
-        async with workspace_probe.ReadWorker() as worker:
+        async with self._read_worker() as worker:
             self._read_workers[identifier] = (worker, root)
             try:
                 yield worker
@@ -997,7 +1026,7 @@ class Agent:
         if runtime_requirement is not None:
             request["project_runtime_requirement"] = runtime_requirement
         try:
-            previous = self.journal.start(id, request)
+            previous = await self.disk_call(self.journal.start, id, request)
             if previous is not None:
                 await self.send({"type": "result", "id": id, "result": previous})
                 return
@@ -1047,7 +1076,6 @@ class Agent:
                     raise DevError(
                         "BOUNDED_EXECUTION_MISMATCH", "原命令预算和首次执行身份不匹配", 409
                     )
-            self.phase(id, "accepted")
             await self.send(
                 {
                     "type": "accepted",
@@ -1055,6 +1083,13 @@ class Agent:
                     **({"bounded_execution": bounded_execution} if bounded_execution else {}),
                 }
             )
+            if await self.disk_call(self.telemetry.record, id, "accepted"):
+                self.pending_output["trace:" + id] = {
+                    "type": "trace",
+                    "id": id,
+                    "trace": await self.disk_call(self.telemetry.snapshot, id),
+                }
+                self.output_wake.set()
             tool, project, args = request["tool"], request["project"], request["args"]
             if (
                 not isinstance(tool, str)
@@ -1650,6 +1685,26 @@ class Agent:
                 holder["manager"].finish, holder["snapshot"], success=holder["success"]
             )
 
+    async def _allocate_output_log(self, identifier, project, root):
+        from agent.operation_logs import OperationLog
+        from agent.run_directories import prepare_run_directory
+
+        if not hasattr(self, "_execution_run_dirs"):
+            self._execution_run_dirs = {}
+        if not hasattr(self, "_execution_logs"):
+            self._execution_logs = {}
+        if root not in self._run_cleanup_projects:
+            self._run_cleanup_projects[root] = (project, 0.0)
+            self._run_cleanup_wake.set()
+
+        def allocate():
+            path = prepare_run_directory(root, identifier)
+            self._execution_run_dirs[identifier] = path
+            self._execution_logs[identifier] = OperationLog(path)
+            return path
+
+        return await self._snapshot_io(allocate)
+
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
             worker, root = self._read_workers.get(id, (None, None))
@@ -1659,11 +1714,7 @@ class Agent:
         from shared.integration_contracts import REMOTE_TOOLS
 
         if tool == "exec":
-            from agent.run_directories import (
-                prepare_run_directory,
-                finish_run_directory,
-                cleanup_run_directories,
-            )
+            from agent.run_directories import finish_run_directory
 
             local = args.get("target", "agent") == "agent"
             run_dir = None
@@ -1675,25 +1726,9 @@ class Agent:
             if local:
                 root, _ = self.engine.root(project, True)
                 self._preflight_local_execution(project, args, root)
-                if not hasattr(self, "_execution_run_dirs"):
-                    self._execution_run_dirs = {}
-
-                # Allocation only after admission and permission preflight.
-                # Track it inside the worker so cancellation cannot orphan an active marker.
-                def allocate():
-                    cleanup_run_directories(root)
-                    path = prepare_run_directory(root, id)
-                    self._execution_run_dirs[id] = path
-                    from agent.operation_logs import OperationLog
-
-                    if not hasattr(self, "_execution_logs"):
-                        self._execution_logs = {}
-                    self._execution_logs[id] = OperationLog(path)
-                    return path
-
             try:
                 if local:
-                    run_dir = await self._snapshot_io(allocate)
+                    run_dir = await self._allocate_output_log(id, project, root)
                 if args["task"]:
                     from shared.contracts import Task
 
@@ -1852,6 +1887,9 @@ class Agent:
             # it must not be described as the local clean/container workload.
             runner = self._run_process_account if saved_transport else self.run_process
 
+            if saved_transport:
+                await self._allocate_output_log(id, project, root)
+
             async def attempt(remaining):
                 async with SSHDiagnostics(self.state_dir) as diagnostics:
                     command, env = prepare_ssh(
@@ -1884,6 +1922,9 @@ class Agent:
                 record=lambda stage, **detail: self.phase(id, stage, **detail),
             )
             if saved_transport:
+                log = self._execution_logs[id]
+                await self._snapshot_io(log.close)
+                result["output_log"] = log.receipt(id)
                 result["transport_runtime"] = {
                     "mode": "native_ssh_transport",
                     "target": saved_vps_target,
@@ -2300,7 +2341,7 @@ class Agent:
         redaction_value=None,
         redaction_values=None,
     ):
-        from shared.secret_output import SecretOutputs, credential_output_values
+        from shared.secret_output import ProcessOutput, credential_output_values
         from agent.project_runtime import legacy_environment
 
         environment = (
@@ -2311,7 +2352,7 @@ class Agent:
         protected_values = credential_output_values(environment) + list(redaction_values or [])
         if redaction_value is not None:
             protected_values.append(redaction_value)
-        output_filter = SecretOutputs(protected_values)
+        output_filter = ProcessOutput(protected_values)
         if execution_project is not None:
             # Inspect the exact argv, cwd and environment used below, including
             # local task definitions, PATH overrides and resolved symlink targets.
@@ -2430,8 +2471,13 @@ class Agent:
             # Process.wait() may wait for inherited stdout to close as well as
             # process exit. Observe the leader so its children cannot extend a
             # completed task to its full timeout by retaining the pipe.
-            while process.returncode is None:  # noqa: ASYNC110 - Observe external process/cancellation state; bounded by the owning lifecycle.
-                await asyncio.sleep(0.05)
+            from agent.owned_subprocess import OwnedProcess
+
+            if isinstance(process, OwnedProcess):
+                await process.wait()
+            else:
+                while process.returncode is None:  # noqa: ASYNC110 - Non-owned transport can retain inherited stdout after exit.
+                    await asyncio.sleep(0.05)
             process_event("process_leader_exited", pid=process.pid, returncode=process.returncode)
 
         reader = waiter = None
@@ -2564,6 +2610,48 @@ class Agent:
 
     disk_call = staticmethod(disk_call)
 
+    async def maintain_run_directories(self):
+        from agent.read_snapshots import TTL, prune_expired
+        from agent.run_directories import cleanup_run_directories
+
+        next_prune = 0.0
+        while not self.stop_event.is_set():
+            self._run_cleanup_wake.clear()
+            if time.monotonic() >= next_prune:
+                next_prune = time.monotonic() + TTL
+                try:
+                    await self.disk_call(prune_expired, self.journal.directory)
+                except (OSError, sqlite3.Error) as exc:
+                    LOGGER.warning("Read snapshot cleanup failed (%s)", type(exc).__name__)
+            for root, (project, due) in list(self._run_cleanup_projects.items()):
+                if due > time.monotonic():
+                    continue
+                self._run_cleanup_projects[root] = (project, time.monotonic() + 3600)
+                active = set(self.jobs) | set(self.processes)
+
+                def clean(*, project=project, root=root, active=active):
+                    current, _ = self.engine.root(project, True)
+                    if current != root:
+                        return
+                    cleanup_run_directories(
+                        root,
+                        terminal=lambda name: (
+                            name not in active and self.journal.completed_run(name)
+                        ),
+                    )
+
+                try:
+                    await self.disk_call(clean)
+                except (DevError, OSError, sqlite3.Error, ValueError) as exc:
+                    LOGGER.warning("Run directory cleanup failed (%s)", type(exc).__name__)
+                    self._run_cleanup_projects.pop(root, None)
+            try:
+                await asyncio.wait_for(
+                    self._run_cleanup_wake.wait(), max(0, next_prune - time.monotonic())
+                )
+            except TimeoutError:
+                pass
+
     async def maintain_journal(self):
         while not self.stop_event.is_set():
             try:
@@ -2580,13 +2668,22 @@ class Agent:
             except TimeoutError:
                 pass
 
+    def _reconnect_delay(self, delay, previous_connection):
+        if self.connection_number != previous_connection:
+            delay = 1
+        delay = random.uniform(1, min(30, delay * 3))
+        window, self.reconnect_window = self.reconnect_window, 0
+        return delay, max(delay, random.uniform(1, window)) if window else delay
+
     async def run(self):
         await self.integrations.start()
         self.computer.start_guard()
+        self._read_pool = workspace_probe.ReadPool(min(self.scheduler.config["read_limit"], 4))
         watcher = asyncio.create_task(self.watch_config())
         sender = asyncio.create_task(self.output_sender())
         scheduler_monitor = asyncio.create_task(self.watch_scheduler())
         journal_maintenance = asyncio.create_task(self.maintain_journal())
+        run_cleanup = asyncio.create_task(self.maintain_run_directories())
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
 
@@ -2596,6 +2693,7 @@ class Agent:
         review_cleanup = asyncio.create_task(watch_cleanup(self.engine, self.stop_event))
         connection = None
         delay = 1
+        self.reconnect_window = 0
         try:
             while not self.stop_event.is_set():
                 before = self.connection_number
@@ -2609,13 +2707,11 @@ class Agent:
                     break
                 except Exception as exc:
                     LOGGER.warning("连接断开（%s）；将按原连接退避策略恢复", type(exc).__name__)
-                if self.connection_number != before:
-                    delay = 1
+                delay, reconnect_after = self._reconnect_delay(delay, before)
                 try:
-                    await asyncio.wait_for(self.stop_event.wait(), delay + random.random())
+                    await asyncio.wait_for(self.stop_event.wait(), reconnect_after)
                 except asyncio.TimeoutError:
                     pass
-                delay = min(delay * 2, 30)
         finally:
             self.stop_event.set()
             await self.scheduler.close()
@@ -2629,6 +2725,7 @@ class Agent:
                 scheduler_monitor,
                 review_cleanup,
                 journal_maintenance,
+                run_cleanup,
             ] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
@@ -2654,6 +2751,7 @@ class Agent:
                 await asyncio.gather(*list(self.kill_tasks), return_exceptions=True)
                 await asyncio.gather(*list(self.transfer_tasks), return_exceptions=True)
             finally:
+                await self._read_pool.close()
                 try:
                     self.journal.db.close()
                 finally:

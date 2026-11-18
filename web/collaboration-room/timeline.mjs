@@ -376,17 +376,19 @@ export function patchMessages() {
   const nearEnd = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 90;
   const reading = readingSnapshot();
   let changed = false;
+  const nodes = new Map();
   const visibleIds = new Set(state.messages.map((message) => message.id));
   for (const node of [...list.children])
     if (!visibleIds.has(node.dataset.messageId)) {
       node.remove();
       changed = true;
-    }
+    } else nodes.set(node.dataset.messageId, node);
   for (const message of state.messages) {
-    let node = [...list.children].find((child) => child.dataset.messageId === message.id);
+    let node = nodes.get(message.id);
     if (!node) {
       node = document.createElement('article');
       node.dataset.messageId = message.id;
+      nodes.set(message.id, node);
       list.append(node);
       changed = true;
     }
@@ -406,7 +408,7 @@ export function patchMessages() {
   }
   // Stable nodes keep browser selection and scroll intact across projections.
   state.messages.forEach((message, index) => {
-    const node = [...list.children].find((child) => child.dataset.messageId === message.id);
+    const node = nodes.get(message.id);
     if (node && list.children[index] !== node)
       list.insertBefore(node, list.children[index] || null);
   });

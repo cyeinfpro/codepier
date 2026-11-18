@@ -108,6 +108,43 @@ def plan_jobs(nodeids, markers=None, *, shard_index=0, shard_count=1, resource_s
     return jobs
 
 
+def batch_jobs(jobs, markers, width=16):
+    """Combine complete ordinary modules after shard assignment, retaining every node ID."""
+    from itertools import batched
+
+    ordinary = []
+    planned = []
+    for job in jobs:
+        tags = [set(markers.get(node, ())) for node in job["nodeids"]]
+        if (
+            not job["limited"]
+            and not job["exclusive"]
+            and job["selectors"] == [job["module"]]
+            and not any(tag & {"slow", "isolated_case", "resource_regression"} for tag in tags)
+        ):
+            ordinary.append(job)
+        else:
+            if tags and all("sync_browser_reuse" in tag for tag in tags):
+                job = {**job, "browser_reuse": True}
+            planned.append(job)
+    for group in batched(ordinary, width):
+        if len(group) == 1:
+            planned.append(group[0])
+            continue
+        modules = [job["module"] for job in group]
+        planned.append(
+            {
+                "name": "unit-batch-" + fingerprint(modules)[:16],
+                "module": modules[0],
+                "selectors": modules,
+                "nodeids": [node for job in group for node in job["nodeids"]],
+                "limited": False,
+                "exclusive": False,
+            }
+        )
+    return planned
+
+
 def pytest_command(prefix, directory, selectors, *, coverage=False, scratch=None):
     directory = Path(directory)
     basetemp = Path(scratch) / "pytest" if scratch is not None else directory / "tmp"
