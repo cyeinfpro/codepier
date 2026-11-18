@@ -368,14 +368,17 @@ class Exec(Mutation):
         description="Relative snapshot artifacts to export to CODEPIER_RUN_DIR.",
     )
     options: dict[str, Any] = Field(
-        default_factory=dict, description="order=default|strict; wait_policy=queue|fail_fast; max_queue_ms bounds Agent admission."
+        default_factory=dict,
+        description="order=default|strict; wait_policy=queue|fail_fast; max_queue_ms bounds Agent admission.",
     )
 
     @model_validator(mode="after")
     def execution_values(self):
         from shared.contracts import ShellExec
 
-        self.options = ExecQueueOptions.model_validate(self.options).model_dump(exclude_defaults=True)
+        self.options = ExecQueueOptions.model_validate(self.options).model_dump(
+            exclude_defaults=True
+        )
         if self.options.get("max_queue_ms") is not None and (
             self.isolation == "snapshot" or self.options.get("wait_policy") == "fail_fast"
         ):

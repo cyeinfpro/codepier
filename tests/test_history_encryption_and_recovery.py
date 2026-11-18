@@ -86,12 +86,13 @@ def test_retention_plans_are_read_only_and_preserve_unknown(tmp_path):
 
 
 @pytest.mark.parametrize('guarded', [False, True])
-def test_json_media_index_accepts_encrypted_read_and_keeps_existing_expiry(tmp_path, guarded):
+@pytest.mark.asyncio
+async def test_json_media_index_accepts_encrypted_read_and_keeps_existing_expiry(tmp_path, guarded):
     store = Store(tmp_path / 'hub')
     try:
         runtime = Runtime(store)
         if guarded:
-            runtime._purge_computer()
+            await runtime._run_maintenance()
         else:
             store.execute("CREATE INDEX operations_media_expiry ON operations(json_extract(result,'$.data.computer_expires_at'))")
         store.close()
@@ -104,7 +105,7 @@ def test_json_media_index_accepts_encrypted_read_and_keeps_existing_expiry(tmp_p
             '_computer_content': [], 'computer_expires_at': 1}})
         row = store.one("SELECT * FROM operations WHERE id='media'")
         assert row['result'].startswith(PREFIX) and 'private pixels' not in row['result']
-        runtime._purge_computer()
+        await runtime._run_maintenance()
         value = runtime.operation_result(store.one("SELECT * FROM operations WHERE id='media'"))
         assert value['data']['media_expired'] and 'text' not in value['data']
     finally:

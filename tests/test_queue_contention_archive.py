@@ -1,4 +1,5 @@
 """Synthetic cold archive and queue diagnostic regressions."""
+from contextlib import closing
 import json
 import time
 
@@ -8,8 +9,9 @@ from hub.operation_archive import archive_payloads, restore_payloads
 from hub.operation_history import result, seal, unseal
 from hub.operation_output import OperationOutput
 from hub.keyring import rotate_key
-from hub.queue_contention import queue_contention_report
+from hub.queue_contention import baseline_window_report, queue_contention_report
 from hub.store import Store
+from tests.test_reliability import runtime
 
 
 def insert(store, identifier='old', *, state='succeeded', updated=1, output='secret tail'):
@@ -160,3 +162,87 @@ def test_archive_skips_media_and_validates_bounds(tmp_path):
                 archive_payloads(store, **arguments)
     finally:
         store.close()
+
+
+def test_baseline_keeps_window_cohorts_and_uses_first_same_attempt_evidence(tmp_path):
+    now = 100000.0
+    with closing(Store(tmp_path)) as store:
+        def operation(identifier, tool, state, created, updated, *, device="device-1"):
+            store.execute(
+                """INSERT INTO operations(id,device_id,project_id,actor,tool,args_summary,
+                   fingerprint,state,created,updated) VALUES (?,?,?,'admin',?,'{}',?,?,?,?)""",
+                (identifier, device, "project-1", tool, identifier, state, created, updated),
+            )
+
+        def event(identifier, source, seq, stage, at, elapsed=None, **detail):
+            store.execute(
+                """INSERT INTO operation_events(operation_id,source,seq,stage,at,elapsed_ms,detail)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (identifier, source, seq, stage, at, elapsed, json.dumps(detail)),
+            )
+
+        # Created before the window, finished inside it. A dispatch retry and
+        # pre-execution Agent restart must each contribute just one sample.
+        operation("read", "fs_tree", "succeeded", 100, now - 30)
+        event("read", "hub", 1, "hub_received", 100, baseline_connection="online",
+              baseline_admission="adaptive")
+        event("read", "hub", 2, "dispatched", 102)
+        event("read", "hub", 3, "dispatched", now - 40)
+        event("read", "hub", 4, "hub_completed", now - 30)
+        event("read", "agent", 1, "accepted", 105, 15)
+        event("read", "agent", 2, "accepted", now - 41, 3)
+        # Out-of-order receipt arrival cannot replace Agent's sequence/elapsed.
+        event("read", "agent", 3, "executing", now - 42, 63)
+        operation("cancel", "write", "cancelled", now - 20, now - 19)
+        event("cancel", "hub", 1, "hub_completed", now - 19, baseline_timeout=False)
+        operation("timed-out", "exec", "failed", now - 18, now - 17)
+        event("timed-out", "hub", 1, "hub_received", now - 18,
+              baseline_connection="offline", baseline_admission="legacy_or_warming")
+        event("timed-out", "hub", 2, "hub_completed", now - 17, baseline_timeout=True)
+        operation("legacy-error", "exec", "failed", now - 16, now - 15)
+        operation("waiting", "exec", "queued", 200, 205)
+        operation("expired-window", "exec", "failed", 100, now - 86400)
+        operation("other-device", "exec", "succeeded", now - 14, now - 13, device="device-2")
+        report = baseline_window_report(store, now=now, device_id="device-1", project_id="project-1")
+    assert report["total"]["admitted"] == 3
+    assert report["total"]["completed"] == 4
+    assert report["total"]["successful_per_second"] == pytest.approx(1 / 86400)
+    assert report["total"]["terminal_by_state"]["cancelled"] == 1
+    assert report["total"]["timeouts_observed"] == report["total"]["timeout_classification_unknown"] == 1
+    assert report["total"]["queued_now"] == 1
+    assert report["total"]["oldest_queued_age_seconds"] == now - 200
+    latencies = report["by_workload"]["short_read"]["success_latency_ms"]
+    assert latencies["hub_first_dispatch"] == {"n": 1, "p50": 2000, "p95": 2000, "p99": 2000}
+    assert latencies["agent_to_executing"]["p95"] == 60
+    assert latencies["hub_to_completion"]["p99"] == (now - 130) * 1000
+    assert report["by_workload"]["file_write"]["success_latency_ms"]["hub_first_dispatch"]["p95"] is None
+    conditions = {(r["workload"], r["connection"], r["admission"]): r for r in report["by_admission_condition"]}
+    assert conditions["short_read", "online", "adaptive"]["completed"] == 1
+    assert conditions["task_or_exec", "offline", "legacy_or_warming"]["timeouts_observed"] == 1
+    assert conditions["task_or_exec", "unknown", "unknown"]["timeout_classification_unknown"] == 1
+    assert "admission_rejections" in report["not_observed"]
+
+
+def test_baseline_cli_reads_runtime_trace_without_counting_idempotent_replay(runtime, capsys, monkeypatch):
+    from scripts.queue_contention_report import main
+
+    r, principal = runtime
+    project = r.store.one("SELECT * FROM projects WHERE id='proj'")
+    args = {"path": "private-path", "idempotency_key": "private-key"}
+    identifier, _ = r._admit_operation("fs_read", args, project, principal)
+    r._admit_operation("fs_read", args, project, principal)
+    timeout = {"ok": False, "error": {"code": "QUEUE_EXPIRED", "message": "private timeout"}}
+    r.complete({"id": identifier}, timeout)
+    r.complete({"id": identifier}, timeout)
+    monkeypatch.setattr("sys.argv", [
+        "report", "--database", str(r.store.state_directory / "hub.sqlite3"),
+        "--baseline", "--device", "dev", "--project", "proj",
+    ])
+    main()
+    output = capsys.readouterr().out
+    assert "private" not in output and identifier not in output
+    report = json.loads(output)
+    assert report["total"]["admitted"] == report["total"]["completed"] == 1
+    assert report["total"]["timeouts_observed"] == 1
+    assert report["by_admission_condition"][0]["connection"] == "offline"
+    assert report["by_admission_condition"][0]["admission"] == "legacy_or_warming"

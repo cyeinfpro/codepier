@@ -512,7 +512,8 @@ CATALOG = (
         "reliability",
         "instance",
         "队列、等待与重试",
-        "HUB_QUEUE_TTL_SECONDS HUB_CALL_WAIT_SECONDS HUB_DELIVERY_RETRY_SECONDS",
+        "HUB_QUEUE_TTL_SECONDS HUB_CALL_WAIT_SECONDS HUB_DELIVERY_RETRY_SECONDS "
+        "HUB_DELIVERY_SLOTS HUB_DELIVERY_PREFETCH HUB_DELIVERY_DEVICE_CHUNK HUB_DELIVERY_ROLLING_DEVICES",
         "instance",
         "部署管理员",
         "environment",

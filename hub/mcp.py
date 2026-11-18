@@ -293,8 +293,8 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 return failure(identifier, -32600, "Unsupported MCP-Protocol-Version", 400)
         mark("protocol_validated", protocol="modern" if modern else "legacy")
         try:
-            profile, schemas, view, verbosity, text_mode, mirror, output_mode = presentation_options(
-                request.query_params
+            profile, schemas, view, verbosity, text_mode, mirror, output_mode = (
+                presentation_options(request.query_params)
             )
         except ValueError as exc:
             return failure(identifier, -32602, str(exc), 400)
@@ -547,7 +547,9 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                         except Exception:
                             runtime.diagnostics.connection.write_errors += 1
                         if trace:
-                            trace["operation_id"] = value.get("operation_id") or trace["operation_id"]
+                            trace["operation_id"] = (
+                                value.get("operation_id") or trace["operation_id"]
+                            )
                             trace["status"] = "tool_error" if result.get("isError") else "complete"
                         if modern and name == "exec" and task_supported(metadata):
                             created = await runtime.store.run(

@@ -153,6 +153,10 @@ def snapshot(context, principal, project_id=""):
                 "queue_ttl_seconds": runtime.queue_seconds,
                 "call_wait_seconds": runtime.wait_seconds,
                 "delivery_retry_seconds": runtime.retry_seconds,
+                "delivery_slots": runtime.delivery_config.delivery_slots,
+                "delivery_prefetch": runtime.delivery_config.delivery_prefetch,
+                "delivery_device_chunk": runtime.delivery_config.delivery_device_chunk,
+                "delivery_rolling_devices": list(runtime.delivery_config.delivery_rolling_devices),
             },
             "running_process",
         )

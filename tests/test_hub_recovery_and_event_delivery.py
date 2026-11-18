@@ -150,26 +150,34 @@ def test_artifact_retention_uses_hub_clock(store):
 
 @pytest.mark.asyncio
 async def test_maintenance_failure_does_not_block_delivery():
+    from hub.delivery_metrics import DeliveryMetrics
     runtime = Runtime.__new__(Runtime)
     runtime.stopping = False
     runtime.wake = asyncio.Event()
-    runtime.computer_cleanup_at = 0
+    runtime.delivery_metrics = DeliveryMetrics()
     observed = []
     async def run(call, *args, **kwargs):
         return call(*args, **kwargs)
-    runtime.store = SimpleNamespace(run=run, audit=lambda *args, **kwargs: observed.append("audit"))
-    def purge():
-        observed.append("purge")
-        raise RuntimeError("synthetic failure")
+    runtime.store = SimpleNamespace(run=run, run_read=run, run_hint_read=run,
+                                    audit=lambda *args, **kwargs: observed.append("audit"))
+    def purge(now, *, legacy):
+        if legacy:
+            observed.append("purge")
+            raise RuntimeError("synthetic failure")
+        observed.append("purge-sealed")
+        return 0
     def candidates(active):
         observed.append("delivery")
         runtime.stopping = True
         return []
     runtime._purge_computer = purge
     runtime._delivery_candidates = candidates
+    await runtime._run_maintenance()
+    assert observed == ["purge", "audit", "purge-sealed"]
+    assert runtime.delivery_metrics.snapshot()["maintenance_ms"]["p50"] is not None
+    # Candidate selection runs without first waiting for periodic cleanup.
     await runtime.delivery_loop()
-    assert observed == ["purge", "audit", "delivery"]
-    assert runtime.computer_cleanup_at > 0
+    assert observed == ["purge", "audit", "purge-sealed", "delivery"]
 
 @pytest.mark.asyncio
 async def test_external_writer_snapshot_churn_returns_retryable_error(store):

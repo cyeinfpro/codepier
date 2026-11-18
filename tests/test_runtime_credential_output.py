@@ -17,8 +17,11 @@ def test_process_output_patterns_pem_and_database_password_across_reads():
     secrets = credential_output_values({"DATABASE_URL": "postgres://fixture:syn%2Bthetic@localhost/db",
                                        "PWD": "/work/fixture", "OLDPWD": "/work/previous"})
     assert "/work/fixture" not in secrets and "/work/previous" not in secrets
-    stream = ("ordinary\nAuthorization: Bearer unseen-value\n-----BEGIN " "PRIVATE KEY-----\n"
-              "private bytes\n-----END PRIVATE KEY-----\nlast syn+thetic\n")
+    pem_label = "PRIVATE KEY"
+    stream = (
+        "ordinary\nAuthorization: Bearer unseen-value\n"
+        f"-----BEGIN {pem_label}-----\nprivate bytes\n-----END {pem_label}-----\nlast syn+thetic\n"
+    )
     for split in range(len(stream) + 1):
         masker = ProcessOutput(secrets)
         actual = masker.feed(stream[:split]) + masker.feed(stream[split:], final=True)

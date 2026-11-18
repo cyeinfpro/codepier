@@ -387,7 +387,11 @@ def write_rows(path, rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--output", type=Path, help="New report directory; default is the CodePier user state directory")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="New report directory; default is the CodePier user state directory",
+    )
     parser.add_argument("--variant", choices=["before", "after"], required=True)
     parser.add_argument(
         "--before-module",

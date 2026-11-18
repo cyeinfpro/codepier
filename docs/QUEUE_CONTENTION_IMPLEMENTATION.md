@@ -111,6 +111,22 @@ live 内容有标记，节点设置显示配置值与 Agent 实际生效值，�
 python -m scripts.queue_contention_report --database /path/to/hub.sqlite3 --top 10
 ```
 
+做投递优化前后对比时，从保留完整 WAL 的数据库副本或 SQLite 一致性备份读取各自的 24 小时窗口。可按节点和项目筛选。
+
+```sh
+python -m scripts.queue_contention_report --database /path/to/hub.sqlite3 --baseline
+python -m scripts.queue_contention_report --database /path/to/hub.sqlite3 --baseline \
+  --device DEVICE_ID --project PROJECT_ID
+```
+
+基线以原操作 ID 去重，按工具区分短文件读、文件写、任务或命令、其他操作。任务分组包括用时较短的命令，以便不同窗口使用相同分类。
+
+- `admitted` 按窗口内创建时间计数。`completed` 和成功完成数/秒按终态行的更新时间统计，包含在窗口开始前已接纳、窗口内才完成的操作。取消按终态计数。完成回执没有明确超时标记时，未成功的操作计入 `timeout_classification_unknown`。
+- 成功操作的首次投递与 Hub 完成延迟使用 Hub trace 的时间戳。Agent 开始前等待使用同次尝试的 `accepted → executing` 单调时间。每项分别报告样本数 `n` 和 P50/P95/P99。trace 丢失时，终态计数仍保留，缺失的耗时样本不参加计算。
+- `oldest_queued_age_seconds` 是观察时仍处于 `queued` 且没有已记录 `executing` 的操作中，距原始接纳最久的年龄。断线恢复和已经执行的操作另见原操作 trace。
+- `by_admission_condition` 使用操作初次接纳时的在线状态和采用的准入策略。`adaptive` 表示当时使用自适应预算，`legacy_or_warming` 表示当时使用基础预算，其中旧 Agent 与刚开始预热的 Agent 无法进一步区分。旧回执没有状态字段时显示 `unknown`。
+- `not_observed` 标注数据库无法覆盖的接纳前拒绝、客户端调用超时及客户端延迟。做对比时应收集同一窗口的入口或客户端数据。请求诊断日志在繁忙时采样，无法据此计算精确拒绝率。隔离压测以基准脚本记录的请求结果为准。
+
 报告是诊断信号，不自动取消任务或修改并发额度。性能 compose overlay 提供
 1 GiB / 1.5 CPU 预算，继续沿用托管更新与回退的资源保留流程。应用到真实
 主机须先核对共用服务预算并走授权部署流程。

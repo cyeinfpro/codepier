@@ -100,14 +100,10 @@ def _validate_link(path, root, artifacts):
         resolved = path.resolve(strict=True)
         resolved.relative_to(root)
     except (ValueError, OSError, RuntimeError) as exc:
-        raise DevError(
-            "SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source"
-        ) from exc
+        raise DevError("SNAPSHOT_UNSAFE", "Snapshot symbolic link escapes its source") from exc
     relative = resolved.relative_to(root)
     if snapshot_ignored(relative.as_posix()):
-        raise DevError(
-            "SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata"
-        )
+        raise DevError("SNAPSHOT_UNSAFE", "Snapshot symbolic link targets excluded metadata")
 
 
 def _validate_tree(root: Path, *, artifacts: bool = False, original: Path | None = None) -> set:
@@ -249,7 +245,10 @@ class SnapshotManager:
                 elif stat.S_ISDIR(mode):
                     if source.name in partial_clone or not _clone_directory(source, target):
                         shutil.copytree(
-                            source, target, symlinks=True, copy_function=_clone_file,
+                            source,
+                            target,
+                            symlinks=True,
+                            copy_function=_clone_file,
                             ignore=lambda directory, names: _snapshot_exclusions(
                                 root, Path(directory), names
                             ),

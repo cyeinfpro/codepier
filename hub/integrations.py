@@ -234,7 +234,9 @@ class HubIntegrations:
             project = self.runtime.project(projects.pop(), principal)
         except DevError:
             return None
-        if any(row.get("device_id") and row["device_id"] != project["device_id"] for row in operations):
+        if any(
+            row.get("device_id") and row["device_id"] != project["device_id"] for row in operations
+        ):
             return None
         trace = self.begin(principal, project, name, metadata, arguments, started=started)
         if len(operations) == 1:
@@ -242,12 +244,17 @@ class HubIntegrations:
         return trace
 
     def begin(self, principal, project, name, metadata, arguments=None, *, started=None):
-        meaningful = name not in SAFE and not self.operation_poll(name, arguments or {}) and name not in {
-            "operations_list",
-            "activity_list",
-            "diagnostics_get",
-            "operations_trace",
-        }
+        meaningful = (
+            name not in SAFE
+            and not self.operation_poll(name, arguments or {})
+            and name
+            not in {
+                "operations_list",
+                "activity_list",
+                "diagnostics_get",
+                "operations_trace",
+            }
+        )
         window = metadata.get("openai/session") if isinstance(metadata, dict) else None
         if not isinstance(window, str) or not 1 <= len(window) <= 512:
             window = None

@@ -96,8 +96,11 @@ def register_queue_routes(router, store, runtime, auth):
                 raise DevError("FORBIDDEN", "仅实例管理员可读取实例级队列诊断", 403)
             from hub.queue_contention import queue_contention_report
 
-            return {
+            report = {
                 "scope": "hub_instance",
                 "contention": queue_contention_report(store),
                 "metrics": store.stats_snapshot(),
             }
+        # Percentiles are computed from process-local samples after the
+        # database report has closed its transaction.
+        return {**report, "delivery": runtime.delivery_metrics.snapshot()}

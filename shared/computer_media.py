@@ -226,7 +226,7 @@ def mcp_result(name: str, value: dict):
     }
 
 
-def purge_database(db, table: str, now: float | None = None):
+def purge_database(db, table: str, now: float | None = None, *, limit: int = 64):
     """Incremental privacy cleanup; invoke inside the owner's DB lock/transaction."""
     if table not in {"calls", "operations"}:
         raise ValueError("Unknown result table")
@@ -237,7 +237,7 @@ def purge_database(db, table: str, now: float | None = None):
         f"CREATE INDEX IF NOT EXISTS {table}_media_expiry ON {table}({MEDIA_EXPIRY}) WHERE {MEDIA_PENDING}"
     )
     rows = db.execute(
-        f"SELECT id FROM {table} WHERE {MEDIA_PENDING} AND {MEDIA_EXPIRY}<=? LIMIT 64", (now,)
+        f"SELECT id FROM {table} WHERE {MEDIA_PENDING} AND {MEDIA_EXPIRY}<=? LIMIT ?", (now, limit)
     ).fetchall()
     for row in rows:
         stored = db.execute(f"SELECT result FROM {table} WHERE id=?", (row["id"],)).fetchone()

@@ -56,10 +56,18 @@ IGNORED_DIRS = {
     ".codepier",
     ".cache",
 }
-GENERATED_SCAN_DIRS = frozenset({
-    ".build", ".next", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".turbo",
-    ".work", ".codepier-test-runs",
-})
+GENERATED_SCAN_DIRS = frozenset(
+    {
+        ".build",
+        ".next",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".turbo",
+        ".work",
+        ".codepier-test-runs",
+    }
+)
 CHECKPOINT_ARTIFACTS = GENERATED_SCAN_DIRS | {"coverage", "playwright-report", "test-results"}
 STORAGE_UNAVAILABLE = frozenset(
     getattr(errno, name)
@@ -838,7 +846,7 @@ class FileEngine:
                 continue
             try:
                 rel = name.decode("utf-8")
-                if not rel.startswith(prefix) or scan_ignored(rel[len(prefix):]):
+                if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
                     continue
                 if paths_only:
                     if rel not in seen:

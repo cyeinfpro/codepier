@@ -202,9 +202,8 @@ class Store:
             with self._wal_sample_lock:
                 self._read_started.pop(worker, None)
 
-    def _read_phase(self, call):
-        # One connection belongs to each worker. No transaction, authorization
-        # memo or connection binding survives this synchronous phase.
+    def _reader_connection(self):
+        # One connection belongs to each worker.
         binding = getattr(self._reader_state, "connection", None)
         if binding is None:
             connection = sqlite3.connect(
@@ -221,8 +220,20 @@ class Store:
             self._reader_state.connection = binding
             with self._read_connections_lock:
                 self._read_connections.append(binding)
-        self._reader_state.binding = binding
+        return binding
+
+    def _read_phase(self, call, *, hint_only=False):
+        # No transaction, authorization memo or connection binding survives
+        # this synchronous phase.
+        self._reader_state.binding = self._reader_connection()
+        self._reader_state.denial_audits = None
         try:
+            if hint_only:
+                # Durable delivery selection is only a hint. The writer repeats
+                # its state/authority checks before preparing or sending a call.
+                with self.lock, self._read_transaction_timing(), self.db:
+                    self.db.execute("BEGIN")
+                    return call()
             for attempt in range(4):
                 # Discard audits from invalidated snapshots. Only the final
                 # accepted/failed phase produces externally visible records.
@@ -280,7 +291,7 @@ class Store:
                 retry_after=1,
             )
         finally:
-            audits = getattr(self._reader_state, "denial_audits", [])
+            audits = self._reader_state.denial_audits
             del self._reader_state.binding
             del self._reader_state.denial_audits
             # Both the reader transaction and final writer fence are released.
@@ -298,7 +309,10 @@ class Store:
         """Collect role denials only; never allow arbitrary writes in readers."""
         if getattr(self._reader_state, "binding", None) is None:
             return False
-        self._reader_state.denial_audits.append(
+        audits = self._reader_state.denial_audits
+        if audits is None:
+            raise RuntimeError("Authorization decisions require Store.run_read")
+        audits.append(
             (
                 copy_context(),
                 partial(self.audit, actor, "role.denied", target, "denied", dict(detail)),
@@ -407,6 +421,9 @@ class Store:
         if "resource" not in grant_columns:
             self.db.execute("ALTER TABLE grants ADD COLUMN resource TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS op_pending ON operations(state,next_attempt)")
+        from hub.delivery_candidates import migrate as migrate_delivery_candidates
+
+        migrate_delivery_candidates(self.db)
         if "profile_id" not in grant_columns:
             self.db.execute(
                 "ALTER TABLE grants ADD COLUMN profile_id TEXT REFERENCES access_profiles(id)"
@@ -486,8 +503,11 @@ class Store:
     def encrypt(self, value: str):
         return self.cipher.encrypt(value.encode()).decode()
 
+    def decrypt_bytes(self, value: str) -> bytes:
+        return self.cipher.decrypt(value.encode())
+
     def decrypt(self, value: str):
-        return self.cipher.decrypt(value.encode()).decode()
+        return self.decrypt_bytes(value).decode()
 
     def audit(
         self,
@@ -597,6 +617,16 @@ class Store:
         """
         return await self._run(function, args, kwargs, control=False, read_only=True)
 
+    async def run_hint_read(self, function, /, *args, **kwargs):
+        """Read internal delivery candidates once, even under concurrent writes.
+
+        Stale hints are safe only because prepare and send recheck durable state
+        on the writer. Use run_read for authority and user-visible reads.
+        """
+        return await self._run(
+            function, args, kwargs, control=False, read_only=True, hint_only=True
+        )
+
     async def run_control(self, function, /, *args, **kwargs):
         """Internal authenticated Agent receipt/final-send-fence path only.
 
@@ -605,7 +635,7 @@ class Store:
         """
         return await self._run(function, args, kwargs, control=True)
 
-    async def _run(self, function, args, kwargs, *, control, read_only=False):
+    async def _run(self, function, args, kwargs, *, control, read_only=False, hint_only=False):
         if self.lock.owned:
             raise RuntimeError("Do not await Store.run while holding Store.lock")
         loop = asyncio.get_running_loop()
@@ -619,7 +649,9 @@ class Store:
             started = metrics.start(submitted)
             failed = False
             try:
-                return context.run(self._read_phase, call) if read_only else context.run(call)
+                if read_only:
+                    return context.run(self._read_phase, call, hint_only=hint_only)
+                return context.run(call)
             except BaseException:
                 failed = True
                 raise
@@ -670,7 +702,10 @@ class Store:
             row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         with self._wal_sample_lock:
             self._wal_checkpoint = {
-                "at": time.time(), "busy": row[0], "log": row[1], "checkpointed": row[2],
+                "at": time.time(),
+                "busy": row[0],
+                "log": row[1],
+                "checkpointed": row[2],
             }
             return dict(self._wal_checkpoint)
 
@@ -688,7 +723,9 @@ class Store:
                 "bytes": size,
                 "checkpoint": dict(self._wal_checkpoint) if self._wal_checkpoint else None,
                 "oldest_read_transaction_ms": (
-                    max(0, round((time.monotonic() - oldest) * 1000)) if oldest is not None else None
+                    max(0, round((time.monotonic() - oldest) * 1000))
+                    if oldest is not None
+                    else None
                 ),
             }
 

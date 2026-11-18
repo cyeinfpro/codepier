@@ -16,7 +16,8 @@ from tests.legacy_iam_fixture import seed_owner
 
 
 @pytest.fixture
-def delivery(tmp_path):
+def delivery(tmp_path, monkeypatch, request):
+    monkeypatch.setenv('HUB_DELIVERY_ROLLING_DEVICES', getattr(request, 'param', ''))
     store = Store(tmp_path/'hub')
     seed_owner(store, 'owner', 'owner')
     for identifier in ['hot', 'cold']:
@@ -104,6 +105,7 @@ def test_queued_computer_close_rechecks_current_instance_admin(delivery, force):
         assert denied.value.code == 'COMPUTER_FORCE_DENIED'
 
 
+@pytest.mark.parametrize('delivery', ['*'], indirect=True)
 def test_candidate_window_is_fair_and_preserves_device_order(delivery):
     e = delivery
     with e.store.transaction():
@@ -114,11 +116,142 @@ def test_candidate_window_is_fair_and_preserves_device_order(delivery):
                     (id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated)
                     VALUES(?,?,?,'fixture','read','{}','fixture','queued',?,?)''',
                     (device+str(index).zfill(3),device,device,stamp,stamp))
+    chunk = e.runtime.delivery_config.delivery_device_chunk
     rows = e.runtime._delivery_candidates(())
-    assert len(rows) == 128
+    # One round takes a bounded chunk per device; the device task refills the rest.
+    assert len(rows) == chunk + 3
     assert [row['device_id'] for row in rows[:4]] == ['hot','cold','hot','cold']
-    assert [row['id'] for row in rows if row['device_id']=='hot'] == ['hot'+str(i).zfill(3) for i in range(125)]
+    assert [row['id'] for row in rows if row['device_id']=='hot'] == [
+        'hot'+str(i).zfill(3) for i in range(chunk)]
     assert {row['device_id'] for row in e.runtime._delivery_candidates(('hot',))} == {'cold'}
+    assert all(row['attempts'] == 0 and row['due'] == float(row['id'][-3:]) or row['device_id'] == 'cold'
+               for row in rows)
+
+
+def insert_queued(e, device, count, *, start=0):
+    with e.store.transaction():
+        for index in range(start, start+count):
+            e.store.db.execute('''INSERT INTO operations
+                (id,device_id,project_id,actor,tool,args_summary,fingerprint,state,created,updated)
+                VALUES(?,?,?,'fixture','read','{}','fixture','queued',?,?)''',
+                (device+str(index).zfill(3), device, device, index, index))
+    return [device+str(index).zfill(3) for index in range(start, start+count)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delivery', ['*'], indirect=True)
+async def test_device_task_refills_in_order_and_yields_at_task_limit(delivery, monkeypatch):
+    from hub.device_delivery import DELIVERY_TASK_LIMIT
+    e = delivery
+    expected = insert_queued(e, 'hot', DELIVERY_TASK_LIMIT + 40)
+    prepared = []
+    async def prepare(identifier, *, device_id=None, timing=None):
+        assert device_id == 'hot' and timing is not None
+        prepared.append(identifier)
+        return None
+    monkeypatch.setattr(e.runtime, '_prepare_for_send', prepare)
+    rows = await e.store.run_read(e.runtime._delivery_candidates, ())
+    assert len(rows) == e.runtime.delivery_config.delivery_device_chunk
+    await e.runtime.deliver_device([row['id'] for row in rows], device_id='hot', selected=rows)
+    # Strict per-device order across refills, then yield back to the scheduler.
+    assert prepared == expected[:DELIVERY_TASK_LIMIT]
+    assert e.runtime.delivery_slots._value == 8
+    snapshot = e.runtime.delivery_metrics.snapshot()
+    assert snapshot['counts']['settled'] == DELIVERY_TASK_LIMIT
+    assert snapshot['device_batches']['items']['p50'] == DELIVERY_TASK_LIMIT
+    assert snapshot['stages_ms']['settled']['candidate_wait']['count'] == DELIVERY_TASK_LIMIT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delivery', ['*'], indirect=True)
+async def test_work_due_after_selection_joins_the_running_device_task(delivery, monkeypatch):
+    e = delivery
+    first = insert_queued(e, 'hot', 1)
+    prepared = []
+    async def prepare(identifier, *, device_id=None, timing=None):
+        prepared.append(identifier)
+        if identifier == first[0]:
+            # Admitted while the hot device's task is already running.
+            insert_queued(e, 'hot', 2, start=1)
+        return None
+    monkeypatch.setattr(e.runtime, '_prepare_for_send', prepare)
+    rows = await e.store.run_read(e.runtime._delivery_candidates, ())
+    await e.runtime.deliver_device([row['id'] for row in rows], device_id='hot', selected=rows)
+    assert prepared == ['hot000', 'hot001', 'hot002']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('delivery', ['*'], indirect=True)
+async def test_refill_failure_ends_task_without_losing_durable_work(delivery, monkeypatch):
+    e = delivery
+    insert_queued(e, 'hot', 3)
+    async def prepare(identifier, *, device_id=None, timing=None):
+        return None
+    def broken(*args):
+        raise OSError('fixture')
+    monkeypatch.setattr(e.runtime, '_prepare_for_send', prepare)
+    monkeypatch.setattr(e.runtime, '_device_delivery_refill', broken)
+    await e.runtime.deliver_device(['hot000'], device_id='hot')
+    # A failed refill yields to the scheduler without retrying on every send.
+    assert e.runtime.delivery_metrics.snapshot()['refill_errors'] == 1
+    assert e.store.one("SELECT count(*) AS n FROM operations WHERE state='queued'")['n'] == 3
+
+
+@pytest.mark.asyncio
+async def test_real_send_records_split_stage_timings(delivery):
+    e = delivery
+    sent = []
+    class Socket:
+        async def send_text(self, value):
+            sent.append(value)
+    class Channel:
+        def pack(self, value):
+            return json.dumps(value)
+    connection = Connection(Socket(), Channel())
+    connection.journal_id = 'fixture-journal'
+    e.runtime.connections['hot'] = connection
+    identifier = admit(e)
+    rows = await e.store.run_read(e.runtime._delivery_candidates, ())
+    assert [row['id'] for row in rows] == [identifier] and rows[0]['attempts'] == 0
+    await e.runtime.deliver_device([identifier], device_id='hot', selected=rows)
+    assert len(sent) == 1 and json.loads(sent[0])['id'] == identifier
+    snapshot = e.runtime.delivery_metrics.snapshot()
+    assert snapshot['counts']['first_call'] == 1
+    stages = snapshot['stages_ms']['first_call']
+    for stage in ['candidate_wait', 'slot_wait', 'device_lock_wait', 'prepare_queue', 'prepare_run',
+                  'send_turn', 'send_lock_wait', 'fence_queue', 'fence_run', 'send', 'total']:
+        assert stages[stage]['count'] == 1, stage
+    from hub.delivery_metrics import STAGES
+    assert list(stages) == [stage for stage in STAGES if stage in stages]
+    # The trace still records the dispatch decision inside the final fence.
+    stage_rows = e.store.all("SELECT stage FROM operation_events WHERE operation_id=? AND source='hub'",
+                             (identifier,))
+    assert 'dispatched' in [row['stage'] for row in stage_rows]
+
+
+@pytest.mark.asyncio
+async def test_fenced_send_and_offline_backoff_are_classified_separately(delivery):
+    e = delivery
+    class Socket:
+        async def send_text(self, value):
+            raise AssertionError('fenced packet must not reach the socket')
+    class Channel:
+        def pack(self, value):
+            return json.dumps(value)
+    connection = Connection(Socket(), Channel())
+    connection.journal_id = 'fixture-journal'
+    e.runtime.connections['hot'] = connection
+    identifier = admit(e)
+    prepared = await e.runtime._prepare_for_send(identifier)
+    e.store.execute('UPDATE operations SET cancel_requested=1 WHERE id=?', (identifier,))
+    from hub.delivery_metrics import DeliveryTiming
+    timing = DeliveryTiming(identifier)
+    assert await e.runtime._send_prepared(identifier, prepared, timing=timing) is False
+    assert 'fence_run' in timing.stages and 'send' not in timing.stages
+    other = admit(e, project='cold', key='offline-read')
+    del e.runtime.connections['cold']
+    await e.runtime.deliver_device([other], device_id='cold')
+    assert e.runtime.delivery_metrics.snapshot()['counts']['offline_backoff'] == 1
 
 
 def test_equal_timestamp_candidates_keep_admission_order(delivery):
@@ -250,7 +383,7 @@ async def test_slow_device_does_not_block_a_later_device_tick(delivery, monkeypa
             return [{'id':'hot-op','device_id':'hot'}]
         assert 'hot' in busy
         return [] if 'cold' in busy or cold_finished.is_set() else [{'id':'cold-op','device_id':'cold'}]
-    async def deliver(identifiers):
+    async def deliver(identifiers, **_):
         if identifiers == ['hot-op']:
             hot_started.set()
             await hold.wait()

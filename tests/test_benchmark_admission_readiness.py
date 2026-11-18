@@ -458,7 +458,7 @@ async def test_workload_keeps_busy_codes_and_counts_and_continues_without_replay
         calls.append((name, dict(args)))
         assert name == 'read'
         if args['path'] == 'README.md':
-            return {}, False
+            return {'operation_id': 'warm'}, False
         step = len(calls) - 2
         if step < len(rejections):
             code, scope, reason = rejections[step]
@@ -467,7 +467,7 @@ async def test_workload_keeps_busy_codes_and_counts_and_continues_without_replay
                 'queue_reason': reason, 'retry_after_seconds': 3,
                 'admitted': False, 'secret': SENSITIVE,
             }}, True
-        return {'sha256': initial_hash}, False
+        return {'operation_id': 'successful-read', 'sha256': initial_hash}, False
 
     async def monitor(stack, stop, rows):
         rows.append({'complete': True})

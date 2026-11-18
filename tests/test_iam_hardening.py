@@ -52,10 +52,11 @@ def test_workflow_request_key_is_scoped_to_space_and_survives_restart(team):
     assert must(tool(b['owner'],'workflows_create',args))['replayed']
     assert must(tool(b['legacy'],'workflows_create',args))['replayed']
     # Opening the migrated DB again must NOT recreate the obsolete global index.
+    schema=app.state.store.one("SELECT value FROM meta WHERE key='schema'")['value']
     second=Store(app.state.store.directory)
     try:
         assert len(second.all('SELECT * FROM workflow_replays WHERE idem=?',(args['idempotency_key'],)))==2
-        assert second.one("SELECT value FROM meta WHERE key='schema'")['value']=='10'
+        assert second.one("SELECT value FROM meta WHERE key='schema'")['value']==schema
         assert second.all('PRAGMA foreign_key_check')==[]
     finally:second.close()
 
@@ -129,7 +130,7 @@ def test_pending_receipt_revalidates_membership_after_wait(team,monkeypatch):
     # delivery task until teardown, then drive real delivery explicitly below.
     # Otherwise it may correctly persist AUTHORIZATION_CHANGED before the
     # pending-receipt assertion, depending on thread scheduling.
-    async def hold_background_delivery(ids):
+    async def hold_background_delivery(ids, **_):
         await asyncio.Future()
     monkeypatch.setattr(runtime,'deliver_device',hold_background_delivery)
 

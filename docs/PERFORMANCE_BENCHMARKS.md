@@ -29,7 +29,7 @@ scripts/benchmark_hub_agent.py 的同一份文件、同一解释器分别传 --r
 - 复用测量 HTTP client 的协议 warmup 完整等到终态后才开始计时
 - 每个样本保留操作 ID、worker/step/kind、总时延、错误类型、poll 数、原 ID 恢复和状态
 - 准入拒绝另保留四个有界白名单字段：`queue_scope`、`queue_reason`、`retry_after_seconds`、`admitted`。不保存错误原文、原始响应、配置、路径或凭据；拒绝仍计入失败，不自动重试新操作
-- Hub queue：同 Hub 时钟的 admission(created) 至首 dispatch；Agent queue：同一执行尝试的相对 accepted/wait 至 executing。attempts 不等于 1 时不混算 Agent 时间，只保留不可用原因
+- Hub 首投用同一 Hub 时钟的 `hub_received → dispatched`。Agent 等待用同一次执行尝试的 `accepted → executing`。成功样本的 `stage_ms_success` 按操作类型提供覆盖数、P50/P95/P99 和最大值，缺失或无法配对的阶段保留原因
 - 真实断 HTTP waiter：在 fixture 数据库看见原 idem 对应 running 操作后取消等待，仅 task_query 原 operation ID；核对该 idem 只有一条 operation、2 秒合成任务只追加一次计数
 
 初次 HTTP 异常、poll 拒绝、未知/缺失状态及错误 receipt 均停止所有 worker 的新发起。只允许查询已知原 ID；初次响应丢失时，仅从该 fixture DB 的精确 idem 查回原 ID，不重新调用原工具。恢复成功也保留初次失败样本，不变绿。当前 phase 清理后不继续下一格。任意残留 queued/running/reconnecting/cancelling/unknown 也阻止后续 phase。
@@ -45,6 +45,32 @@ scripts/benchmark_hub_agent.py 的同一份文件、同一解释器分别传 --r
 探测间隔至少三秒，单次 HTTP timeout 不超过十秒及绝对截止的剩余时间。等待预算默认且最多 300 秒；即使最后一次响应报告就绪，只要已到绝对截止也失败。永久未知、压力状态、失联或 HTTP 错误不会被当作就绪，不复用旧的成功观察。失败写入 `readiness_not_met`，停止该轮而不重新压测。准备及前后观察不计入 workload 时长。
 
 `manifest.json` 记录 profile、等待预算及所有 case 的安全观察；每个已完成 case 的 `summary.json` 还包含相同的 `admission` 记录。观察包括实际预算、reason、三条 lane 的有界数值及等待经过时间，不包括设备身份、scheduler 配置或项目路径。将 `cold` 与 `ready` 分开报告，同一对必须使用同一 profile、等待预算和新 harness 哈希；旧冷启动拒绝结果保持原样，不能用 ready 结果替换。
+
+#### 开环：固定到达率与突发排空
+
+默认 `--mode closed_loop` 就是上文的固定 worker 闭环：每个 worker 等上一次完成才发下一次，服务变慢时发送也跟着变慢，测不出积压和排空时间。`--mode open_loop` 另按固定到达率发送：
+
+- 计时前一次算出全部计划到达时刻：`--burst N` 个在 t0，其后稳态第 i 个在 t0 + i/`--arrival-rate`。`--operations` 是含突发的总数，`--duration` 是稳态到达窗口秒数，二者只给一个；单格最多计划 100000 次。`--arrival-rate` 可逗号分隔多档，每档一格，目录名如 `read-open-20`。`--concurrency`、`--operations-per-worker` 在开环中不使用。
+- 端到端时延从计划到达时刻算到终态，不从实际发送时刻算。另报 `send_lag_ms`（实际发送 − 计划）和 `service_ms`（终态 − 实际发送）。
+- `--max-in-flight`（默认 128，最大 256）限制客户端同时在途数。满了不等待：该到达记为 `client_dropped`，后续到达仍按原计划发出。等空位会把排队时间藏进客户端（coordinated omission），所以不这样做。
+- 每个在途操作独占一个夹具文件，read_write 的 SHA 校验仍然精确。三种 workload 复用闭环的单次操作函数，按计划序号混合：read_write 每四次一写，long_short 每 32 次一个 0.4 秒合成任务。比例与闭环相同，但不绑定到 worker。
+- 停止规则同闭环：初次 HTTP 异常等情况停止新发起，剩余计划到达记为 `not_sent_after_stop`，不重放，也不继续下一格。准入就绪检查所需的 pending 预算按 `--max-in-flight` 计。
+
+每格 summary 带 `mode: "open_loop"`（闭环为 `"closed_loop"`）；manifest 记录 `mode` 和 `open_loop` 计划。主要字段：
+- 供给：`arrival_rate_per_second`、`burst`、`offered_operations`、`offered_rate_mean_per_second`（含突发）
+- `throughput_success_per_second`：成功数除以计划到达窗口与实际排空时长中的较大值。中止时按实际观测时长计算
+- `latency_ms_from_scheduled_all` / `_success`、`send_lag_ms`（另有 `send_lag_ms_max`）、`service_ms` 的 P50/P95/P99
+- 分开计数：`succeeded`、`rejected`（明确 `admitted=false`，或无操作 ID 的准入 Busy，按 `rejected_by_code` 分码）、`timeout`、`cancelled`、`failed`、`client_dropped`、`not_sent_after_stop`；`errors` 是除成功外的全部
+- 积压：`max_in_flight_observed`、`oldest_backlog_age_ms_max`（未完成操作距其计划到达的最大年龄）、`backlog_at_last_arrival`（最后一次计划到达时的在途数和最老年龄）
+- `burst_drain`：从 t0 到全部突发操作到达终态的 `drain_ms`；任一突发操作被丢弃、未发送或结果仍未知时为 null。同时给出 `succeeded`：快速拒绝也算到达终态，不能当成排空成功
+- `by_kind`：同口径按 kind 分开
+
+怎样读：
+- 闭环回答“N 个并发调用方各自看到的时延和吞吐”；开环回答“给定到达率下排队是否稳定、突发多久排空”。两种结果分别报告，不互相配对，也不合成一个数字。
+- 到达率高于成功吞吐时，积压年龄和计划时延会随运行时长持续增长，P99 主要由时长决定。这时报告“该到达率下不稳定”，不报告稳态时延。
+- `send_lag_ms` 的 P99 明显超过几毫秒，或 `client_dropped` 不为零，说明测量端自身成了瓶颈或上限太小。该格只作诊断，降低到达率或调大 `--max-in-flight` 后用新目录重跑。
+- 测突发排空时，`--max-in-flight` 至少要容纳 `--burst` 加稳态在途数，否则突发本身就被客户端丢弃，`drain_ms` 为 null。
+- 只有同 harness 哈希、同到达率、同 burst、同上限的前后版本才能配对；其余配对和噪声规则同闭环。
 
 ### Gateway Session 微基准
 
@@ -66,8 +92,8 @@ scripts/benchmark_gateway.py 单独比较 Session 调度与传输，不混入 Hu
 下述命令只执行指定纯 mock/helper 测试，不启动真实 listener/Hub/Agent。将 PY 指向已安装依赖的解释器：
 
     PY=/path/to/existing/python
-    "$PY" -m pytest -q tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_gateway.py
-    "$PY" -m ruff check scripts/benchmark_hub_agent.py scripts/benchmark_gateway.py tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_gateway.py
+    "$PY" -m pytest -q tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_open_loop.py tests/test_benchmark_gateway.py
+    "$PY" -m ruff check scripts/benchmark_hub_agent.py scripts/benchmark_gateway.py tests/test_benchmark_hub_agent.py tests/test_benchmark_admission_readiness.py tests/test_benchmark_open_loop.py tests/test_benchmark_gateway.py
 
 测试不从 test_*.py 导入共享 fixture。新增测量器失败、超时、状态错误和脱敏行为都有独立负向检查。秒级 mock 结果只证明脚本语义，不能替代下面真实矩阵。
 
@@ -91,6 +117,21 @@ scripts/benchmark_gateway.py 单独比较 Session 调度与传输，不混入 Hu
       --operations-per-worker 32 --host-context "实际已核实的同时运行活动"
 
 下一对反转次序 after → before。至少三个 ABBA 循环（六个相邻配对），保留全部结果，不选最好的一次。初次仅可先跑 --concurrency 1 --operations-per-worker 1 作真实 harness 冒烟，明确标成 smoke，不并入正式矩阵。
+
+开环突发排空另跑独立的一组目录，同样 ABBA 交错，不与闭环目录混放或配对：
+
+    "$PY" "$AFTER/scripts/benchmark_hub_agent.py" \
+      --repository "$BEFORE" --variant before --output .work/hub-open-pair01-before \
+      --mode open_loop --arrival-rate 10,20,40 --duration 60 --burst 64 --max-in-flight 192 \
+      --admission-profile ready --readiness-timeout 300 \
+      --host-context "实际已核实的同时运行活动"
+    "$PY" "$AFTER/scripts/benchmark_hub_agent.py" \
+      --repository "$AFTER" --variant after --output .work/hub-open-pair01-after \
+      --mode open_loop --arrival-rate 10,20,40 --duration 60 --burst 64 --max-in-flight 192 \
+      --admission-profile ready --readiness-timeout 300 \
+      --host-context "实际已核实的同时运行活动"
+
+开环冒烟可用 `--mode open_loop --workloads read --arrival-rate 2 --operations 10`，同样标成 smoke。到达率档位要覆盖闭环测得的成功吞吐上下，才能看到稳定与不稳定的分界。
 
 Gateway 两个变体都指同一当前 checkout；--variant 决定精确加载的模块：
 
@@ -118,7 +159,7 @@ Gateway 两个变体都指同一当前 checkout；--variant 决定精确加载�
 - nearest-rank P50/P95/P99 同时报告全样本和成功样本，错误不会被过滤掉。成功吞吐是成功数除整个 phase wall time
 - by_kind 必须看短请求，不能用长任务占比变化掩盖短请求尾延迟
 - Jain 指标是 worker 平均时延倒数的公平性，不是固定窗口每 worker 吞吐；每个 worker 的 raw 可重算。长短 worker 工作量不同，优先同类/同混合比例比较
-- 闭环固定 worker 压力，不做 coordinated-omission 修正，不声称固定到达率 SLA 或饱和容量
+- 闭环模式是固定 worker 压力，不做 coordinated-omission 修正，不声称固定到达率 SLA 或饱和容量。固定到达率与突发排空只看开环模式的结果，两种模式分别报告
 - 每格默认 4 次/worker 只是 smoke 级样本量；正式用 32 并做重复。任一 kind 的 P99 若不足 1000 成功样本，应标为低样本/探索性，不作为达标证据
 - 采样 ps 仅使用自有 fixture PID，每 0.5 秒一次，三秒内未返回则记采样失败。CPU 是 ps 生命周期平均百分比，不是严格区间 CPU；RSS 单位 KiB
 - Hub CPU/RSS 是两个父进程，不含完整子进程树；child CPU 是本次 fixture 生命周期内已回收子进程用时差，包含 fixture 启停及采样开销，maxrss 是平台原生单位的累计峰值

@@ -75,11 +75,37 @@ class RuntimeConfig:
     queue_seconds: float
     wait_seconds: float
     retry_seconds: float
+    # Bounds on prepared and sending requests during delivery.
+    delivery_slots: int = 8
+    delivery_prefetch: int = 2
+    # Only enrolled canary devices use this chunk size and refill.
+    delivery_device_chunk: int = 16
+    delivery_rolling_devices: tuple[str, ...] = ()
+
+    def rolling_for(self, device_id: str | None) -> bool:
+        """Only explicitly enabled device tasks may refill from the durable queue."""
+        return bool(
+            device_id
+            and (
+                self.delivery_rolling_devices == ("*",)
+                or device_id in self.delivery_rolling_devices
+            )
+        )
 
     @classmethod
     def from_env(cls) -> RuntimeConfig:
+        devices = env_csv("HUB_DELIVERY_ROLLING_DEVICES")
+        if devices != ("*",) and any(len(device) > 100 or "*" in device for device in devices):
+            raise ConfigurationError(
+                "HUB_DELIVERY_ROLLING_DEVICES must be empty, a comma-separated list of "
+                "exact device IDs (up to 100 characters each), or * alone"
+            )
         return cls(
-            env_float("HUB_QUEUE_TTL_SECONDS", 1800, 5, 86400),
-            env_float("HUB_CALL_WAIT_SECONDS", 10, 0, OPERATION_WAIT_SECONDS),
-            env_float("HUB_DELIVERY_RETRY_SECONDS", 5, 0.2, 30),
+            queue_seconds=env_float("HUB_QUEUE_TTL_SECONDS", 1800, 5, 86400),
+            wait_seconds=env_float("HUB_CALL_WAIT_SECONDS", 10, 0, OPERATION_WAIT_SECONDS),
+            retry_seconds=env_float("HUB_DELIVERY_RETRY_SECONDS", 5, 0.2, 30),
+            delivery_slots=env_int("HUB_DELIVERY_SLOTS", 8, 1, 64),
+            delivery_prefetch=env_int("HUB_DELIVERY_PREFETCH", 2, 1, 8),
+            delivery_device_chunk=env_int("HUB_DELIVERY_DEVICE_CHUNK", 16, 1, 128),
+            delivery_rolling_devices=devices,
         )

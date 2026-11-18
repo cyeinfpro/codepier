@@ -25,7 +25,8 @@ async def test_pending_poll_uses_only_original_id(monkeypatch):
     seen = []
     async def rpc(client,name,args):
         seen.append((name,args))
-        return {'operations':[{'pending':False,'state':'succeeded','result':{'ok':True,'data':{'sha256':'a'*64}}}]},False
+        return {'operations':[{'operation_id':'original','pending':False,'state':'succeeded',
+                               'result':{'ok':True,'data':{'sha256':'a'*64}}}]},False
     monkeypatch.setattr(benchmark,'rpc',rpc)
     identifier,data,failed,polls,state = await benchmark.finish_original(
         None,{'pending':True,'operation_id':'original'},False,time.monotonic()+1)
@@ -84,6 +85,8 @@ async def test_unknown_without_pending_never_counts_as_success(monkeypatch):
 @pytest.mark.parametrize('receipt', [
     {'operations':[]},
     {'operations':[{'id':'other', 'state':'succeeded', 'result':{'ok':True}}]},
+    {'operations':[{'state':'succeeded', 'result':{'ok':True}}]},
+    {'operations':[{'id':'original', 'state':'succeeded', 'pending':True}]},
     {'operations':[{'id':'original'}]},
 ])
 async def test_invalid_receipt_is_not_a_success(monkeypatch, receipt):
@@ -123,7 +126,7 @@ async def test_failed_http_recovers_same_id_and_stops_new_work(monkeypatch, tmp_
     async def rpc(client, name, args):
         calls.append((name, args))
         if name == 'read' and args['path'] == 'README.md':
-            return {}, False
+            return {'operation_id':'warm'}, False
         if name == 'read':
             raise httpx.ReadTimeout('SENSITIVE bearer fixture body')
         assert args['operation_ids'] == ['original']
@@ -141,6 +144,7 @@ async def test_failed_http_recovers_same_id_and_stops_new_work(monkeypatch, tmp_
     assert [name for name, _ in calls] == ['read', 'read', 'task_query']
     assert summary['admission_stopped'] and summary['errors'] == 1
     assert rows[0]['recovered'] and not rows[0]['ok'] and not rows[0]['unresolved']
+    assert rows[0]['polls'] == 0 and rows[0]['recovery_polls'] == 1
     assert 'SENSITIVE' not in (tmp_path/'samples.jsonl').read_text()
 
 
