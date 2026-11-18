@@ -107,3 +107,31 @@ def test_trigger_origin_is_trusted_admission_metadata_not_request_args():
     legacy = public_row({'tool': 'project_knowledge_build', 'args_summary': spoof | {'_log': {'version': 1}}})
     assert legacy['trigger_source'] == 'unknown'
     assert public_row({'tool': 'shell_exec'})['model_invocation'] is None
+
+
+def test_structured_argument_summary_strips_defaults_and_collapses_empty():
+    from hub.call_log import structured_argument_summary
+
+    cmd = structured_argument_summary(
+        'exec',
+        {'command': 'pytest -q', 'cwd': '.', 'timeout_seconds': 3600, '_log': {'command_chars': 9}},
+    )
+    assert cmd == {'kind': 'command', 'primary': 'pytest -q', 'dir': '', 'name': '', 'badges': ['9 字符']}
+
+    custom_cmd = structured_argument_summary(
+        'exec',
+        {'command': 'npm run build', 'cwd': 'web/mcp-apps', 'timeout_seconds': 120},
+    )
+    assert 'cwd: web/mcp-apps' in custom_cmd['badges']
+    assert '限时 120s' in custom_cmd['badges']
+
+    file_part = structured_argument_summary(
+        'write',
+        {'path': 'artworks/pelican.svg', 'content': '<11634 chars>', '_log': {'edit_count': 2}},
+    )
+    assert file_part['kind'] == 'file'
+    assert file_part['dir'] == 'artworks/' and file_part['name'] == 'pelican.svg'
+    assert '11.4 KB' in file_part['badges'] and '2 处修改' in file_part['badges']
+
+    empty_part = structured_argument_summary('open_workspace', {})
+    assert empty_part == {'kind': 'empty', 'primary': '', 'dir': '', 'name': '', 'badges': []}

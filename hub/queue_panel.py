@@ -22,9 +22,10 @@ def queue_rows(store, runtime, principal, limit=100):
         )
         args.extend(principal.projects)
     rows = store.all(
-        """SELECT o.id,o.project_id,o.device_id,o.tool,o.actor,o.state,o.created,
-        o.updated,o.args_summary,o.error,o.attempts,o.accepted_at,o.deadline,
-        o.cancel_requested,o.transport_error,p.alias,d.name AS device_name
+        """SELECT o.id,o.grant_id,o.project_id,o.device_id,o.tool,o.actor,o.state,
+        o.space_id,o.owner_user_id,o.visibility,o.created,o.updated,o.args_summary,
+        o.error,o.attempts,o.accepted_at,o.deadline,o.cancel_requested,
+        o.transport_error,p.alias,d.name AS device_name
         FROM operations o LEFT JOIN projects p ON p.id=o.project_id
         LEFT JOIN devices d ON d.id=o.device_id WHERE """
         + clause
@@ -32,31 +33,47 @@ def queue_rows(store, runtime, principal, limit=100):
         (*args, *ACTIVE, 1001),
     )
     observed = time.time()
-    result = []
+    authorized_rows = []
     scan_incomplete = len(rows) > 1000
+    use_loaded_auth = hasattr(
+        runtime, "authorize_loaded_operation_row"
+    ) and "operation_row" not in vars(runtime)
     for row in rows[:1000]:
         # SQL is only a coarse tenant/owner filter. Apply the full originating
         # operation policy (including computer scopes and project roles) before
         # projecting any metadata, then independently filter each blocker.
         try:
-            runtime.operation_row(row["id"], principal, status_only=True)
+            if use_loaded_auth:
+                runtime.authorize_loaded_operation_row(row, principal)
+            else:
+                runtime.operation_row(row["id"], principal, status_only=True)
         except DevError as error:
             if error.status in {403, 404}:
                 continue
             raise
+        authorized_rows.append(row)
+        if len(authorized_rows) > limit:
+            break
+    visible_rows = authorized_rows[:limit]
+    annotations = (
+        runtime.batch_queue_annotations(visible_rows, principal, now=observed)
+        if visible_rows and hasattr(runtime, "batch_queue_annotations")
+        else {row["id"]: runtime.queue_annotations(row, principal) for row in visible_rows}
+    )
+    result = []
+    for row in visible_rows:
         item = public_row(row, observed)
-        item.update(runtime.queue_annotations(row, principal))
+        item.update(annotations[row["id"]])
         item["can_cancel"] = cancellable(runtime, principal, row)
         result.append(item)
-        if len(result) > limit:
-            break
+    has_more = len(authorized_rows) > limit
     return {
-        "operations": result[:limit],
-        "truncated": len(result) > limit or scan_incomplete,
-        "complete": not (len(result) > limit or scan_incomplete),
+        "operations": result,
+        "truncated": has_more or scan_incomplete,
+        "complete": not (has_more or scan_incomplete),
         "completeness_reason": "bounded_authorization_scan"
         if scan_incomplete
-        else ("visible_limit" if len(result) > limit else None),
+        else ("visible_limit" if has_more else None),
         "observed_at": observed,
         "scope": "visible_space_operations",
         "diagnostics_available": principal.instance_admin,

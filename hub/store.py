@@ -583,7 +583,7 @@ class Store:
         import re
 
         if re.search(
-            r"\b(?:sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|external_identities|oidc_providers|access_roles|access_profiles|role_assignments|role_created_projects|grants|tokens|projects|devices|gateway_[a-z_]+)\b",
+            r"\b(?:sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|external_identities|oidc_providers|access_roles|access_profiles|role_assignments|role_created_projects|grants|tokens|projects|devices|vps_connections|vps_projects|gateway_[a-z_]+)\b",
             sql,
             re.I,
         ):

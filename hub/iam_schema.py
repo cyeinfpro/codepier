@@ -133,6 +133,13 @@ def migrate(db):
     db.execute(
         "CREATE INDEX IF NOT EXISTS operations_panel_active ON operations(space_id,state,owner_user_id,visibility,grant_id,project_id)"
     )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS operations_space_tools ON operations(space_id,tool,project_id)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS audit_space_timeline ON audit(space_id,id DESC)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS audit_owner_timeline ON audit(space_id,owner_user_id,id DESC)"
+    )
     db.execute(f"""CREATE INDEX IF NOT EXISTS operations_device_lifecycle
         ON operations(device_id,created DESC) WHERE {DEVICE_ACTION_PREDICATE}""")
 

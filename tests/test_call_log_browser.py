@@ -350,3 +350,161 @@ def test_missing_origin_and_mode_are_not_inferred_from_actor_or_request(log_page
     assert '条目数' not in facts
     assert '触发来源未记录' in facts
     assert '未记录' in facts
+
+
+def test_filter_change_preserves_queue_panel_and_search_focus(log_page):
+    page, rows, _, requests = log_page
+    page.add_style_tag(path=str(ROOT / 'web/queue.css'))
+    page.add_script_tag(path=str(ROOT / 'web/queue.js'))
+    page.evaluate(
+        '''() => {
+        window.queueFetches = 0;
+        const origRead = window.readCallLog;
+        window.readCallLog = async (path) => {
+          if (path === '/api/operations/queue') {
+            window.queueFetches++;
+            return {operations: [], observed_at: 100, diagnostics_available: false};
+          }
+          const res = await origRead(path);
+          if (path.includes('include_queue=true')) {
+            res.queue = {operations: [], observed_at: 100, diagnostics_available: false};
+          }
+          return res;
+        };
+      }'''
+    )
+    page.evaluate('renderPage()')
+    page.locator('#operation-queue').wait_for()
+    assert page.evaluate('window.queueFetches') == 0
+    page.evaluate('window.origQueueEl = document.querySelector("#operation-queue")')
+
+    # Switch project filter and verify #operation-queue is NOT wiped or refetched.
+    page.locator('#call-project').select_option('p1')
+    page.wait_for_function('S.callLog.project === "p1"')
+    assert page.evaluate('document.querySelector("#operation-queue") === window.origQueueEl')
+    assert page.evaluate('window.queueFetches') == 0
+
+    # Instant IME-safe search preserves input focus and cursor position.
+    query_input = page.locator('#audit-query')
+    query_input.focus()
+    page.keyboard.type('README')
+    page.wait_for_function('S.auditQuery === "README"')
+    assert page.evaluate('document.activeElement.id === "audit-query"')
+    assert page.evaluate('document.querySelector("#operation-queue") === window.origQueueEl')
+
+
+def test_sse_operation_terminal_event_reconciles_both_queue_and_list_under_502(log_page):
+    page, rows, _, requests = log_page
+    page.add_style_tag(path=str(ROOT / 'web/queue.css'))
+    page.add_script_tag(path=str(ROOT / 'web/queue.js'))
+    op_id = rows[0]['id']
+    page.evaluate(
+        f'''() => {{
+        const origRead = window.readCallLog;
+        window.fail502 = false;
+        window.readCallLog = async (path) => {{
+          if (window.fail502) throw new Error('HTTP 502');
+          const res = await origRead(path);
+          if (path.includes('include_queue=true')) {{
+            res.queue = {{
+              observed_at: 101,
+              diagnostics_available: false,
+              operations: [{{id: '{op_id}', tool: 'shell_exec', state: 'running', queue_stage: 'running', summary: 'pytest -q', alias: 'MCP', device_name: 'Node'}}],
+            }};
+          }}
+          return res;
+        }};
+      }}'''
+    )
+    page.evaluate('renderPage()')
+    page.locator(f'[data-queue-id="{op_id}"]').wait_for()
+    assert '执行中' in page.locator('[data-call-id]').first.locator('.call-state').inner_text()
+
+    # Collapsed output SSE events must NOT trigger /api/call-log HTTP requests.
+    before_count = len(requests)
+    page.evaluate(
+        f'''() => {{
+        for (let i = 0; i < 30; i++) {{
+          CodePierCallLog.onServerEvent({{type: 'output', data: {{id: '{op_id}'}}}});
+        }}
+      }}'''
+    )
+    page.wait_for_timeout(500)
+    assert len(requests) == before_count
+
+    # Simulate transient HTTP 502 window while SSE delivers terminal succeeded frame.
+    page.evaluate(
+        f'''() => {{
+        window.fail502 = true;
+        CodePierCallLog.onServerEvent({{
+          type: 'operation',
+          at: 105,
+          data: {{id: '{op_id}', state: 'succeeded', queue_stage: 'terminal', exit_code: 0}},
+        }});
+      }}'''
+    )
+    assert page.locator(f'[data-queue-id="{op_id}"]').count() == 0
+    assert '已完成' in page.locator('[data-call-id]').first.locator('.call-state').inner_text()
+
+
+def test_burst_grouping_diff_waterfall_and_dense_table(log_page):
+    page, rows, details, _ = log_page
+    base = {'actor': 'mcp:g1:Claude', 'project_id': 'p1', 'device_id': 'd1', 'alias': 'MCP', 'device_name': 'Node', 'state': 'succeeded', 'elapsed_ms': 40, 'summary': 'path=README.md'}
+    rows[:] = [
+        {**base, 'id': f'{i + 1:02x}' + 'b' * 30, 'tool': 'read' if i % 2 == 0 else 'search', 'created': 200 - i}
+        for i in range(4)
+    ] + [
+        {'id': 'e' * 32, 'tool': 'edit', 'actor': 'mcp:g1:Claude', 'project_id': 'p1', 'device_id': 'd1', 'alias': 'MCP', 'device_name': 'Node', 'state': 'succeeded', 'created': 150, 'elapsed_ms': 320, 'summary': 'path=hub/app.py'}
+    ]
+    details['e' * 32] = {
+        **rows[-1],
+        'args_summary': {'path': 'hub/app.py'},
+        'result': {'ok': True, 'data': {'added_lines': 3, 'removed_lines': 1, 'diff': '@@ -1 +1,3 @@\n+new line'}},
+        'timing': {'wait_ms': 50, 'execution_ms': 210},
+        'trace': {'current': {'reason': '操作已结束'}, 'events': []},
+    }
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+    burst = page.locator('.call-burst')
+    assert burst.count() == 1
+    assert '连续探查 4 次' in burst.locator('.call-burst-summary').inner_text()
+
+    # Toggle dense table mode and expand edit entry to verify Waterfall & Diff.
+    page.locator('[data-call-action="density"][data-density="table"]').click()
+    assert page.locator('.call-log.call-log-table').count() == 1
+    edit_entry = page.locator(f'[data-call-id="{"e" * 32}"]')
+    edit_entry.locator('summary').first.click()
+    edit_entry.locator('[data-call-section="diff"]').wait_for()
+    assert '+ 3 行' in edit_entry.locator('[data-call-section="diff"]').inner_text()
+    assert edit_entry.locator('.call-waterfall').count() == 1
+
+
+def test_sse_terminal_frame_shows_final_duration_not_last_polled_value(log_page):
+    page, rows, _, _ = log_page
+    op_id = rows[0]['id']
+    assert '已历时' in page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
+    # State frames carry created/updated but no elapsed_ms (hub/runtime.py).
+    page.evaluate(
+        f"""CodePierCallLog.onServerEvent({{type: 'operation', at: 105,
+            data: {{id: '{op_id}', state: 'succeeded', created: 100, updated: 104.5}}}})"""
+    )
+    text = page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
+    assert '总历时 4.50 秒' in text and '1.00 秒' not in text
+
+
+def test_incremental_detail_that_finishes_is_settled_with_full_timing(log_page):
+    page, rows, details, requests = log_page
+    op_id = rows[0]['id']
+    details[op_id] = {**details[op_id], 'output_seq': 3, 'timing': {'wait_ms': None, 'execution_ms': None}}
+    entry = page.locator(f'[data-call-id="{op_id}"]')
+    entry.locator('summary').first.click()
+    entry.get_by_text('实际执行（本次 Agent 计时）', exact=True).wait_for()
+    # The call finishes. An incremental read (after_output_seq/after_event_id)
+    # carries no full trace, so it cannot provide final wait/execution timing.
+    rows[0].update(state='succeeded', updated=104)
+    details[op_id] = {**details[op_id], 'state': 'succeeded', 'updated': 104, 'output_seq': 4,
+        'timing': {'wait_ms': 20, 'execution_ms': 900}}
+    page.evaluate('CodePierCallLog.refresh(false)')
+    entry.locator('.call-waterfall').wait_for()
+    assert '实际执行 900 毫秒' in entry.locator('.call-waterfall').inner_text()
+    assert any('after_output_seq=3' in u for u in requests)
+    assert requests[-1].endswith(op_id)

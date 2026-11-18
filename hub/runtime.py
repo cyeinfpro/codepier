@@ -269,6 +269,17 @@ class Runtime:
 
     @staticmethod
     def _enqueue(q, message):
+        kind = message.get("type") if isinstance(message, dict) else None
+        op_id = (message.get("data") or {}).get("id") if kind in {"output", "trace"} else None
+        if op_id:
+            for idx, existing in enumerate(q._queue):
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("type") == kind
+                    and (existing.get("data") or {}).get("id") == op_id
+                ):
+                    q._queue[idx] = message
+                    return
         if q.full():
             while not q.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
@@ -279,6 +290,77 @@ class Runtime:
             return
         with contextlib.suppress(asyncio.QueueFull):
             q.put_nowait(message)
+
+    def _operation_audience(self, row: dict | None):
+        if not row or not row.get("space_id"):
+            return None
+        from shared.integration_contracts import INCOMING_UPLOAD_TOOLS
+
+        tool = row.get("tool") or ""
+        try:
+            raw_args = row.get("args_summary")
+            summary = raw_args if isinstance(raw_args, dict) else json.loads(raw_args or "{}")
+        except (TypeError, ValueError):
+            summary = None
+        scope = required_scope(tool, summary) if tool in TOOLS else "read"
+        special = bool(
+            tool in PANEL_ROOTS_TOOLS
+            or tool in PANEL_RUNTIME_TOOLS
+            or tool in INCOMING_UPLOAD_TOOLS
+            or (not row.get("project_id") and tool == "system_validate")
+        )
+        return {
+            "fast_auth": not special,
+            "space_id": row["space_id"],
+            "owner_user_id": row.get("owner_user_id"),
+            "visibility": row.get("visibility") or "private",
+            "grant_id": row.get("grant_id"),
+            "project_id": row.get("project_id"),
+            "scope": scope,
+            "needs_computer": bool(
+                scope == "computer"
+                or tool in {"browser_open", "browser_snapshot", "browser_action", "browser_close"}
+            ),
+        }
+
+    @staticmethod
+    def _derive_queue_stage(state: str, accepted) -> str:
+        if state in TERMINAL:
+            return "terminal"
+        if state == "running":
+            return "running"
+        if state in {"reconnecting", "unknown", "cancelling"}:
+            return "unknown"
+        return "agent_waiting" if accepted else "hub_queue"
+
+    def _publish_operation(
+        self,
+        id: str,
+        state: str,
+        *,
+        tool: str | None = None,
+        exit_code=None,
+        row: dict | None = None,
+    ):
+        loaded = row
+        if loaded is None or "space_id" not in loaded:
+            loaded = self.store.one(
+                "SELECT id,project_id,device_id,tool,grant_id,state,created,updated,"
+                "space_id,owner_user_id,visibility,args_summary,accepted_at "
+                "FROM operations WHERE id=?",
+                (id,),
+            )
+        stage = self._derive_queue_stage(state, loaded.get("accepted_at") if loaded else None)
+        payload = {"id": id, "state": state, "queue_stage": stage}
+        actual_tool = tool or (loaded["tool"] if loaded else None)
+        if actual_tool:
+            payload["tool"] = actual_tool
+        for field in ("project_id", "created", "updated"):
+            if loaded and loaded.get(field) is not None:
+                payload[field] = loaded[field]
+        if type(exit_code) is int:
+            payload["exit_code"] = exit_code
+        self.publish("operation", payload, audience=self._operation_audience(loaded))
 
     def _publish(self, kind: str, data=None, audience=None):
         message = {"type": kind, "at": time.time(), "data": data or {}}
@@ -492,6 +574,11 @@ class Runtime:
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         return self._authorize_operation_row(row, principal, status_only, include_output)
 
+    @iam.read_decision
+    def authorize_loaded_operation_row(self, row: dict, principal: Principal):
+        principal = refresh_profile_principal(self.store, principal)
+        return self._authorize_operation_row(row, principal, True, False)
+
     def _authorize_operation_row(self, row, principal, status_only, include_output):
         if row is None:
             raise DevError("OPERATION_NOT_FOUND", "找不到此身份授权范围内的操作", 404)
@@ -613,19 +700,70 @@ class Runtime:
             "can_cancel": False,
         }
 
-    @iam.read_decision
-    def queue_annotations(self, row, principal):
-        """Skinny authorized-row annotation shared by receipts and panel lists."""
+    def _project_visible_blocker_map(self, identifiers, principal, *, now: float):
+        clean_ids = list(
+            dict.fromkeys(
+                key for key in identifiers if isinstance(key, str) and 1 <= len(key) <= 100
+            )
+        )
+        if not clean_ids:
+            return {}
+        loaded = {}
+        for offset in range(0, len(clean_ids), 400):
+            batch = clean_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in batch)
+            for item in self.store.all(
+                "SELECT id,actor,grant_id,project_id,device_id,tool,state,space_id,owner_user_id,"
+                "visibility,args_summary,created,updated,"
+                "(SELECT at FROM operation_events WHERE operation_id=operations.id "
+                "AND stage='executing' ORDER BY id DESC LIMIT 1) AS started "
+                f"FROM operations WHERE id IN ({marks})",
+                tuple(batch),
+            ):
+                loaded[item["id"]] = item
+        current = refresh_profile_principal(self.store, principal)
+        from hub.call_log import argument_summary
+        from shared.audit_redaction import display_value
+
+        resolved = {}
+        for identifier, candidate in loaded.items():
+            try:
+                auth_row = self._authorize_operation_row(candidate, current, True, False)
+                summary, _, _ = display_value(
+                    json.loads(auth_row.get("args_summary") or "{}"), text_limit=300, budget=2000
+                )
+                if not isinstance(summary, dict):
+                    summary = {}
+                end_ts = now if auth_row["state"] in ACTIVE | {"unknown"} else auth_row["updated"]
+                start_ts = (
+                    auth_row["started"] if auth_row["started"] is not None else auth_row["created"]
+                )
+                resolved[identifier] = (
+                    True,
+                    candidate["device_id"],
+                    {
+                        "operation_id": identifier,
+                        "tool": auth_row["tool"],
+                        "state": auth_row["state"],
+                        "elapsed_s": round(max(0, end_ts - start_ts), 1),
+                        "summary": argument_summary(summary)[:300],
+                    },
+                )
+            except (DevError, ValueError, TypeError):
+                resolved[identifier] = (
+                    False,
+                    candidate["device_id"],
+                    self._anonymous_blocker(candidate, current),
+                )
+        return resolved
+
+    def _annotate_single_row(self, row, latest, blocker_map, principal, now: float):
         if row["state"] not in ACTIVE | {"unknown"}:
             return {"queue_stage": "terminal"}
-        latest = self.store.one(
-            "SELECT stage,at,detail FROM operation_events WHERE operation_id=? AND source='agent' ORDER BY seq DESC LIMIT 1",
-            (row["id"],),
-        )
         stage_summary = (
             {
                 "stage": latest["stage"],
-                "stage_age_ms": max(0, round((time.time() - latest["at"]) * 1000)),
+                "stage_age_ms": max(0, round((now - latest["at"]) * 1000)),
             }
             if latest
             else {}
@@ -640,24 +778,26 @@ class Runtime:
         if row["state"] == "running":
             return {"queue_stage": "running", "stage": "running", **stage_summary}
         if latest and latest["stage"] in {"waiting_resource", "waiting_project", "waiting_worker"}:
-            try:
-                detail = json.loads(latest["detail"])
-                if not isinstance(detail, dict):
-                    detail = {}
-            except (ValueError, TypeError):
-                detail = {}
+            detail = latest["_parsed_detail"]
             from shared.scheduler_config import safe_queue_detail
 
             safe = safe_queue_detail(detail)
-            anonymous = []
-            blockers, restricted = self._visible_operations(
-                detail.get("blocked_by", []), principal, row["device_id"], anonymous=anonymous
-            )
-            # A blocker/stage change emits another event. Preserve the Agent's
-            # elapsed wait rather than restarting the clock at that event.
-            queue_age_ms = safe.get("queue_age_ms", 0) + max(
-                0, round((time.time() - latest["at"]) * 1000)
-            )
+            blockers, anonymous, restricted = [], [], False
+            raw_ids = detail.get("blocked_by", [])
+            ids = [
+                v.get("operation_id") if isinstance(v, dict) else v
+                for v in (raw_ids[:64] if isinstance(raw_ids, list) else [])
+            ]
+            for key in (k for k in ids if isinstance(k, str) and 1 <= len(k) <= 100):
+                entry = blocker_map.get(key)
+                if not entry or entry[1] != row["device_id"]:
+                    restricted = True
+                elif entry[0]:
+                    blockers.append(entry[2])
+                else:
+                    restricted = True
+                    anonymous.append(entry[2])
+            queue_age_ms = safe.get("queue_age_ms", 0) + max(0, round((now - latest["at"]) * 1000))
             waiting = {
                 "reason": safe.get("queue_reason", latest["stage"]),
                 "lane": safe.get("lane"),
@@ -678,22 +818,71 @@ class Runtime:
         if "accepted_at" not in row:
             current = self.store.one("SELECT accepted_at FROM operations WHERE id=?", (row["id"],))
             accepted = current["accepted_at"] if current else None
+        age_ms = max(0, round((now - (accepted or row.get("created") or now)) * 1000))
         return {
             "queue_stage": "agent_waiting" if accepted else "hub_queue",
             "stage": "accepted" if accepted else "hub_queue",
             "queue_reason": "agent_pending" if accepted else "hub_delivery",
-            "stage_age_ms": max(
-                0, round((time.time() - (accepted or row.get("created") or time.time())) * 1000)
-            ),
+            "stage_age_ms": age_ms,
             "waiting": {
                 "reason": "agent_pending" if accepted else "hub_delivery",
                 "lane": None,
-                "queue_age_ms": max(
-                    0, round((time.time() - (accepted or row.get("created") or time.time())) * 1000)
-                ),
+                "queue_age_ms": age_ms,
                 "blocked_by": [],
             },
         }
+
+    @iam.read_decision
+    def batch_queue_annotations(self, rows, principal, *, now: float | None = None):
+        observed = time.time() if now is None else now
+        active_ids = [
+            row["id"]
+            for row in rows
+            if row.get("state") in ACTIVE | {"unknown"} and isinstance(row.get("id"), str)
+        ]
+        latest_by_id = {}
+        for offset in range(0, len(active_ids), 400):
+            batch = active_ids[offset : offset + 400]
+            marks = ",".join("?" for _ in batch)
+            for event in self.store.all(
+                "SELECT e.operation_id,e.stage,e.at,e.detail FROM operation_events e "
+                "JOIN (SELECT operation_id,MAX(seq) AS max_seq FROM operation_events "
+                f"WHERE source='agent' AND operation_id IN ({marks}) GROUP BY operation_id) latest "
+                "ON e.operation_id=latest.operation_id AND e.seq=latest.max_seq "
+                "WHERE e.source='agent'",
+                tuple(batch),
+            ):
+                try:
+                    parsed = json.loads(event["detail"])
+                    event["_parsed_detail"] = parsed if isinstance(parsed, dict) else {}
+                except (ValueError, TypeError):
+                    event["_parsed_detail"] = {}
+                latest_by_id[event["operation_id"]] = event
+        blocker_ids = []
+        for row in rows:
+            latest = latest_by_id.get(row.get("id"))
+            if (
+                row.get("state") == "queued"
+                and latest
+                and latest["stage"] in {"waiting_resource", "waiting_project", "waiting_worker"}
+            ):
+                raw = latest["_parsed_detail"].get("blocked_by", [])
+                if isinstance(raw, list):
+                    blocker_ids.extend(
+                        v.get("operation_id") if isinstance(v, dict) else v for v in raw[:64]
+                    )
+        blocker_map = self._project_visible_blocker_map(blocker_ids, principal, now=observed)
+        return {
+            row["id"]: self._annotate_single_row(
+                row, latest_by_id.get(row["id"]), blocker_map, principal, observed
+            )
+            for row in rows
+        }
+
+    @iam.read_decision
+    def queue_annotations(self, row, principal):
+        """Skinny authorized-row annotation shared by receipts and panel lists."""
+        return self.batch_queue_annotations([row], principal)[row["id"]]
 
     def _filter_concurrency(self, result, principal, device_id):
         """Never disclose Agent-supplied operation IDs without current IAM."""
@@ -1878,7 +2067,7 @@ class Runtime:
                 self.knowledge_maintenance.admitted(name, args, project, principal, id, maintenance)
                 if maintenance is None:
                     self.knowledge_maintenance.enroll_on_write(name, args, project, principal)
-                self.publish("operation", {"id": id, "state": "queued", "tool": name})
+                self._publish_operation(id, "queued", tool=name)
         return id, None
 
     def _check_durable_admission(self, project, name, args, payload_size, *, device_online):
@@ -2938,7 +3127,7 @@ class Runtime:
         self.diagnostics.record(
             op["id"], "hub_completed", detail=baseline_completion_detail(result)
         )
-        self.publish("operation", {"id": op["id"], "state": state, "tool": op["tool"]})
+        self._publish_operation(op["id"], state, tool=op["tool"], exit_code=data.get("exit_code"))
         self.store.after_commit(lambda: self.on_loop(self._resolve_result, op["id"], result))
 
     def _resolve_result(self, identifier, result):
@@ -2958,7 +3147,9 @@ class Runtime:
             return None
         kind, id = data.get("type"), data.get("id")
         op = self.store.one(
-            """SELECT id,tool,state,journal_id,output_seq,accepted_at,cancel_requested,deadline
+            """SELECT id,project_id,device_id,tool,grant_id,state,journal_id,output_seq,
+            accepted_at,cancel_requested,deadline,created,updated,space_id,owner_user_id,
+            visibility,args_summary
             FROM operations WHERE id=? AND device_id=?""",
             (id, device_id),
         )
@@ -2984,11 +3175,12 @@ class Runtime:
             return None
         if kind == "trace":
             self.diagnostics.ingest(id, data.get("trace"))
-            self.publish("trace", {"id": id})
+            self.publish("trace", {"id": id}, audience=self._operation_audience(op))
             return None
         if kind in {"accepted", "started"} and op["state"] in ACTIVE:
+            now = time.time()
             self.store.execute(
-                "UPDATE operations SET last_operation_verified_at=? WHERE id=?", (time.time(), id)
+                "UPDATE operations SET last_operation_verified_at=? WHERE id=?", (now, id)
             )
             state = (
                 "cancelling"
@@ -2999,9 +3191,14 @@ class Runtime:
             )
             self.store.execute(
                 "UPDATE operations SET accepted_at=COALESCE(accepted_at,?),state=?,transport_error=NULL,updated=? WHERE id=?",
-                (time.time(), state, time.time(), id),
+                (now, state, now, id),
             )
-            self.publish("operation", {"id": id, "state": state})
+            self._publish_operation(
+                id,
+                state,
+                tool=op["tool"],
+                row={**op, "state": state, "accepted_at": op["accepted_at"] or now, "updated": now},
+            )
         elif kind == "status" and op["state"] in ACTIVE:
             if data.get("status") in {"running", "accepted"}:
                 self.store.execute(
@@ -3057,7 +3254,7 @@ class Runtime:
             and op["state"] in ACTIVE | {"unknown", "needs_review"}
         ):
             if self.outputs.receive(id, data):
-                self.publish("output", {"id": id})
+                self.publish("output", {"id": id}, audience=self._operation_audience(op))
         elif kind == "result":
             result = data.get("result")
             self.complete(op, result)

@@ -175,6 +175,7 @@ function discardLocalWork(owner = sessionOwner(S.session) || S.suspendedUser) {
 }
 function clearSpaceSnapshots() {
   window.CodePierTokenUsage?.resetDashboard(true);
+  window.CodePierCallLog?.clear();
   clearTimeout(S.activityTimer);
   S.activityRevision = (S.activityRevision || 0) + 1;
   S.activeOps = new Set();
@@ -196,6 +197,10 @@ function clearSpaceSnapshots() {
     vpsProject: '',
     auditRows: [],
     auditOffset: 0,
+    auditBeforeId: 0,
+    auditBeforeHistory: [],
+    auditNextBeforeId: null,
+    auditModeSnapshots: null,
     auditQuery: '',
     auditStatus: '',
     auditSource: '',
@@ -790,6 +795,7 @@ function connectEvents() {
   events.onopen = () => {
     if (!current()) return;
     networkState('实时通道已连接', true);
+    window.CodePierCallLog?.onConnectionState?.(true);
     if (typeof computerApprovalsConnection === 'function') computerApprovalsConnection(true);
     if (S.work.operation) pollTask().catch(() => {});
     // Boot already renders the selected page. Only a reconnection needs a
@@ -831,6 +837,7 @@ function connectEvents() {
   events.onerror = () => {
     if (current()) {
       networkState('正在重新连接…');
+      window.CodePierCallLog?.onConnectionState?.(false);
       if (typeof computerApprovalsConnection === 'function') computerApprovalsConnection(false);
       // A reconnect can be rejected before an SSE invalidation frame exists.
       // An ordinary network failure does not erase unsaved local work.
@@ -868,7 +875,10 @@ function connectEvents() {
     } catch {
       return;
     }
-    if (m.type === 'operation') navActivityOperation(m.data);
+    if (m.type === 'operation') {
+      navActivityOperation(m.data);
+      window.CodePierOperationStore?.ingestEvent(m);
+    }
     if (['device', 'project'].includes(m.type)) invalidateBasics();
     if (['device', 'workflow'].includes(m.type))
       window.dispatchEvent(new CustomEvent('cp:event', { detail: m }));
@@ -891,11 +901,15 @@ function connectEvents() {
       window.CodePierCallLog &&
       ['operation', 'output', 'trace', 'device', 'project'].includes(m.type)
     ) {
-      clearTimeout(S.eventTimer);
-      S.eventTimer = setTimeout(() => {
-        if (current() && S.page === 'audit' && S.auditMode === 'operations')
-          CodePierCallLog.refresh(true).catch(() => {});
-      }, 500);
+      if (typeof CodePierCallLog.onServerEvent === 'function') {
+        CodePierCallLog.onServerEvent(m);
+      } else {
+        clearTimeout(S.eventTimer);
+        S.eventTimer = setTimeout(() => {
+          if (current() && S.page === 'audit' && S.auditMode === 'operations')
+            CodePierCallLog.refresh(true).catch(() => {});
+        }, 500);
+      }
       return;
     }
     if (m.type === 'iam') {
@@ -932,9 +946,17 @@ function mainPathContext() {
     };
   return S.mainPath;
 }
-async function navigate(page) {
+function parseHashRoute(hashStr = location.hash) {
+  const raw = String(hashStr || '').replace(/^#/, '');
+  const qIndex = raw.indexOf('?');
+  const rawPage = qIndex >= 0 ? raw.slice(0, qIndex) : raw;
+  const query = qIndex >= 0 ? raw.slice(qIndex + 1) : '';
+  return { page: rawPage === 'terminal' ? 'native' : rawPage, query };
+}
+async function navigate(pageInput) {
   S.vpsIntent = (S.vpsIntent || 0) + 1;
-  if (page === 'terminal') page = 'native';
+  const parsed = parseHashRoute(String(pageInput || ''));
+  let page = parsed.page;
   if (!S.session || !$('#page') || !nav.some((x) => x[0] === page)) return;
   if (
     page !== S.page &&
@@ -973,7 +995,7 @@ async function navigate(page) {
     if (S.page === 'native') context.native = true;
   }
   S.page = page;
-  location.hash = page;
+  location.hash = page + (parsed.query ? '?' + parsed.query : '');
   const parentGroup = tabParent[page];
   const groupTitle =
     parentGroup === 'connect' ? '连接' : parentGroup === 'members' ? '成员与权限' : '';
@@ -1030,9 +1052,19 @@ async function renderPage(showLoading = true) {
     tokenContinuation && window.CodePierTokenUsage?.cachedDashboard()
       ? $('#page [data-token-dashboard]')
       : null;
+  const auditShellAvailable =
+    page === 'audit' &&
+    S.auditMode === 'operations' &&
+    typeof window.CodePierCallLog?.renderShellHTML === 'function';
+  const auditWarmCache = auditShellAvailable && !!S.callLog?.rows?.length;
   if (showLoading && !tokenContinuation) {
-    $('#page').setAttribute('aria-busy', 'true');
-    $('#page').innerHTML = uiLoadingPage(page);
+    if (auditShellAvailable) {
+      if (!auditWarmCache) $('#page').setAttribute('aria-busy', 'true');
+      $('#page').innerHTML = pageTabsHTML(page) + CodePierCallLog.renderShellHTML();
+    } else {
+      $('#page').setAttribute('aria-busy', 'true');
+      $('#page').innerHTML = uiLoadingPage(page);
+    }
   }
   try {
     await window.CodePierAssets?.load(page);
@@ -1114,12 +1146,14 @@ async function renderPage(showLoading = true) {
       : null;
     if (page === 'vps' && !showLoading) vpsReplacePage(html);
     else if (
-      !showLoading &&
-      ['overview', 'devices', 'projects', 'audit', 'workflows'].includes(page) &&
-      !(page === 'audit' && S.auditMode === 'operations' && window.CodePierCallLog)
-    )
+      // The audit shell (cold skeleton or warm cache) already has the final
+      // structure: patch it so a search box focused during load keeps focus/IME.
+      (!showLoading || auditShellAvailable) &&
+      ['overview', 'devices', 'projects', 'audit', 'workflows'].includes(page)
+    ) {
+      $('#page').removeAttribute('aria-busy');
       CP.dom.replacePage($('#page'), html);
-    else $('#page').innerHTML = html;
+    } else $('#page').innerHTML = html;
     if (preservedToken && window.CodePierTokenUsage?.cachedDashboard()) {
       $('#page [data-token-dashboard]')?.replaceWith(preservedToken);
     }
@@ -2710,19 +2744,32 @@ async function pollTask() {
 async function auditHTML(seq = S.renderSeq) {
   if (S.auditMode === 'operations' && window.CodePierCallLog) return CodePierCallLog.html(seq);
   const type = S.auditMode;
+  const useCursor = type === 'events' && Number.isInteger(S.auditBeforeId) && S.auditBeforeId > 0;
   const query = new URLSearchParams({
     limit: '40',
-    offset: String(S.auditOffset),
+    offset: useCursor ? '0' : String(S.auditOffset || 0),
     source: S.auditSource,
     status: S.auditStatus,
     ...(type === 'events' ? { q: S.auditQuery } : {}),
+    ...(useCursor ? { before_id: String(S.auditBeforeId) } : {}),
   });
   const r = await api('/api/' + (type === 'operations' ? 'operations' : 'audit') + '?' + query);
   const rows = type === 'operations' ? r.operations : r.events;
   if (seq === S.renderSeq) {
     S.auditNext = r.next_offset;
+    S.auditNextBeforeId = r.next_before_id ?? null;
     S.auditRows = rows;
   }
+  const hasPrev =
+    type === 'events'
+      ? (S.auditBeforeHistory?.length || 0) > 0 || S.auditOffset > 0
+      : S.auditOffset > 0;
+  const hasNext =
+    type === 'events'
+      ? (r.next_before_id !== null && r.next_before_id !== undefined) || r.next_offset !== null
+      : r.next_offset !== null;
+  const pageIdx =
+    type === 'events' ? S.auditBeforeHistory?.length || 0 : Math.floor((S.auditOffset || 0) / 40);
   return (
     heading(
       '操作审计',
@@ -2730,7 +2777,7 @@ async function auditHTML(seq = S.renderSeq) {
       '',
       `<button class="btn ghost" data-action="export-audit">${icon('download')}导出审计 CSV</button>`,
     ) +
-    `<div class="filters"><div class="tabs"><button class="${type === 'operations' ? 'active' : ''}" data-action="audit-mode" data-mode="operations">工具执行</button><button class="${type === 'events' ? 'active' : ''}" data-action="audit-mode" data-mode="events">全部事件</button></div><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel', ...(type === 'events' ? ['device'] : [])].map((v) => `<option value="${v}" ${S.auditSource === v ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${(type === 'operations' ? ['queued', 'running', 'reconnecting', 'cancelling', 'succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted'] : ['ok', 'started', 'denied', 'failed']).map((v) => `<option value="${v}" ${S.auditStatus === v ? 'selected' : ''}>${stateNames[v] || v}</option>`).join('')}</select>${type === 'events' ? `<input id="audit-query" value="${esc(S.auditQuery)}" placeholder="搜索调用者 / 操作 / 目标"><button class="btn small" data-action="audit-search">搜索</button>` : ''}</div><section class="panel">${type === 'operations' ? operationsTable(rows) : rows.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>时间</th><th>调用来源</th><th>事件</th><th>目标</th><th>状态</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr><td class="mono tiny muted">${esc(timeText(r.at))}</td><td class="tiny">${esc(r.actor)}</td><td class="mono tiny">${esc(r.action)}</td><td>${esc(r.target || '—')}</td><td>${badge(r.status)}</td><td><button class="icon-btn" data-event-index="${i}" aria-label="查看审计事件">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>` : empty('当前筛选范围没有记录。')}<div class="pagination"><span>${rows.length ? `第 ${S.auditOffset + 1}–${S.auditOffset + rows.length} 条` : '暂无记录'}</span><div class="actions"><button class="btn ghost small" data-action="audit-prev" ${S.auditOffset === 0 ? 'disabled' : ''}>上一页</button><button class="btn ghost small" data-action="audit-next" ${r.next_offset === null ? 'disabled' : ''}>下一页</button></div></div></section>${uiHelp('记录范围', '日志保存工具调用与执行证据，不含完整对话；服务器管理员可修改记录，不是第三方审计存证。')}`
+    `<div class="filters"><div class="tabs"><button class="${type === 'operations' ? 'active' : ''}" data-action="audit-mode" data-mode="operations">工具执行</button><button class="${type === 'events' ? 'active' : ''}" data-action="audit-mode" data-mode="events">全部事件</button></div><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel', ...(type === 'events' ? ['device'] : [])].map((v) => `<option value="${v}" ${S.auditSource === v ? 'selected' : ''}>${v.toUpperCase()}</option>`).join('')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${(type === 'operations' ? ['queued', 'running', 'reconnecting', 'cancelling', 'succeeded', 'failed', 'cancelled', 'needs_review', 'interrupted'] : ['ok', 'started', 'denied', 'failed']).map((v) => `<option value="${v}" ${S.auditStatus === v ? 'selected' : ''}>${stateNames[v] || v}</option>`).join('')}</select>${type === 'events' ? `<input id="audit-query" value="${esc(S.auditQuery)}" placeholder="搜索调用者 / 操作 / 目标"><button class="btn small" data-action="audit-search">搜索</button>` : ''}</div><section class="panel">${type === 'operations' ? operationsTable(rows) : rows.length ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>时间</th><th>调用来源</th><th>事件</th><th>目标</th><th>状态</th><th></th></tr></thead><tbody>${rows.map((r, i) => `<tr data-event-row="${i}"><td class="mono tiny muted">${esc(timeText(r.at))}</td><td class="tiny">${esc(r.actor)}</td><td class="mono tiny">${esc(r.action)}</td><td>${esc(r.target || '—')}</td><td>${badge(r.status)}</td><td><button class="icon-btn" data-event-index="${i}" aria-expanded="false" aria-label="查看审计事件">${icon('arrow')}</button></td></tr><tr class="audit-inline-drawer" data-event-drawer="${i}" hidden><td colspan="6"><div class="call-detail"><dl class="call-facts"><div><dt>调用者</dt><dd>${esc(r.actor)}</dd></div><div><dt>时间</dt><dd>${esc(timeText(r.at))}</dd></div><div><dt>事件</dt><dd><code>${esc(r.action)}</code></dd></div><div><dt>目标</dt><dd>${esc(r.target || '未记录')}</dd></div></dl><div class="code-box"><pre>${esc(json(r.detail))}</pre></div></div></td></tr>`).join('')}</tbody></table></div>` : empty('当前筛选范围没有记录。')}<div class="pagination"><span>${rows.length ? `第 ${pageIdx + 1} 页 · 本页 ${rows.length} 条` : '暂无记录'}</span><div class="actions"><button class="btn ghost small" data-action="audit-prev" ${hasPrev ? '' : 'disabled'}>上一页</button><button class="btn ghost small" data-action="audit-next" ${hasNext ? '' : 'disabled'}>下一页</button></div></div></section>${uiHelp('记录范围', '日志保存工具调用与执行证据，不含完整对话；服务器管理员可修改记录，不是第三方审计存证。')}`
   );
 }
 function bindAudit() {
@@ -2738,17 +2785,29 @@ function bindAudit() {
   $('#audit-source').onchange = (e) => {
     S.auditSource = e.target.value;
     S.auditOffset = 0;
+    S.auditBeforeId = 0;
+    S.auditBeforeHistory = [];
     renderPage(false);
   };
   $('#audit-status').onchange = (e) => {
     S.auditStatus = e.target.value;
     S.auditOffset = 0;
+    S.auditBeforeId = 0;
+    S.auditBeforeHistory = [];
     renderPage(false);
   };
   $$('[data-event-index]').forEach(
     (b) =>
       (b.onclick = () => {
-        const r = S.auditRows[Number(b.dataset.eventIndex)];
+        const idx = Number(b.dataset.eventIndex);
+        const drawer = $(`[data-event-drawer="${idx}"]`);
+        if (drawer) {
+          const nextOpen = drawer.hidden;
+          drawer.hidden = !nextOpen;
+          b.setAttribute('aria-expanded', String(nextOpen));
+          return;
+        }
+        const r = S.auditRows[idx];
         modal(
           r.action,
           `<dl class="kv"><dt>调用者</dt><dd>${esc(r.actor)}</dd><dt>时间</dt><dd>${esc(timeText(r.at))}</dd><dt>目标</dt><dd>${esc(r.target)}</dd></dl><div class="code-box"><pre>${esc(json(r.detail))}</pre></div>`,
@@ -3315,32 +3374,75 @@ panelActions.register(['cancel-task'], async (b, e) => {
   return;
 });
 panelActions.register(['operation-detail'], async (b, e) => {
+  if (
+    S.page === 'audit' &&
+    S.auditMode === 'operations' &&
+    typeof window.CodePierCallLog?.focusOperation === 'function'
+  ) {
+    await CodePierCallLog.focusOperation(b.dataset.id);
+    return;
+  }
   await operationDetail(b.dataset.id);
   return;
 });
 panelActions.register(['audit-mode'], async (b, e) => {
-  window.CodePierCallLog?.clear();
-  S.auditMode = b.dataset.mode;
-  if (S.auditMode === 'operations') S.auditQuery = S.auditQuery.slice(0, 200);
-  S.auditOffset = 0;
-  S.auditStatus = '';
-  S.auditSource = '';
+  const nextMode = b.dataset.mode;
+  if (nextMode === S.auditMode) return;
+  if (!S.auditModeSnapshots) S.auditModeSnapshots = {};
+  S.auditModeSnapshots[S.auditMode] = {
+    query: S.auditQuery || '',
+    status: S.auditStatus || '',
+    source: S.auditSource || '',
+    offset: S.auditOffset || 0,
+    beforeId: S.auditBeforeId || 0,
+    beforeHistory: [...(S.auditBeforeHistory || [])],
+  };
+  window.CodePierCallLog?.detach();
+  S.auditMode = nextMode;
+  const saved = S.auditModeSnapshots[nextMode] || {};
+  S.auditQuery = nextMode === 'operations' ? (saved.query || '').slice(0, 200) : saved.query || '';
+  S.auditStatus = saved.status || '';
+  S.auditSource = saved.source || '';
+  S.auditOffset = saved.offset || 0;
+  S.auditBeforeId = saved.beforeId || 0;
+  S.auditBeforeHistory = saved.beforeHistory || [];
+  if (
+    nextMode === 'operations' &&
+    S.callLog?.rows?.length &&
+    window.CodePierCallLog?.renderShellHTML
+  ) {
+    $('#page').innerHTML = pageTabsHTML('audit') + CodePierCallLog.renderShellHTML();
+    CodePierCallLog.bind();
+    CodePierCallLog.refresh(true).catch(() => {});
+    return;
+  }
   await renderPage(false);
   return;
 });
 panelActions.register(['audit-search'], async (b, e) => {
   S.auditQuery = $('#audit-query').value;
   S.auditOffset = 0;
+  S.auditBeforeId = 0;
+  S.auditBeforeHistory = [];
   await renderPage(false);
   return;
 });
 panelActions.register(['audit-prev'], async (b, e) => {
-  S.auditOffset = Math.max(0, S.auditOffset - 40);
+  if (S.auditMode === 'events' && S.auditBeforeHistory?.length) {
+    S.auditBeforeId = S.auditBeforeHistory.pop();
+  } else {
+    S.auditOffset = Math.max(0, S.auditOffset - 40);
+  }
   await renderPage(false);
   return;
 });
 panelActions.register(['audit-next'], async (b, e) => {
-  if (S.auditNext !== null) {
+  if (S.auditMode === 'events' && S.auditNextBeforeId) {
+    if (!S.auditBeforeHistory) S.auditBeforeHistory = [];
+    S.auditBeforeHistory.push(S.auditBeforeId || 0);
+    S.auditBeforeId = S.auditNextBeforeId;
+    await renderPage(false);
+  } else if (S.auditNext !== null) {
     S.auditOffset = S.auditNext;
     await renderPage(false);
   }
@@ -3490,12 +3592,13 @@ window.addEventListener('beforeunload', (e) => {
   }
 });
 window.addEventListener('hashchange', () => {
-  const page = location.hash.slice(1) === 'terminal' ? 'native' : location.hash.slice(1);
-  if (page !== S.page && nav.some((n) => n[0] === page)) navigate(page);
+  const { page, query } = parseHashRoute(location.hash);
+  if (page !== S.page && nav.some((n) => n[0] === page))
+    navigate(page + (query ? '?' + query : ''));
 });
 (async () => {
   try {
-    const page = location.hash.slice(1) === 'terminal' ? 'native' : location.hash.slice(1);
+    const { page } = parseHashRoute(location.hash);
     if (nav.some((n) => n[0] === page)) S.page = page;
     if (location.hash === '#terminal')
       history.replaceState(null, '', location.pathname + location.search + '#native');

@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 import json
+import time
 from typing import Literal
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,6 +15,134 @@ from fastapi.responses import Response, StreamingResponse
 from shared.util import DevError
 from hub import iam
 from hub.operation_categories import operation_category_sql
+
+
+# Upper bound for reusing one SSE authorization snapshot. session_revision only
+# observes writes made by THIS process; an out-of-process writer (for example
+# `python -m hub reset-password`, which revokes every session) is noticed only by
+# a fresh snapshot. Keep this equal to the idle heartbeat so a busy stream never
+# extends the pre-existing revocation latency.
+SSE_FAST_AUTH_WINDOW_S = 15.0
+
+
+def _session_valid_until(store, request: Request, principal) -> float:
+    from shared.crypto import digest
+
+    now = time.time()
+    limit = now + SSE_FAST_AUTH_WINDOW_S
+    cookie = request.cookies.get("rd_session", "")
+    if cookie:
+        sess = store.one("SELECT expires FROM sessions WHERE id_hash=?", (digest(cookie),))
+        if sess and isinstance(sess.get("expires"), (int, float)):
+            limit = min(limit, float(sess["expires"]))
+    identity_id = getattr(principal, "identity_id", None)
+    if identity_id:
+        ident = store.one("SELECT fresh_until FROM external_identities WHERE id=?", (identity_id,))
+        if ident and isinstance(ident.get("fresh_until"), (int, float)):
+            limit = min(limit, float(ident["fresh_until"]))
+    for table in ("memberships", "role_assignments"):
+        exp = store.one(
+            f"SELECT MIN(expires) AS exp FROM {table} WHERE user_id=? AND space_id=? AND active=1 AND expires IS NOT NULL",
+            (principal.user_id, principal.space_id),
+        )
+        if exp and isinstance(exp.get("exp"), (int, float)):
+            limit = min(limit, float(exp["exp"]))
+    return limit
+
+
+def _fast_operation_visible(aud: dict, cached: dict) -> bool:
+    principal = cached["principal"]
+    if aud.get("space_id") != principal.space_id:
+        return False
+    record_ok = (
+        principal.instance_admin
+        or aud.get("owner_user_id") == principal.user_id
+        or aud.get("visibility") == "space"
+    )
+    if not record_ok:
+        return False
+    proj = aud.get("project_id")
+    if proj:
+        # Mirrors require_record (read) followed by authorize(scope).
+        actions = cached["permissions"].get(proj, ())
+        if "read" not in actions or aud.get("scope", "read") not in actions:
+            return False
+    return not (aud.get("needs_computer") and "computer" not in getattr(principal, "scopes", ()))
+
+
+def _fast_event_decision(item, cached: dict) -> tuple[bool, bool]:
+    if item is None:
+        # An idle heartbeat is the revocation probe for quiet streams: always
+        # take a fresh snapshot, exactly as before the fast path existed.
+        return False, False
+    kind = item.get("type")
+    if kind == "resync":
+        return True, True
+    principal = cached["principal"]
+    if kind == "computer_approval":
+        aud = item.get("_audience") or {}
+        vis = aud.get("space_id") == principal.space_id and (
+            aud.get("user_id") == principal.user_id or principal.instance_admin
+        )
+        return True, vis
+    aud = (
+        item.get("_audience")
+        if kind in {"operation", "operation_event", "output", "trace"}
+        else None
+    )
+    if isinstance(aud, dict) and aud.get("fast_auth") is True:
+        return True, _fast_operation_visible(aud, cached)
+    return False, False
+
+
+def _sse_snapshot(store, runtime, auth, request: Request, item=None):
+    with iam.read_scope(store):
+        principal = auth.panel(request)
+        permissions = iam.project_permissions(store, principal)
+        access = frozenset(
+            (project, action) for project, actions in permissions.items() for action in actions
+        )
+        access |= frozenset(
+            ("@", flag)
+            for flag, allowed in [
+                ("space_admin", principal.admin),
+                ("instance_admin", principal.instance_admin),
+            ]
+            if allowed
+        )
+        visible = item is not None and iam.event_visible(runtime, principal, item)
+        state = {
+            "access": access,
+            "owner": (principal.space_id, principal.user_id),
+            "principal": principal,
+            "permissions": {k: frozenset(v) for k, v in permissions.items()},
+            "revision": getattr(store, "session_revision", None),
+            "valid_until": _session_valid_until(store, request, principal)
+            if iam.installed(store)
+            else 0.0,
+        }
+        return state, visible
+
+
+async def _evaluate_stream_item(store, runtime, auth, request: Request, item, state: dict):
+    current_rev = getattr(store, "session_revision", None)
+    if (
+        iam.installed(store)
+        and current_rev is not None
+        and current_rev == state["revision"]
+        and time.time() < state["valid_until"]
+    ):
+        handled, visible = _fast_event_decision(item, state)
+        if handled:
+            return state, visible, False
+    try:
+        next_state, visible = await store.run_read(
+            _sse_snapshot, store, runtime, auth, request, item
+        )
+    except DevError:
+        return state, False, True
+    revoked = next_state["owner"] != state["owner"] or not state["access"] <= next_state["access"]
+    return next_state, visible, revoked
 
 
 def operation_rows(
@@ -131,7 +260,7 @@ def make_activity_router(context: HubContext):
     register_queue_routes(router, store, runtime, auth)
 
     @router.get("/api/operations/{id}")
-    @database_endpoint(store)
+    @database_endpoint(store, read_only=True)
     def operation(id: str, request: Request):
         return runtime.operation(id, auth.panel(request))
 
@@ -141,16 +270,22 @@ def make_activity_router(context: HubContext):
         request: Request,
         limit: int = 40,
         offset: int = Query(default=0, le=2**63 - 1),
+        before_id: int = Query(default=0, ge=0, le=2**63 - 1),
         q: str = "",
         status: str = "",
         source: str = "",
     ):
         principal = auth.panel(request)
         limit, offset = max(1, min(limit, 100)), max(0, offset)
-        rows = audit_rows(store, principal, limit + 1, offset, q, status, source)
+        rows = audit_rows(
+            store, principal, limit + 1, offset, q, status, source, before_id=before_id
+        )
+        has_more = len(rows) > limit
+        visible = rows[:limit]
         return {
-            "events": rows[:limit],
-            "next_offset": offset + limit if len(rows) > limit else None,
+            "events": visible,
+            "next_offset": offset + limit if has_more else None,
+            "next_before_id": visible[-1]["id"] if has_more and visible else None,
         }
 
     @router.get("/api/audit-export")
@@ -210,30 +345,8 @@ def make_activity_router(context: HubContext):
 
     @router.get("/api/events")
     async def events(request: Request):
-        def snapshot(item=None):
-            # One current authority decision for each frame/idle heartbeat.
-            # Only an invalidation marker, never old event data, crosses a
-            # lost-membership/session boundary.
-            with iam.read_scope(store):
-                principal = auth.panel(request)
-                permissions = iam.project_permissions(store, principal)
-                access = frozenset(
-                    (project, action)
-                    for project, actions in permissions.items()
-                    for action in actions
-                )
-                access |= frozenset(
-                    ("@", flag)
-                    for flag, allowed in [
-                        ("space_admin", principal.admin),
-                        ("instance_admin", principal.instance_admin),
-                    ]
-                    if allowed
-                )
-                visible = item is not None and iam.event_visible(runtime, principal, item)
-                return access, visible, (principal.space_id, principal.user_id)
-
-        access, _, owner = await store.run_read(snapshot)
+        state, _ = await store.run_read(_sse_snapshot, store, runtime, auth, request)
+        owner = state["owner"]
         if (
             len(runtime.watchers) >= 100
             or sum(getattr(q, "_stream_owner", None) == owner for q in runtime.watchers) >= 4
@@ -244,7 +357,7 @@ def make_activity_router(context: HubContext):
         runtime.watchers.add(q)
 
         async def stream():
-            nonlocal access
+            nonlocal state
             try:
                 yield "event: ready\ndata: {}\n\n"
                 while not runtime.stopping:
@@ -254,17 +367,12 @@ def make_activity_router(context: HubContext):
                         item = await asyncio.wait_for(q.get(), 15)
                     except asyncio.TimeoutError:
                         item = None
-                    try:
-                        current_access, visible, current_owner = await store.run_read(
-                            snapshot, item
-                        )
-                    except DevError:
+                    state, visible, revoked = await _evaluate_stream_item(
+                        store, runtime, auth, request, item, state
+                    )
+                    if revoked:
                         yield "event: access_revoked\ndata: {}\n\n"
                         break
-                    if current_owner != owner or not access <= current_access:
-                        yield "event: access_revoked\ndata: {}\n\n"
-                        break
-                    access = current_access
                     if item is None:
                         yield ": heartbeat\n\n"
                     elif item.get("type") == "resync":

@@ -151,6 +151,21 @@ def test_watch_updates_rows_that_no_longer_match_status(log_api):
     assert not any('DISTINCT' in sql for sql in store.queries)
 
 
+def test_watched_rows_already_on_the_page_are_not_read_twice(log_api):
+    client,store,_=log_api
+    store.add('a'*32,state='running',created=20)
+    store.add('b'*32,state='failed',created=10)
+    store.queries.clear()
+    result=client.get('/api/call-log',params={'status':'running','watch':'a'*32+','+'b'*32,
+        'include_filters':'false'},headers=AUTH).json()
+    assert [r['id'] for r in result['operations']]==['a'*32]
+    assert [r['id'] for r in result['updates']]==['b'*32]
+    store.queries.clear()
+    result=client.get('/api/call-log',params={'watch':'a'*32,'include_filters':'false'},headers=AUTH).json()
+    assert result['updates']==[] and len(store.queries)==1
+    assert client.get('/api/call-log',params={'watch':'not-an-id'},headers=AUTH).status_code==400
+
+
 def test_detail_is_bounded_and_preserves_latest_output_tail(log_api):
     client,store,_=log_api
     store.add('a'*32,output='old output\n'*10000+'LATEST SENTINEL\ntoken=hidden-tail',result={'data':{'content':'long body '*20000}})
@@ -219,3 +234,159 @@ def test_map_detail_uses_actual_refresh_receipt_not_requested_mode(log_api):
     assert row['knowledge_stats'] == {'entries_count':12,'changed_entries':3,'reused_entries':9,'skipped_files':1,'metadata_reused':0}
     store.add('b'*32, tool='project_knowledge_build', args={'incremental':True})
     assert client.get('/api/call-log/'+'b'*32, headers=AUTH).json()['knowledge_mode'] is None
+
+
+def test_polling_skips_count_query_and_presets_and_export(log_api):
+    client, store, _ = log_api
+    store.add('a' * 32, created=10, state='failed', tool='exec', args={'command': '=cmd --token=hidden-secret'})
+    store.add('b' * 32, created=20, state='running', tool='fs_read', args={'path': 'README.md'})
+    store.queries.clear()
+    polled = client.get('/api/call-log', params={'include_filters': 'false'}, headers=AUTH).json()
+    assert polled['total'] is None
+    assert not any('count(*)' in sql.lower() for sql in store.queries)
+
+    errors_only = client.get('/api/call-log', params={'preset': 'errors'}, headers=AUTH).json()
+    assert [r['id'] for r in errors_only['operations']] == ['a' * 32]
+    active_only = client.get('/api/call-log', params={'preset': 'active'}, headers=AUTH).json()
+    assert [r['id'] for r in active_only['operations']] == ['b' * 32]
+    assert client.get('/api/call-log', params={'preset': 'invalid'}, headers=AUTH).status_code == 400
+
+    store.db.execute("UPDATE operations SET error='=formula --password=hidden-secret' WHERE id=?", ('a' * 32,))
+    store.db.commit()
+    csv_resp = client.get('/api/call-log-export', params={'format': 'csv'}, headers=AUTH)
+    assert csv_resp.status_code == 200
+    assert csv_resp.headers['X-Export-Rows'] == '2'
+    assert 'hidden-secret' not in csv_resp.text
+    assert 'command==cmd --token=<redacted>' in csv_resp.text
+    assert "'=formula --password=<redacted>" in csv_resp.text
+
+    ndjson_resp = client.get('/api/call-log-export', params={'format': 'ndjson', 'preset': 'errors'}, headers=AUTH)
+    assert ndjson_resp.status_code == 200
+    lines = [json.loads(line) for line in ndjson_resp.text.strip().splitlines()]
+    assert len(lines) == 1 and lines[0]['id'] == 'a' * 32 and 'hidden-secret' not in ndjson_resp.text
+
+
+def test_sse_high_frequency_output_coalesces_without_global_resync():
+    import asyncio
+    from hub.runtime import Runtime
+
+    q = asyncio.Queue(maxsize=100)
+    for seq in range(250):
+        Runtime._enqueue(q, {'type': 'output', 'at': float(seq), 'data': {'id': 'op-hot'}})
+    assert q.qsize() == 1
+    item = q.get_nowait()
+    assert item['type'] == 'output' and item['at'] == 249.0
+    assert item['type'] != 'resync'
+
+
+def test_export_audit_is_filed_in_the_callers_space():
+    # auth.panel() binds the audit Space inside the read phase's copied Context;
+    # the later write phase must not fall back to the legacy Space.
+    from hub import iam
+
+    store = EvidenceStore()
+    store.add('a' * 32, created=10)
+    store.db.execute("UPDATE operations SET space_id='space-b'")
+    store.db.commit()
+    audits = []
+
+    def audit(actor, action, target='', status='ok', detail=None, **_):
+        audits.append((actor, action, iam.audit_context.get(), detail))
+
+    store.audit = audit
+
+    class Auth:
+        def panel(self, request):
+            principal = SimpleNamespace(admin=True, instance_admin=True, actor='panel:alice',
+                space_id='space-b', user_id='alice', user_epoch=1, grant_id=None)
+            iam.audit_context.set((store, principal.actor, principal.space_id, principal.user_id))
+            return principal
+
+    runtime = SimpleNamespace(store=store, list_projects=lambda principal: [])
+    app = FastAPI()
+    register_call_log(app, runtime, Auth())
+    with TestClient(app) as client:
+        response = client.get('/api/call-log-export', params={'format': 'ndjson'})
+    assert response.status_code == 200 and response.headers['X-Export-Rows'] == '1'
+    assert len(audits) == 1
+    actor, action, context, detail = audits[0]
+    assert (actor, action) == ('panel:alice', 'call_log.exported')
+    assert context == (store, 'panel:alice', 'space-b', 'alice')
+    assert detail['rows'] == 1 and detail['truncated'] is False
+    store.db.close()
+
+
+def test_output_delta_requires_identical_redacted_prefix(log_api):
+    import hashlib
+
+    client, store, _ = log_api
+    store.add('a' * 32, state='running', tool='exec', output='line one\nline two\n')
+    full = client.get('/api/call-log/' + 'a' * 32, headers=AUTH).json()
+    assert full['output'] == 'line one\nline two\n'
+    assert 'output_delta' not in full
+    base = 'line one\n'
+    good = hashlib.sha256(base.encode()).hexdigest()[:32]
+    delta = client.get('/api/call-log/' + 'a' * 32, headers=AUTH,
+        params={'after_output_chars': len(base), 'after_output_sha': good}).json()
+    assert delta['output_delta'] == 'line two\n' and delta['output_base_chars'] == len(base)
+    assert delta['output_clean_sha'] == full['output_clean_sha']
+    # A client copy that no longer matches the redacted prefix (e.g. a secret that
+    # completed later and was rewritten) gets the full output, never a suffix.
+    stale = client.get('/api/call-log/' + 'a' * 32, headers=AUTH,
+        params={'after_output_chars': len(base), 'after_output_sha': '0' * 32}).json()
+    assert 'output_delta' not in stale and stale['output'] == full['output']
+    missing = client.get('/api/call-log/' + 'a' * 32, headers=AUTH,
+        params={'after_output_chars': len(base)}).json()
+    assert 'output_delta' not in missing
+
+
+def _sse_state(permissions, *, space='s1', scopes=('read',)):
+    principal = SimpleNamespace(space_id=space, user_id='u1', instance_admin=False,
+        admin=False, scopes=set(scopes))
+    return {'principal': principal, 'permissions': permissions, 'revision': 7,
+        'valid_until': float('inf'), 'owner': (space, 'u1'), 'access': frozenset()}
+
+
+def test_sse_fast_path_mirrors_record_and_scope_checks():
+    from hub.api.activity import _fast_event_decision
+
+    def frame(**audience):
+        base = {'fast_auth': True, 'space_id': 's1', 'owner_user_id': 'u1',
+            'visibility': 'private', 'project_id': 'p1', 'scope': 'write', 'needs_computer': False}
+        return {'type': 'operation', 'data': {'id': 'x'}, '_audience': {**base, **audience}}
+
+    full = _sse_state({'p1': frozenset({'read', 'write'})})
+    assert _fast_event_decision(frame(), full) == (True, True)
+    # require_record needs read on the project before the tool scope is checked.
+    assert _fast_event_decision(frame(), _sse_state({'p1': frozenset({'write'})})) == (True, False)
+    assert _fast_event_decision(frame(space_id='s2'), full) == (True, False)
+    assert _fast_event_decision(frame(owner_user_id='u2'), full) == (True, False)
+    assert _fast_event_decision(frame(owner_user_id='u2', visibility='space'), full) == (True, True)
+    assert _fast_event_decision(frame(needs_computer=True), full) == (True, False)
+    # Frames without a fast audience and idle heartbeats take the full snapshot.
+    assert _fast_event_decision(frame(fast_auth=False), full) == (False, False)
+    assert _fast_event_decision(None, full) == (False, False)
+
+
+def test_sse_idle_heartbeat_always_rechecks_authority():
+    import asyncio
+    from hub.api import activity
+
+    reads = []
+
+    class Store:
+        iam_enabled = True
+        session_revision = 7
+
+        async def run_read(self, function, *args):
+            reads.append(args[-1])
+            raise DevError('INVALID_TOKEN', 'revoked out of process', 401)
+
+    state = _sse_state({'p1': frozenset({'read'})})
+    state['valid_until'] = 10 ** 12
+    _, visible, revoked = asyncio.run(
+        activity._evaluate_stream_item(Store(), None, None, None, None, state))
+    # session_revision is unchanged (the revocation came from another process),
+    # yet the heartbeat still reaches the database and ends the stream.
+    assert reads == [None] and revoked is True and visible is False
+    assert activity.SSE_FAST_AUTH_WINDOW_S <= 15

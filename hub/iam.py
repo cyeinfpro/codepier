@@ -228,6 +228,16 @@ def project_in_space(store, principal, project_id):
 def require_project(store, principal, action, project_id):
     if not installed(store):
         return
+    if memo(store) is not None:
+        principal = live_principal(store, principal)
+        permissions = project_permissions(store, principal)
+        if project_id not in permissions:
+            raise DevError("PROJECT_NOT_FOUND", "未找到当前空间中的已授权项目", 404)
+        if (
+            not principal.grant_id or principal.authorization_mode == "fixed"
+        ) and action not in permissions[project_id]:
+            raise DevError("ROLE_POLICY_DENIED", "当前账号未获授予此项目的操作权限", 403)
+        return
     user_security(store, principal.user_id)
     membership(store, principal.user_id, principal.space_id)
     project_in_space(store, principal, project_id)

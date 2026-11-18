@@ -205,3 +205,62 @@ def test_audit_export_reports_bounded_page_completeness(panel, monkeypatch, coun
     assert response.headers["X-Export-Truncated"] == str(truncated).lower()
     assert response.headers["X-Export-Rows"] == str(min(count, 10000))
     assert response.headers["X-Export-Next-Offset"] == ("10005" if truncated else "")
+
+
+def test_queue_endpoint_constant_query_count(panel):
+    from hub import iam
+    from hub.queue_panel import queue_rows
+
+    app, client = panel
+    store, runtime = app.state.store, app.state.runtime
+    for idx in range(25):
+        writer_id = f"writer-{idx:02d}" + "0" * 23
+        reader_id = f"reader-{idx:02d}" + "0" * 23
+        operation(app, writer_id, state="running", attempts=1, tool="exec")
+        operation(app, reader_id, state="queued", attempts=1, tool="read")
+        runtime.diagnostics.record(
+            reader_id,
+            "waiting_resource",
+            source="agent",
+            seq=1,
+            detail={"queue_reason": "resource_conflict", "lane": "read", "blocked_by": [writer_id]},
+        )
+
+    # Verify single-RTT call-log?include_queue=true returns atomic queue + operations.
+    merged = client.get("/api/call-log?include_queue=true").json()
+    assert len(merged["queue"]["operations"]) == 50
+
+    # Measure exact SQL query count inside queue_rows across all 50 active & blocked items.
+    executed = []
+
+    def count_queries():
+        with store.transaction(immediate=False), iam.read_scope(store):
+            from fastapi import Request
+
+            req = Request(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/api/operations/queue",
+                    "query_string": b"",
+                    "headers": [(b"cookie", b"rd_session=queue-session")],
+                }
+            )
+            principal = app.state.auth.panel(req)
+            raw_conn = store.db._connection
+            raw_conn.set_trace_callback(executed.append)
+            try:
+                return queue_rows(store, runtime, principal)
+            finally:
+                raw_conn.set_trace_callback(None)
+
+    snapshot = asyncio_run_read(store, count_queries)
+    select_queries = [s for s in executed if s.lstrip().upper().startswith("SELECT")]
+    assert len(snapshot["operations"]) == 50
+    assert len(select_queries) <= 4, select_queries
+
+
+def asyncio_run_read(store, fn):
+    import asyncio
+
+    return asyncio.run(store.run_read(fn))
