@@ -1034,6 +1034,26 @@ def _runtime_label(runtime):
     return f"{runtime.get('mode', '')}@{runtime['runtime_ref'][:12]}"
 
 
+def _lean_open_knowledge(knowledge):
+    summary = {
+        key: knowledge[key]
+        for key in ("state", "entries_count", "scan_scope", "revision")
+        if key in knowledge
+    }
+    maintenance = knowledge.get("maintenance") or {}
+    from shared.knowledge_contracts import HEALTHY_MAINTENANCE_STATES
+
+    if maintenance and maintenance.get("state") not in HEALTHY_MAINTENANCE_STATES:
+        summary["maintenance"] = {
+            key: int(item) if key == "last_success_at" and isinstance(item, float) else item
+            for key, item in maintenance.items()
+        }
+    for key in ("maintenance_request", "next"):
+        if knowledge.get(key) and (key != "next" or knowledge.get("state") != "ready"):
+            summary[key] = knowledge[key]
+    return summary
+
+
 def _lean_open(value):
     from shared.mcp_presentation import path_label
 
@@ -1073,23 +1093,7 @@ def _lean_open(value):
         # A Git ref can be used as a worktree base. Keep the full commit SHA.
     knowledge = value.get("knowledge")
     if isinstance(knowledge, dict):
-        summary = {
-            key: knowledge[key]
-            for key in ("state", "entries_count", "scan_scope", "revision")
-            if key in knowledge
-        }
-        maintenance = knowledge.get("maintenance") or {}
-        from shared.knowledge_contracts import HEALTHY_MAINTENANCE_STATES
-
-        if maintenance and maintenance.get("state") not in HEALTHY_MAINTENANCE_STATES:
-            summary["maintenance"] = {
-                key: int(item) if key == "last_success_at" and isinstance(item, float) else item
-                for key, item in maintenance.items()
-            }
-        for key in ("maintenance_request", "next"):
-            if knowledge.get(key) and (key != "next" or knowledge.get("state") != "ready"):
-                summary[key] = knowledge[key]
-        out["knowledge"] = summary
+        out["knowledge"] = _lean_open_knowledge(knowledge)
     context = value.get("context")
     if isinstance(context, dict):
         ctx = {

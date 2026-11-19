@@ -234,6 +234,268 @@ async def _begin_poll_trace(runtime, principal, name, metadata, arguments, value
         return None
 
 
+async def _parse_rpc_request(request, failure):
+    if (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        != "application/json"
+    ):
+        return failure(None, -32600, "Content-Type must be application/json", 415)
+    accept = request.headers.get("accept", "").lower()
+    if "application/json" not in accept or "text/event-stream" not in accept:
+        return failure(
+            None, -32600, "Accept must include application/json and text/event-stream", 406
+        )
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeError, RecursionError):
+        return failure(None, -32700, "Parse error", 400)
+    if not valid_json_value(body):
+        return failure(None, -32600, "Invalid JSON values or excessive nesting", 400)
+    if (
+        not isinstance(body, dict)
+        or body.get("jsonrpc") != "2.0"
+        or not isinstance(body.get("method"), str)
+    ):
+        return failure(
+            None, -32600, "Expected one JSON-RPC request; batches are not supported", 400
+        )
+    notification = "id" not in body
+    identifier = body.get("id")
+    if "id" in body and (isinstance(identifier, bool) or not isinstance(identifier, (str, int))):
+        return failure(None, -32600, "Invalid request ID", 400)
+    if "id" in body and len(json.dumps(identifier, ensure_ascii=False).encode()) > 1024:
+        return failure(None, -32600, "Request ID is too large", 400)
+    modern = is_modern(body, request.headers)
+    method = body["method"]
+    params = body.get("params", {})
+    mark("parsed", method=method)
+    if not isinstance(params, dict):
+        return failure(identifier, -32602, "params must be an object", 400 if modern else 200)
+    metadata = params.get("_meta", {})
+    if not isinstance(metadata, dict):
+        return failure(identifier, -32602, "_meta must be an object", 400 if modern else 200)
+    return body, notification, identifier, modern, method, params, metadata
+
+
+def _validate_rpc_protocol(
+    body, headers, notification, identifier, modern, method, metadata, failure
+):
+    if modern:
+        if notification and method not in {
+            "notifications/roots/list_changed",
+            "notifications/cancelled",
+        }:
+            return failure(
+                None, -32601, "No HTTP client notifications are implemented for 2026-07-28", 404
+            )
+        try:
+            for header in ("mcp-protocol-version", "mcp-method", "mcp-name"):
+                if len(headers.getlist(header)) > 1:
+                    raise ProtocolError(-32020, "Duplicate request metadata headers")
+            if not notification:
+                metadata = validate_modern(body, headers)
+            # Antigravity can send the legacy roots notification with modern metadata.
+            # CodePier projects come from authorized grants, so there is nothing to refresh.
+            elif (
+                headers.get("mcp-protocol-version", MODERN) != MODERN
+                or metadata.get(PREFIX + "protocolVersion", MODERN) != MODERN
+                or headers.get("mcp-method", method) != method
+            ):
+                raise ProtocolError(-32020, "Invalid metadata for roots change notification")
+        except ProtocolError as exc:
+            return failure(identifier, exc.code, exc.message, 400, exc.data)
+    else:
+        version = headers.get("mcp-protocol-version")
+        if version and version not in LEGACY:
+            return failure(identifier, -32600, "Unsupported MCP-Protocol-Version", 400)
+    return metadata
+
+
+def _decorate_rpc_result(result, method, modern, params, view):
+    if modern:
+        if method in {
+            "server/discover",
+            "tools/list",
+            "prompts/list",
+            "resources/list",
+            "resources/read",
+            "resources/templates/list",
+            "events/list",
+        }:
+            # Protected project data must never be cached by shared proxies.
+            ttl = (
+                300000
+                if method == "resources/read" and params.get("uri") in mcp_apps.RESOURCES
+                else 0
+            )
+            result = {**result, "ttlMs": ttl, "cacheScope": "private"}
+        if isinstance(result, CreatedTask):
+            result = {**complete(result.body), "resultType": "task"}
+        else:
+            result = complete(result)
+    from shared.tool_protocol import CONTRACT_PROTOCOL
+
+    if (
+        method in {"initialize", "server/discover", "tools/list"}
+        or view == "1"
+        and (modern or method == "tools/call")
+    ):
+        result = {
+            **result,
+            "_meta": {
+                **result.get("_meta", {}),
+                "com.codepier/serviceVersion": VERSION,
+                "com.codepier/toolContractProtocol": CONTRACT_PROTOCOL,
+            },
+        }
+    correlation = request_id()
+    # Both protocol eras expose the server-generated ID; it correlates evidence, not authority.
+    if correlation and (modern or method == "tools/call"):
+        result = {
+            **result,
+            "_meta": {**result.get("_meta", {}), "com.codepier/requestId": correlation},
+        }
+    return result
+
+
+async def _capture_rpc_output(runtime, trace, response_body):
+    try:
+        final_result = response_body["result"]
+        if isinstance(final_result, CreatedTask):
+            final_result = final_result.body
+        await asyncio.get_running_loop().run_in_executor(
+            _METERING_EXECUTOR,
+            runtime.integrations.capture_output,
+            trace,
+            final_result,
+        )
+    except Exception:
+        runtime.integrations.write_errors += 1
+
+
+def _project_resources(runtime, principal):
+    principal = refresh_principal(runtime.store, principal)
+    from hub.project_views import authorized_projects
+
+    return present(
+        "workspace",
+        {"operation": "list"},
+        {"projects": authorized_projects(runtime, principal)},
+    )["projects"]
+
+
+async def _read_rpc_resource(
+    params,
+    identifier,
+    modern,
+    principal,
+    request_public_url,
+    run_read,
+    runtime,
+    auth,
+    failure,
+):
+    uri = params.get("uri")
+    if not isinstance(uri, str):
+        return failure(identifier, -32602, "uri must be a string", 400 if modern else 200)
+    if "read" not in principal.scopes:
+        raise DevError("INSUFFICIENT_SCOPE", "缺少读取权限", 403)
+    if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:
+        item = await asyncio.to_thread(mcp_apps.read_resource, uri, request_public_url)
+    elif uri == "rd://projects":
+        item = {
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": json.dumps(
+                await run_read(_project_resources, runtime, principal),
+                ensure_ascii=False,
+            ),
+        }
+    elif uri == "rd://workflow":
+        item = {
+            "uri": uri,
+            "mimeType": "text/plain",
+            "text": CORE_WORKFLOW_INSTRUCTIONS,
+        }
+    else:
+        return failure(
+            identifier,
+            -32602 if modern else -32002,
+            "Resource not found",
+            404 if modern else 200,
+        )
+    await runtime.store.run(auth.store.audit, principal.actor, "resources.read", uri)
+    return {"contents": [item]}
+
+
+async def _authenticate_rpc(request, public_base, auth, _sync_epoch_stamp, run_read, failure):
+    authorization = request.query_params.get("authorization", "fixed")
+    if authorization not in {"fixed", "role"}:
+        return failure(None, -32602, "Unknown authorization mode", 400)
+    # Initial pairing advertises choices, not an automatic grant. Tool-level
+    # step-up challenges still request only the scopes the operation needs.
+    auth_scope = ROLE_SCOPE if authorization == "role" else " ".join(LEGACY_OAUTH_SCOPES)
+    mark("authenticate")
+    try:
+
+        def _authenticate():
+            stamp = _sync_epoch_stamp()
+            return auth.bearer(request), stamp
+
+        principal, auth_stamp = await run_read(_authenticate)
+        auth_checked_at = time.monotonic()
+    except DevError as exc:
+        metadata = public_base + "/.well-known/oauth-protected-resource/mcp"
+        if authorization == "role":
+            metadata += "?authorization=role"
+        return failure(
+            None,
+            -32001,
+            exc.message,
+            exc.status,
+            headers={
+                "WWW-Authenticate": f'Bearer resource_metadata="{metadata}", scope="{auth_scope}"'
+            },
+        )
+    return principal, auth_stamp, auth_checked_at
+
+
+def _bound_rpc_response(
+    response_body,
+    view,
+    verbosity,
+    text_mode,
+    mirror,
+    plan,
+    name,
+    arguments,
+    value,
+):
+    from hub.core_tools import bound_batch_response
+    from shared.mcp_presentation import raw_output_sources
+
+    return bound_batch_response(
+        response_body,
+        output_budget=(view != "1" and verbosity != "full"),
+        text_mode=text_mode,
+        mirror=mirror,
+        tool_name="exec" if plan and plan.action == "exec" else name,
+        project=getattr(plan, "project", "") or arguments.get("project", ""),
+        workspace_id=getattr(plan, "workspace_id", "") or arguments.get("workspace_id", ""),
+        unified=plan is not None,
+        sources=raw_output_sources(value, name),
+    )
+
+
+def _handle_notification(request, principal, method, params, streams, failure):
+    if method == "notifications/cancelled":
+        target = params.get("requestId")
+        if type(target) not in (int, str) or len(str(target)) > 1024:
+            return failure(None, -32602, "Invalid cancellation requestId", 400)
+        streams.cancel(request, principal, target)
+    return Response(status_code=202)
+
+
 def make_router(auth: Auth, runtime: Runtime, public_url):
     router = APIRouter()
     tools = ToolRouter(runtime.store, runtime.gateway)
@@ -347,104 +609,22 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             return failure(None, -32000, "Origin not allowed", 403)
         origin = request.headers.get("origin")
         request_public_url = lambda: public_base
-        authorization = request.query_params.get("authorization", "fixed")
-        if authorization not in {"fixed", "role"}:
-            return failure(None, -32602, "Unknown authorization mode", 400)
-        # Initial pairing advertises choices, not an automatic grant. Tool-level
-        # step-up challenges still request only the scopes the operation needs.
-        auth_scope = ROLE_SCOPE if authorization == "role" else " ".join(LEGACY_OAUTH_SCOPES)
-        mark("authenticate")
-        try:
-
-            def _authenticate():
-                stamp = _sync_epoch_stamp()
-                return auth.bearer(request), stamp
-
-            principal, auth_stamp = await run_read(_authenticate)
-            auth_checked_at = time.monotonic()
-        except DevError as exc:
-            metadata = public_base + "/.well-known/oauth-protected-resource/mcp"
-            if authorization == "role":
-                metadata += "?authorization=role"
-            return failure(
-                None,
-                -32001,
-                exc.message,
-                exc.status,
-                headers={
-                    "WWW-Authenticate": f'Bearer resource_metadata="{metadata}", scope="{auth_scope}"'
-                },
-            )
+        authenticated = await _authenticate_rpc(
+            request, public_base, auth, _sync_epoch_stamp, run_read, failure
+        )
+        if isinstance(authenticated, Response):
+            return authenticated
+        principal, auth_stamp, auth_checked_at = authenticated
         mark("authenticated")
-        if (
-            request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            != "application/json"
-        ):
-            return failure(None, -32600, "Content-Type must be application/json", 415)
-        accept = request.headers.get("accept", "").lower()
-        if "application/json" not in accept or "text/event-stream" not in accept:
-            return failure(
-                None, -32600, "Accept must include application/json and text/event-stream", 406
-            )
-        try:
-            body = await request.json()
-        except (ValueError, UnicodeError, RecursionError):
-            return failure(None, -32700, "Parse error", 400)
-        if not valid_json_value(body):
-            return failure(None, -32600, "Invalid JSON values or excessive nesting", 400)
-        if (
-            not isinstance(body, dict)
-            or body.get("jsonrpc") != "2.0"
-            or not isinstance(body.get("method"), str)
-        ):
-            return failure(
-                None, -32600, "Expected one JSON-RPC request; batches are not supported", 400
-            )
-        notification = "id" not in body
-        identifier = body.get("id")
-        if "id" in body and (
-            isinstance(identifier, bool) or not isinstance(identifier, (str, int))
-        ):
-            return failure(None, -32600, "Invalid request ID", 400)
-        if "id" in body and len(json.dumps(identifier, ensure_ascii=False).encode()) > 1024:
-            return failure(None, -32600, "Request ID is too large", 400)
-        modern = is_modern(body, request.headers)
-        method = body["method"]
-        params = body.get("params", {})
-        mark("parsed", method=method)
-        if not isinstance(params, dict):
-            return failure(identifier, -32602, "params must be an object", 400 if modern else 200)
-        metadata = params.get("_meta", {})
-        if not isinstance(metadata, dict):
-            return failure(identifier, -32602, "_meta must be an object", 400 if modern else 200)
-        if modern:
-            if notification and method not in {
-                "notifications/roots/list_changed",
-                "notifications/cancelled",
-            }:
-                return failure(
-                    None, -32601, "No HTTP client notifications are implemented for 2026-07-28", 404
-                )
-            try:
-                for header in ("mcp-protocol-version", "mcp-method", "mcp-name"):
-                    if len(request.headers.getlist(header)) > 1:
-                        raise ProtocolError(-32020, "Duplicate request metadata headers")
-                if not notification:
-                    metadata = validate_modern(body, request.headers)
-                # Antigravity can send the legacy roots notification with modern metadata.
-                # CodePier projects come from authorized grants, so there is nothing to refresh.
-                elif (
-                    request.headers.get("mcp-protocol-version", MODERN) != MODERN
-                    or metadata.get(PREFIX + "protocolVersion", MODERN) != MODERN
-                    or request.headers.get("mcp-method", method) != method
-                ):
-                    raise ProtocolError(-32020, "Invalid metadata for roots change notification")
-            except ProtocolError as exc:
-                return failure(identifier, exc.code, exc.message, 400, exc.data)
-        else:
-            version = request.headers.get("mcp-protocol-version")
-            if version and version not in LEGACY:
-                return failure(identifier, -32600, "Unsupported MCP-Protocol-Version", 400)
+        parsed = await _parse_rpc_request(request, failure)
+        if isinstance(parsed, Response):
+            return parsed
+        body, notification, identifier, modern, method, params, metadata = parsed
+        metadata = _validate_rpc_protocol(
+            body, request.headers, notification, identifier, modern, method, metadata, failure
+        )
+        if isinstance(metadata, Response):
+            return metadata
         mark("protocol_validated", protocol="modern" if modern else "legacy")
         try:
             profile, schemas, view, verbosity, text_mode, mirror, output_mode = (
@@ -454,12 +634,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             return failure(identifier, -32602, str(exc), 400)
         instructions = CORE_WORKFLOW_INSTRUCTIONS if view == "1" else CORE_INSTRUCTIONS
         if notification:
-            if method == "notifications/cancelled":
-                target = params.get("requestId")
-                if type(target) not in (int, str) or len(str(target)) > 1024:
-                    return failure(None, -32602, "Invalid cancellation requestId", 400)
-                streams.cancel(request, principal, target)
-            return Response(status_code=202)
+            return _handle_notification(request, principal, method, params, streams, failure)
 
         async def _revalidate_principal(*, refresh_only=False):
             nonlocal principal, auth_stamp, auth_checked_at
@@ -912,39 +1087,19 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             elif method == "resources/templates/list":
                 result = {"resourceTemplates": []}
             elif method == "resources/read":
-                uri = params.get("uri")
-                if not isinstance(uri, str):
-                    return failure(
-                        identifier, -32602, "uri must be a string", 400 if modern else 200
-                    )
-                if "read" not in principal.scopes:
-                    raise DevError("INSUFFICIENT_SCOPE", "缺少读取权限", 403)
-                if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:
-                    item = await asyncio.to_thread(mcp_apps.read_resource, uri, request_public_url)
-                elif uri == "rd://projects":
-                    item = {
-                        "uri": uri,
-                        "mimeType": "application/json",
-                        "text": json.dumps(
-                            await run_read(project_resources, principal),
-                            ensure_ascii=False,
-                        ),
-                    }
-                elif uri == "rd://workflow":
-                    item = {
-                        "uri": uri,
-                        "mimeType": "text/plain",
-                        "text": CORE_WORKFLOW_INSTRUCTIONS,
-                    }
-                else:
-                    return failure(
-                        identifier,
-                        -32602 if modern else -32002,
-                        "Resource not found",
-                        404 if modern else 200,
-                    )
-                await runtime.store.run(auth.store.audit, principal.actor, "resources.read", uri)
-                result = {"contents": [item]}
+                result = await _read_rpc_resource(
+                    params,
+                    identifier,
+                    modern,
+                    principal,
+                    request_public_url,
+                    run_read,
+                    runtime,
+                    auth,
+                    failure,
+                )
+                if isinstance(result, Response):
+                    return result
             elif method == "prompts/list":
                 result = {
                     "prompts": [
@@ -999,79 +1154,14 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     catalog_sha256=result.get("_meta", {}).get("com.codepier/catalogSha256"),
                     catalog_has_more=bool(result.get("nextCursor")),
                 )
-            if modern:
-                if method in {
-                    "server/discover",
-                    "tools/list",
-                    "prompts/list",
-                    "resources/list",
-                    "resources/read",
-                    "resources/templates/list",
-                    "events/list",
-                }:
-                    # Protected project data must never be cached by shared proxies.
-                    ttl = (
-                        300000
-                        if method == "resources/read" and params.get("uri") in mcp_apps.RESOURCES
-                        else 0
-                    )
-                    result = {**result, "ttlMs": ttl, "cacheScope": "private"}
-                if isinstance(result, CreatedTask):
-                    result = {**complete(result.body), "resultType": "task"}
-                else:
-                    result = complete(result)
-            from shared.tool_protocol import CONTRACT_PROTOCOL
-
-            if (
-                method in {"initialize", "server/discover", "tools/list"}
-                or view == "1"
-                and (modern or method == "tools/call")
-            ):
-                result = {
-                    **result,
-                    "_meta": {
-                        **result.get("_meta", {}),
-                        "com.codepier/serviceVersion": VERSION,
-                        "com.codepier/toolContractProtocol": CONTRACT_PROTOCOL,
-                    },
-                }
-            correlation = request_id()
-            # Both protocol eras expose the server-generated ID; it correlates evidence, not authority.
-            if correlation and (modern or method == "tools/call"):
-                result = {
-                    **result,
-                    "_meta": {**result.get("_meta", {}), "com.codepier/requestId": correlation},
-                }
-            from hub.core_tools import bound_batch_response
-            from shared.mcp_presentation import raw_output_sources
-
+            result = _decorate_rpc_result(result, method, modern, params, view)
             response_body = {"jsonrpc": "2.0", "id": identifier, "result": result}
             if method == "tools/call" and route and route.backend != "remote":
-                response_body = bound_batch_response(
-                    response_body,
-                    output_budget=(view != "1" and verbosity != "full"),
-                    text_mode=text_mode,
-                    mirror=mirror,
-                    tool_name="exec" if plan and plan.action == "exec" else name,
-                    project=getattr(plan, "project", "") or arguments.get("project", ""),
-                    workspace_id=getattr(plan, "workspace_id", "")
-                    or arguments.get("workspace_id", ""),
-                    unified=plan is not None,
-                    sources=raw_output_sources(value, name),
+                response_body = _bound_rpc_response(
+                    response_body, view, verbosity, text_mode, mirror, plan, name, arguments, value
                 )
             if method == "tools/call" and trace:
-                try:
-                    final_result = response_body["result"]
-                    if isinstance(final_result, CreatedTask):
-                        final_result = final_result.body
-                    await asyncio.get_running_loop().run_in_executor(
-                        _METERING_EXECUTOR,
-                        runtime.integrations.capture_output,
-                        trace,
-                        final_result,
-                    )
-                except Exception:
-                    runtime.integrations.write_errors += 1
+                await _capture_rpc_output(runtime, trace, response_body)
             return JSONResponse(
                 response_body,
                 headers={
@@ -1090,15 +1180,5 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 exc.status if modern else 200,
                 {"code": exc.code},
             )
-
-    def project_resources(principal):
-        principal = refresh_principal(runtime.store, principal)
-        from hub.project_views import authorized_projects
-
-        return present(
-            "workspace",
-            {"operation": "list"},
-            {"projects": authorized_projects(runtime, principal)},
-        )["projects"]
 
     return router

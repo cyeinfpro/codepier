@@ -279,6 +279,85 @@ def estimate_input(arguments):
         return unavailable()
 
 
+def _project_content_block(target, block, result, has_structured):
+    if block.get("type") == "text" and isinstance(block.get("text"), str):
+        if (
+            len(block["text"]) > MAX_CHARACTERS
+            and block["text"].lstrip().startswith(("{", "["))
+            and has_structured
+            and not _is_meta_stub(result, result["structuredContent"])
+        ):
+            target.value(result["structuredContent"])
+        else:
+            target.text(block["text"])
+        return True
+    if (
+        block.get("type") == "resource"
+        and isinstance(block.get("resource"), dict)
+        and isinstance(block["resource"].get("text"), str)
+    ):
+        target.text(block["resource"]["text"])
+        return True
+    return False
+
+
+def _content_projections(content, result, has_structured):
+    c0_proj = None
+    rest_proj = None
+    media_excluded = 0
+    found_text = False
+    for block in content if isinstance(content, list) else ():
+        target = rest_proj
+        if not found_text:
+            probe = Projection(output=True)
+            target = probe
+        elif target is None:
+            rest_proj = Projection(output=True)
+            target = rest_proj
+        if target.nodes >= MAX_NODES or target.characters >= MAX_CHARACTERS:
+            target.truncated = True
+            if not found_text:
+                media_excluded += target.excluded
+            break
+        target.nodes += 1
+        if isinstance(block, dict) and _project_content_block(
+            target, block, result, has_structured
+        ):
+            if not found_text:
+                c0_proj = target
+                c0_proj.excluded += media_excluded
+                media_excluded = 0
+                found_text = True
+        elif found_text:
+            target.excluded += 1
+        else:
+            media_excluded += 1
+
+    if not found_text and media_excluded and rest_proj is None:
+        rest_proj = Projection(output=True)
+        rest_proj.excluded = media_excluded
+
+    return c0_proj, rest_proj
+
+
+def _semantic_parts(c0_proj, rest_proj, sc_proj, result):
+    if c0_proj is None:
+        sem_parts = (rest_proj, sc_proj)
+    elif sc_proj is None:
+        sem_parts = (c0_proj, rest_proj)
+    else:
+        c0_metric = c0_proj.metric()
+        sc_metric = sc_proj.metric()
+        primary = (
+            c0_proj
+            if _is_meta_stub(result, result["structuredContent"])
+            or c0_metric["estimated_tokens"] >= sc_metric["estimated_tokens"]
+            else sc_proj
+        )
+        sem_parts = (primary, rest_proj)
+    return sem_parts
+
+
 def estimate_output(result):
     if not isinstance(result, dict):
         return unavailable()
@@ -287,67 +366,7 @@ def estimate_output(result):
     if not isinstance(content, list) and not has_structured:
         return unavailable()
 
-    c0_proj = None
-    rest_proj = None
-    media_excluded = 0
-    found_text = False
-    if isinstance(content, list):
-        for block in content:
-            target = rest_proj
-            if not found_text:
-                probe = Projection(output=True)
-                target = probe
-            else:
-                if target is None:
-                    rest_proj = Projection(output=True)
-                    target = rest_proj
-            if target.nodes >= MAX_NODES or target.characters >= MAX_CHARACTERS:
-                target.truncated = True
-                if not found_text:
-                    media_excluded += target.excluded
-                break
-            target.nodes += 1
-            if not isinstance(block, dict):
-                if found_text:
-                    target.excluded += 1
-                else:
-                    media_excluded += 1
-                continue
-            if block.get("type") == "text" and isinstance(block.get("text"), str):
-                if (
-                    len(block["text"]) > MAX_CHARACTERS
-                    and block["text"].lstrip().startswith(("{", "["))
-                    and has_structured
-                    and not _is_meta_stub(result, result["structuredContent"])
-                ):
-                    target.value(result["structuredContent"])
-                else:
-                    target.text(block["text"])
-                if not found_text:
-                    c0_proj = target
-                    c0_proj.excluded += media_excluded
-                    media_excluded = 0
-                    found_text = True
-            elif (
-                block.get("type") == "resource"
-                and isinstance(block.get("resource"), dict)
-                and isinstance(block["resource"].get("text"), str)
-            ):
-                target.text(block["resource"]["text"])
-                if not found_text:
-                    c0_proj = target
-                    c0_proj.excluded += media_excluded
-                    media_excluded = 0
-                    found_text = True
-            else:
-                if found_text:
-                    target.excluded += 1
-                else:
-                    media_excluded += 1
-
-    if not found_text and media_excluded and rest_proj is None:
-        rest_proj = Projection(output=True)
-        rest_proj.excluded = media_excluded
+    c0_proj, rest_proj = _content_projections(content, result, has_structured)
 
     sc_proj = None
     if has_structured:
@@ -361,20 +380,7 @@ def estimate_output(result):
 
     try:
         wire_metric = _combine_projections((c0_proj, rest_proj, sc_proj, meta_proj))
-        if c0_proj is None:
-            sem_parts = (rest_proj, sc_proj)
-        elif sc_proj is None:
-            sem_parts = (c0_proj, rest_proj)
-        else:
-            c0_metric = c0_proj.metric()
-            sc_metric = sc_proj.metric()
-            primary = (
-                c0_proj
-                if _is_meta_stub(result, result["structuredContent"])
-                or c0_metric["estimated_tokens"] >= sc_metric["estimated_tokens"]
-                else sc_proj
-            )
-            sem_parts = (primary, rest_proj)
+        sem_parts = _semantic_parts(c0_proj, rest_proj, sc_proj, result)
         sem_metric = _combine_projections(sem_parts)
     except UnicodeError:
         return unavailable()

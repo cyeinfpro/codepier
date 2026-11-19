@@ -654,22 +654,7 @@ class FileEngine:
             ):
                 stack.append((entries(p), level + 1))
 
-    def tree(self, project, args):
-        root, _ = self.root(project)
-        start = self.path(root, args.get("path", "."))
-        if not start.is_dir():
-            raise DevError("NOT_DIRECTORY", "目录不存在", 404)
-        scope = args.get("scope", "git")
-        depth = args.get("depth", 2)
-        offset = args.get("offset", 0)
-        limit = args.get("limit", 300)
-        per_dir_raw = args.get("per_dir", 40)
-        per_dir = 40 if per_dir_raw is None else per_dir_raw
-        if type(per_dir) is not int or per_dir < 1:
-            raise DevError("INVALID_ARGUMENTS", "per_dir 必须是正整数", 422)
-        # Single-directory listing (depth == 1) paginates strictly via offset/limit;
-        # per-directory sibling folding applies only to multi-level trees (depth > 1).
-        enforce_per_dir = depth is None or depth > 1
+    def _tree_git_index(self, root, start, depth, scope):
         indexed = self.git_candidates(root, start, paths_only=True) if scope == "git" else None
         visible = None
         scan_error = None
@@ -692,6 +677,27 @@ class FileEngine:
                     indexed_children.setdefault(parent or ".", []).append(name)
             if capped:
                 scan_error = "SCAN_LIMIT"
+        return indexed, visible, scan_error, indexed_children
+
+    def tree(self, project, args):
+        root, _ = self.root(project)
+        start = self.path(root, args.get("path", "."))
+        if not start.is_dir():
+            raise DevError("NOT_DIRECTORY", "目录不存在", 404)
+        scope = args.get("scope", "git")
+        depth = args.get("depth", 2)
+        offset = args.get("offset", 0)
+        limit = args.get("limit", 300)
+        per_dir_raw = args.get("per_dir", 40)
+        per_dir = 40 if per_dir_raw is None else per_dir_raw
+        if type(per_dir) is not int or per_dir < 1:
+            raise DevError("INVALID_ARGUMENTS", "per_dir 必须是正整数", 422)
+        # Single-directory listing (depth == 1) paginates strictly via offset/limit;
+        # per-directory sibling folding applies only to multi-level trees (depth > 1).
+        enforce_per_dir = depth is None or depth > 1
+        indexed, visible, scan_error, indexed_children = self._tree_git_index(
+            root, start, depth, scope
+        )
 
         def excluded(rel):
             return (
@@ -814,6 +820,51 @@ class FileEngine:
             "next_start_line": end + 1 if end < len(lines) else None,
         }
 
+    @staticmethod
+    def _git_visible_paths(raw, prefix, deadline, max_files, capped):
+        rows, seen = [], set()
+        for name in raw.split(b"\0"):
+            if time.monotonic() > deadline:
+                capped = True
+                break
+            if not name:
+                continue
+            try:
+                rel = name.decode("utf-8")
+                if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
+                    continue
+                if rel not in seen:
+                    if len(rows) >= max_files:
+                        capped = True
+                        break
+                    seen.add(rel)
+                    rows.append(rel)
+            except (UnicodeError, DevError, OSError):
+                continue
+        return rows, capped
+
+    @staticmethod
+    def _sorted_git_candidates(raw, prefix, deadline, capped):
+        seen = set()
+        candidates = []
+        for name in raw.split(b"\0"):
+            if time.monotonic() > deadline:
+                capped = True
+                break
+            if not name:
+                continue
+            try:
+                rel = name.decode("utf-8")
+            except UnicodeError:
+                continue
+            if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
+                continue
+            if rel not in seen:
+                seen.add(rel)
+                candidates.append(rel)
+        candidates.sort()
+        return candidates, capped
+
     def git_candidates(self, root, start, *, max_files=20000, paths_only=False, after_path=None):
         """Bounded Git enumeration; content still passes every filesystem guard."""
         if scan_ignored(start.relative_to(root).as_posix()) or not (root / ".git").exists():
@@ -860,46 +911,12 @@ class FileEngine:
         capped = len(raw) > 8 * 1024 * 1024
         if capped:
             raw = raw[: 8 * 1024 * 1024].rsplit(b"\0", 1)[0] + b"\0"
-        rows, seen = [], set()
         start_name = start.relative_to(root).as_posix()
         prefix = "" if start_name == "." else start_name + "/"
         if paths_only:
-            for name in raw.split(b"\0"):
-                if time.monotonic() > deadline:
-                    capped = True
-                    break
-                if not name:
-                    continue
-                try:
-                    rel = name.decode("utf-8")
-                    if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
-                        continue
-                    if rel not in seen:
-                        if len(rows) >= max_files:
-                            capped = True
-                            break
-                        seen.add(rel)
-                        rows.append(rel)
-                except (UnicodeError, DevError, OSError):
-                    continue
-            return rows, capped
-        candidates = []
-        for name in raw.split(b"\0"):
-            if time.monotonic() > deadline:
-                capped = True
-                break
-            if not name:
-                continue
-            try:
-                rel = name.decode("utf-8")
-            except UnicodeError:
-                continue
-            if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
-                continue
-            if rel not in seen:
-                seen.add(rel)
-                candidates.append(rel)
-        candidates.sort()
+            return self._git_visible_paths(raw, prefix, deadline, max_files, capped)
+        candidates, capped = self._sorted_git_candidates(raw, prefix, deadline, capped)
+        rows = []
         for rel in candidates:
             if time.monotonic() > deadline:
                 capped = True
@@ -933,13 +950,7 @@ class FileEngine:
         parts = sub.split("/")
         return tuple((1, part.casefold(), part) for part in parts)
 
-    def search(self, project, args):
-        root, _ = self.root(project)
-        start = self.path(root, args.get("path", "."))
-        start_rel = start.relative_to(root).as_posix()
-        resume_after_raw = args.get("resume_after_path") or ""
-        resume_after = relative_path(resume_after_raw, False) if resume_after_raw else None
-        budget = time.monotonic()
+    def _search_entries(self, root, start, start_rel, resume_after, budget):
         scan_scope, candidates_capped = "filesystem_walk", False
         resume_key = None
         if start.is_file():
@@ -980,6 +991,62 @@ class FileEngine:
                 scan_scope = "git_index"
         else:
             raise DevError("NOT_FOUND", "搜索路径不存在或不是普通文件/目录", 404)
+        return entries, scan_scope, candidates_capped, resume_key
+
+    @staticmethod
+    def _collect_search_matches(
+        text,
+        data,
+        rel,
+        args,
+        needle,
+        case_sensitive,
+        offset,
+        limit,
+        results,
+        matches,
+        context_bytes,
+    ):
+        page_full = False
+        lines = text.splitlines()
+        radius = args.get("context_lines", 0)
+        checksum = digest(data) if radius or args.get("include_sha256") else None
+        for n, line in enumerate(lines, 1):
+            if needle not in (line if case_sensitive else line.casefold()):
+                continue
+            matches += 1
+            if matches <= offset:
+                continue
+            if len(results) >= limit:
+                page_full = True
+                break
+            match = {
+                "path": rel,
+                "line": n,
+                "text": line[:1600],
+                "line_truncated": len(line) > 1600,
+            }
+            if checksum:
+                match.update(sha256=checksum, total_lines=len(lines))
+            if radius:
+                match.update(search_context(lines, n, radius))
+                context_bytes += len(json.dumps(match, ensure_ascii=False).encode())
+                if results and context_bytes > 32 * 1024:
+                    page_full = True
+                    break
+            results.append(match)
+        return matches, context_bytes, page_full
+
+    def search(self, project, args):
+        root, _ = self.root(project)
+        start = self.path(root, args.get("path", "."))
+        start_rel = start.relative_to(root).as_posix()
+        resume_after_raw = args.get("resume_after_path") or ""
+        resume_after = relative_path(resume_after_raw, False) if resume_after_raw else None
+        budget = time.monotonic()
+        entries, scan_scope, candidates_capped, resume_key = self._search_entries(
+            root, start, start_rel, resume_after, budget
+        )
         expected_scope = args.get("resume_scan_scope")
         if expected_scope is not None and expected_scope != scan_scope:
             raise DevError(
@@ -1043,33 +1110,19 @@ class FileEngine:
             if needle not in haystack:
                 last_scanned_path = rel
                 continue
-            lines = text.splitlines()
-            radius = args.get("context_lines", 0)
-            checksum = digest(data) if radius or args.get("include_sha256") else None
-            for n, line in enumerate(lines, 1):
-                if needle not in (line if case_sensitive else line.casefold()):
-                    continue
-                matches += 1
-                if matches <= offset:
-                    continue
-                if len(results) >= limit:
-                    page_full = True
-                    break
-                match = {
-                    "path": rel,
-                    "line": n,
-                    "text": line[:1600],
-                    "line_truncated": len(line) > 1600,
-                }
-                if checksum:
-                    match.update(sha256=checksum, total_lines=len(lines))
-                if radius:
-                    match.update(search_context(lines, n, radius))
-                    context_bytes += len(json.dumps(match, ensure_ascii=False).encode())
-                    if results and context_bytes > 32 * 1024:
-                        page_full = True
-                        break
-                results.append(match)
+            matches, context_bytes, page_full = self._collect_search_matches(
+                text,
+                data,
+                rel,
+                args,
+                needle,
+                case_sensitive,
+                offset,
+                limit,
+                results,
+                matches,
+                context_bytes,
+            )
             if page_full:
                 break
             last_scanned_path = rel

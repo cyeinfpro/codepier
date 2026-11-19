@@ -238,6 +238,70 @@ class ConnectionEvidence:
         """A returned tool call is evidence of the contract, never of host scanning."""
         self.observe(principal, "call", tool=name)
 
+    @staticmethod
+    def _completed_workspace(op_row, payload):
+        if isinstance(payload, Mapping):
+            args_part = payload.get("args")
+            workspace_id = (
+                args_part.get("workspace_id", "")
+                if isinstance(args_part, Mapping)
+                else payload.get("workspace_id", "")
+            )
+            if not isinstance(workspace_id, str):
+                workspace_id = ""
+        else:
+            original = json.loads(_field(op_row, "args_summary") or "{}")
+            workspace_id = original.get("workspace_id", "") if isinstance(original, Mapping) else ""
+        return workspace_id
+
+    def _completed_matches_project(self, op_row, row, project, payload):
+        if payload is not None:
+            request = payload if isinstance(payload, Mapping) else {}
+            if "project" in request:
+                original_project = request.get("project") or {}
+                if (
+                    original_project.get("root") != project["root"]
+                    or _field(row, "device_id") != project["device_id"]
+                ):
+                    return False
+            elif _field(row, "device_id") != project["device_id"]:
+                return False
+        else:
+            encrypted_payload = _field(op_row, "payload")
+            request = json.loads(self.store.decrypt(encrypted_payload)) if encrypted_payload else {}
+            original_project = request.get("project") or {}
+            if (
+                original_project.get("root") != project["root"]
+                or _field(row, "device_id") != project["device_id"]
+            ):
+                return False
+        return True
+
+    def _completed_request_identity(self, op_row, principal, grant_id):
+        if principal is None:
+            grant = self.store.one("SELECT * FROM grants WHERE id=? AND revoked=0", (grant_id,))
+            if not grant:
+                return principal, None
+            principal = self.runtime.grant_principal(grant)
+            row = self.runtime.operation_row(_field(op_row, "id"), principal)
+            if row["grant_id"] != principal.grant_id or row["state"] != "succeeded":
+                return principal, None
+        else:
+            row = op_row
+            if _field(row, "grant_id") != principal.grant_id:
+                return principal, None
+        return principal, row
+
+    def _completed_is_throttled(self, grant_id, project_id, workspace_id, completed_at):
+        early_key = self._dedup_key(
+            grant_id,
+            project_id,
+            "readonly",
+            workspace_id=workspace_id,
+            tool="read",
+        )
+        return self._is_throttled(early_key, observed_at=completed_at)
+
     def completed(
         self,
         op=None,
@@ -286,72 +350,24 @@ class ConnectionEvidence:
         ):
             return
         try:
-            if isinstance(payload, Mapping):
-                args_part = payload.get("args")
-                workspace_id = (
-                    args_part.get("workspace_id", "")
-                    if isinstance(args_part, Mapping)
-                    else payload.get("workspace_id", "")
-                )
-                if not isinstance(workspace_id, str):
-                    workspace_id = ""
-            else:
-                original = json.loads(_field(op_row, "args_summary") or "{}")
-                workspace_id = (
-                    original.get("workspace_id", "") if isinstance(original, Mapping) else ""
-                )
+            workspace_id = self._completed_workspace(op_row, payload)
             project_id = (
                 _field(project, "id") if project is not None else _field(op_row, "project_id", "")
             )
-            if project_id:
-                early_key = self._dedup_key(
-                    grant_id,
-                    project_id,
-                    "readonly",
-                    workspace_id=workspace_id,
-                    tool="read",
-                )
-                if self._is_throttled(early_key, observed_at=effective_completed_at):
-                    return
+            if project_id and self._completed_is_throttled(
+                grant_id, project_id, workspace_id, effective_completed_at
+            ):
+                return
 
-            if principal is None:
-                grant = self.store.one("SELECT * FROM grants WHERE id=? AND revoked=0", (grant_id,))
-                if not grant:
-                    return
-                principal = self.runtime.grant_principal(grant)
-                row = self.runtime.operation_row(_field(op_row, "id"), principal)
-                if row["grant_id"] != principal.grant_id or row["state"] != "succeeded":
-                    return
-            else:
-                row = op_row
-                if _field(row, "grant_id") != principal.grant_id:
-                    return
+            principal, row = self._completed_request_identity(op_row, principal, grant_id)
+            if row is None:
+                return
 
             if project is None:
                 project = self.runtime.project(_field(row, "project_id"), principal)
 
-            if payload is not None:
-                request = payload if isinstance(payload, Mapping) else {}
-                if "project" in request:
-                    original_project = request.get("project") or {}
-                    if (
-                        original_project.get("root") != project["root"]
-                        or _field(row, "device_id") != project["device_id"]
-                    ):
-                        return
-                elif _field(row, "device_id") != project["device_id"]:
-                    return
-            else:
-                encrypted_payload = _field(op_row, "payload")
-                request = (
-                    json.loads(self.store.decrypt(encrypted_payload)) if encrypted_payload else {}
-                )
-                original_project = request.get("project") or {}
-                if (
-                    original_project.get("root") != project["root"]
-                    or _field(row, "device_id") != project["device_id"]
-                ):
-                    return
+            if not self._completed_matches_project(op_row, row, project, payload):
+                return
 
             self.observe(
                 principal,
@@ -367,6 +383,41 @@ class ConnectionEvidence:
             return
         except Exception:
             self.write_errors += 1
+
+    def _verify_workspace_receipt(self, viewer, grant_id, project_id, workspace_id):
+        # Workspace evidence is only surfaced after existing current ownership checks.
+        subject = self.runtime.project(project_id, viewer)
+        receipt = self.runtime.operation_row(workspace_id, viewer)
+        if (
+            receipt["tool"] != "worktrees_create"
+            or receipt["project_id"] != subject["id"]
+            or receipt["grant_id"] != grant_id
+            or receipt["state"] != "succeeded"
+        ):
+            raise DevError("NOT_FOUND", "未找到当前连接有权查看的隔离目录创建回执", 404)
+        created = (self.runtime.operation_result(receipt) or {}).get("data") or {}
+        if created.get("workspace_id") != workspace_id:
+            raise DevError("NOT_FOUND", "隔离目录回执绑定不一致", 404)
+
+    def _status_evidence(self, rows, grant_id, now, binding, mapping):
+        evidence = {}
+        for row in rows:
+            current = row["binding"] == binding and (
+                not row["project_id"] or row["mapping"] == mapping
+            )
+            age = max(0, round(now - row["observed"]))
+            freshness = "fresh" if current and age <= FRESH_SECONDS else "stale"
+            if freshness != "fresh":
+                self._evict_stage(grant_id, row["project_id"], row["stage"], row["workspace_id"])
+            evidence[row["stage"]] = {
+                **json.loads(row["detail"]),
+                "observed_at": row["observed"],
+                "age_seconds": age,
+                "freshness": freshness,
+                "binding_current": current,
+                "source": "server_observation",
+            }
+        return evidence
 
     def status(
         self,
@@ -397,20 +448,8 @@ class ConnectionEvidence:
             if project_id
             else None
         )
-        # Workspace evidence is only surfaced after existing current ownership checks.
         if workspace_id:
-            subject = self.runtime.project(project_id, viewer)
-            receipt = self.runtime.operation_row(workspace_id, viewer)
-            if (
-                receipt["tool"] != "worktrees_create"
-                or receipt["project_id"] != subject["id"]
-                or receipt["grant_id"] != grant_id
-                or receipt["state"] != "succeeded"
-            ):
-                raise DevError("NOT_FOUND", "未找到当前连接有权查看的隔离目录创建回执", 404)
-            created = (self.runtime.operation_result(receipt) or {}).get("data") or {}
-            if created.get("workspace_id") != workspace_id:
-                raise DevError("NOT_FOUND", "隔离目录回执绑定不一致", 404)
+            self._verify_workspace_receipt(viewer, grant_id, project_id, workspace_id)
         now, binding = time.time(), self.binding(grant)
         mapping = digest([project["root"], project["device_id"]]) if project else ""
         rows = self.store.all(
@@ -419,23 +458,7 @@ class ConnectionEvidence:
             AND ((project_id='' AND workspace_id='') OR (project_id=? AND workspace_id=?)) ORDER BY observed""",
             (viewer.space_id, viewer.user_id, grant_id, project_id, workspace_id),
         )
-        evidence = {}
-        for row in rows:
-            current = row["binding"] == binding and (
-                not row["project_id"] or row["mapping"] == mapping
-            )
-            age = max(0, round(now - row["observed"]))
-            freshness = "fresh" if current and age <= FRESH_SECONDS else "stale"
-            if freshness != "fresh":
-                self._evict_stage(grant_id, row["project_id"], row["stage"], row["workspace_id"])
-            evidence[row["stage"]] = {
-                **json.loads(row["detail"]),
-                "observed_at": row["observed"],
-                "age_seconds": age,
-                "freshness": freshness,
-                "binding_current": current,
-                "source": "server_observation",
-            }
+        evidence = self._status_evidence(rows, grant_id, now, binding, mapping)
         active = preview["grant"]["state"] == "active"
         read_allowed = bool(project and allowed[project_id]["actions"]["read"]["allowed"])
         labels = {

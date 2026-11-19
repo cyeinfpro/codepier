@@ -7,6 +7,7 @@ Keep payload variants independent and permit additive diagnostic fields.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 STR = {"type": "string"}
@@ -235,6 +236,29 @@ def union(variants, *, pending=True):
     }
 
 
+def _reduced_anyof_group(members, common, required):
+    reduced = []
+    for member in members:
+        child = dict(member)
+        properties = {k: v for k, v in member.get("properties", {}).items() if k not in common}
+        local_required = [k for k in member.get("required", []) if k not in required]
+        child.pop("properties", None)
+        child.pop("required", None)
+        if properties:
+            child["properties"] = properties
+        if local_required:
+            child["required"] = local_required
+        reduced.append(child)
+    first = members[0]
+    combined = {
+        "properties": {k: v for k, v in first["properties"].items() if k in common},
+        "anyOf": reduced,
+    }
+    if required:
+        combined["required"] = [k for k in first["required"] if k in required]
+    return combined
+
+
 def _group_anyof_properties(branches, key):
     """Factor conjunctions shared by a subset of open anyOf branches."""
     # Closed branches retain their local properties: these also define which
@@ -254,27 +278,7 @@ def _group_anyof_properties(branches, key):
             group_set = set(group)
             common = {name for (name, _), ids in by_property.items() if group_set <= ids}
             required = set.intersection(*(set(member.get("required", [])) for member in members))
-            reduced = []
-            for member in members:
-                child = dict(member)
-                properties = {
-                    k: v for k, v in member.get("properties", {}).items() if k not in common
-                }
-                local_required = [k for k in member.get("required", []) if k not in required]
-                child.pop("properties", None)
-                child.pop("required", None)
-                if properties:
-                    child["properties"] = properties
-                if local_required:
-                    child["required"] = local_required
-                reduced.append(child)
-            first = members[0]
-            combined = {
-                "properties": {k: v for k, v in first["properties"].items() if k in common},
-                "anyOf": reduced,
-            }
-            if required:
-                combined["required"] = [k for k in first["required"] if k in required]
+            combined = _reduced_anyof_group(members, common, required)
             saving = sum(len(key(member)) + 1 for member in members) - len(key(combined)) - 1
             if saving > 0 and (best is None or saving > best[0]):
                 best = saving, group, combined
@@ -288,40 +292,7 @@ def _group_anyof_properties(branches, key):
         ]
 
 
-def _combine_disjunction(node, key):
-    """Normalize exact type/literal alternatives, retaining annotated branches."""
-    branches = node.get("anyOf")
-    if not branches or not all(isinstance(branch, dict) for branch in branches):
-        return
-    types, literals, remaining = [], [], []
-    for branch in branches:
-        if set(branch) == {"type"}:
-            value = branch["type"]
-            types.extend(value if isinstance(value, list) else [value])
-        elif set(branch) == {"enum"}:
-            literals.extend(branch["enum"])
-        elif set(branch) == {"const"}:
-            literals.append(branch["const"])
-        else:
-            remaining.append(branch)
-    types = list(dict.fromkeys(types))
-    literals = list(
-        {
-            key(value): value
-            for value in literals
-            if "string" not in types or not isinstance(value, str)
-        }.values()
-    )
-    if types:
-        remaining.append({"type": types[0] if len(types) == 1 else types})
-    if len(literals) == 1:
-        remaining.append({"const": literals[0]})
-    elif literals:
-        remaining.append({"enum": literals})
-    if len(remaining) == 1 and not set(remaining[0]) & (set(node) - {"anyOf"}):
-        node.pop("anyOf")
-        node.update(remaining[0])
-        return
+def _lift_nullable_disjunction(node, remaining):
     if len(remaining) == 2 and {"type": "null"} in remaining:
         typed = next(branch for branch in remaining if branch != {"type": "null"})
         kind = typed.get("type")
@@ -350,14 +321,108 @@ def _combine_disjunction(node, key):
             node.pop("anyOf")
             node.update(typed)
             node["type"] = [kind, "null"]
-            return
+            return True
+    return False
+
+
+def _partition_disjunction(branches):
+    types, literals, remaining = [], [], []
+    for branch in branches:
+        if set(branch) == {"type"}:
+            value = branch["type"]
+            types.extend(value if isinstance(value, list) else [value])
+        elif set(branch) == {"enum"}:
+            literals.extend(branch["enum"])
+        elif set(branch) == {"const"}:
+            literals.append(branch["const"])
+        else:
+            remaining.append(branch)
+    return types, literals, remaining
+
+
+def _combine_disjunction(node, key):
+    """Normalize exact type/literal alternatives, retaining annotated branches."""
+    branches = node.get("anyOf")
+    if not branches or not all(isinstance(branch, dict) for branch in branches):
+        return
+    types, literals, remaining = _partition_disjunction(branches)
+    types = list(dict.fromkeys(types))
+    literals = list(
+        {
+            key(value): value
+            for value in literals
+            if "string" not in types or not isinstance(value, str)
+        }.values()
+    )
+    if types:
+        remaining.append({"type": types[0] if len(types) == 1 else types})
+    if len(literals) == 1:
+        remaining.append({"const": literals[0]})
+    elif literals:
+        remaining.append({"enum": literals})
+    if len(remaining) == 1 and not set(remaining[0]) & (set(node) - {"anyOf"}):
+        node.pop("anyOf")
+        node.update(remaining[0])
+        return
+    if _lift_nullable_disjunction(node, remaining):
+        return
     if len(key(remaining)) < len(key(branches)):
         node["anyOf"] = remaining
 
 
+def _group_required(branches):
+    # (C and A) or (C and B) == C and (A or B), on the same instance.
+    # Only explicit required clauses in anyOf participate. References,
+    # conditionals and oneOf multiplicity are never moved or regrouped.
+    def size(value):
+        return len(json.dumps(value, separators=(",", ":")))
+
+    while True:
+        fields = {
+            field
+            for branch in branches
+            if isinstance(branch, dict)
+            and not set(branch) & {"$ref", "if", "then", "else", "anyOf", "oneOf"}
+            for field in branch.get("required", [])
+        }
+        best = None
+        for field in sorted(fields):
+            selected = [
+                index
+                for index, branch in enumerate(branches)
+                if isinstance(branch, dict)
+                and field in branch.get("required", [])
+                and not set(branch) & {"$ref", "if", "then", "else", "anyOf", "oneOf"}
+            ]
+            if len(selected) < 2:
+                continue
+            common = set.intersection(*(set(branches[index]["required"]) for index in selected))
+            grouped = []
+            for index in selected:
+                branch = deepcopy(branches[index])
+                branch["required"] = [name for name in branch["required"] if name not in common]
+                if not branch["required"]:
+                    branch.pop("required")
+                grouped.append(branch)
+            combined = {
+                "required": [name for name in branches[selected[0]]["required"] if name in common],
+                "anyOf": grouped,
+            }
+            candidate = [
+                combined if index == selected[0] else branch
+                for index, branch in enumerate(branches)
+                if index == selected[0] or index not in selected
+            ]
+            saving = size(branches) - size(candidate)
+            if saving > 0 and (best is None or saving > best[0]):
+                best = saving, candidate
+        if best is None:
+            return branches
+        branches = best[1]
+
+
 def factor(schema, *, normalize_before_factoring=False):
     """Reuse repeated schema nodes with local references, never loosen types."""
-    import json
     from collections import Counter
 
     # Moving a scoped/anchored or recursive resource can change its meaning.
@@ -444,58 +509,6 @@ def factor(schema, *, normalize_before_factoring=False):
     if not all(acyclic(name) for name in original_defs):
         return deepcopy(schema)
 
-    def group_required(branches):
-        # (C and A) or (C and B) == C and (A or B), on the same instance.
-        # Only explicit required clauses in anyOf participate. References,
-        # conditionals and oneOf multiplicity are never moved or regrouped.
-        def size(value):
-            return len(json.dumps(value, separators=(",", ":")))
-
-        while True:
-            fields = {
-                field
-                for branch in branches
-                if isinstance(branch, dict)
-                and not set(branch) & {"$ref", "if", "then", "else", "anyOf", "oneOf"}
-                for field in branch.get("required", [])
-            }
-            best = None
-            for field in sorted(fields):
-                selected = [
-                    index
-                    for index, branch in enumerate(branches)
-                    if isinstance(branch, dict)
-                    and field in branch.get("required", [])
-                    and not set(branch) & {"$ref", "if", "then", "else", "anyOf", "oneOf"}
-                ]
-                if len(selected) < 2:
-                    continue
-                common = set.intersection(*(set(branches[index]["required"]) for index in selected))
-                grouped = []
-                for index in selected:
-                    branch = deepcopy(branches[index])
-                    branch["required"] = [name for name in branch["required"] if name not in common]
-                    if not branch["required"]:
-                        branch.pop("required")
-                    grouped.append(branch)
-                combined = {
-                    "required": [
-                        name for name in branches[selected[0]]["required"] if name in common
-                    ],
-                    "anyOf": grouped,
-                }
-                candidate = [
-                    combined if index == selected[0] else branch
-                    for index, branch in enumerate(branches)
-                    if index == selected[0] or index not in selected
-                ]
-                saving = size(branches) - size(candidate)
-                if saving > 0 and (best is None or saving > best[0]):
-                    best = saving, candidate
-            if best is None:
-                return branches
-            branches = best[1]
-
     def compact_types(node):
         if isinstance(node, list):
             return [compact_types(item) for item in node]
@@ -565,7 +578,7 @@ def factor(schema, *, normalize_before_factoring=False):
         if result.get("required") == []:
             result.pop("required")
         if isinstance(result.get("anyOf"), list):
-            result["anyOf"] = group_required(result["anyOf"])
+            result["anyOf"] = _group_required(result["anyOf"])
         # JSON Schema defaults additionalProperties to true. Removing only
         # this explicit default is equivalent and keeps additive variants small.
         if result.get("additionalProperties") is True:

@@ -305,6 +305,47 @@ async def prepare(runtime, name, raw, principal):
     return plan
 
 
+async def _poll_or_cancel(read, stop, remaining):
+    poll = asyncio.create_task(read)
+    tasks = {poll}
+    cancelled = asyncio.create_task(stop.wait()) if stop is not None else None
+    if cancelled is not None:
+        tasks.add(cancelled)
+    try:
+        done, _ = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        if poll not in done:
+            return False, None
+        return True, poll.result()
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _poll_wait_operation(runtime, call, principal, deadline, stop):
+    latest = None
+    # Fallback polling loop for lightweight mock runtimes without Runtime.wait_for_operation.
+    while stop is None or not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        wait_seconds = min(10, max(1, math.ceil(remaining)))
+        read = runtime.invoke("process", {**call, "wait_seconds": wait_seconds}, principal)
+        if stop is None and remaining >= 1:
+            latest = await read
+        else:
+            completed, value = await _poll_or_cancel(read, stop, remaining)
+            if not completed:
+                break
+            latest = value
+        rows = latest.get("operations") if isinstance(latest, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else {}
+        if not isinstance(row, dict) or row.get("error") or not row.get("pending"):
+            break
+    return latest
+
+
 async def _wait(runtime, plan, value, principal):
     """Wait on the SAME operation; never restarts or replays work."""
     call = {"operation": "wait", "operation_ids": [value["operation_id"]]}
@@ -328,39 +369,7 @@ async def _wait(runtime, plan, value, principal):
                 if stop is None or not stop.is_set():
                     latest = await runtime.invoke("process", {**call, "wait_seconds": 0}, principal)
             else:
-                # Fallback polling loop for lightweight mock runtimes without Runtime.wait_for_operation.
-                while stop is None or not stop.is_set():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    wait_seconds = min(10, max(1, math.ceil(remaining)))
-                    read = runtime.invoke(
-                        "process", {**call, "wait_seconds": wait_seconds}, principal
-                    )
-                    if stop is None and remaining >= 1:
-                        latest = await read
-                    else:
-                        poll = asyncio.create_task(read)
-                        tasks = {poll}
-                        cancelled = asyncio.create_task(stop.wait()) if stop is not None else None
-                        if cancelled is not None:
-                            tasks.add(cancelled)
-                        try:
-                            done, _ = await asyncio.wait(
-                                tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-                            )
-                            if poll not in done:
-                                break
-                            latest = poll.result()
-                        finally:
-                            for task in tasks:
-                                if not task.done():
-                                    task.cancel()
-                            await asyncio.gather(*tasks, return_exceptions=True)
-                    rows = latest.get("operations") if isinstance(latest, dict) else None
-                    row = rows[0] if isinstance(rows, list) and rows else {}
-                    if not isinstance(row, dict) or row.get("error") or not row.get("pending"):
-                        break
+                latest = await _poll_wait_operation(runtime, call, principal, deadline, stop)
     if latest is None:
         return value, plan.tool, plan.args
     return latest, "process", call

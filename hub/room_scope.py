@@ -345,6 +345,67 @@ def require_room(store, principal, room, conversation_id=None):
         raise DevError("ROOM_SCOPE_CONVERSATION_DENIED", "此连接不能切换到另一个房间或话题", 403)
 
 
+def _tool_capability(principal, name, args, operation):
+    from shared.contracts import TOOLS, required_scope
+
+    if name == "operations_cancel" or (name == "process" and args.get("operation") == "cancel"):
+        from hub.runtime import CANCELLABLE_READ_TOOLS, operation_same_principal
+
+        capability = "execute"
+        if operation is not None:
+            try:
+                summary = json.loads(operation.get("args_summary") or "{}")
+            except (TypeError, ValueError):
+                summary = None
+            tool_name = operation.get("tool") or ""
+            tool_scope = (
+                required_scope(tool_name, summary)
+                if tool_name in TOOLS
+                else ("read" if tool_name == "project_knowledge_refresh" else "execute")
+            )
+            if (
+                tool_name in CANCELLABLE_READ_TOOLS
+                and tool_scope == "read"
+                and operation_same_principal(operation, principal)
+            ):
+                capability = "read"
+    else:
+        capability = required_scope(name, args) if name in TOOLS else "read"
+    return capability
+
+
+def _tool_project_context(store, principal, args):
+    project = None
+    operation = None
+    if args.get("operation_id"):
+        operation = store.one(
+            "SELECT project_id,tool,space_id,owner_user_id,grant_id,actor,args_summary FROM operations WHERE id=?",
+            (args["operation_id"],),
+        )
+    if args.get("project"):
+        value = args["project"]
+        if not isinstance(value, str):
+            raise DevError("ROOM_SCOPE_PROJECT_REQUIRED", "必须指定确切项目", 403)
+        project = store.one(
+            "SELECT * FROM projects WHERE space_id=? AND (id=? OR alias_key=?)",
+            (principal.space_id, value, unicodedata.normalize("NFKC", value).casefold()),
+        )
+    elif args.get("operation_id"):
+        project = (
+            store.one("SELECT * FROM projects WHERE id=?", (operation["project_id"],))
+            if operation
+            else None
+        )
+    elif args.get("artifact_id"):
+        artifact = store.one("SELECT project_id FROM artifacts WHERE id=?", (args["artifact_id"],))
+        project = (
+            store.one("SELECT * FROM projects WHERE id=?", (artifact["project_id"],))
+            if artifact
+            else None
+        )
+    return project, operation
+
+
 def require_tool(store, principal, name, args):
     """Extra fail-closed dispatch gate; normal typed handlers still reauthorize."""
     record = current(store, principal.grant_id)
@@ -378,34 +439,7 @@ def require_tool(store, principal, name, args):
         )
     if name in METADATA_TOOLS:
         return  # Their established queries use the already-intersected projects.
-    project = None
-    operation = None
-    if args.get("operation_id"):
-        operation = store.one(
-            "SELECT project_id,tool,space_id,owner_user_id,grant_id,actor,args_summary FROM operations WHERE id=?",
-            (args["operation_id"],),
-        )
-    if args.get("project"):
-        value = args["project"]
-        if not isinstance(value, str):
-            raise DevError("ROOM_SCOPE_PROJECT_REQUIRED", "必须指定确切项目", 403)
-        project = store.one(
-            "SELECT * FROM projects WHERE space_id=? AND (id=? OR alias_key=?)",
-            (principal.space_id, value, unicodedata.normalize("NFKC", value).casefold()),
-        )
-    elif args.get("operation_id"):
-        project = (
-            store.one("SELECT * FROM projects WHERE id=?", (operation["project_id"],))
-            if operation
-            else None
-        )
-    elif args.get("artifact_id"):
-        artifact = store.one("SELECT project_id FROM artifacts WHERE id=?", (args["artifact_id"],))
-        project = (
-            store.one("SELECT * FROM projects WHERE id=?", (artifact["project_id"],))
-            if artifact
-            else None
-        )
+    project, operation = _tool_project_context(store, principal, args)
     if project is None:
         # Local collaboration handlers bind a room/goal/slot and recheck below.
         if name.startswith(("collaboration_", "monitor_")) or name in {
@@ -415,31 +449,7 @@ def require_tool(store, principal, name, args):
         }:
             return
         raise DevError("ROOM_SCOPE_PROJECT_REQUIRED", "房间连接不能省略或绕过项目身份", 403)
-    from shared.contracts import TOOLS, required_scope
-
-    if name == "operations_cancel" or (name == "process" and args.get("operation") == "cancel"):
-        from hub.runtime import CANCELLABLE_READ_TOOLS, operation_same_principal
-
-        capability = "execute"
-        if operation is not None:
-            try:
-                summary = json.loads(operation.get("args_summary") or "{}")
-            except (TypeError, ValueError):
-                summary = None
-            tool_name = operation.get("tool") or ""
-            tool_scope = (
-                required_scope(tool_name, summary)
-                if tool_name in TOOLS
-                else ("read" if tool_name == "project_knowledge_refresh" else "execute")
-            )
-            if (
-                tool_name in CANCELLABLE_READ_TOOLS
-                and tool_scope == "read"
-                and operation_same_principal(operation, principal)
-            ):
-                capability = "read"
-    else:
-        capability = required_scope(name, args) if name in TOOLS else "read"
+    capability = _tool_capability(principal, name, args, operation)
     require_action(store, principal, capability, project_id=project["id"])
     if capability == "execute" and record["manifest"]["execution_mode"] == "require_os_isolation":
         from hub.project_runtimes import current_requirement

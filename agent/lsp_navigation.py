@@ -883,6 +883,49 @@ class LspPool:
         entry.spec_fingerprint = spec_fp
         return peer
 
+    async def _release_query_peer(self, agent, identifier, key, entry, pooled):
+        if entry.peer is None or agent.processes.get(identifier) is entry.peer.process:
+            agent.processes.pop(identifier, None)
+        if not pooled or entry.peer is None or not entry.peer.is_alive():
+            async with self._lock:
+                if self._entries.get(key) is entry:
+                    self._entries.pop(key, None)
+            await entry.close()
+        else:
+            async with self._lock:
+                if self._entries.get(key) is entry:
+                    entry.last_used = self.clock()
+                    self._entries.move_to_end(key)
+                    self._ensure_reaper()
+
+    async def _run_peer_request(
+        self, entry, agent, identifier, project, root, config, spec_fp, runner, reused
+    ):
+        agent.processes[identifier] = entry.peer.process
+        try:
+            return await runner(entry.peer)
+        except DevError as exc:
+            if reused and exc.code == "LSP_DISCONNECTED":
+                await entry.close()
+                peer = await self._spawn_peer(
+                    entry, agent, identifier, project, root, config, spec_fp
+                )
+                agent.processes[identifier] = peer.process
+                return await runner(peer)
+            raise
+
+    async def _ensure_query_peer(self, entry, agent, identifier, project, root, config, spec_fp):
+        if entry.peer is not None and (
+            not entry.peer.is_alive() or entry.spec_fingerprint != spec_fp
+        ):
+            await entry.close()
+        reused = entry.peer is not None
+        if entry.peer is None:
+            await self._spawn_peer(entry, agent, identifier, project, root, config, spec_fp)
+        else:
+            self.hits += 1
+        return reused
+
     async def run_query(
         self,
         agent,
@@ -912,30 +955,13 @@ class LspPool:
                         continue
                     if reported_waiting:
                         phase(identifier, "executing")
-                    if entry.peer is not None and (
-                        not entry.peer.is_alive() or entry.spec_fingerprint != spec_fp
-                    ):
-                        await entry.close()
-                    reused = entry.peer is not None
-                    if entry.peer is None:
-                        await self._spawn_peer(
-                            entry, agent, identifier, project, root, config, spec_fp
-                        )
-                    else:
-                        self.hits += 1
+                    reused = await self._ensure_query_peer(
+                        entry, agent, identifier, project, root, config, spec_fp
+                    )
                     try:
-                        agent.processes[identifier] = entry.peer.process
-                        try:
-                            return await runner(entry.peer)
-                        except DevError as exc:
-                            if reused and exc.code == "LSP_DISCONNECTED":
-                                await entry.close()
-                                peer = await self._spawn_peer(
-                                    entry, agent, identifier, project, root, config, spec_fp
-                                )
-                                agent.processes[identifier] = peer.process
-                                return await runner(peer)
-                            raise
+                        return await self._run_peer_request(
+                            entry, agent, identifier, project, root, config, spec_fp, runner, reused
+                        )
                     except DevError as exc:
                         if exc.code in _FATAL_POOL_ERRORS or (
                             entry.peer is not None and not entry.peer.is_alive()
@@ -954,22 +980,7 @@ class LspPool:
                         await entry.close()
                         raise
                     finally:
-                        if (
-                            entry.peer is None
-                            or agent.processes.get(identifier) is entry.peer.process
-                        ):
-                            agent.processes.pop(identifier, None)
-                        if not pooled or entry.peer is None or not entry.peer.is_alive():
-                            async with self._lock:
-                                if self._entries.get(key) is entry:
-                                    self._entries.pop(key, None)
-                            await entry.close()
-                        else:
-                            async with self._lock:
-                                if self._entries.get(key) is entry:
-                                    entry.last_used = self.clock()
-                                    self._entries.move_to_end(key)
-                                    self._ensure_reaper()
+                        await self._release_query_peer(agent, identifier, key, entry, pooled)
             finally:
                 entry.waiters -= 1
 
@@ -1012,6 +1023,96 @@ async def shutdown_all(agent=None) -> int:
         if pool._loop is None or pool._loop is loop:
             total += await pool.shutdown_all()
     return total
+
+
+async def _query_locations(peer, projector, action, params):
+    items = []
+    if action == "references":
+        params["context"] = {"includeDeclaration": True}
+    result = await peer.request("textDocument/" + action, params)
+    if result is None:
+        result = []
+    if isinstance(result, dict):
+        result = [result]
+    if not isinstance(result, list):
+        raise DevError("LSP_PROTOCOL", "位置响应格式无效")
+    seen = set()
+    for item in result:
+        loc = projector.location(item)
+        if loc:
+            key = json.dumps(loc, sort_keys=True)
+            if key not in seen and projector.take(loc):
+                items.append(loc)
+                seen.add(key)
+    return items
+
+
+async def _query_diagnostics(peer, projector, args, uri, doc_version, capabilities, config):
+    items = []
+    if capabilities.get("diagnosticProvider"):
+        response = await peer.request("textDocument/diagnostic", {"textDocument": {"uri": uri}})
+        rawitems = response.get("items", []) if isinstance(response, dict) else []
+        fresh = isinstance(response, dict) and response.get("kind") == "full"
+    else:
+        deadline = time.monotonic() + min(config.get("timeout_seconds", 20), 12)
+        while uri not in peer.diagnostics and not peer.error and time.monotonic() < deadline:
+            peer.changed.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(peer.changed.wait(), max(0.01, deadline - time.monotonic()))
+        reported = peer.diagnostics.get(uri)
+        fresh = bool(reported is not None and reported.get("version") in (None, doc_version))
+        rawitems = reported.get("diagnostics", []) if reported else []
+    for item in rawitems:
+        try:
+            row = {
+                "path": args["path"],
+                "range": projector.range(args["path"], item["range"]),
+                "message": str(item.get("message", ""))[:2000],
+                "severity": item.get("severity"),
+                "code": str(item.get("code", ""))[:100],
+            }
+            if projector.take(row):
+                items.append(row)
+        except (TypeError, ValueError, KeyError, DevError):
+            projector.omitted += 1
+    extra = {
+        "diagnostics_fresh": fresh,
+        "diagnostics_state": "observed" if fresh else "not_received",
+        "not_a_test_run": True,
+    }
+    return items, fresh, extra
+
+
+async def _query_calls(peer, projector, action, params):
+    items = []
+    prepared = await peer.request("textDocument/prepareCallHierarchy", params)
+    if prepared is None:
+        prepared = []
+    if not isinstance(prepared, list):
+        raise DevError("LSP_PROTOCOL", "调用层级响应无效")
+    for item in prepared[:8]:
+        if not projector.location(item):
+            continue
+        method = (
+            "callHierarchy/incomingCalls"
+            if action == "incoming_calls"
+            else "callHierarchy/outgoingCalls"
+        )
+        calls = await peer.request(method, {"item": item}) or []
+        if not isinstance(calls, list):
+            raise DevError("LSP_PROTOCOL", "调用层级数据格式错误")
+        for call in calls:
+            target = call.get("from" if action == "incoming_calls" else "to", {})
+            loc = projector.location(target)
+            if loc and projector.take(loc):
+                items.append(
+                    {
+                        **loc,
+                        "name": str(target.get("name", ""))[:300],
+                        "kind": target.get("kind"),
+                    }
+                )
+    return items
 
 
 async def _execute_query(
@@ -1060,23 +1161,7 @@ async def _execute_query(
             args["path"],
         )
     elif action in {"definition", "references"}:
-        if action == "references":
-            params["context"] = {"includeDeclaration": True}
-        result = await peer.request("textDocument/" + action, params)
-        if result is None:
-            result = []
-        if isinstance(result, dict):
-            result = [result]
-        if not isinstance(result, list):
-            raise DevError("LSP_PROTOCOL", "位置响应格式无效")
-        seen = set()
-        for item in result:
-            loc = projector.location(item)
-            if loc:
-                key = json.dumps(loc, sort_keys=True)
-                if key not in seen and projector.take(loc):
-                    items.append(loc)
-                    seen.add(key)
+        items = await _query_locations(peer, projector, action, params)
     elif action == "hover":
         result = await peer.request("textDocument/hover", params)
         content = result.get("contents", []) if isinstance(result, dict) else []
@@ -1087,67 +1172,11 @@ async def _execute_query(
         )
         extra = {"text": text[:16000], "text_truncated": len(text) > 16000}
     elif action == "diagnostics":
-        if capabilities.get("diagnosticProvider"):
-            response = await peer.request("textDocument/diagnostic", {"textDocument": {"uri": uri}})
-            rawitems = response.get("items", []) if isinstance(response, dict) else []
-            fresh = isinstance(response, dict) and response.get("kind") == "full"
-        else:
-            deadline = time.monotonic() + min(config.get("timeout_seconds", 20), 12)
-            while uri not in peer.diagnostics and not peer.error and time.monotonic() < deadline:
-                peer.changed.clear()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(
-                        peer.changed.wait(), max(0.01, deadline - time.monotonic())
-                    )
-            reported = peer.diagnostics.get(uri)
-            fresh = bool(reported is not None and reported.get("version") in (None, doc_version))
-            rawitems = reported.get("diagnostics", []) if reported else []
-        for item in rawitems:
-            try:
-                row = {
-                    "path": args["path"],
-                    "range": projector.range(args["path"], item["range"]),
-                    "message": str(item.get("message", ""))[:2000],
-                    "severity": item.get("severity"),
-                    "code": str(item.get("code", ""))[:100],
-                }
-                if projector.take(row):
-                    items.append(row)
-            except (TypeError, ValueError, KeyError, DevError):
-                projector.omitted += 1
-        extra = {
-            "diagnostics_fresh": fresh,
-            "diagnostics_state": "observed" if fresh else "not_received",
-            "not_a_test_run": True,
-        }
+        items, fresh, extra = await _query_diagnostics(
+            peer, projector, args, uri, doc_version, capabilities, config
+        )
     else:
-        prepared = await peer.request("textDocument/prepareCallHierarchy", params)
-        if prepared is None:
-            prepared = []
-        if not isinstance(prepared, list):
-            raise DevError("LSP_PROTOCOL", "调用层级响应无效")
-        for item in prepared[:8]:
-            if not projector.location(item):
-                continue
-            method = (
-                "callHierarchy/incomingCalls"
-                if action == "incoming_calls"
-                else "callHierarchy/outgoingCalls"
-            )
-            calls = await peer.request(method, {"item": item}) or []
-            if not isinstance(calls, list):
-                raise DevError("LSP_PROTOCOL", "调用层级数据格式错误")
-            for call in calls:
-                target = call.get("from" if action == "incoming_calls" else "to", {})
-                loc = projector.location(target)
-                if loc and projector.take(loc):
-                    items.append(
-                        {
-                            **loc,
-                            "name": str(target.get("name", ""))[:300],
-                            "kind": target.get("kind"),
-                        }
-                    )
+        items = await _query_calls(peer, projector, action, params)
     if source is not None:
         current = agent.engine.read_bytes(agent.engine.path(root, args["path"], False))
         fresh = fresh and hashlib.sha256(current).hexdigest() == sha

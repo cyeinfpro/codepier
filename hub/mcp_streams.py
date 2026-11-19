@@ -158,6 +158,36 @@ class Streams:
             separators=(",", ":"),
         ).encode("utf-8")
 
+    async def _response_events(self, work, stop, key, identifier):
+        try:
+            yield b": keepalive\n\n"
+            while not work.done():
+                done, _ = await asyncio.wait({work}, timeout=self.keepalive_interval)
+                if not done:
+                    yield b": keepalive\n\n"
+            try:
+                response = work.result()
+            except asyncio.CancelledError:
+                payload = self._jsonrpc_error(identifier, -32000, "Request cancelled")
+                yield b"event: message\ndata: " + payload + b"\n\n"
+            except DevError as exc:
+                payload = self._jsonrpc_error(
+                    identifier,
+                    -32000,
+                    error_view(exc.message),
+                    {"code": exc.code},
+                )
+                yield b"event: message\ndata: " + payload + b"\n\n"
+            except Exception:
+                payload = self._jsonrpc_error(identifier, -32603, "Internal error")
+                yield b"event: message\ndata: " + payload + b"\n\n"
+            else:
+                yield b"event: message\ndata: " + response.body + b"\n\n"
+        finally:
+            stop.set()
+            if key is not None:
+                self._release_key(key, stop)
+
     async def respond(self, request, handler):
         ready = asyncio.get_running_loop().create_future()
         work = asyncio.create_task(handler(request, ready))
@@ -180,38 +210,8 @@ class Streams:
         meta = self._stop_meta.get(id(stop))
         key, identifier = meta if meta is not None else (None, None)
 
-        async def events():
-            try:
-                yield b": keepalive\n\n"
-                while not work.done():
-                    done, _ = await asyncio.wait({work}, timeout=self.keepalive_interval)
-                    if not done:
-                        yield b": keepalive\n\n"
-                try:
-                    response = work.result()
-                except asyncio.CancelledError:
-                    payload = self._jsonrpc_error(identifier, -32000, "Request cancelled")
-                    yield b"event: message\ndata: " + payload + b"\n\n"
-                except DevError as exc:
-                    payload = self._jsonrpc_error(
-                        identifier,
-                        -32000,
-                        error_view(exc.message),
-                        {"code": exc.code},
-                    )
-                    yield b"event: message\ndata: " + payload + b"\n\n"
-                except Exception:
-                    payload = self._jsonrpc_error(identifier, -32603, "Internal error")
-                    yield b"event: message\ndata: " + payload + b"\n\n"
-                else:
-                    yield b"event: message\ndata: " + response.body + b"\n\n"
-            finally:
-                stop.set()
-                if key is not None:
-                    self._release_key(key, stop)
-
         return StreamingResponse(
-            events(),
+            self._response_events(work, stop, key, identifier),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "private, no-store",

@@ -454,6 +454,18 @@ def _worktree_creation_claims(engine, root, operation_id=None):
     ]
 
 
+def _read_batch_claims(engine, args, root):
+    try:
+        return [
+            Claim("agent", "path", canonical_path(engine.path(root, item["path"], False)), False)
+            for item in args["options"]["items"]
+        ]
+    except (DevError, OSError):
+        # Per-item errors belong to the durable read result, not admission.
+        # Revalidate every path at execution, under a conservative root claim.
+        return [Claim("agent", "path", canonical_path(root), False)]
+
+
 def claims_for(engine, tool, project, args, root, operation_id=None):
     if tool in SCOPED_READ_TOOLS:
         return [
@@ -481,17 +493,7 @@ def claims_for(engine, tool, project, args, root, operation_id=None):
             # claim if a rejected path becomes readable while this job waits.
             return [Claim("agent", "path", canonical_path(root), False)]
     if tool == "read" and args.get("operation") == "batch":
-        try:
-            return [
-                Claim(
-                    "agent", "path", canonical_path(engine.path(root, item["path"], False)), False
-                )
-                for item in args["options"]["items"]
-            ]
-        except (DevError, OSError):
-            # Per-item errors belong to the durable read result, not admission.
-            # Revalidate every path at execution, under a conservative root claim.
-            return [Claim("agent", "path", canonical_path(root), False)]
+        return _read_batch_claims(engine, args, root)
     if tool == "edit" and args.get("changes"):
         paths = [change["path"] for change in args["changes"]] + [
             change["destination"] for change in args["changes"] if change.get("destination")

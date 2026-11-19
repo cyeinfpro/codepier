@@ -419,6 +419,20 @@ class ProjectScheduler:
             self.turn = Counter({key: value for key, value in self.turn.items() if key in live})
             self._drain_all()
 
+    def _enqueue_claims(self, item, claims, strict_order, on_bypass):
+        if claims is not None:
+            if self.resources is None:
+                raise ValueError("Resource claims require a joint resource queue")
+            self.resources.enqueue(
+                item.token,
+                item.operation_id,
+                claims,
+                bounded=item.lane == "read",
+                strict=strict_order,
+                on_bypass=on_bypass,
+            )
+            self._resource_tokens.add(item.token)
+
     @asynccontextmanager
     async def slot(
         self,
@@ -452,18 +466,7 @@ class ProjectScheduler:
                 self._events[item.token] = event
                 self._callbacks[item.token] = on_wait
                 self._resource_callbacks[item.token] = on_resource_wait
-                if claims is not None:
-                    if self.resources is None:
-                        raise ValueError("Resource claims require a joint resource queue")
-                    self.resources.enqueue(
-                        item.token,
-                        operation_id,
-                        claims,
-                        bounded=lane == "read",
-                        strict=strict_order,
-                        on_bypass=on_bypass,
-                    )
-                    self._resource_tokens.add(item.token)
+                self._enqueue_claims(item, claims, strict_order, on_bypass)
                 self._drain_all()
             if max_queue_ms is not None:
                 try:

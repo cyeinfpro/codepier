@@ -109,6 +109,43 @@ def _table_write_kind(table: str) -> tuple[bool, bool]:
     return table not in _NON_SECURITY_WRITE_TABLES, False
 
 
+def _read_quoted_token(sql: str, start: int, quote: str):
+    j = start + 1
+    buf = []
+    while j < len(sql):
+        if sql[j] == quote:
+            if sql[j + 1 : j + 2] == quote:
+                buf.append(quote)
+                j += 2
+                continue
+            end = j + 1
+            if quote == "'":
+                return ("STRING", sql[start:end]), end
+            return ("IDENT", "".join(buf).lower()), end
+        buf.append(sql[j])
+        j += 1
+    return None
+
+
+def _skip_sql_comment(sql: str, start: int) -> int | None:
+    if sql[start] == "-":
+        end = sql.find("\n", start + 2)
+        return len(sql) if end == -1 else end + 1
+    end = sql.find("*/", start + 2)
+    return None if end == -1 else end + 2
+
+
+def _sql_word_end(sql: str, start: int) -> int:
+    j = start + 1
+    while j < len(sql) and (sql[j].isalnum() or sql[j] in {"_", "$"}):
+        j += 1
+    return j
+
+
+def _sql_character_token(ch: str) -> tuple[str, str]:
+    return ("SYM" if ch in {"(", ")", ",", ".", "=", ";"} else "OTHER", ch)
+
+
 def _tokenize_sql(sql: str):
     tokens = []
     i = 0
@@ -118,49 +155,18 @@ def _tokenize_sql(sql: str):
         if ch.isspace():
             i += 1
             continue
-        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
-            nl = sql.find("\n", i + 2)
-            i = n if nl == -1 else nl + 1
-            continue
-        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
-            end = sql.find("*/", i + 2)
-            if end == -1:
+        if sql[i : i + 2] in {"--", "/*"}:
+            end = _skip_sql_comment(sql, i)
+            if end is None:
                 return None
-            i = end + 2
+            i = end
             continue
-        if ch == "'":
-            j = i + 1
-            while j < n:
-                if sql[j] == "'":
-                    if j + 1 < n and sql[j + 1] == "'":
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                j += 1
-            else:
+        if ch in {"'", '"', "`"}:
+            quoted = _read_quoted_token(sql, i, ch)
+            if quoted is None:
                 return None
-            tokens.append(("STRING", sql[i:j]))
-            i = j
-            continue
-        if ch in {'"', "`"}:
-            quote = ch
-            j = i + 1
-            buf = []
-            while j < n:
-                if sql[j] == quote:
-                    if j + 1 < n and sql[j + 1] == quote:
-                        buf.append(quote)
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                buf.append(sql[j])
-                j += 1
-            else:
-                return None
-            tokens.append(("IDENT", "".join(buf).lower()))
-            i = j
+            token, i = quoted
+            tokens.append(token)
             continue
         if ch == "[":
             end = sql.find("]", i + 1)
@@ -170,17 +176,11 @@ def _tokenize_sql(sql: str):
             i = end + 1
             continue
         if ch.isalpha() or ch == "_":
-            j = i + 1
-            while j < n and (sql[j].isalnum() or sql[j] in {"_", "$"}):
-                j += 1
+            j = _sql_word_end(sql, i)
             tokens.append(("WORD", sql[i:j].lower()))
             i = j
             continue
-        if ch in {"(", ")", ",", ".", "=", ";"}:
-            tokens.append(("SYM", ch))
-            i += 1
-            continue
-        tokens.append(("OTHER", ch))
+        tokens.append(_sql_character_token(ch))
         i += 1
     return tokens
 
@@ -199,52 +199,72 @@ def _read_table_name(tokens, idx: int):
     return name, idx
 
 
+def _read_assignment_columns(tokens, idx: int, cols: set[str]) -> int | None:
+    kind, name = tokens[idx]
+    if kind in {"IDENT", "WORD"}:
+        cols.add(name)
+        return idx + 1
+    if (kind, name) != ("SYM", "("):
+        return None
+    idx += 1
+    while idx < len(tokens):
+        kind, name = tokens[idx]
+        if (kind, name) == ("SYM", ")"):
+            return idx + 1
+        if kind not in {"IDENT", "WORD"}:
+            return None
+        cols.add(name)
+        idx += 1
+        if idx < len(tokens) and tokens[idx] == ("SYM", ","):
+            idx += 1
+        elif idx < len(tokens) and tokens[idx] != ("SYM", ")"):
+            return None
+    return None
+
+
+def _scan_assignment_value(tokens, idx: int) -> tuple[bool, int]:
+    depth = 0
+    while idx < len(tokens):
+        cur = tokens[idx]
+        if cur == ("SYM", "("):
+            depth += 1
+        elif cur == ("SYM", ")"):
+            if depth == 0:
+                return False, idx
+            depth -= 1
+        elif depth == 0:
+            if cur == ("SYM", ","):
+                return True, idx + 1
+            if cur[0] == "WORD" and cur[1] in {"where", "from", "returning", "order", "limit"}:
+                return True, len(tokens)
+        idx += 1
+    return True, idx
+
+
 def _parse_update_columns(tokens, idx: int) -> set[str] | None:
     cols: set[str] = set()
-    n = len(tokens)
-    while idx < n:
-        tok = tokens[idx]
-        if tok == ("SYM", "("):
-            idx += 1
-            while idx < n and tokens[idx] != ("SYM", ")"):
-                if tokens[idx][0] not in {"IDENT", "WORD"}:
-                    return None
-                cols.add(tokens[idx][1])
-                idx += 1
-                if idx < n and tokens[idx] == ("SYM", ","):
-                    idx += 1
-                elif idx < n and tokens[idx] != ("SYM", ")"):
-                    return None
-            if idx >= n or tokens[idx] != ("SYM", ")"):
-                return None
-            idx += 1
-        elif tok[0] in {"IDENT", "WORD"}:
-            cols.add(tok[1])
-            idx += 1
-        else:
+    while idx < len(tokens):
+        next_idx = _read_assignment_columns(tokens, idx, cols)
+        if next_idx is None or next_idx >= len(tokens) or tokens[next_idx] != ("SYM", "="):
             return None
-        if idx >= n or tokens[idx] != ("SYM", "="):
+        ok, idx = _scan_assignment_value(tokens, next_idx + 1)
+        if not ok:
             return None
-        idx += 1
-        depth = 0
-        while idx < n:
-            cur = tokens[idx]
-            if cur == ("SYM", "("):
-                depth += 1
-            elif cur == ("SYM", ")"):
-                if depth == 0:
-                    return None
-                depth -= 1
-            elif depth == 0:
-                if cur == ("SYM", ","):
-                    idx += 1
-                    break
-                if cur[0] == "WORD" and cur[1] in {"where", "from", "returning", "order", "limit"}:
-                    return cols or None
-            idx += 1
-        else:
-            return cols or None
     return cols or None
+
+
+def _classify_update(tokens, idx: int) -> tuple[bool, bool]:
+    table, idx = _read_table_name(tokens, idx)
+    if not table:
+        return True, False
+    if table != "devices":
+        return _table_write_kind(table)
+    while idx < len(tokens) and tokens[idx] != ("WORD", "set"):
+        idx += 1
+    if idx >= len(tokens):
+        return True, False
+    cols = _parse_update_columns(tokens, idx + 1)
+    return not cols or not cols <= _DEVICE_ROUTINE_COLUMNS, False
 
 
 def _classify_write(sql: str) -> tuple[bool, bool]:
@@ -256,59 +276,19 @@ def _classify_write(sql: str) -> tuple[bool, bool]:
         tokens.pop()
     if not tokens:
         return False, False
-    if any(tok == ("SYM", ";") for tok in tokens):
+    kind, op = tokens[0]
+    if kind != "WORD" or ("SYM", ";") in tokens:
         return True, False
-    first = tokens[0]
-    if first[0] != "WORD":
-        return True, False
-    op = first[1]
     idx = 1
-    if op == "insert":
-        if idx < len(tokens) and tokens[idx] == ("WORD", "or"):
-            idx += 2
-        if idx < len(tokens) and tokens[idx] == ("WORD", "into"):
-            idx += 1
-        else:
-            return True, False
-        table, _ = _read_table_name(tokens, idx)
-        if not table:
-            return True, False
-        return _table_write_kind(table)
-    if op == "replace":
-        if idx < len(tokens) and tokens[idx] == ("WORD", "into"):
-            idx += 1
-        else:
-            return True, False
-        table, _ = _read_table_name(tokens, idx)
-        if not table:
-            return True, False
-        return _table_write_kind(table)
-    if op == "delete":
-        if idx < len(tokens) and tokens[idx] == ("WORD", "from"):
-            idx += 1
-        else:
-            return True, False
-        table, _ = _read_table_name(tokens, idx)
-        if not table:
-            return True, False
-        return _table_write_kind(table)
+    if op in {"insert", "update"} and tokens[idx : idx + 1] == [("WORD", "or")]:
+        idx += 2
     if op == "update":
-        if idx < len(tokens) and tokens[idx] == ("WORD", "or"):
-            idx += 2
-        table, idx = _read_table_name(tokens, idx)
-        if not table:
-            return True, False
-        if table != "devices":
-            return _table_write_kind(table)
-        while idx < len(tokens) and tokens[idx] != ("WORD", "set"):
-            idx += 1
-        if idx >= len(tokens):
-            return True, False
-        cols = _parse_update_columns(tokens, idx + 1)
-        if not cols:
-            return True, False
-        return not cols <= _DEVICE_ROUTINE_COLUMNS, False
-    return True, False
+        return _classify_update(tokens, idx)
+    preposition = {"insert": "into", "replace": "into", "delete": "from"}.get(op)
+    if preposition is None or tokens[idx : idx + 1] != [("WORD", preposition)]:
+        return True, False
+    table, _ = _read_table_name(tokens, idx + 1)
+    return _table_write_kind(table) if table else (True, False)
 
 
 _DDL_VERBS = frozenset(
@@ -405,12 +385,11 @@ class Store:
 
         self.state_directory = state_directory(self.directory)
         from hub.collaboration.delivery_compatibility import check_database as check_delivery_path
-        from hub.collaboration.delivery_compatibility import raise_floor_in_transaction
 
         check_delivery_path(self.state_directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
-        from shared.hub_data_contract import check_database, check_path, initialize_fresh_contract
+        from shared.hub_data_contract import check_path
         from shared.util import VERSION
 
         check_path(self.state_directory, VERSION)
@@ -438,24 +417,23 @@ class Store:
         )
         self._executor = StoreWorker()
         self.worker_metrics = WorkerMetrics()
+        self._initialize_database(initialize_host_contract)
+
+        self._read_executor = ThreadPoolExecutor(
+            max_workers=read_workers, thread_name_prefix="hub-sqlite-read"
+        )
+        self.read_worker_metrics = WorkerMetrics()
+
+    def _initialize_database(self, initialize_host_contract):
+        from hub.collaboration.delivery_compatibility import raise_floor_in_transaction
+        from shared.hub_data_contract import check_database, initialize_fresh_contract
+        from shared.util import VERSION
+
         with self.lock:
             try:
                 if not self.db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
                     self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
-                # Changing a new database to WAL can return BUSY without invoking
-                # SQLite's busy handler when another opener is doing the same.
-                deadline = time.monotonic() + 30
-                while True:
-                    try:
-                        self.db.execute("PRAGMA journal_mode=WAL")
-                        break
-                    except sqlite3.OperationalError as exc:
-                        if (
-                            getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY
-                            or time.monotonic() >= deadline
-                        ):
-                            raise
-                        time.sleep(0.05)
+                self._enable_wal()
                 # An acknowledged authorization change must survive a power loss
                 # by default. NORMAL remains an explicit performance opt-in.
                 sync_mode = (os.getenv("CODEPIER_SQLITE_SYNCHRONOUS") or "FULL").strip().upper()
@@ -491,10 +469,21 @@ class Store:
                 self.db.close()
                 raise
 
-        self._read_executor = ThreadPoolExecutor(
-            max_workers=read_workers, thread_name_prefix="hub-sqlite-read"
-        )
-        self.read_worker_metrics = WorkerMetrics()
+    def _enable_wal(self):
+        # Changing a new database to WAL can return BUSY without invoking
+        # SQLite's busy handler when another opener is doing the same.
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                self.db.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if (
+                    getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_BUSY
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(0.05)
 
     @property
     def in_read_phase(self) -> bool:

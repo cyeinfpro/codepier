@@ -139,6 +139,30 @@ class Session:
             return False
         return self.active < self._effective_concurrency()
 
+    def _admit(self, ticket, exclusive, started):
+        self.waiters.remove(ticket)
+        self.active += 1
+        self.exclusive = exclusive
+        admitted = time.monotonic()
+        self.used = admitted
+        self.stats["admitted"] += 1
+        self.stats["queued_seconds"] += admitted - started
+        self.stats["peak_active"] = max(self.stats["peak_active"], self.active)
+        self.condition.notify_all()
+        return admitted
+
+    async def _cancel_admission(self, ticket):
+        should_close = False
+        async with self.condition:
+            self.initializing = False
+            if ticket in self.waiters:
+                self.waiters.remove(ticket)
+            self.condition.notify_all()
+            if self.closing and not self.active and not self.initializing:
+                should_close = True
+        if should_close:
+            await self._close_transport()
+
     @asynccontextmanager
     async def operation(self, *, exclusive=False):
         ticket = object()
@@ -167,15 +191,7 @@ class Session:
                         self.initializing = True
                         do_init = True
                     else:
-                        self.waiters.remove(ticket)
-                        self.active += 1
-                        self.exclusive = exclusive
-                        admitted = time.monotonic()
-                        self.used = admitted
-                        self.stats["admitted"] += 1
-                        self.stats["queued_seconds"] += admitted - started
-                        self.stats["peak_active"] = max(self.stats["peak_active"], self.active)
-                        self.condition.notify_all()
+                        admitted = self._admit(ticket, exclusive, started)
                         break
                 if do_init:
                     await self.initialize()
@@ -185,16 +201,7 @@ class Session:
                         self.condition.notify_all()
         except BaseException:
             if admitted is None:
-                should_close = False
-                async with self.condition:
-                    self.initializing = False
-                    if ticket in self.waiters:
-                        self.waiters.remove(ticket)
-                    self.condition.notify_all()
-                    if self.closing and not self.active and not self.initializing:
-                        should_close = True
-                if should_close:
-                    await self._close_transport()
+                await self._cancel_admission(ticket)
             raise
         try:
             yield
@@ -240,6 +247,38 @@ class Session:
         self.connected_at = time.monotonic()
         self.invalid = False
 
+    def _check_rpc_status(self, status):
+        if status in (401, 403):
+            raise BackendError(
+                "GATEWAY_BACKEND_AUTH_REQUIRED",
+                "此 MCP 后端帐户需要重新连接或授权；不是 CodePier 登出",
+                502,
+            )
+        if status == 429:
+            raise BackendError("GATEWAY_BACKEND_RATE_LIMITED", "MCP 后端限流；未自动重发", 502)
+        if status == 404 and self.session_id:
+            self.session_id = self.version = None
+            raise BackendError(
+                "GATEWAY_BACKEND_SESSION_EXPIRED",
+                "后端会话已过期；本次操作未重发，请先核对原结果",
+                502,
+            )
+        if 300 <= status < 400:
+            raise BackendError("GATEWAY_REDIRECT_DENIED", "不向重定向地址发送后端凭据", 502)
+        if status >= 500:
+            raise BackendError("GATEWAY_BACKEND_UNAVAILABLE", "MCP 后端服务不可用；未自动重发", 502)
+
+    def _record_rpc_session(self, method, headers):
+        if method == "server/discover":
+            self.stateless = headers.get("mcp-session-id") is None
+        if method == "initialize":
+            sid = headers.get("mcp-session-id")
+            if sid is not None and (
+                not sid or len(sid) > 256 or any(not 33 <= ord(c) <= 126 for c in sid)
+            ):
+                raise BackendError("GATEWAY_BACKEND_PROTOCOL", "后端会话编号无效")
+            self.session_id = sid
+
     async def rpc(self, method, params=None, *, version=None, notification=False):
         await self.connect()
         client = self.client
@@ -271,29 +310,7 @@ class Session:
                 "POST", self.url, headers=headers, json=body, extensions={"sni_hostname": self.sni}
             ) as response:
                 status = response.status_code
-                if status in (401, 403):
-                    raise BackendError(
-                        "GATEWAY_BACKEND_AUTH_REQUIRED",
-                        "此 MCP 后端帐户需要重新连接或授权；不是 CodePier 登出",
-                        502,
-                    )
-                if status == 429:
-                    raise BackendError(
-                        "GATEWAY_BACKEND_RATE_LIMITED", "MCP 后端限流；未自动重发", 502
-                    )
-                if status == 404 and self.session_id:
-                    self.session_id = self.version = None
-                    raise BackendError(
-                        "GATEWAY_BACKEND_SESSION_EXPIRED",
-                        "后端会话已过期；本次操作未重发，请先核对原结果",
-                        502,
-                    )
-                if 300 <= status < 400:
-                    raise BackendError("GATEWAY_REDIRECT_DENIED", "不向重定向地址发送后端凭据", 502)
-                if status >= 500:
-                    raise BackendError(
-                        "GATEWAY_BACKEND_UNAVAILABLE", "MCP 后端服务不可用；未自动重发", 502
-                    )
+                self._check_rpc_status(status)
                 if notification:
                     if status not in (200, 202, 204):
                         raise BackendError("GATEWAY_BACKEND_PROTOCOL", "后端未接受初始化通知")
@@ -318,15 +335,7 @@ class Session:
                     )
                 if status >= 400 or not isinstance(value.get("result"), dict):
                     raise BackendError("GATEWAY_BACKEND_PROTOCOL", "后端 MCP 响应无效")
-                if method == "server/discover":
-                    self.stateless = response.headers.get("mcp-session-id") is None
-                if method == "initialize":
-                    sid = response.headers.get("mcp-session-id")
-                    if sid is not None and (
-                        not sid or len(sid) > 256 or any(not 33 <= ord(c) <= 126 for c in sid)
-                    ):
-                        raise BackendError("GATEWAY_BACKEND_PROTOCOL", "后端会话编号无效")
-                    self.session_id = sid
+                self._record_rpc_session(method, response.headers)
                 return value["result"]
         except asyncio.CancelledError:
             # Cancellation may interrupt a sent request. Drain sibling leases
@@ -381,6 +390,35 @@ class Session:
             raise BackendError("GATEWAY_BACKEND_INCOMPLETE", "后端 SSE 未返回完整结果；未重发操作")
         return decode_json(bytes(raw))
 
+    async def _try_modern(self, protocol):
+        try:
+            result = await self.rpc("server/discover", version=MODERN)
+            if (
+                MODERN not in result.get("supportedVersions", [])
+                or result.get("resultType", "complete") != "complete"
+            ):
+                raise BackendError("GATEWAY_BACKEND_VERSION", "后端没有声明支持已实现的现代协议")
+            self.version = MODERN
+            return True
+        except BackendError as exc:
+            if (
+                protocol == "modern"
+                or exc.rpc_code == -32022
+                or exc.code
+                in (
+                    "GATEWAY_BACKEND_AUTH_REQUIRED",
+                    "GATEWAY_BACKEND_RATE_LIMITED",
+                    "GATEWAY_BACKEND_TRANSPORT",
+                    "GATEWAY_BACKEND_UNAVAILABLE",
+                    "GATEWAY_REDIRECT_DENIED",
+                )
+            ):
+                raise
+            # Probe is read-only. Do not use a failed tools/call to negotiate.
+            if exc.status not in (400, 404, 405) and exc.rpc_code != -32601:
+                raise
+        return False
+
     async def initialize(self):
         # Called without holding self.condition while self.initializing serializes
         # concurrent initialization. DNS expiry or a failed transport cannot close
@@ -392,35 +430,8 @@ class Session:
         if self.version:
             return
         protocol = self.connector["protocol"]
-        if protocol in ("auto", "modern"):
-            try:
-                result = await self.rpc("server/discover", version=MODERN)
-                if (
-                    MODERN not in result.get("supportedVersions", [])
-                    or result.get("resultType", "complete") != "complete"
-                ):
-                    raise BackendError(
-                        "GATEWAY_BACKEND_VERSION", "后端没有声明支持已实现的现代协议"
-                    )
-                self.version = MODERN
-                return
-            except BackendError as exc:
-                if (
-                    protocol == "modern"
-                    or exc.rpc_code == -32022
-                    or exc.code
-                    in (
-                        "GATEWAY_BACKEND_AUTH_REQUIRED",
-                        "GATEWAY_BACKEND_RATE_LIMITED",
-                        "GATEWAY_BACKEND_TRANSPORT",
-                        "GATEWAY_BACKEND_UNAVAILABLE",
-                        "GATEWAY_REDIRECT_DENIED",
-                    )
-                ):
-                    raise
-                # Probe is read-only. Do not use a failed tools/call to negotiate.
-                if exc.status not in (400, 404, 405) and exc.rpc_code != -32601:
-                    raise
+        if protocol in ("auto", "modern") and await self._try_modern(protocol):
+            return
         result = await self.rpc(
             "initialize",
             {"protocolVersion": "2025-11-25", "clientInfo": CLIENT_INFO, "capabilities": {}},

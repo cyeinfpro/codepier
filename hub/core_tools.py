@@ -484,6 +484,35 @@ def _fit_prefix(count, measure, budget):
     return low
 
 
+def _recover_compact_body(rendered, public, text_mode, body_key, mirror):
+    # The HTTP boundary runs after protocol metadata is attached. Recover the
+    # raw body from the first rendering so the final cap measures the same shape.
+    if (
+        text_mode == "compact"
+        and public.get("batch") is True
+        and rendered.get("content")
+        and any(row.get("content_in") == "text" for row in public.get("files", []))
+    ):
+        public = json.loads(rendered["content"][0]["text"])
+        mirror = "meta"
+    if text_mode == "compact" and rendered.get("content"):
+        first, separator, body = rendered["content"][0]["text"].partition("\n")
+        if separator:
+            for key in ("content", "output"):
+                if public.get(key + "_in") == "text":
+                    public = {name: value for name, value in public.items() if name != key + "_in"}
+                    public[key], body_key, mirror = body, key, "meta"
+                    break
+                if (
+                    isinstance(public.get(key), str)
+                    and public[key] == body
+                    and first.startswith("{")
+                ):
+                    body_key = key
+                    break
+    return public, body_key, mirror
+
+
 def bound_batch_response(
     payload,
     *,
@@ -515,31 +544,7 @@ def bound_batch_response(
     ):
         return payload
 
-    # The HTTP boundary runs after protocol metadata is attached. Recover the
-    # raw body from the first rendering so the final cap measures the same shape.
-    if (
-        text_mode == "compact"
-        and public.get("batch") is True
-        and rendered.get("content")
-        and any(row.get("content_in") == "text" for row in public.get("files", []))
-    ):
-        public = json.loads(rendered["content"][0]["text"])
-        mirror = "meta"
-    if text_mode == "compact" and rendered.get("content"):
-        first, separator, body = rendered["content"][0]["text"].partition("\n")
-        if separator:
-            for key in ("content", "output"):
-                if public.get(key + "_in") == "text":
-                    public = {name: value for name, value in public.items() if name != key + "_in"}
-                    public[key], body_key, mirror = body, key, "meta"
-                    break
-                if (
-                    isinstance(public.get(key), str)
-                    and public[key] == body
-                    and first.startswith("{")
-                ):
-                    body_key = key
-                    break
+    public, body_key, mirror = _recover_compact_body(rendered, public, text_mode, body_key, mirror)
     if not _batch_reads(public) and not (output_budget and output_records(public, tool_name)):
         return payload
 
@@ -804,6 +809,19 @@ def _result(name, arguments, value, *, scopes=None):
     return rendered
 
 
+def _presentation_args(arguments, unified, view):
+    presentation_args = arguments
+    if getattr(unified, "action", "") == "tree":
+        options = {"format": "compact", **unified.args.get("options", {})}
+        presentation_args = {**unified.args, "options": options}
+    elif view >= 3 and getattr(unified, "action", "") == "search":
+        presentation_args = {
+            **arguments,
+            "options": {**arguments.get("options", {}), "format": unified.format},
+        }
+    return presentation_args
+
+
 def result(
     name,
     arguments,
@@ -832,15 +850,7 @@ def result(
     # Stable range reads are a raw escape hatch available on this connection.
     if arguments.get("output_offset") is not None:
         output_mode = "raw"
-    presentation_args = arguments
-    if getattr(unified, "action", "") == "tree":
-        options = {"format": "compact", **unified.args.get("options", {})}
-        presentation_args = {**unified.args, "options": options}
-    elif view >= 3 and getattr(unified, "action", "") == "search":
-        presentation_args = {
-            **arguments,
-            "options": {**arguments.get("options", {}), "format": unified.format},
-        }
+    presentation_args = _presentation_args(arguments, unified, view)
     public = token_view(
         name,
         presentation_args,

@@ -237,71 +237,76 @@ class Connection:
                             ConnectionError("Authenticated channel is no longer usable")
                         )
 
+    @staticmethod
+    def _resolve_frame(item, value):
+        if item.future is not None and not item.future.done():
+            item.future.set_result(value)
+
+    @staticmethod
+    def _fail_frame(item, exc):
+        if item.future is not None and not item.future.done():
+            item.future.set_exception(exc)
+
+    async def _allow_outbound_frame(self, item):
+        if item.before_send is None:
+            return True
+        try:
+            allowed = await item.before_send()
+        except BaseException as exc:
+            self._fail_frame(item, exc)
+            return False
+        if not allowed:
+            self._resolve_frame(item, False)
+            return False
+        return True
+
     async def _write_one(self, item: _OutboundFrame):
         if item.body is None:
-            if item.future is not None and not item.future.done():
-                item.future.set_result(True)
+            self._resolve_frame(item, True)
             return
         if item.cancelled or (item.future is not None and item.future.done()):
             return
         if self.unusable or self._closing:
-            if item.future is not None and not item.future.done():
-                item.future.set_exception(
-                    ConnectionError("Authenticated channel is no longer usable")
-                )
+            self._fail_frame(item, ConnectionError("Authenticated channel is no longer usable"))
             return
         async with self.lock:
             if item.cancelled or (item.future is not None and item.future.done()):
                 return
             if self.unusable or self._closing:
-                if item.future is not None and not item.future.done():
-                    item.future.set_exception(
-                        ConnectionError("Authenticated channel is no longer usable")
-                    )
+                self._fail_frame(item, ConnectionError("Authenticated channel is no longer usable"))
                 return
             # Waiting for another writer must not retain an authorization decision.
             # A rejected guard has not packed ciphertext or advanced its sequence.
-            if item.before_send is not None:
-                try:
-                    allowed = await item.before_send()
-                except BaseException as exc:
-                    if item.future is not None and not item.future.done():
-                        item.future.set_exception(exc)
-                    return
-                if not allowed:
-                    if item.future is not None and not item.future.done():
-                        item.future.set_result(False)
-                    return
+            if not await self._allow_outbound_frame(item):
+                return
             # Backpressure/state check before advancing SecureChannel sequence: if the
             # socket already disconnected, fail cleanly without corrupting ciphertext state.
             if self.unusable or self._closing or self._socket_closed_or_stalled():
                 self.unusable = True
-                if item.future is not None and not item.future.done():
-                    item.future.set_exception(
-                        ConnectionError("Authenticated channel is no longer usable")
-                    )
+                self._fail_frame(item, ConnectionError("Authenticated channel is no longer usable"))
                 return
             if item.cancelled:
                 return
-            try:
-                packed = await pack_channel(self.channel, item.body)
-                payload_mb = len(packed) / (1024 * 1024)
-                send_timeout = max(10.0, 10.0 + payload_mb * 2.0)
-                await asyncio.wait_for(self.socket.send_text(packed), send_timeout)
-            except BaseException as exc:
-                # Verify socket state/backpressure once packed ciphertext consumed a sequence;
-                # closed/unhealthy tunnels cannot safely reuse a desynced stream.
-                self.unusable = True
-                if not self._socket_closed_or_stalled() or isinstance(
-                    exc, (TimeoutError, asyncio.TimeoutError)
-                ):
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(self.socket.close(code=1011), 1)
-                if item.future is not None and not item.future.done():
-                    item.future.set_exception(exc)
-                return
-            if item.future is not None and not item.future.done():
-                item.future.set_result(True)
+            await self._send_outbound_frame(item)
+
+    async def _send_outbound_frame(self, item):
+        try:
+            packed = await pack_channel(self.channel, item.body)
+            payload_mb = len(packed) / (1024 * 1024)
+            send_timeout = max(10.0, 10.0 + payload_mb * 2.0)
+            await asyncio.wait_for(self.socket.send_text(packed), send_timeout)
+        except BaseException as exc:
+            # Verify socket state/backpressure once packed ciphertext consumed a sequence;
+            # closed/unhealthy tunnels cannot safely reuse a desynced stream.
+            self.unusable = True
+            if not self._socket_closed_or_stalled() or isinstance(
+                exc, (TimeoutError, asyncio.TimeoutError)
+            ):
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self.socket.close(code=1011), 1)
+            self._fail_frame(item, exc)
+            return
+        self._resolve_frame(item, True)
 
     async def _writer_loop(self):
         try:
@@ -1294,6 +1299,27 @@ class Runtime:
                     error["blocker_visibility"] = "restricted_or_unavailable"
         return result
 
+    async def _wait_for_operation_signal(self, operation_id, event, cancel_event, remaining):
+        wait_task = asyncio.create_task(event.wait())
+        watch: set[asyncio.Future] = {wait_task}
+        future = self.futures.get(operation_id)
+        if future is not None and not future.done():
+            watch.add(asyncio.shield(future))
+        cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
+        if cancel_task is not None:
+            watch.add(cancel_task)
+        try:
+            done, _ = await asyncio.wait(
+                watch, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for task in (wait_task, cancel_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+        return bool(done) and (cancel_task is None or cancel_task not in done)
+
     async def wait_for_operation(
         self,
         operation_id: str,
@@ -1322,27 +1348,9 @@ class Runtime:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     return None
-                wait_task = asyncio.create_task(event.wait())
-                watch: set[asyncio.Future] = {wait_task}
-                future = self.futures.get(operation_id)
-                if future is not None and not future.done():
-                    watch.add(asyncio.shield(future))
-                cancel_task = (
-                    asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
-                )
-                if cancel_task is not None:
-                    watch.add(cancel_task)
-                try:
-                    done, _ = await asyncio.wait(
-                        watch, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-                    )
-                finally:
-                    for task in (wait_task, cancel_task):
-                        if task is not None and not task.done():
-                            task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await task
-                if not done or (cancel_task is not None and cancel_task in done):
+                if not await self._wait_for_operation_signal(
+                    operation_id, event, cancel_event, remaining
+                ):
                     return None
         finally:
             waiters.discard(event)
@@ -2275,15 +2283,8 @@ class Runtime:
             "note": "已持久保存。网络恢复后继续同一操作；请查询 operation_id，不要换新幂等键重复提交。",
         }
 
-    def _admit_operation(
-        self,
-        name: str,
-        args: dict,
-        project: dict,
-        principal: Principal,
-        background=False,
-        maintenance=None,
-    ):
+    @staticmethod
+    def _normalize_admission_args(name, args):
         if name == "exec":
             # Additive defaults must neither change pre-upgrade idempotency
             # fingerprints nor reach older extra=forbid Agent models.
@@ -2301,6 +2302,18 @@ class Runtime:
                 args["options"] = options
             else:
                 args.pop("options", None)
+        return args
+
+    def _admit_operation(
+        self,
+        name: str,
+        args: dict,
+        project: dict,
+        principal: Principal,
+        background=False,
+        maintenance=None,
+    ):
+        args = self._normalize_admission_args(name, args)
         principal = refresh_principal(self.store, principal)
         if name in PANEL_ROOTS_TOOLS:
             from hub.agent_roots import authorize
@@ -3165,6 +3178,25 @@ class Runtime:
         return True
 
     @iam.read_decision
+    def _decode_delivery_request(self, op, timing):
+        raw = self.store.decrypt_bytes(op["payload"])
+        if timing is not None:
+            timing.payload_bytes = len(raw)
+        request = json.loads(raw.decode("utf-8"))
+        del raw
+        if (
+            not isinstance(request, dict)
+            or request.get("tool") != op["tool"]
+            or not isinstance(request.get("args"), dict)
+            or not isinstance(request.get("project"), dict)
+            or not isinstance(request["project"].get("root"), str)
+            or op["tool"] not in TOOLS
+            and op["tool"] != "system_validate"
+            and op["tool"] not in DEVICE_ACTIONS
+        ):
+            raise ValueError("Invalid durable request")
+        return request
+
     def _prepare_delivery(self, id, *, retain_source=False, scheduled_device=None, timing=None):
         # Reuse existing authorization memoization only within this synchronous
         # phase. Every write invalidates it; no decision survives the next await.
@@ -3186,22 +3218,7 @@ class Runtime:
             if timing is not None:
                 timing.attempts = op["attempts"]
             try:
-                raw = self.store.decrypt_bytes(op["payload"])
-                if timing is not None:
-                    timing.payload_bytes = len(raw)
-                request = json.loads(raw.decode("utf-8"))
-                del raw
-                if (
-                    not isinstance(request, dict)
-                    or request.get("tool") != op["tool"]
-                    or not isinstance(request.get("args"), dict)
-                    or not isinstance(request.get("project"), dict)
-                    or not isinstance(request["project"].get("root"), str)
-                    or op["tool"] not in TOOLS
-                    and op["tool"] != "system_validate"
-                    and op["tool"] not in DEVICE_ACTIONS
-                ):
-                    raise ValueError("Invalid durable request")
+                request = self._decode_delivery_request(op, timing)
             except Exception:
                 self.complete(
                     op,
@@ -3426,33 +3443,8 @@ class Runtime:
             }
         return request
 
-    def complete(self, op, result):
-        # Callers may hold an old row while a newer result/output was committed.
-        op = self.store.one("SELECT * FROM operations WHERE id=?", (op["id"],))
-        if not op:
-            return
-        if op["state"] in {"succeeded", "failed", "cancelled"}:
-            return
-        if (
-            not isinstance(result, dict)
-            or type(result.get("ok")) is not bool
-            or result.get("data") is not None
-            and not isinstance(result["data"], dict)
-            or result.get("error") is not None
-            and not isinstance(result["error"], dict)
-            or isinstance(result.get("error"), dict)
-            and any(
-                k in result["error"] and not isinstance(result["error"][k], str)
-                for k in ("code", "message")
-            )
-        ):
-            result = {
-                "ok": False,
-                "error": {
-                    "code": "INVALID_AGENT_RESULT",
-                    "message": "Agent 返回的结果格式无效，请检查本机执行结果",
-                },
-            }
+    @staticmethod
+    def _annotate_completion_result(op, result):
         if result["ok"] and isinstance(result.get("data"), dict) and "exit_code" in result["data"]:
             data = dict(result["data"])
             for key in ("runtime_cleanup", "runtime_outcome"):
@@ -3501,6 +3493,36 @@ class Runtime:
                     ),
                 },
             }
+        return result
+
+    def complete(self, op, result):
+        # Callers may hold an old row while a newer result/output was committed.
+        op = self.store.one("SELECT * FROM operations WHERE id=?", (op["id"],))
+        if not op:
+            return
+        if op["state"] in {"succeeded", "failed", "cancelled"}:
+            return
+        if (
+            not isinstance(result, dict)
+            or type(result.get("ok")) is not bool
+            or result.get("data") is not None
+            and not isinstance(result["data"], dict)
+            or result.get("error") is not None
+            and not isinstance(result["error"], dict)
+            or isinstance(result.get("error"), dict)
+            and any(
+                k in result["error"] and not isinstance(result["error"][k], str)
+                for k in ("code", "message")
+            )
+        ):
+            result = {
+                "ok": False,
+                "error": {
+                    "code": "INVALID_AGENT_RESULT",
+                    "message": "Agent 返回的结果格式无效，请检查本机执行结果",
+                },
+            }
+        result = self._annotate_completion_result(op, result)
         self.integrations.complete(op, result)
         if op["tool"] == "artifacts_register" and result["ok"]:
             try:
@@ -3797,6 +3819,32 @@ class Runtime:
                 )
             return {"type": "ack", "id": id}
 
+    @staticmethod
+    def _read_scheduler_heartbeat(connection, info, data):
+        from hub.scheduler_settings import public_snapshot
+
+        changed = False
+        snapshot = public_snapshot(data.get("scheduler"))
+        if snapshot is not None:
+            connection.runtime_snapshot = snapshot
+        scheduler_error = data.get("scheduler_error")
+        if scheduler_error in (
+            "",
+            "SCHEDULER_SETTINGS_INVALID",
+        ) and scheduler_error != info.get("scheduler_error"):
+            info["scheduler_error"] = scheduler_error
+            changed = True
+        reported_revision = data.get("scheduler_revision")
+        if (
+            isinstance(reported_revision, str)
+            and len(reported_revision) == 64
+            and all(char in "0123456789abcdef" for char in reported_revision)
+            and reported_revision != info.get("scheduler_revision")
+        ):
+            info["scheduler_revision"] = reported_revision
+            changed = True
+        return changed
+
     def _heartbeat(self, device_id, connection, info, data, *, authenticated=False):
         if self.connections.get(device_id) is not connection or (
             not authenticated and not self.connection_authorized(device_id, connection)
@@ -3827,27 +3875,9 @@ class Runtime:
             changed = True
         desired = None
         if getattr(connection, "scheduler_protocol", 0) == 1:
-            from hub.scheduler_settings import packet, public_snapshot
+            from hub.scheduler_settings import packet
 
-            snapshot = public_snapshot(data.get("scheduler"))
-            if snapshot is not None:
-                connection.runtime_snapshot = snapshot
-            scheduler_error = data.get("scheduler_error")
-            if scheduler_error in (
-                "",
-                "SCHEDULER_SETTINGS_INVALID",
-            ) and scheduler_error != info.get("scheduler_error"):
-                info["scheduler_error"] = scheduler_error
-                changed = True
-            reported_revision = data.get("scheduler_revision")
-            if (
-                isinstance(reported_revision, str)
-                and len(reported_revision) == 64
-                and all(char in "0123456789abcdef" for char in reported_revision)
-                and reported_revision != info.get("scheduler_revision")
-            ):
-                info["scheduler_revision"] = reported_revision
-                changed = True
+            changed = self._read_scheduler_heartbeat(connection, info, data) or changed
             try:
                 candidate = packet(self.store, device_id)
                 if candidate["revision"] != info.get("scheduler_revision"):
@@ -3991,6 +4021,41 @@ class Runtime:
             return False
         return await self.store.run(self.connection_authorized, device_id, connection)
 
+    @staticmethod
+    def _read_agent_hello_metadata(connection, hello, info):
+        if type(hello.get("computer_enabled")) is bool:
+            info["computer_enabled"] = hello["computer_enabled"]
+        capabilities = hello.get("capabilities")
+        if (
+            isinstance(capabilities, list)
+            and len(capabilities) <= 256
+            and all(isinstance(x, str) and len(x) <= 100 for x in capabilities)
+        ):
+            info["capabilities"] = capabilities
+        actions = hello.get("device_actions")
+        if (
+            isinstance(actions, list)
+            and len(actions) <= 16
+            and all(isinstance(x, str) and len(x) <= 100 for x in actions)
+        ):
+            info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
+        info["management"] = public_management(hello.get("management"))
+        info["cancel_pending_protocol"] = connection.cancel_pending_protocol
+        info["bounded_execution_protocol"] = connection.bounded_execution_protocol
+        connection.native_security_protocol = 1 if hello.get("native_security_protocol") == 1 else 0
+        info["native_security_protocol"] = connection.native_security_protocol
+        info["native_protocol"] = connection.native_protocol
+        info["scheduler_protocol"] = connection.scheduler_protocol
+        info["resource_semantics_protocol"] = connection.resource_semantics_protocol
+        info["native_chat_protocol"] = connection.native_chat_protocol
+        info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
+        info["project_view_protocol"] = connection.project_view_protocol
+        info["project_runtime_protocol"] = connection.project_runtime_protocol
+        info["project_runtime_profiles"] = connection.project_runtime_profiles
+        build = hello.get("build")
+        if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
+            info["build"] = build
+
     async def agent_socket(self, websocket: WebSocket, device_id: str):
         device = await self.store.run(
             self.store.one, "SELECT * FROM devices WHERE id=?", (device_id,)
@@ -4034,40 +4099,7 @@ class Runtime:
                 )
                 if k in hello
             }
-            if type(hello.get("computer_enabled")) is bool:
-                info["computer_enabled"] = hello["computer_enabled"]
-            capabilities = hello.get("capabilities")
-            if (
-                isinstance(capabilities, list)
-                and len(capabilities) <= 256
-                and all(isinstance(x, str) and len(x) <= 100 for x in capabilities)
-            ):
-                info["capabilities"] = capabilities
-            actions = hello.get("device_actions")
-            if (
-                isinstance(actions, list)
-                and len(actions) <= 16
-                and all(isinstance(x, str) and len(x) <= 100 for x in actions)
-            ):
-                info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
-            info["management"] = public_management(hello.get("management"))
-            info["cancel_pending_protocol"] = connection.cancel_pending_protocol
-            info["bounded_execution_protocol"] = connection.bounded_execution_protocol
-            connection.native_security_protocol = (
-                1 if hello.get("native_security_protocol") == 1 else 0
-            )
-            info["native_security_protocol"] = connection.native_security_protocol
-            info["native_protocol"] = connection.native_protocol
-            info["scheduler_protocol"] = connection.scheduler_protocol
-            info["resource_semantics_protocol"] = connection.resource_semantics_protocol
-            info["native_chat_protocol"] = connection.native_chat_protocol
-            info["tool_protocol"] = connection.tool_protocol.public(catalog_digest())
-            info["project_view_protocol"] = connection.project_view_protocol
-            info["project_runtime_protocol"] = connection.project_runtime_protocol
-            info["project_runtime_profiles"] = connection.project_runtime_profiles
-            build = hello.get("build")
-            if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
-                info["build"] = build
+            self._read_agent_hello_metadata(connection, hello, info)
             # Complete the handshake before making this connection available for calls.
             scheduler = {}
             if connection.scheduler_protocol == 1:

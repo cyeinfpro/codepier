@@ -90,29 +90,7 @@ class Agent:
         )
         self.instance_lock = InstanceLock(self.state_dir / ".agent.lock")
         try:
-            self.journal = Journal(self.state_dir)
-            self.engine = FileEngine(self.config, self.journal, self.config_path)
-            self._read_workers = {}
-            self._run_cleanup_projects = {}
-            self._run_cleanup_wake = asyncio.Event()
-            self.telemetry = AgentTelemetry(
-                self.journal,
-                process_diagnostics=os.environ.get("CODEPIER_TEST_PROCESS_DIAGNOSTICS") == "1",
-                deferred_persist=True,
-            )
-            self.build = BuildIdentity("agent")
-            self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
-            self.native = NativeCLI(self)
-            self.lifecycle.native_live = self.native.live
-            self.artifacts = Artifacts(self.engine)
-            self.searches = Searches(self.engine)
-            self.computer_approvals = AgentApprovals(self.send)
-            self.computer = Computer(
-                lambda: self.config, self.state_dir, self.journal, approvals=self.computer_approvals
-            )
-            from agent.integrations import Integrations
-
-            self.integrations = Integrations(self)
+            self._initialize_services()
         except BaseException:
             if hasattr(self, "journal"):
                 self.journal.db.close()
@@ -161,6 +139,31 @@ class Agent:
         self._ack_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
         self.lifecycle.activity_check = self.check_maintenance_idle
+
+    def _initialize_services(self):
+        self.journal = Journal(self.state_dir)
+        self.engine = FileEngine(self.config, self.journal, self.config_path)
+        self._read_workers = {}
+        self._run_cleanup_projects = {}
+        self._run_cleanup_wake = asyncio.Event()
+        self.telemetry = AgentTelemetry(
+            self.journal,
+            process_diagnostics=os.environ.get("CODEPIER_TEST_PROCESS_DIAGNOSTICS") == "1",
+            deferred_persist=True,
+        )
+        self.build = BuildIdentity("agent")
+        self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
+        self.native = NativeCLI(self)
+        self.lifecycle.native_live = self.native.live
+        self.artifacts = Artifacts(self.engine)
+        self.searches = Searches(self.engine)
+        self.computer_approvals = AgentApprovals(self.send)
+        self.computer = Computer(
+            lambda: self.config, self.state_dir, self.journal, approvals=self.computer_approvals
+        )
+        from agent.integrations import Integrations
+
+        self.integrations = Integrations(self)
 
     def check_maintenance_idle(self, operation_id):
         if getattr(self.computer, "session", None):
@@ -558,6 +561,44 @@ class Agent:
             self.transfer_tasks.add(task)
             task.add_done_callback(self.transfer_done)
 
+    async def _handle_artifact_read(self, data, socket):
+        request_id = data.get("request_id")
+        if self.lifecycle.handoff_pending:
+            await self.send(
+                {
+                    "type": "artifact_chunk",
+                    "request_id": request_id,
+                    "result": {
+                        "ok": False,
+                        "error": {
+                            "code": "AGENT_MAINTENANCE",
+                            "message": "CodePier 正在安全切换，请稍后重试",
+                        },
+                    },
+                }
+            )
+            return
+        if not isinstance(request_id, str) or len(request_id) != 32:
+            raise ValueError("Invalid artifact request ID")
+        if len(self.transfer_tasks) >= 4:
+            await self.send(
+                {
+                    "type": "artifact_chunk",
+                    "request_id": request_id,
+                    "result": {
+                        "ok": False,
+                        "error": {
+                            "code": "ARTIFACT_BUSY",
+                            "message": "产物通道繁忙",
+                        },
+                    },
+                }
+            )
+        else:
+            task = asyncio.create_task(self.send_artifact(data, socket))
+            self.transfer_tasks.add(task)
+            task.add_done_callback(self.transfer_done)
+
     async def connect_once(self):
         from agent.project_runtime import advertised_profiles
 
@@ -672,42 +713,7 @@ class Agent:
                         self.computer_approvals.decide(data)
                         continue
                     if kind == "artifact_read":
-                        request_id = data.get("request_id")
-                        if self.lifecycle.handoff_pending:
-                            await self.send(
-                                {
-                                    "type": "artifact_chunk",
-                                    "request_id": request_id,
-                                    "result": {
-                                        "ok": False,
-                                        "error": {
-                                            "code": "AGENT_MAINTENANCE",
-                                            "message": "CodePier 正在安全切换，请稍后重试",
-                                        },
-                                    },
-                                }
-                            )
-                            continue
-                        if not isinstance(request_id, str) or len(request_id) != 32:
-                            raise ValueError("Invalid artifact request ID")
-                        if len(self.transfer_tasks) >= 4:
-                            await self.send(
-                                {
-                                    "type": "artifact_chunk",
-                                    "request_id": request_id,
-                                    "result": {
-                                        "ok": False,
-                                        "error": {
-                                            "code": "ARTIFACT_BUSY",
-                                            "message": "产物通道繁忙",
-                                        },
-                                    },
-                                }
-                            )
-                        else:
-                            task = asyncio.create_task(self.send_artifact(data, socket))
-                            self.transfer_tasks.add(task)
-                            task.add_done_callback(self.transfer_done)
+                        await self._handle_artifact_read(data, socket)
                         continue
                     if kind == "call":
                         if id not in self.jobs:
@@ -1932,6 +1938,48 @@ class Agent:
 
         return await self._snapshot_io(allocate)
 
+    async def _finalize_snapshot_execution(self, holder, args, run_dir, result):
+        artifacts = await self._snapshot_io(
+            holder["manager"].extract_artifacts,
+            holder["snapshot"],
+            args.get("snapshot_artifacts", []),
+            run_dir,
+        )
+        holder["success"] = (
+            result.get("exit_code") == 0
+            and not result.get("timed_out")
+            and not result.get("cancelled")
+        )
+        result.update(
+            snapshot_artifacts=artifacts,
+            snapshot_execution={
+                "mode": "copy_on_write",
+                "os_sandbox": False,
+                "excluded": [".git", ".codepier"],
+                "retained": not holder["success"],
+            },
+        )
+
+    async def _attach_execution_log(self, id, root, args, result):
+        log = self._execution_logs[id]
+        await self._snapshot_io(log.close)
+        result["output_log"] = log.receipt(id)
+        result["run_directory"] = ".codepier/runs/" + id
+        if any(
+            resource.get("kind", "path") == "path"
+            and resource.get("mode") == "write"
+            and (
+                Path(resource["name"])
+                if Path(resource["name"]).is_absolute()
+                else root / args.get("cwd", ".") / resource["name"]
+            ).resolve()
+            == root
+            for resource in args.get("resources", [])
+        ):
+            result.setdefault("warnings", []).append(
+                "根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。"
+            )
+
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
             entry = self._read_workers.get(id)
@@ -1991,45 +2039,9 @@ class Agent:
                         id, "ssh_exec", project, forwarded, saved_vps_target=args["target"]
                     )
                 if holder:
-                    artifacts = await self._snapshot_io(
-                        holder["manager"].extract_artifacts,
-                        holder["snapshot"],
-                        args.get("snapshot_artifacts", []),
-                        run_dir,
-                    )
-                    holder["success"] = (
-                        result.get("exit_code") == 0
-                        and not result.get("timed_out")
-                        and not result.get("cancelled")
-                    )
-                    result.update(
-                        snapshot_artifacts=artifacts,
-                        snapshot_execution={
-                            "mode": "copy_on_write",
-                            "os_sandbox": False,
-                            "excluded": [".git", ".codepier"],
-                            "retained": not holder["success"],
-                        },
-                    )
+                    await self._finalize_snapshot_execution(holder, args, run_dir, result)
                 if run_dir is not None:
-                    log = self._execution_logs[id]
-                    await self._snapshot_io(log.close)
-                    result["output_log"] = log.receipt(id)
-                    result["run_directory"] = ".codepier/runs/" + id
-                    if any(
-                        resource.get("kind", "path") == "path"
-                        and resource.get("mode") == "write"
-                        and (
-                            Path(resource["name"])
-                            if Path(resource["name"]).is_absolute()
-                            else root / args.get("cwd", ".") / resource["name"]
-                        ).resolve()
-                        == root
-                        for resource in args.get("resources", [])
-                    ):
-                        result.setdefault("warnings", []).append(
-                            "根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。"
-                        )
+                    await self._attach_execution_log(id, root, args, result)
                 elif not local:
                     result.setdefault("warnings", []).append(
                         "Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory."
@@ -2911,6 +2923,31 @@ class Agent:
         window, self.reconnect_window = self.reconnect_window, 0
         return delay, max(delay, random.uniform(1, window)) if window else delay
 
+    async def _finish_shutdown_jobs(self):
+        # Shutdown is not a user cancellation. Preserve completed
+        # successes and distinguish only processes actually interrupted.
+        self.shutdown_interrupted.update(
+            id for id, process in self.processes.items() if process.returncode is None
+        )
+        for id, job in list(self.jobs.items()):
+            if id not in self.finishing and self.journal.fast_status(id)["status"] == "accepted":
+                job.cancel()
+        await asyncio.gather(
+            *(self.kill_process(p, include_finished=True) for p in list(self.processes.values())),
+            return_exceptions=True,
+        )
+        # Finish in-flight file operations and persist outcomes before exit.
+        await asyncio.gather(*list(self.jobs.values()), return_exceptions=True)
+        await asyncio.gather(*list(self.kill_tasks), return_exceptions=True)
+        await asyncio.gather(*list(self.transfer_tasks), return_exceptions=True)
+        await asyncio.gather(*list(self._reply_tasks), return_exceptions=True)
+        while self._ack_task is not None and not self._ack_task.done():
+            with contextlib.suppress(Exception):
+                await self._ack_task
+        while self._journal_persist_task is not None and not self._journal_persist_task.done():
+            with contextlib.suppress(Exception):
+                await self._journal_persist_task
+
     async def run(self):
         await self.integrations.start()
         self.computer.start_guard()
@@ -2971,37 +3008,7 @@ class Agent:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
             try:
-                # Shutdown is not a user cancellation. Preserve completed
-                # successes and distinguish only processes actually interrupted.
-                self.shutdown_interrupted.update(
-                    id for id, process in self.processes.items() if process.returncode is None
-                )
-                for id, job in list(self.jobs.items()):
-                    if (
-                        id not in self.finishing
-                        and self.journal.fast_status(id)["status"] == "accepted"
-                    ):
-                        job.cancel()
-                await asyncio.gather(
-                    *(
-                        self.kill_process(p, include_finished=True)
-                        for p in list(self.processes.values())
-                    ),
-                    return_exceptions=True,
-                )
-                # Finish in-flight file operations and persist outcomes before exit.
-                await asyncio.gather(*list(self.jobs.values()), return_exceptions=True)
-                await asyncio.gather(*list(self.kill_tasks), return_exceptions=True)
-                await asyncio.gather(*list(self.transfer_tasks), return_exceptions=True)
-                await asyncio.gather(*list(self._reply_tasks), return_exceptions=True)
-                while self._ack_task is not None and not self._ack_task.done():
-                    with contextlib.suppress(Exception):
-                        await self._ack_task
-                while (
-                    self._journal_persist_task is not None and not self._journal_persist_task.done()
-                ):
-                    with contextlib.suppress(Exception):
-                        await self._journal_persist_task
+                await self._finish_shutdown_jobs()
             finally:
                 await self._read_pool.close()
                 try:

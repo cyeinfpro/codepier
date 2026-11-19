@@ -245,6 +245,51 @@ class HubIntegrations:
             trace["operation_id"] = operations[0].get("operation_id")
         return trace
 
+    def _insert_activity(
+        self,
+        principal,
+        project,
+        name,
+        key,
+        now,
+        started,
+        transition,
+        meaningful,
+        overlap_ids,
+        prior_update,
+    ):
+        with self.store.transaction():
+            for offset in range(0, len(overlap_ids), 400):
+                batch = overlap_ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                self.store.execute(
+                    f"UPDATE mcp_activity SET transition='overlap' WHERE id IN ({placeholders})",
+                    tuple(batch),
+                )
+            if prior_update is not None:
+                self.store.execute(
+                    "UPDATE mcp_activity SET next_call_gap_ms=?,cycle_ms=? WHERE id=?",
+                    prior_update,
+                )
+            row = self.store.execute(
+                "INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    project["id"],
+                    project["root"],
+                    project["device_id"],
+                    principal.grant_id,
+                    principal.actor,
+                    key,
+                    name,
+                    time.time() - (now - started),
+                    "running",
+                    transition,
+                    int(meaningful),
+                    request_id(),
+                ),
+            )
+        return row
+
     def begin(self, principal, project, name, metadata, arguments=None, *, started=None):
         meaningful = (
             name not in SAFE
@@ -289,36 +334,18 @@ class HubIntegrations:
                 cycle = max(0, round((now - prior["started"]) * 1000))
                 prior_update = (delta, cycle, prior["id"])
                 transition = "serial"
-        with self.store.transaction():
-            for offset in range(0, len(overlap_ids), 400):
-                batch = overlap_ids[offset : offset + 400]
-                placeholders = ",".join("?" for _ in batch)
-                self.store.execute(
-                    f"UPDATE mcp_activity SET transition='overlap' WHERE id IN ({placeholders})",
-                    tuple(batch),
-                )
-            if prior_update is not None:
-                self.store.execute(
-                    "UPDATE mcp_activity SET next_call_gap_ms=?,cycle_ms=? WHERE id=?",
-                    prior_update,
-                )
-            row = self.store.execute(
-                "INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    project["id"],
-                    project["root"],
-                    project["device_id"],
-                    principal.grant_id,
-                    principal.actor,
-                    key,
-                    name,
-                    time.time() - (now - started),
-                    "running",
-                    transition,
-                    int(meaningful),
-                    request_id(),
-                ),
-            )
+        row = self._insert_activity(
+            principal,
+            project,
+            name,
+            key,
+            now,
+            started,
+            transition,
+            meaningful,
+            overlap_ids,
+            prior_update,
+        )
         trace = {
             "id": row.lastrowid,
             "key": key,

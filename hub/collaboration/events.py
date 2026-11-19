@@ -430,6 +430,24 @@ class EventService:
             )
             raise
 
+    def _subscription_renewal(self, current_filters, route, lifetime):
+        member = self.c.rooms.event_member(
+            current_filters["member_id"],
+            current_filters["conversation_id"],
+            current_filters["binding_generation"],
+        )
+        return (
+            self.c.rooms.renewals.view(member)
+            if not route
+            else {
+                "mode": "host",
+                "renewal_managed_by": "host",
+                "state": "awaiting_probe",
+                "approved": False,
+                "expires_at": lifetime,
+            }
+        )
+
     async def subscribe(self, raw, principal, *, unified=False):
         def begin():
             with self.store.transaction():
@@ -658,22 +676,7 @@ class EventService:
                     "truncated": truncated,
                 }
                 if args["name"] == ROOM_INBOX_EVENT:
-                    member = self.c.rooms.event_member(
-                        current_filters["member_id"],
-                        current_filters["conversation_id"],
-                        current_filters["binding_generation"],
-                    )
-                    result["renewal"] = (
-                        self.c.rooms.renewals.view(member)
-                        if not route
-                        else {
-                            "mode": "host",
-                            "renewal_managed_by": "host",
-                            "state": "awaiting_probe",
-                            "approved": False,
-                            "expires_at": lifetime,
-                        }
-                    )
+                    result["renewal"] = self._subscription_renewal(current_filters, route, lifetime)
                 self._wake_after_commit()
                 return result
 
@@ -1695,6 +1698,111 @@ class EventService:
             logger.warning("Event delivery failed: %s", type(exc).__name__)
             await self.store.run(self.finish, item, None, "delivery_internal_error")
 
+    def _probe_recovery(self, now):
+        has_continuations = False
+        recovery = getattr(
+            getattr(self.c, "room_goal_recovery", None),
+            "recover_continuations",
+            None,
+        )
+        if recovery is not None:
+            has_continuations = bool(
+                self.store.one(
+                    "SELECT 1 FROM room_continuation_items WHERE state IN ('pending','waiting_operations') AND retry_at<=? LIMIT 1",
+                    (now,),
+                )
+            )
+        has_recovery = bool(
+            self.store.one(
+                """SELECT 1 FROM coordination_work w
+                JOIN room_native_work_assignments a ON a.work_id=w.id
+                JOIN coordination_goals g ON g.id=w.goal_id AND g.approval_id=w.approval_id
+                JOIN conversation_rooms r ON r.id=g.conversation_id
+                LEFT JOIN room_work_intents i ON i.goal_id=g.id
+                WHERE w.state='blocked' AND w.reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')
+                  AND g.state='active' AND r.state='active' AND r.room_protocol!=0
+                  AND a.intent_revision=COALESCE(i.intent_revision,1)
+                LIMIT 1"""
+            )
+            or self.store.one(
+                """SELECT 1 FROM collaboration_dot_messages m
+                JOIN mcp_event_subscriptions s ON s.state='active' AND s.expires_at>?
+                JOIN collaboration_join_routes jr ON jr.subscription_id=s.id AND jr.slot_id=m.dot_id
+                WHERE m.state!='handled' AND m.wake_count<3
+                  AND (? - MAX(m.created,m.last_wake_at,m.last_activity_at,COALESCE(m.received_at,0))) >=
+                      CASE WHEN m.state='read' THEN 300 ELSE (CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END) END
+                LIMIT 1""",
+                (now, now),
+            )
+        )
+        if not has_recovery and getattr(self.c, "dot_mailbox", None) is not None:
+            has_recovery = bool(
+                self.store.one(
+                    """SELECT 1 FROM dot_mailbox_bindings b
+                    WHERE b.state='active' AND b.dirty_revision>b.drained_revision AND b.wake_count<3
+                      AND (? - b.last_wake_at) >= CASE b.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END
+                      AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
+                          WHERE cs.dot_id=b.dot_id AND cs.state='active' AND cs.lease_until>?)
+                    LIMIT 1""",
+                    (now, now),
+                )
+                or self.store.one(
+                    """SELECT 1 FROM dot_mailbox_bindings b
+                    JOIN mcp_event_subscriptions s ON s.id=b.subscription_id
+                    WHERE b.state='active' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
+                      AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
+                          WHERE e.dot_id=b.dot_id AND e.kind='control_notice'
+                            AND e.object_id=('subscription-expiry:'||s.id) AND e.object_version=s.version)
+                    LIMIT 1""",
+                    (now, now + 3600),
+                )
+            )
+        if not has_recovery and getattr(self.c, "room_consumers", None) is not None:
+            has_recovery = bool(
+                self.store.one(
+                    """SELECT 1 FROM room_pending_bindings p
+                    JOIN mcp_event_subscriptions s ON s.id=p.subscription_id
+                    WHERE p.status='verifying' AND p.revoked_at IS NULL AND p.probe_replied_at IS NULL
+                      AND p.prepare_expires_at>? AND p.probe_created_at>? AND p.probe_created_at<=?
+                      AND s.state='active' AND s.expires_at>? AND s.last_accepted>=p.probe_created_at
+                    LIMIT 1""",
+                    (now, now - 1800, now - 60, now),
+                )
+                or self.store.one(
+                    """SELECT 1 FROM room_members m
+                    JOIN mcp_event_subscriptions s ON s.id=m.subscription_id
+                    WHERE m.status='bound' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
+                      AND (? - s.expires_at) >= -MIN(3600.0, MAX(15.0, (s.expires_at - s.updated) * 0.2))
+                      AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
+                          WHERE e.member_id=m.id AND e.kind='control_notice'
+                            AND e.object_id=('subscription-expiry:'||m.subscription_id) AND e.object_version=s.version)
+                    LIMIT 1""",
+                    (now, now + 3600, now),
+                )
+                or self.store.one(
+                    "SELECT 1 FROM room_members WHERE status='bound' AND consumer_continuation_at<=? LIMIT 1",
+                    (now,),
+                )
+                or self.store.one(
+                    """SELECT 1 FROM room_members m
+                    WHERE m.status='bound' AND m.dirty_revision>m.drained_revision
+                      AND m.consumer_continuation_at IS NULL AND m.wake_count<51
+                      AND COALESCE(m.wake_episode_at,m.last_wake_at)>?
+                      AND (? - m.last_wake_at) >= CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 WHEN 2 THEN 600 ELSE 1800 END
+                      AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
+                          WHERE cs.member_id=m.id AND cs.state='active' AND cs.lease_until>?)
+                    LIMIT 1""",
+                    (now - 86400, now, now),
+                )
+            )
+        # Episode identity, eligibility and delay live in TaskLiveness.
+        # For unhinted recovery sources, run that canonical logic on a
+        # coarse bounded cadence rather than maintaining a divergent query.
+        if self._full_event_recovery_at is not None and now >= self._full_event_recovery_at:
+            has_continuations = has_continuations or recovery is not None
+            has_recovery = True
+        return has_continuations, has_recovery
+
     def _probe_tick(self, capacity, check_recovery):
         config = getattr(self.c, "config", None)
         if config is not None and (not config.enabled or not config.events_enabled):
@@ -1764,110 +1872,9 @@ class EventService:
                     )
                 )
 
-        has_continuations = False
-        has_recovery = False
-        if check_recovery:
-            recovery = getattr(
-                getattr(self.c, "room_goal_recovery", None),
-                "recover_continuations",
-                None,
-            )
-            if recovery is not None:
-                has_continuations = bool(
-                    self.store.one(
-                        "SELECT 1 FROM room_continuation_items WHERE state IN ('pending','waiting_operations') AND retry_at<=? LIMIT 1",
-                        (now,),
-                    )
-                )
-            has_recovery = bool(
-                self.store.one(
-                    """SELECT 1 FROM coordination_work w
-                    JOIN room_native_work_assignments a ON a.work_id=w.id
-                    JOIN coordination_goals g ON g.id=w.goal_id AND g.approval_id=w.approval_id
-                    JOIN conversation_rooms r ON r.id=g.conversation_id
-                    LEFT JOIN room_work_intents i ON i.goal_id=g.id
-                    WHERE w.state='blocked' AND w.reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')
-                      AND g.state='active' AND r.state='active' AND r.room_protocol!=0
-                      AND a.intent_revision=COALESCE(i.intent_revision,1)
-                    LIMIT 1"""
-                )
-                or self.store.one(
-                    """SELECT 1 FROM collaboration_dot_messages m
-                    JOIN mcp_event_subscriptions s ON s.state='active' AND s.expires_at>?
-                    JOIN collaboration_join_routes jr ON jr.subscription_id=s.id AND jr.slot_id=m.dot_id
-                    WHERE m.state!='handled' AND m.wake_count<3
-                      AND (? - MAX(m.created,m.last_wake_at,m.last_activity_at,COALESCE(m.received_at,0))) >=
-                          CASE WHEN m.state='read' THEN 300 ELSE (CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END) END
-                    LIMIT 1""",
-                    (now, now),
-                )
-            )
-            if not has_recovery and getattr(self.c, "dot_mailbox", None) is not None:
-                has_recovery = bool(
-                    self.store.one(
-                        """SELECT 1 FROM dot_mailbox_bindings b
-                        WHERE b.state='active' AND b.dirty_revision>b.drained_revision AND b.wake_count<3
-                          AND (? - b.last_wake_at) >= CASE b.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END
-                          AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
-                              WHERE cs.dot_id=b.dot_id AND cs.state='active' AND cs.lease_until>?)
-                        LIMIT 1""",
-                        (now, now),
-                    )
-                    or self.store.one(
-                        """SELECT 1 FROM dot_mailbox_bindings b
-                        JOIN mcp_event_subscriptions s ON s.id=b.subscription_id
-                        WHERE b.state='active' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
-                          AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
-                              WHERE e.dot_id=b.dot_id AND e.kind='control_notice'
-                                AND e.object_id=('subscription-expiry:'||s.id) AND e.object_version=s.version)
-                        LIMIT 1""",
-                        (now, now + 3600),
-                    )
-                )
-            if not has_recovery and getattr(self.c, "room_consumers", None) is not None:
-                has_recovery = bool(
-                    self.store.one(
-                        """SELECT 1 FROM room_pending_bindings p
-                        JOIN mcp_event_subscriptions s ON s.id=p.subscription_id
-                        WHERE p.status='verifying' AND p.revoked_at IS NULL AND p.probe_replied_at IS NULL
-                          AND p.prepare_expires_at>? AND p.probe_created_at>? AND p.probe_created_at<=?
-                          AND s.state='active' AND s.expires_at>? AND s.last_accepted>=p.probe_created_at
-                        LIMIT 1""",
-                        (now, now - 1800, now - 60, now),
-                    )
-                    or self.store.one(
-                        """SELECT 1 FROM room_members m
-                        JOIN mcp_event_subscriptions s ON s.id=m.subscription_id
-                        WHERE m.status='bound' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
-                          AND (? - s.expires_at) >= -MIN(3600.0, MAX(15.0, (s.expires_at - s.updated) * 0.2))
-                          AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
-                              WHERE e.member_id=m.id AND e.kind='control_notice'
-                                AND e.object_id=('subscription-expiry:'||m.subscription_id) AND e.object_version=s.version)
-                        LIMIT 1""",
-                        (now, now + 3600, now),
-                    )
-                    or self.store.one(
-                        "SELECT 1 FROM room_members WHERE status='bound' AND consumer_continuation_at<=? LIMIT 1",
-                        (now,),
-                    )
-                    or self.store.one(
-                        """SELECT 1 FROM room_members m
-                        WHERE m.status='bound' AND m.dirty_revision>m.drained_revision
-                          AND m.consumer_continuation_at IS NULL AND m.wake_count<51
-                          AND COALESCE(m.wake_episode_at,m.last_wake_at)>?
-                          AND (? - m.last_wake_at) >= CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 WHEN 2 THEN 600 ELSE 1800 END
-                          AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
-                              WHERE cs.member_id=m.id AND cs.state='active' AND cs.lease_until>?)
-                        LIMIT 1""",
-                        (now - 86400, now, now),
-                    )
-                )
-            # Episode identity, eligibility and delay live in TaskLiveness.
-            # For unhinted recovery sources, run that canonical logic on a
-            # coarse bounded cadence rather than maintaining a divergent query.
-            if self._full_event_recovery_at is not None and now >= self._full_event_recovery_at:
-                has_continuations = has_continuations or recovery is not None
-                has_recovery = True
+        has_continuations, has_recovery = (
+            self._probe_recovery(now) if check_recovery else (False, False)
+        )
 
         next_due_at = None
         if not has_dispatch and not has_recovery and not has_continuations:
@@ -1924,6 +1931,27 @@ class EventService:
         # source failed. Do not catch lease errors or report phantom items.
         return self.reserve(capacity) if run_dispatch else []
 
+    async def _scan_tick(self, capacity):
+        now = self.c.clock()
+        if self._full_event_recovery_at is None:
+            self._full_event_recovery_at = now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
+        check_recovery = now >= self._relay_recover_after
+        run_read = getattr(self.store, "run_read", self.store.run)
+        has_continuations, has_recovery, has_dispatch, next_due_at = await run_read(
+            self._probe_tick, capacity, check_recovery
+        )
+        if check_recovery:
+            self._relay_recover_after = now + (
+                5 if has_continuations or has_recovery else IDLE_POLL_SECONDS
+            )
+            if (
+                self._full_event_recovery_at is not None
+                and now >= self._full_event_recovery_at
+                and has_recovery
+            ):
+                self._full_event_recovery_at = now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
+        return has_continuations, has_recovery, has_dispatch, next_due_at
+
     async def tick(self, *, wake=None):
         """One owned pump, bounded children, replenished on each completion/hint.
 
@@ -1942,28 +1970,14 @@ class EventService:
                     # visible and is consumed by the following wait.
                     if wake is not None:
                         wake.clear()
-                    now = self.c.clock()
-                    if self._full_event_recovery_at is None:
-                        self._full_event_recovery_at = now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
-                    check_recovery = now >= self._relay_recover_after
                     capacity = DISPATCH_CAPACITY - len(pending)
-                    run_read = getattr(self.store, "run_read", self.store.run)
-                    has_continuations, has_recovery, has_dispatch, next_due_at = await run_read(
-                        self._probe_tick, capacity, check_recovery
-                    )
+                    (
+                        has_continuations,
+                        has_recovery,
+                        has_dispatch,
+                        next_due_at,
+                    ) = await self._scan_tick(capacity)
                     has_work = has_continuations or has_recovery or has_dispatch
-                    if check_recovery:
-                        self._relay_recover_after = now + (
-                            5 if has_continuations or has_recovery else IDLE_POLL_SECONDS
-                        )
-                        if (
-                            self._full_event_recovery_at is not None
-                            and now >= self._full_event_recovery_at
-                            and has_recovery
-                        ):
-                            self._full_event_recovery_at = (
-                                now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
-                            )
                     if has_work:
                         items = await self.store.run(
                             self._run_tick_work,
