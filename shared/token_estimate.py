@@ -361,9 +361,9 @@ def estimate_output(result):
 
     try:
         wire_metric = _combine_projections((c0_proj, rest_proj, sc_proj, meta_proj))
-        if not found_text:
+        if c0_proj is None:
             sem_parts = (rest_proj, sc_proj)
-        elif not has_structured:
+        elif sc_proj is None:
             sem_parts = (c0_proj, rest_proj)
         else:
             c0_metric = c0_proj.metric()
