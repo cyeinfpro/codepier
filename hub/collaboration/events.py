@@ -7,7 +7,6 @@ await. Payloads contain authorized object references, never callback credentials
 from __future__ import annotations
 import asyncio
 import base64
-import contextlib
 import hashlib
 import hmac
 import json
@@ -175,6 +174,9 @@ class EventService:
         self._tick_lock = asyncio.Lock()
         self._scan_after = ""
         self._relay_recover_after = 0
+        self._recovery_hint = False
+        self._recovery_pending = False
+        self.recovery_errors: dict[str, str] = {}
         self._full_event_recovery_at = None
         self._budget_retry_at = None
         self._idle = True
@@ -965,6 +967,10 @@ class EventService:
         if loops is not None:
             self.store.after_commit(loops.wake_events)
 
+    def hint_recovery(self):
+        if self._idle:
+            self._recovery_hint = True
+
     def next_dispatch_delay(self, default=2):
         now = self.c.clock()
         delay = default
@@ -972,6 +978,8 @@ class EventService:
             delay = max(default, IDLE_POLL_SECONDS)
             if self._next_wake_at is not None:
                 delay = min(delay, max(0.05, self._next_wake_at - now))
+        if self._recovery_pending and self._relay_recover_after > now:
+            delay = min(delay, max(0.05, self._relay_recover_after - now))
         if self._budget_retry_at is not None:
             delay = min(delay, max(0.01, self._budget_retry_at - now))
         return delay
@@ -1893,13 +1901,14 @@ class EventService:
 
     def _recovery_step(self, name, callback, default=None):
         try:
-            tx = getattr(self.store, "transaction", None)
-            with tx() if callable(tx) else contextlib.nullcontext():
-                return callback()
+            result = callback()
         except Exception as exc:
-            # Do not log exception bodies (callbacks may include credentials).
+            # Each recovery owner commits its own units. Do not log bodies.
+            self.recovery_errors[name] = type(exc).__name__
             logger.warning("Collaboration event recovery %s failed (%s)", name, type(exc).__name__)
             return default
+        self.recovery_errors.pop(name, None)
+        return result
 
     def _run_tick_work(self, capacity, run_continuations, run_recovery, run_dispatch):
         if run_continuations:
@@ -1935,15 +1944,15 @@ class EventService:
         now = self.c.clock()
         if self._full_event_recovery_at is None:
             self._full_event_recovery_at = now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
-        check_recovery = now >= self._relay_recover_after
+        check_recovery = self._recovery_hint or now >= self._relay_recover_after
+        self._recovery_hint = False
         run_read = getattr(self.store, "run_read", self.store.run)
         has_continuations, has_recovery, has_dispatch, next_due_at = await run_read(
             self._probe_tick, capacity, check_recovery
         )
         if check_recovery:
-            self._relay_recover_after = now + (
-                5 if has_continuations or has_recovery else IDLE_POLL_SECONDS
-            )
+            self._recovery_pending = has_continuations or has_recovery
+            self._relay_recover_after = now + (5 if self._recovery_pending else IDLE_POLL_SECONDS)
             if (
                 self._full_event_recovery_at is not None
                 and now >= self._full_event_recovery_at

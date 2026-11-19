@@ -90,6 +90,17 @@ def device_rows(store, runtime, principal):
     return rows
 
 
+def _remove_device(store, auth, request, device_id):
+    with store.transaction():
+        principal = auth.panel(request, True)
+        iam.require_device(store, principal, device_id, manage=True)
+        if store.one("SELECT id FROM projects WHERE device_id=? LIMIT 1", (device_id,)):
+            raise DevError("DEVICE_HAS_PROJECTS", "请先移除这个设备的项目映射", 409)
+        store.execute("DELETE FROM device_presence WHERE device_id=?", (device_id,))
+        store.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        store.audit(principal.actor, "device.deleted", device_id)
+
+
 def make_devices_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
@@ -195,16 +206,7 @@ def make_devices_router(context: HubContext):
 
     @router.delete("/api/devices/{id}")
     async def delete_device(id: str, request: Request):
-        def remove():
-            with store.lock, store.db:
-                principal = auth.panel(request, True)
-                iam.require_device(store, principal, id, manage=True)
-                if store.one("SELECT id FROM projects WHERE device_id=? LIMIT 1", (id,)):
-                    raise DevError("DEVICE_HAS_PROJECTS", "请先移除这个设备的项目映射", 409)
-                store.execute("DELETE FROM devices WHERE id=?", (id,))
-                store.audit(principal.actor, "device.deleted", id)
-
-        await store.run(remove)
+        await store.run(_remove_device, store, auth, request, id)
         await runtime.disconnect_device(id, "Device removed")
         return {"ok": True}
 

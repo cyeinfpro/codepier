@@ -7,6 +7,7 @@ import json
 import os
 
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from shared.mcp_presentation import error_view
 from shared.util import DevError
 
@@ -82,7 +83,7 @@ class Streams:
     def _reap_stale(self):
         for key, stop in list(self.active.items()):
             task = self._tasks.get(key)
-            if stop.is_set() or (task is not None and task.done()):
+            if task is not None and task.done():
                 self._release_key(key, stop)
 
     def _release_key(self, key, stop=None):
@@ -158,7 +159,7 @@ class Streams:
             separators=(",", ":"),
         ).encode("utf-8")
 
-    async def _response_events(self, work, stop, key, identifier):
+    async def _response_events(self, work, stop, identifier):
         try:
             yield b": keepalive\n\n"
             while not work.done():
@@ -185,8 +186,6 @@ class Streams:
                 yield b"event: message\ndata: " + response.body + b"\n\n"
         finally:
             stop.set()
-            if key is not None:
-                self._release_key(key, stop)
 
     async def respond(self, request, handler):
         ready = asyncio.get_running_loop().create_future()
@@ -208,10 +207,11 @@ class Streams:
 
         stop = ready.result()
         meta = self._stop_meta.get(id(stop))
-        key, identifier = meta if meta is not None else (None, None)
+        _, identifier = meta if meta is not None else (None, None)
 
         return StreamingResponse(
-            self._response_events(work, stop, key, identifier),
+            self._response_events(work, stop, identifier),
+            background=BackgroundTask(stop.set),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "private, no-store",

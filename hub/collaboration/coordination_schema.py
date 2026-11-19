@@ -28,6 +28,8 @@ def migrate(db):
         created REAL NOT NULL, updated REAL NOT NULL
     );
     CREATE INDEX IF NOT EXISTS coordination_work_goal ON coordination_work(goal_id,created,id);
+    CREATE INDEX IF NOT EXISTS coordination_work_live_lease ON coordination_work(lease_until)
+    WHERE state IN ('leased','running') AND lease_until IS NOT NULL;
     CREATE TABLE IF NOT EXISTS coordination_attempts (
         work_item_id TEXT NOT NULL REFERENCES coordination_work(id), attempt INTEGER NOT NULL,
         fencing_token INTEGER NOT NULL, grant_id TEXT NOT NULL, created REAL NOT NULL,

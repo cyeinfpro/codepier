@@ -197,3 +197,74 @@ def test_all_error_batch_does_not_prove_read_success(evidence):
         {'ok':False,'path':'blocked','error':{'code':'PROTECTED_PATH'}}]})
     e.service.returned(e.principal, 'read', {}, {'operation_id':identifier})
     assert next(x for x in snapshot(e)['layers'] if x['id'] == 'readonly')['status'] == 'unknown'
+
+
+def test_completed_read_with_evicted_context_uses_precompletion_mapping(evidence):
+    e = evidence
+    e.runtime._remember_evidence_context = lambda *_a, **_kw: None
+    identifier = completed_read(e)
+    assert not e.runtime._evidence_contexts
+    row = e.store.one("SELECT detail FROM mcp_connection_evidence WHERE stage='readonly'")
+    assert json.loads(row['detail'])['operation_id'] == identifier
+
+
+def test_completed_read_rechecks_naturally_expired_grant(evidence, monkeypatch):
+    from hub import grant_expiry
+    from shared.contracts import TOOLS
+
+    e = evidence
+    now = time.time()
+    e.store.execute(
+        'UPDATE grant_expirations SET expires=? WHERE grant_id=?',
+        (now + 10, e.principal.grant_id),
+    )
+    project = e.runtime.project('project', e.principal)
+    args = TOOLS['read'].model.model_validate(
+        {'project': 'fixture', 'path': 'README.md', 'idempotency_key': 'expires-during-read'}
+    ).model_dump()
+    identifier, _ = e.runtime._admit_operation('read', args, project, e.principal)
+    assert identifier in e.runtime._evidence_contexts
+    revision = e.store.session_revision
+    monkeypatch.setattr(grant_expiry, 'time', SimpleNamespace(time=lambda: now + 11))
+    assert revision == e.store.session_revision
+    op = e.store.one('SELECT id FROM operations WHERE id=?', (identifier,))
+    result = {'ok': True, 'data': {'path': 'README.md', 'sha256': 'a' * 64, 'content': 'fixture'}}
+    e.runtime.complete(op, result)
+    assert e.store.one('SELECT state FROM operations WHERE id=?', (identifier,))['state'] == 'succeeded'
+    assert not e.store.one("SELECT detail FROM mcp_connection_evidence WHERE stage='readonly'")
+    assert e.service.write_errors == 0
+
+
+@pytest.mark.parametrize('invalid', ['NaN', 'inf', '-inf', '-1'])
+def test_invalid_evidence_dedup_environment_rejected(evidence, monkeypatch, invalid):
+    from hub.connection_evidence import ConnectionEvidence
+    from shared.config import ConfigurationError
+
+    monkeypatch.setenv('CODEPIER_EVIDENCE_DEDUP_SECONDS', invalid)
+    with pytest.raises(ConfigurationError, match='finite number'):
+        ConnectionEvidence(evidence.runtime)
+
+
+def test_cached_read_mapping_is_invalidated_by_other_writer(evidence):
+    from contextlib import closing
+    import sqlite3
+
+    from shared.contracts import TOOLS
+
+    e = evidence
+    project = e.runtime.project('project', e.principal)
+    args = TOOLS['read'].model.model_validate(
+        {'project': 'fixture', 'path': 'README.md', 'idempotency_key': 'out-of-process-remap'}
+    ).model_dump()
+    identifier, _ = e.runtime._admit_operation('read', args, project, e.principal)
+    assert identifier in e.runtime._evidence_contexts
+    before = e.store.epoch_stamp()
+    with closing(sqlite3.connect(e.store.state_directory / 'hub.sqlite3')) as other, other:
+        other.execute("UPDATE projects SET root='/changed-fixture' WHERE id='project'")
+    after = e.store.epoch_stamp()
+    assert after[0] > before[0] and after[1] == before[1]
+    op = e.store.one('SELECT id FROM operations WHERE id=?', (identifier,))
+    result = {'ok': True, 'data': {'path': 'README.md', 'sha256': 'a' * 64, 'content': 'fixture'}}
+    e.runtime.complete(op, result)
+    assert e.store.one('SELECT state FROM operations WHERE id=?', (identifier,))['state'] == 'succeeded'
+    assert not e.store.one("SELECT detail FROM mcp_connection_evidence WHERE stage='readonly'")

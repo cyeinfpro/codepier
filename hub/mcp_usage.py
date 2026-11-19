@@ -52,14 +52,17 @@ class MCPUsage:
         self.prune()
 
     def prune(self):
-        # The row quota applies on every insert, including many requests in one
-        # timestamp. The time quota and parent existence are checked on reads too.
+        # Time/orphan cleanup runs at collector startup and on the finish cadence.
         self.store.execute(
             "DELETE FROM mcp_usage WHERE created<? OR activity_id NOT IN (SELECT id FROM mcp_activity)",
             (time.time() - RETENTION_SECONDS,),
         )
+        self._cap_rows()
+
+    def _cap_rows(self):
+        # One ordered primary-key cutoff and range deletion, without an id set.
         self.store.execute(
-            "DELETE FROM mcp_usage WHERE activity_id NOT IN (SELECT activity_id FROM mcp_usage ORDER BY activity_id DESC LIMIT ?)",
+            "DELETE FROM mcp_usage WHERE activity_id <= (SELECT activity_id FROM mcp_usage ORDER BY activity_id DESC LIMIT 1 OFFSET ?)",
             (MAX_ROWS,),
         )
 
@@ -73,7 +76,7 @@ class MCPUsage:
             "INSERT OR IGNORE INTO mcp_usage(activity_id,created,metrics) SELECT id,?,? FROM mcp_activity WHERE id=?",
             (time.time(), encoded, activity_id),
         )
-        self.prune()
+        self._cap_rows()
 
     def enrich(self, rows):
         # Only IDs already projected through activity's current IAM filters.

@@ -79,6 +79,7 @@ class Session:
         self.resolver, self.transport = resolver, transport
         self.client = None
         self.concurrency = _connector_concurrency(connector, concurrency)
+        self.close_lock = asyncio.Lock()
         self.lock = asyncio.Lock()
         self.condition = asyncio.Condition(self.lock)
         self.waiters = deque()
@@ -96,11 +97,12 @@ class Session:
         self.invalid = False
 
     async def _close_transport(self):
-        client, self.client = self.client, None
-        self.version = self.session_id = None
-        self.stateless = False
-        if client is not None:
-            await client.aclose()
+        async with self.close_lock:
+            client, self.client = self.client, None
+            self.version = self.session_id = None
+            self.stateless = False
+            if client is not None:
+                await client.aclose()
 
     async def close(self, *, drain_seconds=CLOSE_DRAIN_SECONDS):
         # Stop admission immediately, even if initialization is currently running
@@ -112,8 +114,8 @@ class Session:
             async with asyncio.timeout(drain_seconds):
                 async with self.condition:
                     self.condition.notify_all()
-                    await self.condition.wait_for(lambda: not self.active)
-                    should_close = not self.initializing
+                    await self.condition.wait_for(lambda: not self.active and not self.initializing)
+                    should_close = True
         except TimeoutError:
             pass
         if should_close:
@@ -151,10 +153,11 @@ class Session:
         self.condition.notify_all()
         return admitted
 
-    async def _cancel_admission(self, ticket):
+    async def _cancel_admission(self, ticket, *, owns_initialization):
         should_close = False
         async with self.condition:
-            self.initializing = False
+            if owns_initialization:
+                self.initializing = False
             if ticket in self.waiters:
                 self.waiters.remove(ticket)
             self.condition.notify_all()
@@ -169,6 +172,7 @@ class Session:
         started = time.monotonic()
         admitted = None
         initialized_once = False
+        do_init = False
         try:
             while True:
                 do_init = False
@@ -198,10 +202,11 @@ class Session:
                     initialized_once = True
                     async with self.condition:
                         self.initializing = False
+                        do_init = False
                         self.condition.notify_all()
         except BaseException:
             if admitted is None:
-                await self._cancel_admission(ticket)
+                await self._cancel_admission(ticket, owns_initialization=do_init)
             raise
         try:
             yield

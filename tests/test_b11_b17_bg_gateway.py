@@ -377,18 +377,19 @@ async def test_remote_mcp_initialize_releases_condition_and_supports_concurrency
     await asyncio.sleep(0.02)
     assert len(session.waiters) == 2
 
-    # close() must acquire self.condition, wake concurrent waiters, and finish immediately.
-    started = time.monotonic()
-    await asyncio.wait_for(session.close(drain_seconds=1.0), timeout=0.5)
-    assert time.monotonic() - started < 0.5
-
+    # A queued caller cannot clear the initializer's ownership. close()
+    # rejects new admission immediately but drains the real handshake.
+    closing = asyncio.create_task(session.close(drain_seconds=1.0))
     with pytest.raises(DevError) as closed_exc:
         await asyncio.wait_for(second, timeout=0.5)
     assert closed_exc.value.code == "GATEWAY_CLOSED"
+    assert session.initializing and not closing.done()
 
     allow_init.set()
     with pytest.raises((DevError, BackendError, asyncio.CancelledError)):
         await asyncio.wait_for(first, timeout=1.0)
+    await asyncio.wait_for(closing, timeout=0.5)
+    assert session.client is None
 
     # Part 1b: On initialize() failure, initializing resets and wakes next waiter.
     attempts = 0

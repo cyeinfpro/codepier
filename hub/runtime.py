@@ -130,7 +130,7 @@ _CONTROL_FRAME_TYPES = frozenset(
     }
 )
 _SEND_QUEUE_LIMIT = 512
-_REPLY_ENQUEUE_TIMEOUT_SECONDS = 30.0
+_REPLY_ENQUEUE_TIMEOUT_SECONDS = 45.0
 
 
 class _OutboundFrame:
@@ -191,6 +191,8 @@ class Connection:
         self._queue_event: asyncio.Event | None = None
         self._writer_task: asyncio.Task | None = None
         self._closing = False
+        self._draining = False
+        self.registration = None
 
     @staticmethod
     def _is_control_frame(body) -> bool:
@@ -265,6 +267,9 @@ class Connection:
             self._resolve_frame(item, True)
             return
         if item.cancelled or (item.future is not None and item.future.done()):
+            return
+        if self._draining and item.body.get("type") == "call":
+            self._resolve_frame(item, False)
             return
         if self.unusable or self._closing:
             self._fail_frame(item, ConnectionError("Authenticated channel is no longer usable"))
@@ -397,6 +402,12 @@ class Connection:
             item.cancelled = True
             raise
 
+    async def send_shutdown(self, window: float) -> None:
+        # Calls already being transmitted always precede this control frame.
+        # Calls still queued must not follow a reconnect advisory on the wire.
+        self._draining = True
+        await self.send({"type": "going_away", "reconnect_window_seconds": window})
+
     async def flush_control(self, wait_seconds: float = 1.0) -> None:
         """Drain queued priority control frames (e.g., ACKs) before WebSocket detach."""
         if (
@@ -450,7 +461,7 @@ class Runtime:
         self.watchers: set[asyncio.Queue] = set()
         self.dispatch_locks = weakref.WeakValueDictionary()
         self.delivery_locks = weakref.WeakValueDictionary()
-        self._evidence_contexts: dict[str, tuple[dict, object, object, int]] = {}
+        self._evidence_contexts: dict[str, tuple[dict, object, object, tuple[int, int]]] = {}
         self._handshake_tokens = 16.0
         self._handshake_updated = time.monotonic()
         self.stopping = False
@@ -687,9 +698,8 @@ class Runtime:
 
     def device_runtime_snapshot(self, device_id: str, fallback_info: dict | None = None):
         connection = self.connections.get(device_id)
-        snapshot = getattr(connection, "runtime_snapshot", None) if connection is not None else None
-        if snapshot is not None:
-            return snapshot
+        if connection is not None and not connection.unusable:
+            return getattr(connection, "runtime_snapshot", None)
         presence = self.store.one(
             "SELECT runtime_info FROM device_presence WHERE device_id=?",
             (device_id,),
@@ -714,16 +724,26 @@ class Runtime:
             else None
         )
         self.store.execute(
-            "INSERT INTO device_presence(device_id,last_seen,runtime_info,updated_at) VALUES(?,?,?,?) "
+            "INSERT INTO device_presence(device_id,last_seen,runtime_info,updated_at) "
+            "SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM devices WHERE id=?) "
             "ON CONFLICT(device_id) DO UPDATE SET "
-            "last_seen=COALESCE(excluded.last_seen,device_presence.last_seen),"
-            "runtime_info=COALESCE(excluded.runtime_info,device_presence.runtime_info),"
-            "updated_at=excluded.updated_at",
-            (device_id, last_seen, runtime_json, time.time()),
+            "last_seen=excluded.last_seen,runtime_info=excluded.runtime_info,"
+            "updated_at=excluded.updated_at WHERE excluded.last_seen >= device_presence.last_seen "
+            "OR device_presence.last_seen IS NULL",
+            (device_id, last_seen, runtime_json, time.time(), device_id),
             security_write=False,
         )
 
-    def _remember_evidence_context(self, operation_id: str, *, payload: dict, principal, project):
+    def _remember_evidence_context(
+        self, operation_id: str, *, payload: dict, principal, project, tool
+    ):
+        if tool != "read" or principal is None or not principal.grant_id or project is None:
+            return
+        try:
+            epoch = self.store.epoch_stamp()
+        except Exception:
+            # Optional evidence must not change the admission outcome.
+            return
         if len(self._evidence_contexts) >= 2048:
             with contextlib.suppress(StopIteration):
                 self._evidence_contexts.pop(next(iter(self._evidence_contexts)))
@@ -731,7 +751,7 @@ class Runtime:
             payload,
             principal,
             project,
-            self.store.session_revision,
+            epoch,
         )
 
     def connection_authorized(self, device_id, connection, *, allow_cache=False):
@@ -779,18 +799,22 @@ class Runtime:
         # Production attach/detach runs on the owning event loop. Keep this
         # identity check and removal synchronous: an old socket must never
         # remove the authenticated replacement while awaiting its cleanup.
-        if self.connections.get(device_id) is not connection:
-            return False
-        self.connections.pop(device_id, None)
+        current = self.connections.get(device_id) is connection
+        if current:
+            self.connections.pop(device_id, None)
         if hasattr(connection, "close"):
             connection.close()
         else:
             connection.unusable = True
+        if not current:
+            return False
         self.delivery_metrics.connection("disconnected")
         return True
 
     def _record_disconnect(self, device_id, connection):
         self.computer_approvals.drop(connection)
+        if device_id in self.connections:
+            return
         last_seen = getattr(connection, "last_seen", None)
         if last_seen is not None:
             with contextlib.suppress(Exception):
@@ -2112,7 +2136,7 @@ class Runtime:
                 "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理",
                 409,
             )
-        if op["tool"] not in PROCESS_TOOLS | CANCELLABLE_READ_TOOLS and op["attempts"]:
+        if op_tool not in PROCESS_TOOLS and not is_cancellable_read and op["attempts"]:
             raise DevError(
                 "NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复"
             )
@@ -2588,6 +2612,7 @@ class Runtime:
                     },
                     principal=principal,
                     project=project,
+                    tool=name,
                 )
         return id, None
 
@@ -3240,6 +3265,7 @@ class Runtime:
                 },
                 principal=delivery_principal if not denied else None,
                 project=project if not denied else None,
+                tool=op["tool"],
             )
             denied = denied or self.collaboration.coordination.operation_denial(op)
             if retain_source:
@@ -3639,13 +3665,13 @@ class Runtime:
         # request. The durable encrypted payload was already cleared above.
         ctx = self._evidence_contexts.pop(op["id"], None)
         evidence_kwargs = {"state": state, "completed_at": time.time()}
-        if ctx is not None:
-            cached_payload, cached_principal, cached_project, cached_rev = ctx
-            evidence_kwargs["payload"] = cached_payload
-            if cached_rev == self.store.session_revision:
-                evidence_kwargs["principal"] = cached_principal
-                evidence_kwargs["project"] = cached_project
         try:
+            if ctx is not None:
+                cached_payload, cached_principal, cached_project, cached_epoch = ctx
+                evidence_kwargs["payload"] = cached_payload
+                if cached_epoch == self.store.epoch_stamp():
+                    evidence_kwargs["principal"] = cached_principal
+                    evidence_kwargs["project"] = cached_project
             self.diagnostics.connection.completed(op, result, **evidence_kwargs)
         except Exception:
             self.diagnostics.connection.write_errors += 1
@@ -3940,9 +3966,15 @@ class Runtime:
             self.store.audit(
                 "device:" + device["name"], "device.connected", device_id, target_kind="device"
             )
-            self.publish("device", {"id": device_id, "online": True})
-            self.wake_delivery()
+            self.store.after_commit(lambda: self._publish_registration(device_id, connection, info))
         return True
+
+    def _publish_registration(self, device_id, connection, info):
+        if self.connections.get(device_id) is not connection:
+            return
+        connection.registration = (time.time(), dict(info))
+        self.publish("device", {"id": device_id, "online": True})
+        self.wake_delivery()
 
     def _receive_agent_frame(self, device_id, connection, info, data):
         """One queued phase per authenticated frame, in wire receive order.
@@ -4201,10 +4233,7 @@ class Runtime:
                     if not await connection.enqueue_reply(reply):
                         break
 
-        except WebSocketDisconnect:
-            if connection is not None and not connection.unusable:
-                await connection.flush_control(1.0)
-        except asyncio.TimeoutError:
+        except (WebSocketDisconnect, asyncio.TimeoutError):
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -4241,7 +4270,7 @@ class Runtime:
 
         async def notify(connection):
             with contextlib.suppress(ConnectionError, OSError, TimeoutError, RuntimeError):
-                await connection.send({"type": "going_away", "reconnect_window_seconds": window})
+                await connection.send_shutdown(window)
 
         if connections:
             try:

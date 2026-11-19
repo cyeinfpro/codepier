@@ -376,3 +376,33 @@ def test_public_schema_keeps_flat_discovery_and_strict_server_actions():
     assert not any(key in query for key in ('oneOf','anyOf'))
     with pytest.raises(DevError):
         resolve('collaboration_query', {'action':'dot_recovery','project':'proj','dot_id':'dot','command':'not allowed'})
+
+
+def test_disconnected_live_hub_does_not_loosen_node_freshness(collab):
+    c = duplex(collab)
+    _, item = task(c)
+    read_operation(c, item)
+    last_seen = c.s.clock() - 60
+    c.s.store.execute(
+        "INSERT INTO device_presence(device_id,last_seen) VALUES (?,?)",
+        ("dev", last_seen),
+    )
+    assert c.s.runtime.connections == {}
+    row = c.s.store.one("SELECT * FROM coordination_work WHERE id=?", (item["id"],))
+    result = c.s.task_liveness.work_summary([row])[item["id"]]
+    assert result["last_node_contact_at"] == last_seen
+    assert result["node_contact_freshness"] == "stale"
+
+
+def test_expired_work_lease_immediately_wakes_reconcile_probe(collab):
+    from hub.collaboration.lifecycle import CollaborationLoops
+
+    c = duplex(collab)
+    _, item = task(c)
+    loops = CollaborationLoops(c.s)
+    assert not loops._probe_reconcile()[2]
+    c.s.store.execute(
+        "UPDATE coordination_work SET state='leased',lease_until=? WHERE id=?",
+        (c.s.clock() - 1, item["id"]),
+    )
+    assert loops._probe_reconcile()[2]

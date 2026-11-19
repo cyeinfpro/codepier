@@ -401,3 +401,21 @@ async def test_slow_device_does_not_block_a_later_device_tick(delivery, monkeypa
         e.runtime.stopping = True
         e.runtime.wake.set()
         await asyncio.wait_for(loop, 3)
+
+
+@pytest.mark.parametrize('probe', [False, True])
+def test_delivered_computer_status_cancellation_uses_effective_scope(delivery, probe):
+    e = delivery
+    args = TOOLS['computer_status'].model.model_validate({'project': 'hot', 'probe': probe}).model_dump()
+    project = e.runtime.project('hot', e.viewer)
+    identifier, _ = e.runtime._admit_operation('computer_status', args, project, e.viewer)
+    e.store.execute("UPDATE operations SET attempts=1 WHERE id=?", (identifier,))
+    if probe:
+        with pytest.raises(DevError) as denied:
+            e.runtime._cancel(identifier, e.viewer)
+        assert denied.value.code == 'NOT_CANCELLABLE'
+        assert not e.store.one("SELECT cancel_requested FROM operations WHERE id=?", (identifier,))[
+            'cancel_requested'
+        ]
+    else:
+        assert e.runtime._cancel(identifier, e.viewer)['cancel_requested']

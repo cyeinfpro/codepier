@@ -67,11 +67,11 @@ def test_heartbeat_without_security_change_keeps_security_epoch_and_revision_sta
             _persisted_last_seen=time.time(),
             scheduler_protocol=1,
             unusable=False,
-            device_secret=None,
+            device_secret=store.one("SELECT secret FROM devices WHERE id='dev'")["secret"],
             runtime_snapshot=None,
         )
         runtime.connections["dev"] = conn
-        runtime.connection_authorized = lambda device_id, c: c is conn
+        assert runtime.connection_authorized("dev", conn)
 
         info = {
             "build": {"version": "1.0"},
@@ -165,7 +165,10 @@ def test_heartbeat_without_security_change_keeps_security_epoch_and_revision_sta
 
         # Non-security metadata write to `meta` bumps config_revision without security_epoch churn.
         cfg_before = store.config_revision
-        store.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('public_url','https://x.test')")
+        store.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('room_waiting_inputs_cursor',?)",
+            ("cursor",),
+        )
         assert store.config_revision > cfg_before
         assert store.security_epoch() == epoch_before
         assert store.session_revision == rev_before
@@ -208,13 +211,13 @@ async def test_store_synchronous_normal_override_and_operations_read_decoupling(
         store_default.close()
 
     monkeypatch.setenv("CODEPIER_SQLITE_SYNCHRONOUS", "NORMAL")
-    store_full = Store(tmp_path / "full_hub")
+    store_normal = Store(tmp_path / "normal_hub")
     try:
-        with store_full.lock:
-            mode = store_full.db.execute("PRAGMA synchronous").fetchone()[0]
+        with store_normal.lock:
+            mode = store_normal.db.execute("PRAGMA synchronous").fetchone()[0]
         assert mode == 1  # NORMAL
     finally:
-        store_full.close()
+        store_normal.close()
 
     monkeypatch.setenv("CODEPIER_SQLITE_SYNCHRONOUS", "OFF")
     with pytest.raises(ValueError, match="CODEPIER_SQLITE_SYNCHRONOUS"):
@@ -643,3 +646,56 @@ async def test_device_dispatch_lock_decoupled_from_prepare_and_wait_for_operatio
     finally:
         await runtime.stop()
         await store.aclose()
+
+
+def test_storage_hooks_cover_explicit_write_fence_and_script_commit(tmp_path):
+    store, _ = _seed_hub(tmp_path)
+    try:
+        initial_revision = store.session_revision
+        store.execute("SELECT 1 /* normal read */")
+        row = store.execute(
+            "WITH first AS (SELECT 1), next AS (SELECT 2) SELECT * FROM next"
+        )
+        with store.lock:
+            assert row.fetchone()[0] == 2
+        assert store.session_revision == initial_revision
+        store.execute("DELETE FROM operations WHERE id=?", ("absent",), security_write=True)
+        assert store.session_revision > initial_revision
+
+        session, config = store.session_revision, store.config_revision
+        with store.lock:
+            store.db.executescript("CREATE TABLE local_audit_test(id INTEGER);")
+        assert store.session_revision > session and store.config_revision > config
+    finally:
+        store.close()
+
+
+def test_authorization_meta_epoch_crosses_connection_boundary(tmp_path):
+    store, _ = _seed_hub(tmp_path)
+    try:
+        old_stamp = store.epoch_stamp()
+        local_revision = store.session_revision
+        store.execute(
+            "INSERT INTO meta(key,value) VALUES ('public_url',?)",
+            ("https://audience.invalid",),
+        )
+        assert store.epoch_stamp() != old_stamp
+        assert store.session_revision > local_revision
+        first = store.security_epoch()
+        with sqlite3.connect(store.state_directory / "hub.sqlite3") as writer:
+            writer.execute("UPDATE meta SET value=? WHERE key='public_url'", ("https://other.invalid",))
+        assert store.security_epoch() > first
+        at = store.security_epoch()
+        local_revision = store.session_revision
+        store.execute(
+            "INSERT OR REPLACE INTO meta VALUES ('room_waiting_inputs_cursor',?)",
+            ("scan-position",),
+        )
+        assert store.security_epoch() == at
+        assert store.session_revision == local_revision
+        with pytest.raises(ValueError), store.transaction():
+            store.execute("DELETE FROM meta WHERE key='public_url'")
+            raise ValueError("abort test transaction")
+        assert store.security_epoch() == at
+    finally:
+        store.close()

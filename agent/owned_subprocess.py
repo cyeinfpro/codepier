@@ -17,13 +17,16 @@ from agent.owned_process_group import stop_owned_group
 
 
 class OwnedProcess:
-    def __init__(self, process):
+    def __init__(self, process, *, limit=2**16):
         self._process = process
         self.pid = process.pid
         self._observed = None
         self._released = False
         self._stop_lock = asyncio.Lock()
-        self.stdout = asyncio.StreamReader()
+        self.stdout = asyncio.StreamReader(limit=limit)
+        self.stderr = None
+        self.stdin = None
+        self._stdio_transports = []
         self._transport = None
 
     @property
@@ -108,16 +111,43 @@ class OwnedProcess:
             if cancellation is not None:
                 raise cancellation
 
+    async def attach_stdio(self, limit):
+        loop = asyncio.get_running_loop()
+        if self._process.stderr is not None:
+            self.stderr = asyncio.StreamReader(limit=limit)
+            transport, _ = await loop.connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(self.stderr), self._process.stderr
+            )
+            self._stdio_transports.append(transport)
+        if self._process.stdin is not None:
+            transport, protocol = await loop.connect_write_pipe(
+                lambda: asyncio.streams.FlowControlMixin(loop=loop), self._process.stdin
+            )
+            self._stdio_transports.append(transport)
+            self.stdin = asyncio.StreamWriter(transport, protocol, None, loop)
 
-async def create_owned_process(*command, **options):
+    def close_stdio(self):
+        for transport in [self._transport, *self._stdio_transports]:
+            if transport is not None:
+                transport.close()
+        for pipe in (self._process.stdin, self._process.stdout, self._process.stderr):
+            if pipe is not None and not pipe.closed:
+                pipe.close()
+
+
+async def create_owned_process(*command, limit=2**16, **options):
     process = await asyncio.to_thread(subprocess.Popen, command, **options)
-    owned = OwnedProcess(process)
+    owned = OwnedProcess(process, limit=limit)
     try:
         loop = asyncio.get_running_loop()
         owned._transport, _ = await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(owned.stdout), process.stdout
         )
+        await owned.attach_stdio(limit)
     except BaseException:
-        await owned.stop_owned()
+        try:
+            await owned.stop_owned()
+        finally:
+            owned.close_stdio()
         raise
     return owned

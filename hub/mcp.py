@@ -363,12 +363,10 @@ async def _capture_rpc_output(runtime, trace, response_body):
         final_result = response_body["result"]
         if isinstance(final_result, CreatedTask):
             final_result = final_result.body
-        await asyncio.get_running_loop().run_in_executor(
-            _METERING_EXECUTOR,
-            runtime.integrations.capture_output,
-            trace,
-            final_result,
+        output = await asyncio.get_running_loop().run_in_executor(
+            _METERING_EXECUTOR, runtime.integrations.measure_output, final_result
         )
+        runtime.integrations.set_output_metric(trace, output)
     except Exception:
         runtime.integrations.write_errors += 1
 

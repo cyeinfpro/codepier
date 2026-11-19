@@ -365,24 +365,29 @@ class HubIntegrations:
             self.write_errors += 1
         return trace
 
-    def capture_output(self, trace, result):
-        if not trace:
+    @staticmethod
+    def measure_output(result):
+        output = estimate_output(result)
+        ratio = output.get("mirror_overhead_ratio")
+        if isinstance(ratio, (int, float)) and not math.isfinite(ratio):
+            output["mirror_overhead_ratio"] = None
+        return output
+
+    @staticmethod
+    def set_output_metric(trace, output):
+        if not trace or trace["finished"]:
             return
-        try:
-            metrics = trace.setdefault("token_usage", usage())
-            output_metric = estimate_output(result)
-            metrics["output"] = output_metric
-            wire_tokens = output_metric.get("wire_tokens_est")
-            semantic_tokens = output_metric.get("semantic_tokens_est")
-            overhead_ratio = output_metric.get("mirror_overhead_ratio")
-            if isinstance(overhead_ratio, (int, float)) and not math.isfinite(overhead_ratio):
-                overhead_ratio = None
-                output_metric["mirror_overhead_ratio"] = None
-            metrics["wire_tokens_est"] = wire_tokens
-            metrics["semantic_tokens_est"] = semantic_tokens
-            metrics["mirror_overhead_ratio"] = overhead_ratio
-        except Exception:
-            self.write_errors += 1
+        metrics = trace.setdefault("token_usage", usage())
+        metrics["output"] = output
+        for key in ("wire_tokens_est", "semantic_tokens_est", "mirror_overhead_ratio"):
+            metrics[key] = output.get(key)
+
+    def capture_output(self, trace, result):
+        if trace:
+            try:
+                self.set_output_metric(trace, self.measure_output(result))
+            except Exception:
+                self.write_errors += 1
 
     def finish(self, trace, *, status=None):
         if not trace or trace["finished"]:
@@ -409,7 +414,6 @@ class HubIntegrations:
         if len(self.previous) > 1000:
             self.previous.pop(next(iter(self.previous)))
         self._finishes_since_prune += 1
-        should_prune = self._finishes_since_prune >= 500 or (now - self._last_prune_at) >= 300.0
         try:
             with self.store.transaction():
                 self.store.execute(
@@ -421,21 +425,37 @@ class HubIntegrations:
                         trace["id"],
                     ),
                 )
-                if should_prune:
-                    # Bounded retained metadata only; no tool arguments or outputs.
-                    self.store.execute(
-                        "DELETE FROM mcp_activity WHERE id < (SELECT COALESCE(MAX(id),0)-10000 FROM mcp_activity)"
-                    )
-                    self._finishes_since_prune = 0
-                    self._last_prune_at = now
-                if self.usage_metrics and trace.get("token_usage"):
-                    try:
-                        with self.store.savepoint():
-                            self.usage_metrics.record(trace["id"], trace["token_usage"])
-                    except Exception:
-                        self.write_errors += 1
+                self._record_finish_usage(trace)
+                self._prune_finishes(now)
         except Exception:
             self.write_errors += 1
+
+    def _record_finish_usage(self, trace):
+        if self.usage_metrics and trace.get("token_usage"):
+            try:
+                with self.store.savepoint():
+                    self.usage_metrics.record(trace["id"], trace["token_usage"])
+            except Exception:
+                self.write_errors += 1
+
+    def _prune_finishes(self, now):
+        if self._finishes_since_prune < 500 and now - self._last_prune_at < 300.0:
+            return
+        try:
+            with self.store.savepoint():
+                self.store.execute(
+                    "DELETE FROM mcp_activity WHERE id < (SELECT COALESCE(MAX(id),0)-10000 FROM mcp_activity)"
+                )
+                if self.usage_metrics:
+                    self.usage_metrics.prune()
+        except Exception:
+            self.write_errors += 1
+        else:
+            self.store.after_commit(lambda: self._finish_prune_committed(now))
+
+    def _finish_prune_committed(self, now):
+        self._finishes_since_prune = 0
+        self._last_prune_at = now
 
     def usage(self, args, principal):
         return self.activity(args, principal)

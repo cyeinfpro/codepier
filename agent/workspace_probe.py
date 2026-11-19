@@ -264,10 +264,16 @@ class ReadWorker:
         return self
 
     async def __aexit__(self, *exc):
+        expired = isinstance(exc[1], DevError) and exc[1].code == "QUEUE_EXPIRED"
         if self.epoch is not None:
             self.pool.leased -= 1
+            if expired and not self.failed and not self.complete and self.index:
+                _, cancelled = await _finish(asyncio.create_task(self._release_expired_lease()))
+                if cancelled:
+                    await _finish(asyncio.create_task(_reap(self.process)))
+                    raise asyncio.CancelledError
             if (
-                exc[0] is None
+                (exc[0] is None or expired)
                 and not self.pool.closed
                 and self.complete
                 and not self.failed
@@ -286,14 +292,7 @@ class ReadWorker:
             raise DevError("INVALID_REQUEST", "仅已完成的准入会话可正常结束")
         budget = effective_probe_timeout(timeout_seconds)
         if self.epoch is not None:
-            async with asyncio.timeout(budget):
-                self.process.stdin.write(json.dumps({"release_lease": self.epoch}).encode() + b"\n")
-                await self.process.stdin.drain()
-                ack = decode_result(await self.process.stdout.readline())
-                if ack.get("lease_epoch") != self.epoch or not ack["ok"]:
-                    raise DevError("PROJECT_DISCOVERY_FAILED", "独立读取进程租约结束回执无效")
-                self.complete = True
-            return
+            return await self._release_lease(budget)
         self.failed = True
         self.process.stdin.close()
         try:
@@ -303,6 +302,23 @@ class ReadWorker:
             raise DevError("PROJECT_DISCOVERY_TIMEOUT", "项目准入读取进程结束超时") from exc
         if self.process.returncode:
             raise DevError("PROJECT_DISCOVERY_FAILED", "项目准入读取进程异常退出")
+
+    async def _release_expired_lease(self):
+        with contextlib.suppress(DevError, OSError):
+            await self._release_lease(PROBE_TIMEOUT)
+
+    async def _release_lease(self, budget):
+        try:
+            async with asyncio.timeout(budget):
+                self.process.stdin.write(json.dumps({"release_lease": self.epoch}).encode() + b"\n")
+                await self.process.stdin.drain()
+                ack = decode_result(await self.process.stdout.readline())
+                if ack.get("lease_epoch") != self.epoch or not ack["ok"]:
+                    raise DevError("PROJECT_DISCOVERY_FAILED", "独立读取进程租约结束回执无效")
+                self.complete = True
+        except TimeoutError as exc:
+            self.failed = True
+            raise DevError("PROJECT_DISCOVERY_TIMEOUT", "项目准入读取进程结束超时") from exc
 
     async def request(self, payload, *, timeout_seconds=None):
         phases = (("admission",) if self.admission else ()) + ("root", "execute")
@@ -453,12 +469,7 @@ def _session_main(admission, epoch=None, first=None):
                 raise ValueError("frame too large")
             request = json.loads(line)
             if epoch is not None:
-                if (
-                    admission
-                    and phase == "root"
-                    and identity is not None
-                    and request == {"release_lease": epoch}
-                ):
+                if identity is not None and request == {"release_lease": epoch}:
                     print(json.dumps({"lease_epoch": epoch, "ok": True, "data": {}}), flush=True)
                     return True
                 if request.get("lease_epoch") != epoch:

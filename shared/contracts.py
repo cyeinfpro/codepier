@@ -1710,6 +1710,7 @@ class _FrozenList(list):
     def _readonly(self, *args, **kwargs):
         raise TypeError("Cached schema list is read-only")
 
+    __iadd__ = __imul__ = _readonly
     __setitem__ = __delitem__ = append = extend = insert = pop = remove = clear = sort = reverse = (
         _readonly
     )
@@ -1728,6 +1729,8 @@ def freeze_schema(value):
         return _FrozenDict({k: freeze_schema(v) for k, v in value.items()})
     if isinstance(value, list):
         return _FrozenList([freeze_schema(v) for v in value])
+    if isinstance(value, tuple):
+        return tuple(freeze_schema(v) for v in value)
     return value
 
 

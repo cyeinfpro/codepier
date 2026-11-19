@@ -44,7 +44,7 @@ def main():
             value={'capabilities':capabilities,'serverInfo':{'name':'CodePier deterministic LSP fixture','version':'1'}}
         elif method=='textDocument/didOpen':
             doc=params['textDocument'];documents[doc['uri']]=doc['text']
-            if args.mode=='push':send({'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':{'uri':doc['uri'],'version':1,'diagnostics':[{'range':zero,'message':'Fixture diagnostic','severity':2}]}})
+            if args.mode=='push':send({'jsonrpc':'2.0','method':'textDocument/publishDiagnostics','params':{'uri':doc['uri'],'version':doc['version'],'diagnostics':[{'range':zero,'message':'Fixture diagnostic','severity':2}]}})
             continue
         elif method in {'initialized','workspace/didChangeConfiguration'}:continue
         elif method=='shutdown':value=None;marker('shutdown')

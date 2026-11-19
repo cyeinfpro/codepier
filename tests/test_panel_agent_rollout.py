@@ -49,13 +49,18 @@ def device(rig, identifier='d1', version='1.0.0', online=True, space='legacy'):
         VALUES (?,?,?,?,?,?,?)""", (identifier, 'Synthetic ' + identifier, rig.store.encrypt('fixture-device'),
                                     json.dumps(info), time.time(), space, 'owner'))
     if online:
-        connect(rig, identifier)
+        connect(rig, identifier, register=space == "legacy")
     return identifier
 
 
-def connect(rig, identifier):
-    rig.runtime.connections[identifier] = SimpleNamespace(
+def connect(rig, identifier, *, register=True):
+    connection = SimpleNamespace(
         unusable=False, last_seen=time.time(), tool_protocol=negotiate(advertisement('a' * 64)))
+    rig.runtime.connections[identifier] = connection
+    if register:
+        device_row = rig.store.one("SELECT * FROM devices WHERE id=?", (identifier,))
+        assert rig.runtime._register_agent(identifier, connection, json.loads(device_row["info"]), device_row)
+    return connection
 
 
 def prepare(rig):
@@ -216,6 +221,13 @@ async def test_partial_failure_and_agent_rollback_are_terminal(rig):
     info = json.loads(rig.store.one("SELECT info FROM devices WHERE id='bad'")['info'])
     info['management'].update(status='rollback', last_error='Synthetic startup failed; restored old runtime')
     rig.store.execute("UPDATE devices SET info=?,last_seen=1 WHERE id='bad'", (json.dumps(info),))
+    old = rig.runtime.connections['bad']
+    old.last_seen = time.time()  # tail heartbeat from the original process
+    await rig.rollout.tick()
+    assert (await view(rig))['nodes'][0]['state'] == 'awaiting_restart'
+    connect(rig, 'bad', register=False)
+    await rig.rollout.tick()
+    assert (await view(rig))['nodes'][0]['state'] == 'awaiting_restart'
     connect(rig, 'bad')
     await rig.rollout.tick(); await rig.rollout.tick()
     result = await view(rig)

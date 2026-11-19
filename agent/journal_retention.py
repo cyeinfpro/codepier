@@ -161,10 +161,15 @@ def prune(journal, *, now=None, **settings):
                 (expired, row["id"]),
             )
         removed["calls"] = len(rows)
+        cancellation_filter = (
+            "at<? AND id IN (SELECT id FROM calls WHERE result_expired=1 AND acked=1)"
+        )
+        cutoff = now - 7 * DAY
+        cancellations = journal.db.execute(
+            "SELECT id,at FROM cancellations WHERE " + cancellation_filter, (cutoff,)
+        ).fetchall()
         removed["cancellations"] = journal.db.execute(
-            "DELETE FROM cancellations WHERE at<? AND id IN "
-            "(SELECT id FROM calls WHERE result_expired=1 AND acked=1)",
-            (now - 7 * DAY,),
+            "DELETE FROM cancellations WHERE " + cancellation_filter, (cutoff,)
         ).rowcount
         if journal.db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_stages'"
@@ -175,6 +180,7 @@ def prune(journal, *, now=None, **settings):
                 )
         active = _active(journal)
     journal.forget_retired_terminals(row["id"] for row in rows)
+    journal.forget_retired_cancellations(cancellations)
     if active:
         return removed
 

@@ -287,13 +287,14 @@ def test_large_json_secret_and_binary_payloads_are_never_scanned_as_prose():
     value = {"password": "SECRET " * MAX_CHARACTERS, "text": "ok"}
     raw = json.dumps(value)
     measured = estimate_output(output(raw, structuredContent=value))
-    assert measured["characters"] == 2 * len('{"text":"ok"}')
-    assert measured["excluded_fields"] == 2
+    assert measured["characters"] == len('{"text":"ok"}')
+    assert measured["excluded_fields"] == 1
     assert measured["semantic_tokens_est"] < measured["wire_tokens_est"]
     assert "SECRET" not in json.dumps(usage(measured))
     assert not measured["truncated"]
     without_object = estimate_output(output(raw))
-    assert without_object["truncated"] and without_object["characters"] == 0
+    assert without_object["truncated"] and without_object["characters"] <= 2
+    assert without_object["excluded_fields"] == 1
     binary = {"upload_id": "u", "chunk_sha256": "hash", "data": "ABCD"}
     binary["data"] = "A" * MAX_CHARACTERS * 4
     assert not estimate_input(binary)["truncated"]

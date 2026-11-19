@@ -234,6 +234,12 @@ class TaskLiveness:
             tuple(ids),
         )
         contacts = self._live_node_contacts(ids, placeholders)
+        runtime = getattr(self.c, "runtime", None)
+        contact_budget = (
+            LIVE_NODE_FRESHNESS_SECONDS
+            if getattr(runtime, "connections", None) is not None
+            else PERSISTED_NODE_FRESHNESS_SECONDS
+        )
         by_id, now, result = {row["work_item_id"]: row for row in aggregates}, self.c.clock(), {}
         for item in items:
             proof = by_id.get(
@@ -294,9 +300,7 @@ class TaskLiveness:
                 "node_contact_freshness": freshness(
                     proof["last_node_contact_at"],
                     now,
-                    LIVE_NODE_FRESHNESS_SECONDS
-                    if live_contact is not None
-                    else PERSISTED_NODE_FRESHNESS_SECONDS,
+                    contact_budget,
                 ),
                 "consumer_freshness": freshness(last_heartbeat, now, 90),
                 "wait_reason": waiting,

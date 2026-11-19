@@ -76,8 +76,60 @@ def unavailable():
     }
 
 
-def _excluded(key):
+# Linear lexical scan: JSON strings are tokens, never structural delimiters.
+_JSON_TOKEN = re.compile(
+    r'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*'
+    r'(?:"|(?:\\(?:u[0-9a-fA-F]{0,3})?)?\Z)|[{}\[\],:]|[^{}\[\],:"\s]+|\s+'
+)
+_JSON_CLOSE = {"{": "}", "[": "]"}
+
+
+def _load_closed_prefix(prefix, closers):
+    try:
+        return json.loads(prefix + "".join(reversed(closers)))
+    except (ValueError, RecursionError):
+        return None
+
+
+def _partial_json(prefix):
+    """Close a bounded prefix, keeping any values behind excluded keys private."""
+    closers: list[str] = []
+    end = 0
+    for token in _JSON_TOKEN.finditer(prefix):
+        if token.start() != end or len(closers) > MAX_DEPTH:
+            break
+        end = token.end()
+        value = token.group()
+        if value in _JSON_CLOSE:
+            closers.append(_JSON_CLOSE[value])
+        elif closers and value == closers[-1]:
+            closers.pop()
+        elif value.startswith('"') and not _complete_json_string(value):
+            # End immediately after a valid escape, never keep an incomplete escape.
+            clean = re.sub(r"(?<!\\)(?:\\\\)*(\\(?:u[0-9a-fA-F]{0,3})?)$", "", value)
+            recovered = _load_closed_prefix(prefix[: token.start()] + clean + '"', closers)
+            if recovered is not None:
+                return recovered
+            end = token.start()
+            break
+    # In the common key/value cutoff case, retain complete siblings only.
+    final = prefix[:end].rstrip()
+    if final.endswith(":"):
+        final += "null"
+    return _load_closed_prefix(final.rstrip(","), closers)
+
+
+def _complete_json_string(value):
+    if len(value) < 2 or not value.endswith('"'):
+        return False
+    # An escaped final quote is part of an incomplete string.
+    return (len(value) - 1 - len(value[:-1].rstrip("\\"))) % 2 == 0
+
+
+def _excluded(key, *, output=False):
     normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized == "files":
+        return not output
     return normalized in EXCLUDED_KEYS or normalized.endswith(
         ("password", "secret", "accesstoken", "refreshtoken", "apikey", "base64")
     )
@@ -115,22 +167,33 @@ class Projection:
             self.excluded += count
         return text
 
-    def text(self, text):
-        # JSON text blocks mirror structuredContent in CodePier. Normalize once
-        # so credentials/media nested inside their string encoding are excluded.
-        if text.lstrip().startswith(("{", "[")) and len(text) > MAX_CHARACTERS:
-            # Do not treat an incomplete JSON prefix as opaque prose: it could
-            # contain a credential field whose boundary lies outside the cap.
-            self.truncated = True
-            return
-        if len(text) <= MAX_CHARACTERS and text.lstrip().startswith(("{", "[")):
+    def _append_json(self, prefix, *, partial):
+        if partial:
+            value = _partial_json(prefix)
+            if value is None:
+                self.scanned_characters += len(prefix)
+                self.truncated = True
+                return True
+        else:
             try:
-                value = json.loads(text)
+                value = json.loads(prefix)
             except (ValueError, RecursionError):
-                pass
-            else:
-                self.value(value)
-                return
+                return False
+        scan_end = self.scanned_characters + len(prefix)
+        self.value(value)
+        self.scanned_characters = max(scan_end, self.scanned_characters)
+        self.truncated |= partial
+        return True
+
+    def text(self, text):
+        # Decode only a bounded lexical prefix, then apply the same structural
+        # exclusions as complete JSON. Never count an opaque JSON fragment.
+        remaining = max(0, MAX_CHARACTERS - self.scanned_characters)
+        prefix = text[:remaining]
+        if prefix.lstrip().startswith(("{", "[")) and self._append_json(
+            prefix, partial=len(text) > remaining
+        ):
+            return
         self.append(self.clean_text(text))
 
     def value(self, value, depth=0):
@@ -151,7 +214,7 @@ class Projection:
                     break
                 if (
                     not isinstance(key, str)
-                    or _excluded(key)
+                    or _excluded(key, output=self.output)
                     or (key == "data" and "upload_id" in value and "chunk_sha256" in value)
                 ):
                     self.excluded += 1
@@ -283,7 +346,7 @@ def _project_content_block(target, block, result, has_structured):
     if block.get("type") == "text" and isinstance(block.get("text"), str):
         if (
             len(block["text"]) > MAX_CHARACTERS
-            and block["text"].lstrip().startswith(("{", "["))
+            and block["text"][:MAX_CHARACTERS].lstrip().startswith(("{", "["))
             and has_structured
             and not _is_meta_stub(result, result["structuredContent"])
         ):
@@ -387,13 +450,11 @@ def estimate_output(result):
 
     wire_tokens = wire_metric["estimated_tokens"]
     semantic_tokens = sem_metric["estimated_tokens"]
-    wire_metric["source_truncated"] = (
-        wire_metric["source_truncated"] or sem_metric["source_truncated"]
-    )
-    wire_metric["wire_tokens_est"] = wire_tokens
-    wire_metric["semantic_tokens_est"] = semantic_tokens
-    wire_metric["mirror_overhead_ratio"] = round(wire_tokens / max(1, semantic_tokens), 4)
-    return wire_metric
+    sem_metric["source_truncated"] |= wire_metric["source_truncated"]
+    sem_metric["wire_tokens_est"] = wire_tokens
+    sem_metric["semantic_tokens_est"] = semantic_tokens
+    sem_metric["mirror_overhead_ratio"] = round(wire_tokens / max(1, semantic_tokens), 4)
+    return sem_metric
 
 
 def usage(input_metric=None, output_metric=None):

@@ -666,7 +666,7 @@ class FileEngine:
             prefix = "" if base == "." else base + "/"
             for path in paths:
                 if path.startswith(prefix):
-                    parts = path[len(prefix) :].split("/", depth)[:depth]
+                    parts = path[len(prefix) :].split("/", -1 if depth is None else depth)[:depth]
                     visible.update(
                         prefix + "/".join(parts[:end]) for end in range(1, len(parts) + 1)
                     )
@@ -1037,6 +1037,39 @@ class FileEngine:
             results.append(match)
         return matches, context_bytes, page_full
 
+    @staticmethod
+    def _search_pagination(
+        scan_status,
+        page_full,
+        scan_limited,
+        results,
+        offset,
+        matches,
+        resume_after,
+        last_scanned_path,
+    ):
+        truncated = bool(page_full or scan_limited)
+        next_offset = offset + len(results) if page_full and results else None
+        if scan_limited and last_scanned_path is not None and offset:
+            # Offsets are relative to the current path cursor. A newly scanned
+            # range consumes the old skip count, even when no result is emitted.
+            next_offset = max(0, offset - matches)
+        next_resume_path = (
+            (last_scanned_path or resume_after)
+            if scan_limited
+            else resume_after
+            if page_full and resume_after is not None
+            else None
+        )
+        hint = None
+        if scan_status == "no_files":
+            hint = "path 和 file_glob 范围内没有可扫描文件。file_glob 匹配项目相对路径。"
+        elif scan_limited:
+            hint = "扫描达到预算上限；使用返回的 resume_after_path、next_offset（为空则保留原 offset）和 resume_scan_scope 继续，或缩小 path / file_glob。"
+        elif page_full:
+            hint = "结果已分页；使用 next_offset、当前 resume_after_path 和 resume_scan_scope 继续翻页。"
+        return truncated, next_offset, next_resume_path, hint
+
     def search(self, project, args):
         root, _ = self.root(project)
         start = self.path(root, args.get("path", "."))
@@ -1140,22 +1173,16 @@ class FileEngine:
             scan_status = "end_of_results" if matches else "no_matches"
         else:
             scan_status = "matches"
-        truncated = bool(page_full or scan_limited)
-        next_offset = offset + len(results) if page_full and results else None
-        next_resume_path = (
-            last_scanned_path
-            if scan_limited
-            else resume_after
-            if page_full and resume_after is not None
-            else None
+        truncated, next_offset, next_resume_path, hint = self._search_pagination(
+            scan_status,
+            page_full,
+            scan_limited,
+            results,
+            offset,
+            matches,
+            resume_after,
+            last_scanned_path,
         )
-        hint = None
-        if scan_status == "no_files":
-            hint = "path 和 file_glob 范围内没有可扫描文件。file_glob 匹配项目相对路径。"
-        elif scan_limited:
-            hint = "扫描达到预算上限；使用 resume_after_path 和 resume_scan_scope 继续扫描，或缩小 path / file_glob。"
-        elif page_full:
-            hint = "结果已分页；使用 next_offset 和 resume_scan_scope 继续翻页。"
         return {
             "matches": results,
             "scanned_files": min(seen, 20000),

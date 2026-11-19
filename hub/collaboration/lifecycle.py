@@ -99,6 +99,10 @@ class CollaborationLoops:
             if self._wake_scheduled is wake:
                 self._wake_scheduled = None
             if self.started and self._event_wake is wake:
+                events = getattr(self.service, "events", None)
+                hint = getattr(events, "hint_recovery", None)
+                if hint is not None:
+                    hint()
                 wake.set()
 
     def _wake_single(self, event):
@@ -238,6 +242,11 @@ class CollaborationLoops:
                 (now,),
             )
             or store.one(
+                "SELECT 1 FROM coordination_work WHERE state IN ('leased','running') "
+                "AND lease_until<=? LIMIT 1",
+                (now,),
+            )
+            or store.one(
                 """SELECT 1 FROM collaboration_jobs WHERE state IN ('queued','leased','running','retry_wait')
                 AND (deadline_at<=? OR (state IN ('leased','running') AND COALESCE(lease_until,0)<=?)
                      OR (state='retry_wait' AND not_before<=?)) LIMIT 1""",
@@ -265,8 +274,12 @@ class CollaborationLoops:
             try:
                 # Separate top-level commits: a malformed job or backfill
                 # record must never undo a successful security cleanup.
-                with self.service.store.transaction():
+                if step == self.service.reconcile:
+                    # The service publishes each cursor after its own committed unit.
                     step()
+                else:
+                    with self.service.store.transaction():
+                        step()
             except Exception as exc:
                 if error is None:
                     error = exc
@@ -375,16 +388,25 @@ class CollaborationLoops:
                 }
                 logger.warning("Collaboration component %s degraded (%s)", name, code)
             else:
-                self.service.health[name] = {
-                    "status": "running",
-                    "observed_at": self.service.clock(),
-                }
+                self.service.health[name] = self._completed_health(name)
             delay = self._idle_delay_for(name, interval, idle_delay)
             if wake is None:
                 await asyncio.sleep(delay)
             else:
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(wake.wait(), delay)
+
+    def _completed_health(self, name):
+        observed = self.service.clock()
+        events = getattr(self.service, "events", None)
+        failures = getattr(events, "recovery_errors", {}) if name == "events" else {}
+        if failures:
+            return {
+                "status": "degraded",
+                "reason_code": next(iter(failures.values())),
+                "observed_at": observed,
+            }
+        return {"status": "running", "observed_at": observed}
 
     async def stop(self):
         with self._wake_lock:

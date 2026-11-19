@@ -114,19 +114,19 @@ def test_unified_tool_resolve_skips_schema_deepcopy_and_capture_output_off_write
     assert json.dumps(native_defs)
     assert json.dumps(collab_defs)
 
-    # Full HTTP tools/call check: read-only ops & capture_output stay off store.run().
+    # Isolate HTTP wrapper scheduling here; live admission is covered below.
     writer_calls: list[str] = []
     capture_threads: list[str] = []
     real_store_run = app.state.store.run
-    real_capture = app.state.runtime.integrations.capture_output
+    real_measure = app.state.runtime.integrations.measure_output
 
     def tracking_store_run(fn, *args, **kwargs):
         writer_calls.append(getattr(fn, "__name__", repr(fn)))
         return real_store_run(fn, *args, **kwargs)
 
-    def tracking_capture(trace, result):
+    def tracking_measure(result):
         capture_threads.append(threading.current_thread().name)
-        return real_capture(trace, result)
+        return real_measure(result)
 
     async def fake_invoke(name, arguments, caller):
         assert name == "read"
@@ -137,7 +137,7 @@ def test_unified_tool_resolve_skips_schema_deepcopy_and_capture_output_off_write
         }
 
     monkeypatch.setattr(app.state.store, "run", tracking_store_run)
-    monkeypatch.setattr(app.state.runtime.integrations, "capture_output", tracking_capture)
+    monkeypatch.setattr(app.state.runtime.integrations, "measure_output", tracking_measure)
     monkeypatch.setattr(app.state.runtime, "invoke", fake_invoke)
 
     res = _post_mcp(
@@ -462,22 +462,31 @@ def test_sse_keepalive_works_for_non_unified_profiles_and_emits_error_frame(tmp_
     monkeypatch.setenv("CODEPIER_MCP_SSE_KEEPALIVE_INTERVAL", "0.02")
     monkeypatch.setenv("CODEPIER_MCP_SSE_GRACE_SECONDS", "0.02")
 
-    # 1) Default per-principal limit raised to 64 with stale stream reclamation.
+    # 1) Default per-principal limit accounts for work still running.
     streams = Streams()
     assert streams.per_principal_limit == 64
 
     async def _exercise_stream_limits():
         req = SimpleNamespace(headers={"authorization": "Bearer tok"})
         principal = Principal("pat:owner", "owner", {"read"}, ["project"], grant_id="g1")
-        events = [streams.begin(req, principal, f"id-{i}") for i in range(64)]
-        with pytest.raises(DevError) as exc_info:
-            streams.begin(req, principal, "id-overflow")
-        assert exc_info.value.code == "TOO_MANY_STREAMS"
-        events[0].set()  # Marks stream done/stale; next begin() reclaims it.
-        reclaimed = streams.begin(req, principal, "id-reclaimed")
-        reclaimed.set()
-        for ev in events[1:]:
-            ev.set()
+        workers = [asyncio.create_task(asyncio.Event().wait()) for _ in range(64)]
+        try:
+            events = [streams.begin(req, principal, f"id-{i}", task=work)
+                      for i, work in enumerate(workers)]
+            events[0].set()  # Disconnect is only a cancellation signal.
+            with pytest.raises(DevError) as exc_info:
+                streams.begin(req, principal, "id-overflow")
+            assert exc_info.value.code == "TOO_MANY_STREAMS"
+            with pytest.raises(DevError) as duplicate:
+                streams.begin(req, principal, "id-0")
+            assert duplicate.value.code == "DUPLICATE_REQUEST"
+            workers[0].cancel()
+            await asyncio.gather(workers[0], return_exceptions=True)
+            assert streams.begin(req, principal, "id-0")
+        finally:
+            for work in workers:
+                work.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     asyncio.run(_exercise_stream_limits())
 
@@ -776,8 +785,8 @@ def test_token_estimate_reports_wire_and_semantic_tokens_for_full_mirror():
 
     # Backward-compatible keys preserved.
     assert full_metric["state"] == "available"
-    assert full_metric["estimated_tokens"] == full_metric["wire_tokens_est"]
-    assert meta_metric["estimated_tokens"] == meta_metric["wire_tokens_est"]
+    assert full_metric["estimated_tokens"] == full_metric["semantic_tokens_est"]
+    assert meta_metric["estimated_tokens"] == meta_metric["semantic_tokens_est"]
 
     # Dual metering: mirror="full" doubles wire tokens relative to semantic tokens.
     assert full_metric["semantic_tokens_est"] > 0
@@ -811,3 +820,95 @@ def test_token_estimate_reports_wire_and_semantic_tokens_for_full_mirror():
         {"content": [{"type": "text", "text": "hello world"}], "structuredContent": {"content_in": "text"}}
     )["wire_tokens_est"]
     assert "alpha beta gamma" not in json.dumps(full_metric)
+
+
+
+@pytest.mark.parametrize("with_stub", [False, True])
+def test_oversized_json_counts_only_bounded_included_prefix(with_stub):
+    sample = "ordinary result with spaces " * 20000
+    result = {"content": [{"type": "text", "text": json.dumps({"output": sample})}]}
+    if with_stub:
+        result["structuredContent"] = {"output_in": "text"}
+    measured = token_estimate.estimate_output(result)
+    assert measured["state"] == "partial"
+    assert 10000 < measured["estimated_tokens"] < 200000
+    result["content"][0]["text"] = json.dumps({"pass" + "word": sample})
+    excluded = token_estimate.estimate_output(result)
+    assert excluded["state"] == "partial"
+    assert excluded["excluded_fields"] >= 1
+    assert excluded["estimated_tokens"] < 5
+    assert token_estimate.estimate_input({"files": [sample]})["estimated_tokens"] < 5
+
+
+def test_schema_mutators_cannot_change_cached_lists_under_tuples():
+    cached = contracts_module.freeze_schema({"values": ({"enum": [1, 2]},)})
+    values = cached["values"][0]["enum"]
+    with pytest.raises(TypeError):
+        values += [3]
+    with pytest.raises(TypeError):
+        values *= 2
+    assert values == [1, 2]
+
+
+def test_unified_mcp_read_admission_and_wait_reach_real_agent(tmp_path):
+    import uuid
+
+    from tests.support import running_stack
+
+    with running_stack(tmp_path) as stack:
+        def call(tool, args):
+            response = stack.rpc(
+                "tools/call",
+                {"name": tool, "arguments": args},
+                url="/mcp?view=2",
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            assert not result.get("isError"), result
+            return result["structuredContent"]
+
+        data = call("query", {"action": "file", "project": "ProjectAlpha", "path": "README.md"})
+        assert data["content"] == (stack.projectalpha / "README.md").read_text()
+        assert data["sha256"]
+
+        command = call("act", {
+            "action": "exec", "project": "ProjectAlpha", "wait": 4,
+            "idempotency_key": uuid.uuid4().hex, "args": {"task": "smoke"},
+        })
+        operation = command["operations"][0] if "operations" in command else command
+        assert operation["state"] == "succeeded", operation
+        assert "PASS: local task completed" in operation["output"]
+        delivered = stack.poll(operation["operation_id"])
+        assert delivered["state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_metering_never_mutates_finished_trace():
+    from hub.mcp import _capture_rpc_output
+
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    unblocked = threading.Event()
+    trace = {"finished": False, "token_usage": {"output": {"state": "unavailable"}}}
+
+    def measure(result):
+        loop.call_soon_threadsafe(started.set)
+        assert unblocked.wait(3)
+        return {"state": "available", "estimated_tokens": len(result)}
+
+    def retain(target, output):
+        target["token_usage"]["output"] = output
+
+    runtime = SimpleNamespace(integrations=SimpleNamespace(
+        measure_output=measure, set_output_metric=retain, write_errors=0,
+    ))
+    capture = asyncio.create_task(_capture_rpc_output(runtime, trace, {"result": {"text": "ok"}}))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        capture.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await capture
+        trace["finished"] = True
+    finally:
+        unblocked.set()
+    assert trace["token_usage"]["output"] == {"state": "unavailable"}

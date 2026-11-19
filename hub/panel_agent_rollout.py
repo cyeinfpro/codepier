@@ -347,15 +347,43 @@ class PanelAgentRollouts:
             AND idem=? AND owner_user_id=? AND space_id=? ORDER BY created LIMIT 1""",
             (node["idempotency_key"], principal.user_id, principal.space_id),
         )
-        online = self.runtime.online(node["device_id"])
-        last_seen = self.runtime.device_last_seen(node["device_id"], device.get("last_seen"))
-        return principal, last_seen, info, op, online
+        device_id = node["device_id"]
+        connection = self.runtime.connections.get(device_id)
+        online = self.runtime.online(device_id)
+        registration = (
+            getattr(connection, "registration", None)
+            if online and self.runtime.connections.get(device_id) is connection
+            else None
+        )
+        return principal, registration, info, op, online
+
+    @staticmethod
+    def resolve_registration(row, node, op, registration):
+        if registration is None:
+            return False
+        registered_at, info = registration
+        if registered_at <= op["updated"]:
+            return False
+        management = info.get("management") or {}
+        if management.get("last_error") or management.get("status") in {
+            "error",
+            "rollback",
+            "recovery_required",
+        }:
+            node.update(
+                state="failed",
+                message=str(management.get("last_error") or "Agent 管理状态需检查")[:600],
+            )
+        elif info.get("version") == row["target_version"]:
+            node.update(state="succeeded", message="已重连并核对目标版本")
+        else:
+            return False
+        return True
 
     async def advance_node(self, row, node, principal):
-        principal, last_seen, info, op, online = await self.store.run(
+        principal, registration, info, op, online = await self.store.run(
             self.inspect_node, node, principal
         )
-        management = info.get("management") or {}
         if op:
             node["operation_id"] = op["id"]
             if op["state"] in ACTIVE_OPS:
@@ -367,26 +395,9 @@ class PanelAgentRollouts:
                     message=str(op.get("error") or "Agent 更新失败；请查看原操作记录")[:600],
                 )
                 return
-            if (
-                online
-                and info.get("version") == row["target_version"]
-                and (last_seen or 0) > op["created"]
-            ):
-                if management.get("last_error") or management.get("status") in {
-                    "error",
-                    "rollback",
-                    "recovery_required",
-                }:
-                    node.update(
-                        state="failed",
-                        message=str(management.get("last_error") or "Agent 管理状态需检查")[:600],
-                    )
-                else:
-                    node.update(state="succeeded", message="已重连并核对目标版本")
+            if self.resolve_registration(row, node, op, registration):
                 return
-            if online and (last_seen or 0) > op["updated"] and management.get("last_error"):
-                node.update(state="failed", message=str(management["last_error"])[:600])
-            elif time.time() - op["updated"] > 900:
+            if time.time() - op["updated"] > 900:
                 node.update(
                     state="failed",
                     message="更新已交接，15 分钟内未核对目标版本；请检查原回执和节点，不自动重试切换",

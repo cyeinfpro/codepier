@@ -1,18 +1,25 @@
 """Small authenticated channel; it does not make browser HTTP traffic private."""
 
 from __future__ import annotations
+from contextlib import contextmanager
 import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import secrets
+import threading
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from shared.util import valid_json_value
 
 ASYNC_OFFLOAD_BYTES = 64 * 1024
+_SAMPLE_NODE_LIMIT = 2048
+
+
+def _container_exceeds_budget(count, sampled, approx, threshold):
+    return approx > threshold or sampled + count > _SAMPLE_NODE_LIMIT
 
 
 def _exceeds_json_threshold(value, threshold: int = ASYNC_OFFLOAD_BYTES) -> bool:
@@ -25,10 +32,12 @@ def _exceeds_json_threshold(value, threshold: int = ASYNC_OFFLOAD_BYTES) -> bool
     while stack:
         item = stack.pop()
         nodes += 1
-        if nodes > 2048 or approx > threshold:
-            return True
         if isinstance(item, dict):
             approx += 2
+            if _container_exceeds_budget(
+                len(item), len(stack) + nodes, approx + len(item) * 4, threshold
+            ):
+                return True
             for k, v in item.items():
                 approx += (
                     (len(k) * (1 if isinstance(k, str) and k.isascii() else 3) + 4)
@@ -38,6 +47,8 @@ def _exceeds_json_threshold(value, threshold: int = ASYNC_OFFLOAD_BYTES) -> bool
                 stack.append(v)
         elif isinstance(item, (list, tuple)):
             approx += 2 + len(item)
+            if _container_exceeds_budget(len(item), len(stack) + nodes, approx, threshold):
+                return True
             stack.extend(item)
         elif isinstance(item, str):
             approx += len(item) * (1 if item.isascii() else 3) + 2
@@ -99,6 +110,18 @@ def password_needs_rehash(encoded: str) -> bool:
         return True
 
 
+@contextmanager
+def _sequence_access(lock):
+    # Async work holds this gate while offloaded crypto uses its reserved counter.
+    # Never block the event loop when a sync caller tries to enter that direction.
+    if not lock.acquire(blocking=False):
+        raise RuntimeError("Channel sequence already in use")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 class SecureChannel:
     """AES-256-GCM, HKDF per challenge, strict per-direction message counters.
 
@@ -121,6 +144,8 @@ class SecureChannel:
         self.recv_dir = "agent" if role == "hub" else "hub"
         self.sent = 0
         self.received = 0
+        self._send_access = threading.Lock()
+        self._recv_access = threading.Lock()
         self._pack_lock: asyncio.Lock | None = None
         self._pack_loop: asyncio.AbstractEventLoop | None = None
         self._unpack_lock: asyncio.Lock | None = None
@@ -174,38 +199,42 @@ class SecureChannel:
         return message["body"]
 
     def pack(self, body: dict) -> str:
-        sequence = self.sent + 1
-        packet = self._pack_sequence(body, sequence)
-        self.sent = sequence
-        return packet
+        with _sequence_access(self._send_access):
+            sequence = self.sent + 1
+            packet = self._pack_sequence(body, sequence)
+            self.sent = sequence
+            return packet
 
     def unpack(self, packet: str) -> dict:
-        expected = self.received + 1
-        body = self._unpack_sequence(packet, expected)
-        self.received = expected
-        return body
+        with _sequence_access(self._recv_access):
+            expected = self.received + 1
+            body = self._unpack_sequence(packet, expected)
+            self.received = expected
+            return body
 
     async def pack_async(self, body: dict, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> str:
         """Pack body asynchronously, offloading payloads > threshold via asyncio.to_thread."""
         async with self._get_pack_lock():
-            sequence = self.sent + 1
-            if _exceeds_json_threshold(body, threshold):
-                packet = await asyncio.to_thread(self._pack_sequence, body, sequence)
-            else:
-                packet = self._pack_sequence(body, sequence)
-            self.sent = sequence
-            return packet
+            with _sequence_access(self._send_access):
+                sequence = self.sent + 1
+                if _exceeds_json_threshold(body, threshold):
+                    packet = await asyncio.to_thread(self._pack_sequence, body, sequence)
+                else:
+                    packet = self._pack_sequence(body, sequence)
+                self.sent = sequence
+                return packet
 
     async def unpack_async(self, packet: str, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> dict:
         """Unpack packet asynchronously, offloading payloads > threshold via asyncio.to_thread."""
         async with self._get_unpack_lock():
-            expected = self.received + 1
-            if isinstance(packet, (str, bytes)) and len(packet) > threshold:
-                body = await asyncio.to_thread(self._unpack_sequence, packet, expected)
-            else:
-                body = self._unpack_sequence(packet, expected)
-            self.received = expected
-            return body
+            with _sequence_access(self._recv_access):
+                expected = self.received + 1
+                if isinstance(packet, (str, bytes)) and len(packet) > threshold:
+                    body = await asyncio.to_thread(self._unpack_sequence, packet, expected)
+                else:
+                    body = self._unpack_sequence(packet, expected)
+                self.received = expected
+                return body
 
 
 async def pack_channel(channel, body: dict, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> str:

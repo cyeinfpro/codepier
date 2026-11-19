@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager, nullcontext
 import os
+import re
 import sqlite3
 import tempfile
 import asyncio
@@ -65,6 +66,14 @@ _SECURITY_TABLES = frozenset(
         "gateway_accounts",
         "gateway_bindings",
         "gateway_consents",
+        "collaboration_rooms",
+        "conversation_rooms",
+        "native_ownership",
+        "space_invites",
+        "oauth_requests",
+        "oauth_codes",
+        "room_host_control_handles",
+        "integration_admission",
     }
 )
 
@@ -84,7 +93,6 @@ _SNAPSHOT_TABLES = frozenset(
         "mcp_usage",
         "mcp_connection_evidence",
         "mcp_tasks",
-        "integration_admission",
         "knowledge_maintenance",
         "audit",
         "login_attempts",
@@ -107,6 +115,25 @@ def _table_write_kind(table: str) -> tuple[bool, bool]:
     if table == "meta":
         return False, True
     return table not in _NON_SECURITY_WRITE_TABLES, False
+
+
+# Routine cursor progression is not an authorization change. Direct settings
+# writes, including unknown keys and grant project revisions, are fenced.
+_META_ROUTINE_KEYS = ("security_epoch", "room_waiting_inputs_cursor")
+_META_CURSOR_WRITE = re.compile(
+    r"\s*INSERT\s+OR\s+REPLACE\s+INTO\s+meta(?:\(key,value\))?\s+VALUES"
+    r"\s*\('room_waiting_inputs_cursor',\s*\?\s*\)\s*;?\s*",
+    re.I,
+)
+
+
+def _meta_epoch_condition(operation: str) -> str:
+    routine = ", ".join(repr(key) for key in _META_ROUTINE_KEYS)
+    if operation == "INSERT":
+        return f"NEW.key NOT IN ({routine})"
+    if operation == "DELETE":
+        return f"OLD.key NOT IN ({routine})"
+    return f"OLD.key NOT IN ({routine}) OR NEW.key NOT IN ({routine})"
 
 
 def _read_quoted_token(sql: str, start: int, quote: str):
@@ -267,6 +294,24 @@ def _classify_update(tokens, idx: int) -> tuple[bool, bool]:
     return not cols or not cols <= _DEVICE_ROUTINE_COLUMNS, False
 
 
+def _cte_select_only(tokens) -> bool:
+    """Recognize a SELECT only after the final top-level CTE body closes."""
+    depth = 0
+    for i, token in enumerate(tokens[1:], 1):
+        if token == ("SYM", "("):
+            depth += 1
+        elif token == ("SYM", ")"):
+            depth -= 1
+            if depth == 0 and tokens[i + 1 : i + 2] == [("WORD", "select")]:
+                return True
+    return False
+
+
+def _classify_complex_sql(op, tokens) -> tuple[bool, bool]:
+    write = op != "with" or not _cte_select_only(tokens)
+    return write, write
+
+
 def _classify_write(sql: str) -> tuple[bool, bool]:
     """Return (is_security_write, is_meta_write) failing closed on unknown/complex SQL."""
     tokens = _tokenize_sql(sql)
@@ -279,7 +324,21 @@ def _classify_write(sql: str) -> tuple[bool, bool]:
     kind, op = tokens[0]
     if kind != "WORD" or ("SYM", ";") in tokens:
         return True, False
+    if op in {
+        "select",
+        "explain",
+        "pragma",
+        "begin",
+        "commit",
+        "end",
+        "rollback",
+        "savepoint",
+        "release",
+    }:
+        return False, False
     idx = 1
+    if op in _COMPLEX_SQL_VERBS:
+        return _classify_complex_sql(op, tokens)
     if op in {"insert", "update"} and tokens[idx : idx + 1] == [("WORD", "or")]:
         idx += 2
     if op == "update":
@@ -296,12 +355,30 @@ _DDL_VERBS = frozenset(
 )
 
 
+_COMPLEX_SQL_VERBS = _DDL_VERBS | {"with"}
+
+
 def _is_ddl_sql(sql: str) -> bool:
     tokens = _tokenize_sql(sql)
     if not tokens:
         return False
     first = tokens[0]
     return first[0] == "WORD" and first[1] in _DDL_VERBS
+
+
+def _has_non_schema_ddl_effect(sql: str) -> bool:
+    tokens = _tokenize_sql(sql)
+    return bool(
+        tokens
+        and tokens[0]
+        in {
+            ("WORD", "attach"),
+            ("WORD", "detach"),
+            ("WORD", "reindex"),
+            ("WORD", "analyze"),
+            ("WORD", "vacuum"),
+        }
+    )
 
 
 class _StoreWriterConnection(CheckedConnection):
@@ -312,17 +389,30 @@ class _StoreWriterConnection(CheckedConnection):
         self._on_ddl = on_ddl
 
     def execute(self, sql, parameters=()):
-        is_ddl = self._on_ddl is not None and _is_ddl_sql(sql)
-        cursor = super().execute(sql, parameters)
-        if is_ddl:
-            self._on_ddl()
+        if not _is_ddl_sql(sql):
+            return super().execute(sql, parameters)
+        self._require()
+        before = self._schema_version()
+        cursor = super().execute(sql, parameters, _track_change=False)
+        if before != self._schema_version():
+            self._changed(sql)
+            if self._on_ddl is not None:
+                self._on_ddl()
+        elif _has_non_schema_ddl_effect(sql):
+            self._changed(sql)
         return cursor
 
+    def _schema_version(self):
+        return self._connection.execute("PRAGMA schema_version").fetchone()[0]
+
     def executescript(self, script):
-        cursor = super().executescript(script)
-        if self._on_ddl is not None:
-            self._on_ddl()
-        return cursor
+        self._require()
+        before = self._schema_version()
+        try:
+            return super().executescript(script)
+        finally:
+            if self._on_ddl is not None and before != self._schema_version():
+                self._on_ddl()
 
 
 SCHEMA = """
@@ -546,7 +636,18 @@ class Store:
                         f'CREATE TRIGGER IF NOT EXISTS "{trigger_name}" AFTER {operation} ON "{table}" '
                         "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='security_epoch'; END"
                     )
+        self._install_meta_epoch_triggers()
         self._epoch_schema = self.db.execute("PRAGMA schema_version").fetchone()[0]
+
+    def _install_meta_epoch_triggers(self):
+        # Separate names keep meta out of arbitrary read snapshot eligibility.
+        for operation in ("INSERT", "UPDATE", "DELETE"):
+            self.db.execute(
+                f'CREATE TRIGGER IF NOT EXISTS "cp_meta_auth_{operation}" '
+                f"AFTER {operation} ON meta WHEN {_meta_epoch_condition(operation)} "
+                "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 "
+                "WHERE key='security_epoch'; END"
+            )
 
     def _handle_internal_ddl(self):
         if self._epoch_schema is None or self._refreshing_epoch:
@@ -985,9 +1086,13 @@ class Store:
         # Conservative invalidation is safe even if the transaction rolls back.
         # No SQL text or bound value is retained in this process-local revision.
         override = getattr(self._write_override, "security_write", None)
-        is_security, is_meta = _classify_write(sql)
+        is_security, is_meta = (True, True) if sql is None else _classify_write(sql)
         if override is not None:
             is_security = bool(override)
+        elif is_meta and sql is not None:
+            # In-process hot caches key on session_revision; other processes
+            # see the same authority change via committed SQLite triggers.
+            is_security = _META_CURSOR_WRITE.fullmatch(sql) is None
         if is_meta:
             self.config_revision += 1
             self._writer_db.after_commit(self._advance_config_revision)

@@ -251,25 +251,45 @@ class Agent:
         if self._journal_persist_task is None or self._journal_persist_task.done():
             self._journal_persist_task = asyncio.create_task(self._drain_journal_persist())
 
+    def _persist_journal_batch(self, items):
+        for index, (kind, args) in enumerate(items):
+            try:
+                if kind == "mark_running":
+                    self.journal.mark_running_db(*args)
+                elif kind == "cancel":
+                    self.journal.cancel_db(*args)
+                elif kind == "telemetry":
+                    self.telemetry.flush()
+            except (sqlite3.Error, OSError) as exc:
+                LOGGER.warning("Agent 日志异步持久化异常（%s）", type(exc).__name__)
+                return index
+        return len(items)
+
     async def _drain_journal_persist(self):
+        failures = 0
         while self._journal_persist_queue:
             batch = []
             while self._journal_persist_queue and len(batch) < 128:
                 batch.append(self._journal_persist_queue.popleft())
-
-            def apply(items=batch):
-                for kind, args in items:
-                    if kind == "mark_running":
-                        self.journal.mark_running_db(*args)
-                    elif kind == "cancel":
-                        self.journal.cancel_db(*args)
-                    elif kind == "telemetry":
-                        self.telemetry.flush()
-
+            completed = 0
             try:
-                await self.disk_call(apply)
+                completed = await self.disk_call(self._persist_journal_batch, batch)
             except (sqlite3.Error, OSError) as exc:
-                LOGGER.warning("Agent 日志异步持久化异常（%s）", type(exc).__name__)
+                LOGGER.warning("Agent 日志工作线程异常（%s）", type(exc).__name__)
+            finally:
+                # Keep only the unacknowledged suffix. Its writes are idempotent
+                # if cancellation races with the disk worker completing.
+                self._journal_persist_queue.extendleft(reversed(batch[completed:]))
+            if completed == len(batch):
+                failures = 0
+                continue
+            failures = min(failures + 1, 7)
+            if self.stop_event.is_set() and failures >= 3:
+                LOGGER.error(
+                    "Agent 停机时仍有 %s 条持久化记录待写入", len(self._journal_persist_queue)
+                )
+                return
+            await asyncio.sleep(min(2.0, 0.05 * 2 ** (failures - 1)))
 
     def _mark_running(self, id):
         if self.journal.mark_running_memory(id):
@@ -277,14 +297,18 @@ class Agent:
 
     async def _begin_operation(self, id, tool, args, *, deadline=None):
         """Commit a write-ahead start receipt before acknowledging or executing."""
-        if tool in TOOLS and TOOLS[tool].scope == "read" and workspace_probe.eligible(tool, args):
+        if (
+            tool in TOOLS
+            and TOOLS[tool].scope == "read"
+            and workspace_probe.eligible(tool, args)
+            and not self.journal.recovering_start(id)
+        ):
             self._mark_running(id)
         else:
             # Do not use caller-declared read_only or scheduler lane as proof
             # that a command cannot produce externally visible side effects.
             if not await self.disk_call(self.journal.mark_running_db, id):
                 raise DevError("JOURNAL_STATE_CONFLICT", "操作开始记录无法持久化；已停止执行")
-            self.journal.mark_running_memory(id)
         if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
             raise DevError("CANCELLED", "操作开始前已取消")
         if deadline is not None and time.time() > deadline:
@@ -777,9 +801,21 @@ class Agent:
             status = await self.disk_call(self.journal.durable_status, id)
             if status not in {"accepted", "missing", "retryable"}:
                 return
-        self.cancel_pending_call(id)
+        if self._fence_pending_call(id) and self._journal_persist_task is not None:
+            # A pending revocation can be ordered before delivery on this
+            # socket. Keep retries alive if the socket closes, and do not
+            # accept the next frame before this cancellation is durable.
+            await asyncio.shield(self._journal_persist_task)
 
     def cancel_pending_call(self, id):
+        """Synchronous compatibility path; check cold tombstones before fencing."""
+        if self.journal.fast_status(id)["status"] == "missing" and self.journal.durable_status(
+            id
+        ) not in {"accepted", "missing", "retryable"}:
+            return False
+        return self._fence_pending_call(id)
+
+    def _fence_pending_call(self, id):
         """Fence revoked work only before execution; never kill running work.
 
         There is no await between the local state check and cancellation.
@@ -1231,6 +1267,16 @@ class Agent:
                     raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
             # These rechecks already hold the execution slot. Re-entering the
             # lane here could deadlock when all slots are occupied by readers.
+            return await self._recheck_probe_root(
+                tool, project, args, worker, expected_root, deadline
+            )
+        return await self.disk_call(self.engine.root, project, tool in MUTATING)
+
+    async def _recheck_probe_root(self, tool, project, args, worker, expected_root, deadline):
+        kwargs = self._probe_timeout_kwargs(workspace_probe.root, deadline)
+        if kwargs.get("timeout_seconds", workspace_probe.PROBE_TIMEOUT) <= 0:
+            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作")
+        try:
             return await workspace_probe.root(
                 self.engine,
                 tool,
@@ -1238,9 +1284,29 @@ class Agent:
                 args,
                 worker=worker,
                 expected_root=expected_root,
-                **self._probe_timeout_kwargs(workspace_probe.root, deadline),
+                **kwargs,
             )
-        return await self.disk_call(self.engine.root, project, tool in MUTATING)
+        except DevError as exc:
+            if (
+                exc.code == "PROJECT_DISCOVERY_TIMEOUT"
+                and deadline is not None
+                and time.time() >= deadline
+            ):
+                raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
+            raise
+
+    @staticmethod
+    def _resource_busy_detail(detail):
+        from shared.scheduler_config import safe_queue_detail
+
+        return {
+            **safe_queue_detail({"queue_reason": detail.get("reason")}),
+            "blocked_by": [
+                value
+                for value in detail.get("blocked_by", [])[:64]
+                if isinstance(value, str) and len(value) <= 100
+            ],
+        }
 
     async def handle(self, request):
         id = request["id"]
@@ -1610,7 +1676,7 @@ class Agent:
             ] == "accepted" and not self.journal.is_cancelled(id):
                 # No side effect began. Leave the durable accepted receipt for
                 # startup's accepted -> retryable recovery, never finish it.
-                self.telemetry.starts.pop(id, None)
+                self.telemetry.abandon(id)
                 self.pending_output.pop(id, None)
                 self.pending_output.pop("trace:" + id, None)
                 self.integration_projects.pop(id, None)
@@ -1633,7 +1699,7 @@ class Agent:
             ):
                 # Scheduler.close may wake the waiter before shutdown cancels
                 # its task. It has exactly the same never-started receipt.
-                self.telemetry.starts.pop(id, None)
+                self.telemetry.abandon(id)
                 self.pending_output.pop(id, None)
                 self.pending_output.pop("trace:" + id, None)
                 self.integration_projects.pop(id, None)
@@ -1645,11 +1711,7 @@ class Agent:
             )
             result["error"].update(safe_review_error_detail(exc.code, exc.details))
             if exc.code == "RESOURCE_BUSY":
-                result["error"]["blocked_by"] = [
-                    value
-                    for value in exc.details.get("blocked_by", [])[:64]
-                    if isinstance(value, str) and len(value) <= 100
-                ]
+                result["error"].update(self._resource_busy_detail(exc.details))
             if request.get("tool") == "download_artifact":
                 result["error"].update(safe_import_error_detail(exc.details))
             if isinstance(request.get("tool"), str) and request["tool"] in COMPUTER_TOOLS:
@@ -1699,7 +1761,7 @@ class Agent:
                     pass
                 delay = min(delay * 2, 30)
         self.phase(id, "result_ready")
-        self.telemetry.starts.pop(id, None)
+        self.telemetry.abandon(id)
         self.pending_output.pop(id, None)
         self.pending_output.pop("trace:" + id, None)
         self.finishing.discard(id)
@@ -3010,11 +3072,17 @@ class Agent:
             try:
                 await self._finish_shutdown_jobs()
             finally:
-                await self._read_pool.close()
-                try:
-                    self.journal.db.close()
-                finally:
-                    self.instance_lock.close()
+                await self._close_run_state()
+
+    async def _close_run_state(self):
+        try:
+            await self._read_pool.close()
+            await self.disk_call(self.telemetry.flush)
+        finally:
+            try:
+                self.journal.db.close()
+            finally:
+                self.instance_lock.close()
 
     async def stop(self):
         self.stop_event.set()

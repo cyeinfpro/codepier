@@ -281,6 +281,9 @@ async def test_recovery_sources_share_one_bounded_wake_budget(collab, monkeypatc
         return 0
     monkeypatch.setattr(collab[0].dot_mailbox, 'recover', mailbox_recover)
     monkeypatch.setattr(collab[0].task_liveness, 'recover', task_recover)
+    # The recovery pump intentionally skips empty stores. Expire its real
+    # periodic recovery fence instead of replacing the probe or scheduler.
+    events._full_event_recovery_at = collab[0].clock()
     await events.tick()
     assert observed == [('mailbox', 1), ('tasks', 0)]
 

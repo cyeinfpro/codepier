@@ -1143,6 +1143,10 @@ class Rooms:
                 "UPDATE mcp_event_subscriptions SET state='unsubscribed',version=version+1 WHERE id=?",
                 (member["subscription_id"],),
             )
+            loops = getattr(self.c, "loops", None)
+            if loops is not None:
+                self.store.after_commit(loops.wake_renewals)
+                self.store.after_commit(loops.wake_reconcile)
 
     def resume_member_policies(self, member):
         # Restore only adapter policies paused by this room/member action.

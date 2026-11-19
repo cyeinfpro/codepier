@@ -10,6 +10,8 @@ import asyncio, contextlib, hashlib, json, os, shutil, time, weakref
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
+from agent.owned_subprocess import OwnedProcess, create_owned_process
+from agent.resource_queue import finish_cleanup
 from shared.config import env_float, env_int
 from shared.execution_policy import enforce_argv
 from shared.util import DevError, valid_json_value
@@ -35,6 +37,9 @@ LANGUAGES = {
 MAX_MESSAGE = 4 * 1024 * 1024
 DEFAULT_IDLE_TTL = 300.0
 DEFAULT_MAX_INSTANCES = 3
+MAX_OPEN_DOCUMENTS = 64
+MAX_DIAGNOSTIC_REPORTS = 16
+PoolKey = tuple[str, str, int, int]
 _LIVE_POOLS: weakref.WeakSet[LspPool] = weakref.WeakSet()
 
 
@@ -113,12 +118,15 @@ class Peer:
         self.stderr = None
         self.counter = 0
         self.pending = {}
-        self.diagnostics = {}
+        self.diagnostics = OrderedDict()
         self.changed = asyncio.Event()
         self.notifications = 0
         self.error = None
         self.capabilities = {}
-        self.documents = {}
+        self.documents = OrderedDict()
+        self.document_counter = 0
+        self.write_lock = asyncio.Lock()
+        self.close_lock = asyncio.Lock()
         self.closed = False
 
     def is_alive(self) -> bool:
@@ -158,8 +166,9 @@ class Peer:
             if os.name != "nt"
             else {"creationflags": __import__("subprocess").CREATE_NEW_PROCESS_GROUP}
         )
+        spawn = asyncio.create_subprocess_exec if os.name == "nt" else create_owned_process
         spawning = asyncio.create_task(
-            asyncio.create_subprocess_exec(
+            spawn(
                 *command,
                 cwd=self.root,
                 env=env,
@@ -173,8 +182,7 @@ class Peer:
         try:
             self.process = await asyncio.shield(spawning)
         except asyncio.CancelledError:
-            self.process = await spawning
-            await self.close()
+            await finish_cleanup(self._close_after_spawn(spawning))
             raise
         except OSError as exc:
             raise DevError("LSP_UNAVAILABLE", "无法启动已配置语言服务", 409) from exc
@@ -224,18 +232,23 @@ class Peer:
             await self.close()
             raise
 
+    async def _close_after_spawn(self, spawning):
+        self.process = await spawning
+        await self.close()
+
     async def send(self, message):
-        if not self.process or self.process.returncode is not None:
-            raise DevError("LSP_DISCONNECTED", "语言服务已退出", 409)
         body = json.dumps(message, ensure_ascii=False).encode()
         if len(body) > MAX_MESSAGE:
             raise DevError("LSP_LIMIT", "语言服务请求超过大小限制")
-        try:
-            self.process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
-            await self.process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            self.error = DevError("LSP_DISCONNECTED", "语言服务已退出", 409)
-            raise self.error from exc
+        async with self.write_lock:
+            if not self.process or self.process.returncode is not None:
+                raise DevError("LSP_DISCONNECTED", "语言服务已退出", 409)
+            try:
+                self.process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                await self.process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                self.error = DevError("LSP_DISCONNECTED", "语言服务已退出", 409)
+                raise self.error from exc
 
     async def notify(self, method, params):
         await self.send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -286,14 +299,7 @@ class Peer:
                     if "id" in message:
                         await self.server_request(message)
                     elif message["method"] == "textDocument/publishDiagnostics":
-                        p = message.get("params", {})
-                        if (
-                            isinstance(p, dict)
-                            and isinstance(p.get("uri"), str)
-                            and isinstance(p.get("diagnostics"), list)
-                        ):
-                            self.diagnostics[p["uri"]] = p
-                            self.changed.set()
+                        self._accept_diagnostics(message.get("params", {}))
                 elif type(message.get("id")) is int and message["id"] in self.pending:
                     future = self.pending[message["id"]]
                     if not future.done():
@@ -321,6 +327,41 @@ class Peer:
                 if not f.done():
                     f.set_exception(self.error)
             self.changed.set()
+
+    def _accept_diagnostics(self, report):
+        if not isinstance(report, dict) or not isinstance(report.get("diagnostics"), list):
+            return
+        uri = report.get("uri")
+        if not isinstance(uri, str) or uri not in self.documents:
+            return
+        doc = self.documents[uri]
+        version = report.get("version")
+        # An explicitly versioned report must match. Once content changes or
+        # a document is reopened, an unversioned report cannot prove freshness.
+        if version != doc["version"] and not (version is None and doc["accept_unversioned"]):
+            return
+        self.diagnostics[uri] = report
+        self.diagnostics.move_to_end(uri)
+        while len(self.diagnostics) > MAX_DIAGNOSTIC_REPORTS:
+            self.diagnostics.popitem(last=False)
+        self.changed.set()
+
+    async def wait_diagnostics(self, uri, version, budget):
+        deadline = time.monotonic() + budget
+        while not self.error:
+            report = self.diagnostics.get(uri)
+            doc = self.documents.get(uri, {})
+            if report is not None and doc.get("version") == version:
+                return report
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self.changed.clear()
+            try:
+                await asyncio.wait_for(self.changed.wait(), remaining)
+            except asyncio.TimeoutError:
+                break
+        return None
 
     async def server_request(self, message):
         method = message["method"]
@@ -367,31 +408,40 @@ class Peer:
                     "LSP_NOT_READY", "语言服务尚未确认当前源码的分析结果，请稍后重试", 409
                 )
             return "source_diagnostics_observed"
-        deadline = time.monotonic() + self.spec.get("timeout_seconds", 20)
-        while time.monotonic() < deadline:
-            reported = self.diagnostics.get(uri)
-            if reported is not None and reported.get("version") in (None, expected_version):
-                return "source_diagnostics_observed"
+        report = await self.wait_diagnostics(
+            uri, expected_version, self.spec.get("timeout_seconds", 20)
+        )
+        if report is None:
             if self.error:
                 raise self.error
-            self.changed.clear()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self.changed.wait(), max(0.01, deadline - time.monotonic()))
-        raise DevError(
-            "LSP_NOT_READY",
-            "语言服务尚未报告当前源码分析完成；没有把冷索引的空结果当作查无引用",
-            409,
-        )
+            raise DevError("LSP_NOT_READY", "语言服务尚未确认当前源码的分析结果，请稍后重试", 409)
+        return "source_diagnostics_observed"
 
     async def sync_document(
-        self, *, uri: str, language_id: str, source: str, sha: str, stat_info=None
+        self, *, uri: str, language_id: str, source: str, sha: str, stat_info=None, force=False
     ) -> int:
         mtime_ns = getattr(stat_info, "st_mtime_ns", None)
         size = getattr(stat_info, "st_size", None)
         existing = self.documents.get(uri)
+        if existing is not None and existing["sha256"] == sha and not force:
+            existing["mtime_ns"] = mtime_ns
+            existing["size"] = size
+            self.documents.move_to_end(uri)
+            return existing["version"]
+        self.document_counter += 1
+        version = self.document_counter
+        self.diagnostics.pop(uri, None)
         if existing is None:
-            version = 1
-            self.diagnostics.pop(uri, None)
+            if len(self.documents) >= MAX_OPEN_DOCUMENTS:
+                await self._close_document(next(iter(self.documents)))
+            self.documents[uri] = {
+                "sha256": sha,
+                "version": version,
+                "language_id": language_id,
+                "mtime_ns": mtime_ns,
+                "size": size,
+                "accept_unversioned": version <= MAX_OPEN_DOCUMENTS,
+            }
             await self.notify(
                 "textDocument/didOpen",
                 {
@@ -403,22 +453,13 @@ class Peer:
                     }
                 },
             )
-            self.documents[uri] = {
-                "sha256": sha,
-                "version": version,
-                "language_id": language_id,
-                "mtime_ns": mtime_ns,
-                "size": size,
-            }
             return version
-        if existing["sha256"] == sha:
-            existing["mtime_ns"] = mtime_ns
-            existing["size"] = size
-            return existing["version"]
-        self.diagnostics.pop(uri, None)
+        existing.update(
+            sha256=sha, version=version, mtime_ns=mtime_ns, size=size, accept_unversioned=False
+        )
+        self.documents.move_to_end(uri)
         sync = self.capabilities.get("textDocumentSync")
         change_kind = sync.get("change", 1) if isinstance(sync, dict) else sync
-        version = existing["version"] + 1
         if change_kind == 0:
             await self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             await self.notify(
@@ -444,77 +485,102 @@ class Peer:
             "workspace/didChangeWatchedFiles",
             {"changes": [{"uri": uri, "type": 2}]},
         )
-        existing.update(sha256=sha, version=version, mtime_ns=mtime_ns, size=size)
         return version
 
-    async def _close_missing_document(self, open_uri: str):
-        self.documents.pop(open_uri, None)
-        self.diagnostics.pop(open_uri, None)
-        await self.notify("textDocument/didClose", {"textDocument": {"uri": open_uri}})
-        await self.notify(
-            "workspace/didChangeWatchedFiles",
-            {"changes": [{"uri": open_uri, "type": 3}]},
-        )
+    async def _close_document(self, uri):
+        self.documents.pop(uri, None)
+        self.diagnostics.pop(uri, None)
+        await self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+    def _document_change(self, uri, doc):
+        engine = self.agent.engine
+        path = _uri_to_path(engine, self.root, uri)
+        if path is None:
+            return None
+        try:
+            st = path.lstat()
+            if (st.st_mtime_ns, st.st_size) == (doc["mtime_ns"], doc["size"]):
+                return ()
+            raw = engine.read_bytes(path)
+            return st, engine.text(raw), hashlib.sha256(raw).hexdigest()
+        except (DevError, OSError):
+            return None
 
     async def refresh_other_documents(self, active_uri: str | None):
+        disk_call = getattr(self.agent, "disk_call", asyncio.to_thread)
+        changed = False
         for open_uri, doc in list(self.documents.items()):
             if open_uri == active_uri:
                 continue
-            p = _uri_to_path(self.agent.engine, self.root, open_uri)
-            if p is None:
-                await self._close_missing_document(open_uri)
-                continue
-            try:
-                st = p.lstat()
-                if (st.st_mtime_ns, st.st_size) == (doc.get("mtime_ns"), doc.get("size")):
-                    continue
-                raw = self.agent.engine.read_bytes(p)
-                text = self.agent.engine.text(raw)
-                sha = hashlib.sha256(raw).hexdigest()
-            except (DevError, OSError):
-                await self._close_missing_document(open_uri)
-                continue
-            if sha != doc["sha256"]:
-                await self.sync_document(
-                    uri=open_uri,
-                    language_id=doc["language_id"],
-                    source=text,
-                    sha=sha,
-                    stat_info=st,
+            update = await disk_call(self._document_change, open_uri, dict(doc))
+            if update is None:
+                changed = True
+                self.diagnostics.clear()
+                await self._close_document(open_uri)
+                await self.notify(
+                    "workspace/didChangeWatchedFiles",
+                    {"changes": [{"uri": open_uri, "type": 3}]},
                 )
-            else:
-                doc["mtime_ns"] = st.st_mtime_ns
-                doc["size"] = st.st_size
+            elif update:
+                st, source, sha = update
+                if sha != doc["sha256"]:
+                    changed = True
+                    self.diagnostics.clear()
+                    await self.sync_document(
+                        uri=open_uri,
+                        language_id=doc["language_id"],
+                        source=source,
+                        sha=sha,
+                        stat_info=st,
+                    )
+                else:
+                    doc.update(mtime_ns=st.st_mtime_ns, size=st.st_size)
+        return changed
 
     async def drain_stderr(self):
         while await self.process.stderr.read(65536):
             pass
 
     async def close(self):
-        if self.closed and self.process is None and self.reader is None and self.stderr is None:
-            return
-        self.closed = True
-        process = self.process
-        if process:
-            with contextlib.suppress(Exception):
-                if process.returncode is None and self.reader and not self.reader.done():
-                    await asyncio.wait_for(self.request("shutdown", None), 1)
-                    await self.notify("exit", {})
-                    # Give the protocol peer a bounded chance to flush state and
-                    # exit normally. Group cleanup below still reaps descendants.
-                    await asyncio.wait_for(process.wait(), 1)
+        await finish_cleanup(self._close())
+
+    async def _close(self):
+        async with self.close_lock:
+            self.closed = True
+            process = self.process
+            try:
+                if process is not None:
+                    await self._stop_process(process)
+            finally:
+                await self._release_io(process)
+
+    async def _stop_process(self, process):
+        try:
+            if process.returncode is None and self.reader and not self.reader.done():
+                with contextlib.suppress(Exception):
+                    async with asyncio.timeout(2):
+                        await self.request("shutdown", None)
+                        await self.notify("exit", {})
+                        await process.wait()
+        finally:
             await self.agent.kill_process(process, include_finished=True)
-        for t in (self.reader, self.stderr):
-            if t:
-                t.cancel()
-        await asyncio.gather(*(t for t in (self.reader, self.stderr) if t), return_exceptions=True)
-        self.reader = None
-        self.stderr = None
-        self.process = None
-        if process is not None:
-            for key, val in list(self.agent.processes.items()):
-                if val is process:
-                    self.agent.processes.pop(key, None)
+
+    async def _release_io(self, process):
+        try:
+            if isinstance(process, OwnedProcess):
+                process.close_stdio()
+            tasks = [task for task in (self.reader, self.stderr) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            self.reader = self.stderr = self.process = None
+            self.documents.clear()
+            self.diagnostics.clear()
+            if process is not None:
+                for key, current in list(self.agent.processes.items()):
+                    if current is process:
+                        self.agent.processes.pop(key, None)
 
 
 class Projector:
@@ -673,7 +739,7 @@ _FATAL_POOL_ERRORS = frozenset(
 
 
 class _PoolEntry:
-    def __init__(self, key: tuple[str, str], spec_fingerprint: str, clock):
+    def __init__(self, key: PoolKey, spec_fingerprint: str, clock):
         self.key = key
         self.spec_fingerprint = spec_fingerprint
         self.lock = asyncio.Lock()
@@ -713,7 +779,7 @@ class LspPool:
             else env_int("CODEPIER_LSP_MAX_INSTANCES", DEFAULT_MAX_INSTANCES, 1, 32)
         )
         self.clock = clock
-        self._entries: OrderedDict[tuple[str, str], _PoolEntry] = OrderedDict()
+        self._entries: OrderedDict[PoolKey, _PoolEntry] = OrderedDict()
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task | None = None
         self._reaper_wake = asyncio.Event()
@@ -747,6 +813,10 @@ class LspPool:
         )
 
     async def _close_entries(self, entries):
+        if entries:
+            await finish_cleanup(self._close_entries_owned(entries))
+
+    async def _close_entries_owned(self, entries):
         for entry in entries:
             with contextlib.suppress(Exception):
                 await entry.close()
@@ -830,15 +900,18 @@ class LspPool:
             reaper = self._reaper_task
             self._reaper_task = None
             self._reaper_wake.set()
+        closed = sum(entry.peer is not None for entry in entries)
+        await finish_cleanup(self._shutdown_entries(reaper, entries))
+        return closed
+
+    async def _shutdown_entries(self, reaper, entries):
         if reaper is not None and reaper is not asyncio.current_task():
             reaper.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await reaper
-        closed = sum(1 for entry in entries if entry.peer is not None)
         await self._close_entries(entries)
-        return closed
 
-    async def _checkout(self, key: tuple[str, str], spec_fp: str) -> tuple[_PoolEntry, bool]:
+    async def _checkout(self, key: PoolKey, spec_fp: str) -> tuple[_PoolEntry, bool]:
         self._sync_loop()
         now = self.clock()
         async with self._lock:
@@ -870,12 +943,20 @@ class LspPool:
                 self._entries.move_to_end(key)
                 pooled = True
             entry.waiters += 1
-        await self._close_entries(to_close)
+        try:
+            await self._close_entries(to_close)
+        except BaseException:
+            entry.waiters -= 1
+            async with self._lock:
+                if not entry.in_use and entry.peer is None and self._entries.get(key) is entry:
+                    self._entries.pop(key, None)
+            raise
         return entry, pooled
 
     async def _spawn_peer(
         self, entry: _PoolEntry, agent, identifier, project, root, config: dict, spec_fp: str
     ) -> Peer:
+        _raise_if_stopped(agent, identifier)
         self.misses += 1
         peer = Peer(agent, identifier, project, root, config)
         await peer.start()
@@ -901,11 +982,14 @@ class LspPool:
     async def _run_peer_request(
         self, entry, agent, identifier, project, root, config, spec_fp, runner, reused
     ):
+        _raise_if_stopped(agent, identifier)
+        entry.peer.notifications = 0
         agent.processes[identifier] = entry.peer.process
         try:
             return await runner(entry.peer)
         except DevError as exc:
             if reused and exc.code == "LSP_DISCONNECTED":
+                _raise_if_stopped(agent, identifier)
                 await entry.close()
                 peer = await self._spawn_peer(
                     entry, agent, identifier, project, root, config, spec_fp
@@ -932,7 +1016,7 @@ class LspPool:
         identifier,
         project,
         root,
-        key: tuple[str, str],
+        key: PoolKey,
         config: dict,
         runner,
     ):
@@ -940,6 +1024,7 @@ class LspPool:
         phase = getattr(agent, "phase", None)
         reported_waiting = False
         while True:
+            _raise_if_stopped(agent, identifier)
             entry, pooled = await self._checkout(key, spec_fp)
             try:
                 if callable(phase) and entry.lock.locked() and not reported_waiting:
@@ -983,6 +1068,18 @@ class LspPool:
                         await self._release_query_peer(agent, identifier, key, entry, pooled)
             finally:
                 entry.waiters -= 1
+
+
+def _raise_if_stopped(agent, identifier):
+    journal = getattr(agent, "journal", None)
+    stop = getattr(agent, "stop_event", None)
+    cancelled = getattr(journal, "is_cancelled", None)
+    if (
+        identifier in getattr(agent, "cancelled", ())
+        or (stop is not None and stop.is_set())
+        or (callable(cancelled) and cancelled(identifier))
+    ):
+        raise DevError("CANCELLED", "语义查询已取消", 409)
 
 
 _DEFAULT_POOL: LspPool | None = None
@@ -1054,13 +1151,10 @@ async def _query_diagnostics(peer, projector, args, uri, doc_version, capabiliti
         rawitems = response.get("items", []) if isinstance(response, dict) else []
         fresh = isinstance(response, dict) and response.get("kind") == "full"
     else:
-        deadline = time.monotonic() + min(config.get("timeout_seconds", 20), 12)
-        while uri not in peer.diagnostics and not peer.error and time.monotonic() < deadline:
-            peer.changed.clear()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(peer.changed.wait(), max(0.01, deadline - time.monotonic()))
-        reported = peer.diagnostics.get(uri)
-        fresh = bool(reported is not None and reported.get("version") in (None, doc_version))
+        reported = await peer.wait_diagnostics(
+            uri, doc_version, min(config.get("timeout_seconds", 20), 12)
+        )
+        fresh = reported is not None
         rawitems = reported.get("diagnostics", []) if reported else []
     for item in rawitems:
         try:
@@ -1132,7 +1226,7 @@ async def _execute_query(
     action = args["action"]
     fresh = True
     capabilities = peer.capabilities
-    await peer.refresh_other_documents(uri)
+    dependencies_changed = await peer.refresh_other_documents(uri)
     doc_version = 1
     if uri:
         doc_version = await peer.sync_document(
@@ -1141,6 +1235,7 @@ async def _execute_query(
             source=source,
             sha=sha,
             stat_info=stat_info,
+            force=dependencies_changed,
         )
     params = {"textDocument": {"uri": uri}, "position": position}
     items = []
@@ -1253,7 +1348,9 @@ async def query(agent, identifier, project, args, *, pool: LspPool | None = None
         "path": path_arg,
     }
     active_pool = pool or get_pool(agent)
-    key = (str(root), _server_language(agent.config, language))
+    disk_call = getattr(agent, "disk_call", asyncio.to_thread)
+    root_stat = await disk_call(root.stat)
+    key = (str(root), _server_language(agent.config, language), root_stat.st_dev, root_stat.st_ino)
     try:
         async with asyncio.timeout(min(config.get("timeout_seconds", 20) * 3, 120)):
             return await active_pool.run_query(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -489,7 +491,7 @@ async def test_lsp_pool_incremental_sync_lru_memory_pressure_and_crash_respawn(t
             {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50},
         )
         assert pool.resident_count() == 2
-        assert (str(roots[0].resolve()), "python") not in pool._entries
+        assert not any(key[:2] == (str(roots[0].resolve()), "python") for key in pool._entries)
 
         # 4. Memory-pressure eviction hook
         evicted = await lsp_navigation.evict_for_memory_pressure(agent)
@@ -503,10 +505,16 @@ async def test_lsp_pool_incremental_sync_lru_memory_pressure_and_crash_respawn(t
             projects[0],
             {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50},
         )
-        entry = pool._entries[(str(roots[0].resolve()), "python")]
+        entry = next(
+            value for key, value in pool._entries.items()
+            if key[:2] == (str(roots[0].resolve()), "python")
+        )
         dead_proc = entry.peer.process
         dead_pid = dead_proc.pid
-        dead_proc.kill()
+        if os.name == "nt":
+            dead_proc.kill()
+        else:
+            os.kill(dead_pid, signal.SIGKILL)
         await dead_proc.wait()
 
         recovered = await lsp_navigation.query(
@@ -546,3 +554,26 @@ async def test_lsp_pool_incremental_sync_lru_memory_pressure_and_crash_respawn(t
         assert closed >= 0
         assert pool.resident_count() == 0
         assert not agent.processes
+
+
+@pytest.mark.asyncio
+async def test_lsp_pool_never_reuses_peer_for_recreated_root(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "source.py").write_text("def fixture():\n    return 1\n")
+    marker = tmp_path / "marker.json"
+    pool = lsp_navigation.LspPool()
+    agent = _make_lsp_agent(tmp_path, root, marker, pool=pool)
+    project = {"root": str(root), "alias": "Fixture", "id": "proj-1", "allow_tasks": True}
+    args = {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50}
+    try:
+        await lsp_navigation.query(agent, "old", project, args)
+        first = json.loads(marker.read_text())["pid"]
+        root.rename(tmp_path / "old")
+        root.mkdir()
+        (root / "source.py").write_text("def fixture():\n    return 2\n")
+        await lsp_navigation.query(agent, "new", project, args)
+        assert json.loads(marker.read_text())["pid"] != first
+        assert pool.hits == 0
+    finally:
+        await pool.shutdown_all()

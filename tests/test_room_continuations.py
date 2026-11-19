@@ -108,7 +108,8 @@ async def test_save_without_selection_and_expired_preview_do_not_resume(collab):
 
 
 @pytest.mark.asyncio
-async def test_waiting_operation_keeps_original_receipt_when_continuation_recovers(collab):
+@pytest.mark.parametrize("stale_policy", [False, True])
+async def test_waiting_operation_keeps_original_receipt_when_continuation_recovers(collab, stale_policy):
     clock = collab[6]
     s, owner, actor, _, identity, credentials = await connected(collab, [{'project': 'proj'}],
         [{'project_id': 'proj', 'lifetime': {'mode': 'timed', 'expires_at': clock[0] + 180}}])
@@ -129,10 +130,21 @@ async def test_waiting_operation_keeps_original_receipt_when_continuation_recove
     s.runtime.complete(s.store.one('SELECT * FROM operations WHERE id=?', (operation_id,)),
         {'ok': True, 'data': {'content': 'completed by original worker'}})
     clock[0] += 31
-    assert continuations.recover() == 1
+    if stale_policy:
+        s.store.execute(
+            "UPDATE room_continuation_batches SET policy_version=policy_version-1 WHERE id=?",
+            (batch["batch_id"],),
+        )
+    assert s.events._recovery_step("continuations", s.room_goal_recovery.recover_continuations) == 1
     current = continuations.status(room, batch['batch_id'], owner)
-    assert current['results'][0]['state'] == 'continued'
-    assert s.room_goal_recovery.epoch(goal['id']) == 2
+    assert current['results'][0]['state'] == ("skipped" if stale_policy else "continued")
+    assert s.room_goal_recovery.epoch(goal['id']) == (1 if stale_policy else 2)
+    if stale_policy:
+        row = s.store.one(
+            "SELECT reason_code FROM room_continuation_items WHERE batch_id=?",
+            (batch["batch_id"],),
+        )
+        assert row["reason_code"] == "ROOM_CONTINUATION_POLICY_CHANGED"
     assert s.store.all('SELECT id,state FROM operations') == [{'id': operation_id, 'state': 'succeeded'}]
 
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 import itertools
-import re
 import threading
 import time
 
@@ -124,7 +123,7 @@ class CheckedConnection:
         finally:
             self._connection.set_authorizer(None)
 
-    def execute(self, sql, parameters=()):
+    def execute(self, sql, parameters=(), *, _track_change=True):
         self._require()
         started = (
             time.monotonic() if self._on_transaction and self._transaction_started is None else None
@@ -134,7 +133,8 @@ class CheckedConnection:
         finally:
             if started is not None and self._connection.in_transaction:
                 self._transaction_started = started
-        self._changed(sql)
+        if _track_change:
+            self._changed(sql)
         return CheckedCursor(cursor, self._lock)
 
     def executemany(self, sql, parameters):
@@ -151,7 +151,7 @@ class CheckedConnection:
         return CheckedCursor(cursor, self._lock)
 
     def _changed(self, sql):
-        if self._on_write and re.match(r"\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.I):
+        if self._on_write:
             self._on_write(sql)
 
     def after_commit(self, callback):
@@ -203,7 +203,11 @@ class CheckedConnection:
         self._require()
         if self.depth or self._connection.in_transaction:
             raise RuntimeError("executescript would implicitly commit the managed transaction")
-        return CheckedCursor(self._connection.executescript(script), self._lock)
+        try:
+            return CheckedCursor(self._connection.executescript(script), self._lock)
+        finally:
+            # SQLite can commit early statements of a script before a later failure.
+            self._changed(None)
 
     def backup(self, target, **kwargs):
         self._require()

@@ -389,7 +389,7 @@ class ProjectScheduler:
     def _abort_waiting(self, item):
         """Remove a timed-out waiter under self.condition and return (reason, blockers)."""
         blockers = self._blockers(item)
-        reason = self._reason(item)
+        reason = "resource_conflict" if blockers else self._reason(item)
         if item in self.waiting:
             self.waiting.remove(item)
         if item.token in self._resource_tokens:

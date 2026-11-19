@@ -6,11 +6,13 @@ from collections import OrderedDict
 from collections.abc import Mapping
 import hashlib
 import json
-import os
+import math
 import threading
 import time
 
 from hub.access_preview import grant_access_preview
+from hub.principal import refresh_principal
+from shared.config import env_float
 from shared.mcp_protocol import SERVER_INFO, SUPPORTED
 from shared.tool_protocol import CONTRACT_PROTOCOL, wire_version
 from shared.util import DevError
@@ -52,13 +54,14 @@ class ConnectionEvidence:
     ):
         self.runtime, self.store = runtime, runtime.store
         self.write_errors = 0
-        self._authentication_observed = {}
         self._writes_since_prune = 0
         self.dedup_seconds = (
-            float(os.getenv("CODEPIER_EVIDENCE_DEDUP_SECONDS", DEDUP_WINDOW_SECONDS))
+            env_float("CODEPIER_EVIDENCE_DEDUP_SECONDS", DEDUP_WINDOW_SECONDS, 0.0, float("inf"))
             if dedup_seconds is None
             else float(dedup_seconds)
         )
+        if not math.isfinite(self.dedup_seconds) or self.dedup_seconds < 0:
+            raise ValueError("Evidence deduplication window must be finite and nonnegative")
         self.max_dedup_entries = max(1, int(max_dedup_entries))
         self._observed_lru: OrderedDict[tuple, tuple[float, float, int]] = OrderedDict()
         self._lru_lock = threading.Lock()
@@ -73,7 +76,6 @@ class ConnectionEvidence:
         """Clear in-memory observation deduplication cache (for tests/admin reset)."""
         with self._lru_lock:
             self._observed_lru.clear()
-        self._authentication_observed.clear()
 
     @staticmethod
     def _dedup_key(
@@ -219,12 +221,6 @@ class ConnectionEvidence:
                 ),
             )
             self._record_observed(dedup_key, observed_at)
-            if stage == "authentication":
-                self._authentication_observed[
-                    (principal.space_id, principal.user_id, principal.grant_id)
-                ] = time.monotonic()
-                if len(self._authentication_observed) > self.max_dedup_entries:
-                    self._authentication_observed.pop(next(iter(self._authentication_observed)))
             self._writes_since_prune += 1
             if self._writes_since_prune >= 64:
                 self.store.execute("""DELETE FROM mcp_connection_evidence WHERE rowid IN
@@ -287,10 +283,25 @@ class ConnectionEvidence:
             if row["grant_id"] != principal.grant_id or row["state"] != "succeeded":
                 return principal, None
         else:
+            # Membership and grant deadlines can pass without a database write.
+            principal = refresh_principal(self.store, principal)
             row = op_row
             if _field(row, "grant_id") != principal.grant_id:
                 return principal, None
         return principal, row
+
+    def _completed_project(self, row, principal, cached_project):
+        project_id = _field(row, "project_id")
+        if cached_project is None:
+            return self.runtime.project(project_id, principal)
+        # A matching epoch allows reusing the exact mapping, not the authority.
+        # Freshly narrowed permissions can exclude a project even without a DB write.
+        if cached_project["id"] != project_id or not self.runtime.visible_project(
+            cached_project, principal
+        ):
+            return None
+        self.runtime.authorize(principal, "read", project_id=project_id)
+        return cached_project
 
     def _completed_is_throttled(self, grant_id, project_id, workspace_id, completed_at):
         early_key = self._dedup_key(
@@ -317,8 +328,9 @@ class ConnectionEvidence:
     ):
         """Use the old in-memory request after the real terminal result commits.
 
-        Runtime clears encrypted payload at completion. Never retain that payload
-        or infer a historical mapping from the current project when polling.
+        Runtime clears encrypted payload at completion. A pre-completion row
+        snapshot still carries the original encrypted mapping for the cache-miss
+        fallback; subsequent polling never infers that mapping.
         """
         op_row = operation if _is_row(operation) or (op is None and operation is not None) else op
         if op_row is None:
@@ -363,8 +375,9 @@ class ConnectionEvidence:
             if row is None:
                 return
 
-            if project is None:
-                project = self.runtime.project(_field(row, "project_id"), principal)
+            project = self._completed_project(row, principal, project)
+            if not project:
+                return
 
             if not self._completed_matches_project(op_row, row, project, payload):
                 return

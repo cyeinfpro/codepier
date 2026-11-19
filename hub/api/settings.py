@@ -35,6 +35,37 @@ class SettingsUpdateInput(SettingsInput):
     expected_public_url: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+def _register_grant_recovery_routes(router, store, runtime, auth):
+    def wake_grant_recovery():
+        loops = getattr(getattr(runtime, "collaboration", None), "loops", None)
+        if loops is not None:
+            store.after_commit(loops.wake_renewals)
+            store.after_commit(loops.wake_reconcile)
+
+    @router.put("/api/grants/{id}/expiration")
+    @database_endpoint(store)
+    def update_grant_expiration(id: str, request: Request, body: GrantExpirationInput):
+        with store.transaction():
+            principal = auth.panel(request, True)
+            result = grant_expiry.update(
+                store, principal, id, body.expires, body.expected_revision, body.confirm_reactivate
+            )
+            wake_grant_recovery()
+            return result
+
+    @router.delete("/api/grants/{id}")
+    @database_endpoint(store)
+    def revoke_grant(id: str, request: Request):
+        principal = auth.panel(request, True)
+        store.execute(
+            "UPDATE grants SET revoked=1 WHERE id=? AND user_id=? AND space_id=?",
+            (id, principal.user_id, principal.space_id),
+        )
+        store.audit(principal.actor, "token.revoked", id)
+        wake_grant_recovery()
+        return {"ok": True}
+
+
 def make_settings_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
@@ -247,25 +278,7 @@ def make_settings_router(context: HubContext):
         )
         return result
 
-    @router.put("/api/grants/{id}/expiration")
-    @database_endpoint(store)
-    def update_grant_expiration(id: str, request: Request, body: GrantExpirationInput):
-        with store.transaction():
-            principal = auth.panel(request, True)
-            return grant_expiry.update(
-                store, principal, id, body.expires, body.expected_revision, body.confirm_reactivate
-            )
-
-    @router.delete("/api/grants/{id}")
-    @database_endpoint(store)
-    def revoke_grant(id: str, request: Request):
-        principal = auth.panel(request, True)
-        store.execute(
-            "UPDATE grants SET revoked=1 WHERE id=? AND user_id=? AND space_id=?",
-            (id, principal.user_id, principal.space_id),
-        )
-        store.audit(principal.actor, "token.revoked", id)
-        return {"ok": True}
+    _register_grant_recovery_routes(router, store, runtime, auth)
 
     @router.get("/api/settings")
     @database_endpoint(store)

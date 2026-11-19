@@ -302,8 +302,14 @@ def test_revocation_fence_is_atomic_and_never_kills_started_work(local_agent, st
     elif status == 'done':
         agent.journal.finish(identifier, {'ok': True, 'data': {'content': 'preserved'}})
     elif status == 'retryable':
-        with agent.journal.lock, agent.journal.db:
-            agent.journal.db.execute("UPDATE calls SET status='retryable' WHERE id=?", (identifier,))
+        # Reopen the journal to execute the real accepted -> retryable transition
+        # and rebuild its matching active-state cache.
+        from agent.journal import Journal
+
+        state_dir = agent.journal.directory
+        agent.journal.db.close()
+        agent.journal = Journal(state_dir)
+        assert agent.journal.fast_status(identifier)["status"] == "retryable"
     elif status == 'finishing':
         agent.finishing.add(identifier)
     job = Mock()

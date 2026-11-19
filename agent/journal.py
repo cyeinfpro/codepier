@@ -133,6 +133,7 @@ class Journal:
         self.terminal_statuses: OrderedDict[str, str] = OrderedDict()
         self.cancelled_ids: set[str] = set()
         self._cancelled_at: dict[str, float] = {}
+        self._recovered_starts: set[str] = set()
         for row in self.db.execute(
             "SELECT id,status,result,output,output_seq FROM calls "
             "WHERE status IN ('accepted','running','retryable')"
@@ -168,20 +169,18 @@ class Journal:
     def prune(self, **settings):
         from agent.journal_retention import prune
 
-        result = prune(self, **settings)
-        if result.get("cancellations"):
-            with self.lock:
-                current = {r[0] for r in self.db.execute("SELECT id FROM cancellations")}
-            now = time.time()
-            with self._state_lock:
-                for identifier in list(self.cancelled_ids - current):
-                    if (
-                        identifier not in self.active_states
-                        and now - self._cancelled_at.get(identifier, 0) > 60
-                    ):
-                        self.cancelled_ids.discard(identifier)
-                        self._cancelled_at.pop(identifier, None)
-        return result
+        return prune(self, **settings)
+
+    def forget_retired_cancellations(self, entries):
+        with self._state_lock:
+            for identifier, retired_at in entries:
+                if self._cancelled_at.get(identifier) == retired_at:
+                    self.cancelled_ids.discard(identifier)
+                    self._cancelled_at.pop(identifier, None)
+
+    def recovering_start(self, identifier):
+        with self._state_lock:
+            return identifier in self._recovered_starts
 
     def meta(self, key):
         with self.lock:
@@ -200,6 +199,7 @@ class Journal:
         new_active = None
         done_status = None
         done_result = None
+        recovered = False
         with self.lock, self.db:
             old = self.db.execute("SELECT * FROM calls WHERE id=?", (id,)).fetchone()
             if old:
@@ -208,6 +208,7 @@ class Journal:
                 if old["status"] in {"running", "accepted"}:
                     raise DevError("ALREADY_RUNNING", "该操作已接收或正在执行")
                 if old["status"] == "retryable":
+                    recovered = True
                     self.db.execute(
                         "UPDATE calls SET status='accepted',result=NULL,acked=0 WHERE id=?", (id,)
                     )
@@ -235,6 +236,8 @@ class Journal:
         with self._state_lock:
             if new_active is not None:
                 self.active_states[id] = new_active
+                if recovered:
+                    self._recovered_starts.add(id)
                 self.terminal_statuses.pop(id, None)
             elif done_status is not None:
                 self.active_states.pop(id, None)
@@ -259,13 +262,19 @@ class Journal:
         return False
 
     def mark_running_db(self, id):
-        with self.lock, self.db:
-            return (
-                self.db.execute(
-                    "UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,)
-                ).rowcount
-                == 1
-            )
+        with self.lock:
+            with self.db:
+                changed = (
+                    self.db.execute(
+                        "UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,)
+                    ).rowcount
+                    == 1
+                )
+            if changed:
+                self.mark_running_memory(id)
+                with self._state_lock:
+                    self._recovered_starts.discard(id)
+            return changed
 
     def mark_running(self, id):
         self.mark_running_memory(id)
@@ -281,7 +290,8 @@ class Journal:
     def cancel_db(self, id, at=None):
         with self.lock, self.db:
             self.db.execute(
-                "INSERT OR IGNORE INTO cancellations VALUES (?,?)",
+                "INSERT INTO cancellations VALUES (?,?) "
+                "ON CONFLICT(id) DO UPDATE SET at=MAX(cancellations.at,excluded.at)",
                 (id, time.time() if at is None else at),
             )
 
@@ -354,6 +364,7 @@ class Journal:
             )
         with self._state_lock:
             self.active_states.pop(id, None)
+            self._recovered_starts.discard(id)
             self._remember_terminal(id, "done")
 
     def ack(self, id: str):

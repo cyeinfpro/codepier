@@ -7,6 +7,7 @@ is not authorization: both backends revalidate at execution boundaries.
 from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
+from threading import Lock
 from hub import iam
 from hub.principal import refresh_principal
 from hub.tool_discovery import visible_definitions
@@ -25,12 +26,14 @@ class ToolRoute:
 class ToolRouter:
     def __init__(self, store, gateway):
         self.store, self.gateway = store, gateway
+        self._cache_lock = Lock()
         self._collision_cache = OrderedDict()
         self._native_names_cache = {}
 
     def _native_tool_names(self, collaboration_enabled, authorization_mode):
         key = (collaboration_enabled, authorization_mode)
-        cached = self._native_names_cache.get(key)
+        with self._cache_lock:
+            cached = self._native_names_cache.get(key)
         if cached is None:
             names = {item["name"] for item in tool_definitions(authorization=authorization_mode)}
             if collaboration_enabled:
@@ -40,7 +43,8 @@ class ToolRouter:
                     item["name"] for item in collaboration_tools(authorization=authorization_mode)
                 )
             cached = frozenset(names)
-            self._native_names_cache[key] = cached
+            with self._cache_lock:
+                cached = self._native_names_cache.setdefault(key, cached)
         return cached
 
     def _check_unified_collision(self, principal, collaboration_enabled):
@@ -64,8 +68,7 @@ class ToolRouter:
             gw_rev,
             collaboration_enabled,
         )
-        if cache_key in self._collision_cache:
-            self._collision_cache.move_to_end(cache_key)
+        if self._collision_cached(cache_key):
             return
         external = self.gateway.tools(principal)
         from shared.public_collaboration import LEGACY_TOOLS
@@ -81,9 +84,21 @@ class ToolRouter:
             raise DevError("TOOL_NAME_COLLISION", "远端工具不能覆盖统一工具 query/act", 409)
         if ext_set & self._native_tool_names(collaboration_enabled, principal.authorization_mode):
             raise DevError("TOOL_NAME_COLLISION", "工具发布名称冲突；未选择任意后端", 409)
-        self._collision_cache[cache_key] = True
-        while len(self._collision_cache) > 1024:
-            self._collision_cache.popitem(last=False)
+        self._cache_collision_check(cache_key)
+
+    def _collision_cached(self, key):
+        with self._cache_lock:
+            if key not in self._collision_cache:
+                return False
+            self._collision_cache.move_to_end(key)
+            return True
+
+    def _cache_collision_check(self, key):
+        with self._cache_lock:
+            self._collision_cache[key] = True
+            self._collision_cache.move_to_end(key)
+            if len(self._collision_cache) > 1024:
+                self._collision_cache.popitem(last=False)
 
     @iam.read_decision
     def definitions(self, principal, *, discovery=True, profile="unified", schemas="full"):

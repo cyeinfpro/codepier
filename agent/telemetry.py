@@ -69,6 +69,11 @@ class AgentTelemetry:
                     del stages[:-32]
                 self._next_seq[op_id] = row[1]
 
+    def abandon(self, identifier):
+        with self._mem_lock:
+            self.starts.pop(identifier, None)
+            self._last.pop(identifier, None)
+
     def process_event(self, identifier, stage, **detail):
         """Bounded, best-effort memory only: never delay a workload on disk I/O."""
         if (
@@ -79,7 +84,13 @@ class AgentTelemetry:
             return
         try:
             now = time.monotonic()
-            elapsed = max(0, round((now - self.starts.get(identifier, now)) * 1000))
+            if not self._mem_lock.acquire(blocking=False):
+                return
+            try:
+                start = self.starts.get(identifier, now)
+            finally:
+                self._mem_lock.release()
+            elapsed = max(0, round((now - start) * 1000))
             pending = self._process_pending.setdefault(identifier, [])
             if len(pending) < 16:
                 pending.append((stage, elapsed, safe_process_detail(detail)))
