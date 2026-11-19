@@ -8,6 +8,8 @@ from dataclasses import replace
 from functools import partial
 
 logger = logging.getLogger(__name__)
+IDLE_BACKOFF_SECONDS = 20
+FULL_RECONCILE_INTERVAL_SECONDS = 60
 
 
 class CollaborationLoops:
@@ -18,6 +20,10 @@ class CollaborationLoops:
         self.host_backfill_pending = False
         self._wake_lock = Lock()
         self._event_loop = self._event_wake = self._wake_scheduled = None
+        self._reconcile_wake = self._monitor_wake = self._renewal_wake = None
+        self._reconcile_idle = True
+        self._full_reconcile_at = None
+        self._renewals_idle = True
         self._channel_wakes = {}
 
     async def start(self):
@@ -27,6 +33,9 @@ class CollaborationLoops:
         with self._wake_lock:
             self._event_loop = asyncio.get_running_loop()
             self._event_wake = asyncio.Event() if self.service.config.events_enabled else None
+            self._reconcile_wake = asyncio.Event()
+            self._renewal_wake = asyncio.Event() if self.service.config.events_enabled else None
+            self._monitor_wake = asyncio.Event() if self.service.config.collector_enabled else None
             self._wake_scheduled = None
         operations = [("reconcile", self.reconcile, 5)]
         if self.service.config.events_enabled:
@@ -92,6 +101,25 @@ class CollaborationLoops:
             if self.started and self._event_wake is wake:
                 wake.set()
 
+    def _wake_single(self, event):
+        with self._wake_lock:
+            loop = self._event_loop
+            if not self.started or loop is None or event is None or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                return
+
+    def wake_reconcile(self):
+        self._wake_single(self._reconcile_wake)
+
+    def wake_monitor(self):
+        self._wake_single(self._monitor_wake)
+
+    def wake_renewals(self):
+        self._wake_single(self._renewal_wake)
+
     def wake_channels(self, name=None):
         """An owner/account change interrupts the idle backoff immediately."""
         with self._wake_lock:
@@ -127,12 +155,135 @@ class CollaborationLoops:
         # should consume the one database worker every second.
         return 30
 
+    def channel_probe(self, name, interval):
+        delay = self.channel_delay(name, interval)
+        if delay == interval:
+            return True, delay
+        now = self.service.clock()
+        if name in {"weixin_media", "telegram_media"}:
+            has_media = bool(
+                self.service.store.one(
+                    "SELECT 1 FROM channel_attachments WHERE state!='expired' AND expires_at<=? LIMIT 1",
+                    (now,),
+                )
+                or (
+                    name == "weixin_media"
+                    and self.service.store.one(
+                        "SELECT 1 FROM channel_attachments WHERE channel='weixin' AND state='pending' AND next_attempt<=? AND COALESCE(lease_until,0)<=? LIMIT 1",
+                        (now, now),
+                    )
+                )
+            )
+            return has_media, (interval if has_media else delay)
+        if name == "channel_mirrors":
+            has_mirrors = bool(
+                self.service.store.one(
+                    "SELECT 1 FROM channel_mirror_parts WHERE state IN ('queued','waiting_context','sending','preparing') LIMIT 1"
+                )
+            )
+            return has_mirrors, (interval if has_mirrors else delay)
+        return False, delay
+
+    def _probe_reconcile(self):
+        now = self.service.clock()
+        store = self.service.store
+        has_revoke = bool(
+            store.one(
+                "SELECT 1 FROM mcp_event_deliveries WHERE state='leased' AND reason_code='host_revoked_in_flight' AND lease_until<=? LIMIT 1",
+                (now,),
+            )
+            or store.one(
+                """SELECT 1 FROM room_host_revoke_jobs j JOIN room_host_connections h
+                ON h.id=j.host_connection_id AND h.host_revocation_epoch=j.host_revocation_epoch
+                WHERE h.state='revoked' AND j.state IN ('pending','running') LIMIT 1""",
+            )
+        )
+        has_proof_expire = bool(
+            store.one(
+                """SELECT 1 FROM room_host_attach_challenges c JOIN room_host_connections h
+                ON h.id=c.host_connection_id WHERE c.state='pending' AND (c.expires_at<=? OR h.state='revoked') LIMIT 1""",
+                (now,),
+            )
+            or store.one(
+                """SELECT 1 FROM room_host_control_handles c JOIN room_host_connections h
+                ON h.id=c.host_connection_id WHERE c.exchange_secret!='' AND (c.exchange_expires_at<=? OR h.state='revoked') LIMIT 1""",
+                (now,),
+            )
+        )
+        # The cheap query is a scheduling hint, not an authority on what the
+        # recovery code can repair. Periodically run the canonical scan even
+        # when the hint has no matching row.
+        has_service_reconcile = bool(
+            (self._full_reconcile_at is not None and now >= self._full_reconcile_at)
+            or getattr(self.service, "_reconcile_after", "")
+            or getattr(getattr(self.service, "coordination", None), "_reconcile_after", "")
+            or getattr(getattr(self.service, "dot_mailbox", None), "_settle_after", 0)
+            or store.one(
+                """SELECT 1 FROM conversation_rooms r
+                WHERE (r.archived_at IS NOT NULL AND r.state!='archived')
+                   OR (r.state='archived' AND NOT EXISTS (
+                       SELECT 1 FROM conversation_archives a WHERE a.conversation_id=r.id))
+                LIMIT 1"""
+            )
+            or store.one(
+                """SELECT 1 FROM dot_mailbox_entries e
+                JOIN dot_message_handling h ON h.dot_id=e.dot_id AND h.message_id=e.object_id
+                JOIN dot_mailbox_bindings b ON b.dot_id=e.dot_id AND b.generation=e.generation
+                WHERE e.kind='message' AND e.acknowledged_at IS NULL AND e.superseded_by=''
+                  AND h.handling_state IN ('reply_committed','covered','no_response_required','legacy_handled')
+                LIMIT 1"""
+            )
+            or store.one(
+                "SELECT 1 FROM coordination_goals WHERE state='active' AND expires_at<=? LIMIT 1",
+                (now,),
+            )
+            or store.one(
+                """SELECT 1 FROM collaboration_jobs WHERE state IN ('queued','leased','running','retry_wait')
+                AND (deadline_at<=? OR (state IN ('leased','running') AND COALESCE(lease_until,0)<=?)
+                     OR (state='retry_wait' AND not_before<=?)) LIMIT 1""",
+                (now, now, now),
+            )
+        )
+        return (
+            has_revoke,
+            has_proof_expire,
+            has_service_reconcile,
+            bool(self.host_backfill_pending),
+        )
+
+    def _run_reconcile(self, do_revoke, do_expire, do_service, do_backfill):
+        error = None
+        steps = (
+            (do_revoke, self.service.room_connections.drain_revoke_jobs),
+            (do_expire, self.service.rooms.host_proofs.expire),
+            (do_service, self.service.reconcile),
+            (do_backfill and self.host_backfill_pending, self.resume_host_backfill),
+        )
+        for enabled, step in steps:
+            if not enabled:
+                continue
+            try:
+                # Separate top-level commits: a malformed job or backfill
+                # record must never undo a successful security cleanup.
+                with self.service.store.transaction():
+                    step()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
+
     async def reconcile(self):
-        await self.service.store.run(self.service.room_connections.drain_revoke_jobs)
-        await self.service.store.run(self.service.rooms.host_proofs.expire)
-        await self.service.store.run(self.service.reconcile)
-        if self.host_backfill_pending:
-            await self.service.store.run(self.resume_host_backfill)
+        if self._full_reconcile_at is None:
+            self._full_reconcile_at = self.service.clock() + FULL_RECONCILE_INTERVAL_SECONDS
+        flags = await self.service.store.run_read(self._probe_reconcile)
+        if not any(flags):
+            self._reconcile_idle = True
+            return
+        self._reconcile_idle = False
+        await self.service.store.run(self._run_reconcile, *flags)
+        if flags[2]:
+            self._full_reconcile_at = self.service.clock() + FULL_RECONCILE_INTERVAL_SECONDS
 
     def resume_host_backfill(self):
         from hub.collaboration.room_host_rollout import advance_auto_backfill
@@ -143,12 +294,56 @@ class CollaborationLoops:
                 self.service.config = replace(self.service.config, host_connections_mode="on")
                 self.host_backfill_pending = False
 
+    def _probe_renewals(self):
+        now = self.service.clock()
+        return bool(
+            self.service.store.one(
+                "SELECT 1 FROM room_subscription_renewals WHERE state='approved' AND next_at<=? LIMIT 1",
+                (now,),
+            )
+        )
+
     async def renew_room_subscriptions(self):
+        has_work = await self.service.store.run_read(self._probe_renewals)
+        if not has_work:
+            self._renewals_idle = True
+            return
+        self._renewals_idle = False
         await self.service.rooms.renewals.tick(self.service.events)
+
+    def _wake_for(self, name):
+        if name == "events":
+            return self._event_wake
+        if name == "reconcile":
+            return self._reconcile_wake
+        if name == "collector":
+            return self._monitor_wake
+        if name == "room_subscription_renewal":
+            return self._renewal_wake
+        return self._channel_wakes.get(name)
+
+    def _idle_delay_for(self, name, interval, channel_idle_delay):
+        if name == "events":
+            deadline = getattr(getattr(self.service, "events", None), "next_dispatch_delay", None)
+            return deadline(interval) if deadline is not None else IDLE_BACKOFF_SECONDS
+        if name == "reconcile":
+            return IDLE_BACKOFF_SECONDS if self._reconcile_idle else interval
+        if name == "room_subscription_renewal":
+            return IDLE_BACKOFF_SECONDS if self._renewals_idle else interval
+        if name == "collector":
+            next_collect = getattr(
+                getattr(self.service, "monitor", None), "next_collect_delay", None
+            )
+            return (
+                next_collect(IDLE_BACKOFF_SECONDS)
+                if next_collect is not None
+                else IDLE_BACKOFF_SECONDS
+            )
+        return channel_idle_delay
 
     async def loop(self, name, operation, interval):
         while True:
-            wake = self._event_wake if name == "events" else self._channel_wakes.get(name)
+            wake = self._wake_for(name)
             # Clear BEFORE the DB scan. A commit during the scan/network await
             # stays set and triggers one more serialized pass, never a lost wake.
             if wake is not None:
@@ -159,12 +354,14 @@ class CollaborationLoops:
                     "status": "running",
                     "observed_at": self.service.clock(),
                 }
-                await operation()
-                idle_delay = (
-                    await self.service.store.run_read(lambda: self.channel_delay(name, interval))
-                    if name in self._channel_wakes
-                    else interval
-                )
+                if name in self._channel_wakes:
+                    has_work, idle_delay = await self.service.store.run_read(
+                        lambda: self.channel_probe(name, interval)
+                    )
+                    if has_work:
+                        await operation()
+                else:
+                    await operation()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -182,12 +379,7 @@ class CollaborationLoops:
                     "status": "running",
                     "observed_at": self.service.clock(),
                 }
-            deadline = (
-                getattr(getattr(self.service, "events", None), "next_dispatch_delay", None)
-                if name == "events"
-                else None
-            )
-            delay = deadline(interval) if deadline is not None else idle_delay
+            delay = self._idle_delay_for(name, interval, idle_delay)
             if wake is None:
                 await asyncio.sleep(delay)
             else:
@@ -198,6 +390,7 @@ class CollaborationLoops:
         with self._wake_lock:
             self.started = False
             self._event_loop = self._event_wake = self._wake_scheduled = None
+            self._reconcile_wake = self._monitor_wake = self._renewal_wake = None
         self._channel_wakes = {}
         tasks, self.tasks = self.tasks, []
         for task in tasks:

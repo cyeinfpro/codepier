@@ -36,6 +36,7 @@ def device_rows(store, runtime, principal):
         if not isinstance(info, dict):
             info = {}
         row["can_manage"] = bool(principal.admin or row.get("owner_user_id") == principal.user_id)
+        row["last_seen"] = runtime.device_last_seen(row["id"], row["last_seen"])
         row["info"] = info
         row["online"] = runtime.online(row["id"])
         row["project_count"] = store.one(

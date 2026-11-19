@@ -235,7 +235,127 @@ def union(variants, *, pending=True):
     }
 
 
-def factor(schema):
+def _group_anyof_properties(branches, key):
+    """Factor conjunctions shared by a subset of open anyOf branches."""
+    # Closed branches retain their local properties: these also define which
+    # names are allowed. Keep references/annotations at their original sites.
+    allowed = {"type", "properties", "required", "anyOf"}
+    while True:
+        by_property = {}
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, dict) or set(branch) - allowed:
+                continue
+            for name, value in branch.get("properties", {}).items():
+                by_property.setdefault((name, key(value)), set()).add(index)
+        groups = sorted({tuple(sorted(ids)) for ids in by_property.values() if len(ids) > 1})
+        best = None
+        for group in groups:
+            members = [branches[i] for i in group]
+            group_set = set(group)
+            common = {name for (name, _), ids in by_property.items() if group_set <= ids}
+            required = set.intersection(*(set(member.get("required", [])) for member in members))
+            reduced = []
+            for member in members:
+                child = dict(member)
+                properties = {
+                    k: v for k, v in member.get("properties", {}).items() if k not in common
+                }
+                local_required = [k for k in member.get("required", []) if k not in required]
+                child.pop("properties", None)
+                child.pop("required", None)
+                if properties:
+                    child["properties"] = properties
+                if local_required:
+                    child["required"] = local_required
+                reduced.append(child)
+            first = members[0]
+            combined = {
+                "properties": {k: v for k, v in first["properties"].items() if k in common},
+                "anyOf": reduced,
+            }
+            if required:
+                combined["required"] = [k for k in first["required"] if k in required]
+            saving = sum(len(key(member)) + 1 for member in members) - len(key(combined)) - 1
+            if saving > 0 and (best is None or saving > best[0]):
+                best = saving, group, combined
+        if best is None:
+            return branches
+        _, group, combined = best
+        branches = [
+            combined if index == group[0] else branch
+            for index, branch in enumerate(branches)
+            if index == group[0] or index not in group
+        ]
+
+
+def _combine_disjunction(node, key):
+    """Normalize exact type/literal alternatives, retaining annotated branches."""
+    branches = node.get("anyOf")
+    if not branches or not all(isinstance(branch, dict) for branch in branches):
+        return
+    types, literals, remaining = [], [], []
+    for branch in branches:
+        if set(branch) == {"type"}:
+            value = branch["type"]
+            types.extend(value if isinstance(value, list) else [value])
+        elif set(branch) == {"enum"}:
+            literals.extend(branch["enum"])
+        elif set(branch) == {"const"}:
+            literals.append(branch["const"])
+        else:
+            remaining.append(branch)
+    types = list(dict.fromkeys(types))
+    literals = list(
+        {
+            key(value): value
+            for value in literals
+            if "string" not in types or not isinstance(value, str)
+        }.values()
+    )
+    if types:
+        remaining.append({"type": types[0] if len(types) == 1 else types})
+    if len(literals) == 1:
+        remaining.append({"const": literals[0]})
+    elif literals:
+        remaining.append({"enum": literals})
+    if len(remaining) == 1 and not set(remaining[0]) & (set(node) - {"anyOf"}):
+        node.pop("anyOf")
+        node.update(remaining[0])
+        return
+    if len(remaining) == 2 and {"type": "null"} in remaining:
+        typed = next(branch for branch in remaining if branch != {"type": "null"})
+        kind = typed.get("type")
+        number = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"}
+        assertions = {
+            "object": {
+                "properties",
+                "required",
+                "minProperties",
+                "maxProperties",
+                "additionalProperties",
+            },
+            "array": {"items", "minItems", "maxItems", "uniqueItems"},
+            "string": {"minLength", "maxLength", "pattern"},
+            "integer": number,
+            "number": number,
+        }
+        if (
+            isinstance(kind, str)
+            and kind in assertions
+            and set(typed) <= assertions[kind] | {"type"}
+            and not set(typed) & (set(node) - {"anyOf"})
+        ):
+            # These assertions evaluate only their own instance type. They are
+            # inert on null, so lifting them does not change either branch.
+            node.pop("anyOf")
+            node.update(typed)
+            node["type"] = [kind, "null"]
+            return
+    if len(key(remaining)) < len(key(branches)):
+        node["anyOf"] = remaining
+
+
+def factor(schema, *, normalize_before_factoring=False):
     """Reuse repeated schema nodes with local references, never loosen types."""
     import json
     from collections import Counter
@@ -507,6 +627,32 @@ def factor(schema):
         for child in children(node):
             count(child)
 
+    def compact_disjunctions(node):
+        if not isinstance(node, dict):
+            return
+        for child in children(node):
+            compact_disjunctions(child)
+        if isinstance(node.get("anyOf"), list):
+            node["anyOf"] = _group_anyof_properties(node["anyOf"], key)
+        # A nonempty string enum or string const already imposes its type.
+        # Do not touch mixed enums, annotations, or accepted literal values.
+        if node.get("type") == "string":
+            values = node.get("enum", [])
+            if (
+                isinstance(values, list)
+                and values
+                and all(isinstance(v, str) for v in values)
+                or isinstance(node.get("const"), str)
+            ):
+                node.pop("type")
+        _combine_disjunction(node, key)
+
+    if normalize_before_factoring:
+        # The frozen runtime schemas are rendered again after catalog
+        # annotations are compacted. Expose identical disjunctions here so
+        # early local refs cannot hide them from that later factoring pass.
+        compact_disjunctions(schema)
+
     count(schema)
     definitions, names = {}, {}
     reserved = set(schema.get("$defs", {}))
@@ -627,6 +773,8 @@ def factor(schema):
     # Inlining short references can expose type-only unions again. Normalize
     # once more, retaining the facade's explicit extension hint at the root.
     result = compact_types(result)
+
+    compact_disjunctions(result)
     if root_extensions:
         result["additionalProperties"] = True
     return result
@@ -1070,4 +1218,11 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             ]
         )
         result["task_query"] = union([process[0], *variants("diagnostics_get", "activity_list")])
-    return {name: factor(schema) for name, schema in result.items()}
+    # In these facades, normalizing overlapping branches before assigning
+    # local refs leaves more shared shapes visible to the catalog renderer.
+    # The other facades benefit from retaining their existing ref boundaries.
+    normalize_first = {"workspace", "read", "write", "edit", "exec", "process", "project_query"}
+    return {
+        name: factor(schema, normalize_before_factoring=name in normalize_first)
+        for name, schema in result.items()
+    }

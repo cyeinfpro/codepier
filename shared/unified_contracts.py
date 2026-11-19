@@ -1049,6 +1049,8 @@ def _lean_open(value):
     out = {key: value[key] for key in keys if key in value}
     if value.get("context_unchanged"):
         out["context_unchanged"] = True
+        if "context" in value and value["context"] is None:
+            out["context"] = None
     workspace = value.get("workspace") or {}
     out["workspace"] = {
         key: workspace[key] for key in ("project", "mode", "granted_scopes") if key in workspace
@@ -1073,7 +1075,7 @@ def _lean_open(value):
     if isinstance(knowledge, dict):
         summary = {
             key: knowledge[key]
-            for key in ("state", "entries_count", "scan_scope")
+            for key in ("state", "entries_count", "scan_scope", "revision")
             if key in knowledge
         }
         maintenance = knowledge.get("maintenance") or {}
@@ -1300,7 +1302,11 @@ def present_unified(value, *, verbosity="lean", plan=None, visible=None, convert
         if plan.action in {"file", "tree", "search", "project", "skills", "knowledge"}:
             for key, default in (
                 ("truncated", False),
+                ("per_dir_capped", False),
+                ("page_truncated", False),
                 ("next_offset", None),
+                ("next_hint", None),
+                ("resume_after_path", None),
                 ("scan_error", None),
                 ("warnings", []),
                 ("skills", []),
@@ -1319,18 +1325,34 @@ def present_unified(value, *, verbosity="lean", plan=None, visible=None, convert
 
 _GUIDANCE = {
     "query": {
-        "project": "Open by project name. Reuse args.context_id only when you have the prior context.",
-        "file": "Read by path or batch up to 8 args.items. Follow next_offset and use the returned SHA for edits.",
-        "tree": "Tree is compact by default. Use args.format=structured for structured entries.",
+        "project": "Open by name. Reuse args.context_id only with the prior context.",
+        "file": "Read a path or ≤8 args.items. Follow next_offset; edit with the returned SHA.",
+        "tree": "Tree defaults compact; args.format=structured for structured entries.",
         "search": "Search defaults to sync. Use view=start for paginated text/symbol/reference search.",
-        "job": "Read original ids. Use args.after_output_seq while running; terminal args.output_offset returns raw ranges. Follow output_next for older saved output.",
+        "job": "Use original ids. Running: args.after_output_seq. Terminal: args.output_offset for raw ranges; follow output_next.",
     },
     "act": {
-        "exec": "Exec takes command or args.task, with project and idempotency_key. wait is response time (default 30s).",
-        "edit": "Edit uses unique replacements, whole content or args.changes with current SHA (new for creation).",
-        "baseline": "Capture a baseline before edits. args.baseline_paths accepts exact relative paths.",
+        "exec": "Exec: command or args.task, project, idempotency_key. wait: response timeout (default 30s).",
+        "edit": "Edit: unique replacements, whole content or args.changes; current SHA or new for creation.",
+        "baseline": "Baseline before edits; args.baseline_paths takes exact relative paths.",
         "collab.handle": "Collaboration handles reduce repeated credentials without changing authority.",
     },
+}
+
+
+_CHEAT_SHEET = {
+    "query": (
+        ("file", "- file: {path, offset?, limit?} or batch {items:[{path,offset?,limit?}]}"),
+        ("tree", "- tree: {path?, depth?, per_dir?, offset?, limit?}"),
+        ("search", "- search: {query, path?, file_glob?, offset?, limit?, resume_after_path?}"),
+    ),
+    "act": (
+        (
+            "edit",
+            '- edit: {path, expected_sha256:"new"|<sha>, content|edits:[{old_text,new_text}], idempotency_key}',
+        ),
+        ("exec", "- exec: {command, cwd?, timeout_seconds?, idempotency_key}"),
+    ),
 }
 
 
@@ -1344,11 +1366,15 @@ def description(tool, actions):
     if any(action.startswith("collab.") for action in actions):
         parts.append("Collaboration views use the resource action name.")
     if tool == "act":
-        parts.append("Recover pending or uncertain work through query job on its original ID.")
+        parts.append("Recover pending/uncertain work: query job by original ID.")
     parts.append(
-        "Put action-specific fields in args. Use query(action='help', args={tool,action,view}) for a ready-to-use example and parameters."
+        "Action fields go in args. query(action='help', args={tool,action,view}) shows examples and parameters."
     )
-    return " ".join(parts)
+    text = " ".join(parts)
+    cheat = [line for action, line in _CHEAT_SHEET.get(tool, ()) if action in actions]
+    if cheat:
+        text += "\nCommon args:\n" + "\n".join(cheat)
+    return text
 
 
 ANNOTATIONS = {

@@ -379,6 +379,12 @@ def require_tool(store, principal, name, args):
     if name in METADATA_TOOLS:
         return  # Their established queries use the already-intersected projects.
     project = None
+    operation = None
+    if args.get("operation_id"):
+        operation = store.one(
+            "SELECT project_id,tool,space_id,owner_user_id,grant_id,actor,args_summary FROM operations WHERE id=?",
+            (args["operation_id"],),
+        )
     if args.get("project"):
         value = args["project"]
         if not isinstance(value, str):
@@ -388,9 +394,6 @@ def require_tool(store, principal, name, args):
             (principal.space_id, value, unicodedata.normalize("NFKC", value).casefold()),
         )
     elif args.get("operation_id"):
-        operation = store.one(
-            "SELECT project_id FROM operations WHERE id=?", (args["operation_id"],)
-        )
         project = (
             store.one("SELECT * FROM projects WHERE id=?", (operation["project_id"],))
             if operation
@@ -414,7 +417,29 @@ def require_tool(store, principal, name, args):
         raise DevError("ROOM_SCOPE_PROJECT_REQUIRED", "房间连接不能省略或绕过项目身份", 403)
     from shared.contracts import TOOLS, required_scope
 
-    capability = required_scope(name, args) if name in TOOLS else "read"
+    if name == "operations_cancel" or (name == "process" and args.get("operation") == "cancel"):
+        from hub.runtime import CANCELLABLE_READ_TOOLS, operation_same_principal
+
+        capability = "execute"
+        if operation is not None:
+            try:
+                summary = json.loads(operation.get("args_summary") or "{}")
+            except (TypeError, ValueError):
+                summary = None
+            tool_name = operation.get("tool") or ""
+            tool_scope = (
+                required_scope(tool_name, summary)
+                if tool_name in TOOLS
+                else ("read" if tool_name == "project_knowledge_refresh" else "execute")
+            )
+            if (
+                tool_name in CANCELLABLE_READ_TOOLS
+                and tool_scope == "read"
+                and operation_same_principal(operation, principal)
+            ):
+                capability = "read"
+    else:
+        capability = required_scope(name, args) if name in TOOLS else "read"
     require_action(store, principal, capability, project_id=project["id"])
     if capability == "execute" and record["manifest"]["execution_mode"] == "require_os_isolation":
         from hub.project_runtimes import current_requirement

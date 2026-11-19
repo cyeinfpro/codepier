@@ -49,7 +49,7 @@ from shared.contracts import (
 )
 from shared.computer_contracts import COMPUTER_TOOLS
 from shared.computer_media import scrub_expired, purge_database
-from shared.crypto import SecureChannel, digest, token
+from shared.crypto import SecureChannel, digest, pack_channel, token, unpack_channel
 from shared.util import DevError, safe_summary
 from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
 from shared.tool_protocol import (
@@ -78,6 +78,69 @@ PROJECT_DISCOVERY_PAGE_SIZE = 100
 MAINTENANCE_SECONDS = 15
 MAINTENANCE_MEDIA_BATCH = 4
 MAINTENANCE_MEDIA_LIMIT = 64
+PRESENCE_PERSIST_INTERVAL = 60.0
+
+# Authoritative read-only remote tools cancellable with `read` scope by the
+# owning principal; cross-principal or write/exec tools still require `execute`.
+CANCELLABLE_READ_TOOLS = frozenset(
+    {
+        name
+        for name, tool in TOOLS.items()
+        if tool.scope == "read"
+        and not tool.local
+        and name not in MUTATING
+        and name not in PROCESS_TOOLS
+    }
+    | {
+        "read",
+        "project_context",
+        "open_workspace",
+        "project_knowledge_query",
+        "project_knowledge_refresh",
+        "searches_start",
+    }
+)
+
+
+def operation_same_principal(op: dict | None, principal: Principal | None) -> bool:
+    """Strict Redline #3 check: caller must match operation space and grant/user."""
+    if not op or not principal:
+        return False
+    if op.get("space_id") != principal.space_id:
+        return False
+    op_grant = op.get("grant_id")
+    if principal.grant_id is not None or op_grant is not None:
+        if not (principal.grant_id and op_grant and op_grant == principal.grant_id):
+            return False
+    op_user = op.get("owner_user_id")
+    if op_user is not None:
+        return bool(principal.user_id and op_user == principal.user_id)
+    return bool(principal.actor and op.get("actor") == principal.actor)
+
+
+_CONTROL_FRAME_TYPES = frozenset(
+    {
+        "ack",
+        "heartbeat",
+        "cancel",
+        "cancel_pending",
+        "going_away",
+        "scheduler_config",
+        "native_ack",
+    }
+)
+_SEND_QUEUE_LIMIT = 512
+_REPLY_ENQUEUE_TIMEOUT_SECONDS = 30.0
+
+
+class _OutboundFrame:
+    __slots__ = ("body", "before_send", "future", "cancelled")
+
+    def __init__(self, body, before_send=None, future=None):
+        self.body = body
+        self.before_send = before_send
+        self.future = future
+        self.cancelled = False
 
 
 def alias_key(value: str):
@@ -104,6 +167,8 @@ class Connection:
         self.socket, self.channel = socket, channel
         self.lock = asyncio.Lock()
         self.last_seen = time.time()
+        self._persisted_last_seen = 0.0
+        self.runtime_snapshot = None
         self.journal_id = None
         self.protocol = 1
         self.cancel_pending_protocol = 0
@@ -121,30 +186,232 @@ class Connection:
         from hub.admission_policy import AdmissionWindow
 
         self.admission = AdmissionWindow()
+        self._control_queue: asyncio.Queue[_OutboundFrame] | None = None
+        self._data_queue: asyncio.Queue[_OutboundFrame] | None = None
+        self._queue_event: asyncio.Event | None = None
+        self._writer_task: asyncio.Task | None = None
+        self._closing = False
 
-    async def send(self, body, *, before_send=None):
-        # A half-open peer must not hold the scheduler/send lock indefinitely.
+    @staticmethod
+    def _is_control_frame(body) -> bool:
+        return isinstance(body, dict) and body.get("type") in _CONTROL_FRAME_TYPES
+
+    def _socket_closed_or_stalled(self) -> bool:
+        for attr in ("application_state", "client_state"):
+            state = getattr(self.socket, attr, None)
+            if state is not None and getattr(state, "name", None) not in {None, "CONNECTED"}:
+                return True
+        return False
+
+    def _ensure_writer(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        if self._control_queue is None:
+            self._control_queue = asyncio.Queue(maxsize=_SEND_QUEUE_LIMIT)
+            self._data_queue = asyncio.Queue(maxsize=_SEND_QUEUE_LIMIT)
+            self._queue_event = asyncio.Event()
+        if self._writer_task is None or self._writer_task.done():
+            self._writer_task = loop.create_task(self._writer_loop(), name="hub-ws-writer")
+        return loop
+
+    def close(self):
+        self._closing = True
+        self.unusable = True
+        task = self._writer_task
+        self._writer_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        self._fail_pending_frames()
+
+    def _fail_pending_frames(self):
+        for queue in (self._control_queue, self._data_queue):
+            if queue is None:
+                continue
+            while not queue.empty():
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item.future is not None and not item.future.done():
+                    with contextlib.suppress(RuntimeError):
+                        item.future.set_exception(
+                            ConnectionError("Authenticated channel is no longer usable")
+                        )
+
+    async def _write_one(self, item: _OutboundFrame):
+        if item.body is None:
+            if item.future is not None and not item.future.done():
+                item.future.set_result(True)
+            return
+        if item.cancelled or (item.future is not None and item.future.done()):
+            return
+        if self.unusable or self._closing:
+            if item.future is not None and not item.future.done():
+                item.future.set_exception(
+                    ConnectionError("Authenticated channel is no longer usable")
+                )
+            return
         async with self.lock:
-            if self.unusable:
-                raise ConnectionError("Authenticated channel is no longer usable")
+            if item.cancelled or (item.future is not None and item.future.done()):
+                return
+            if self.unusable or self._closing:
+                if item.future is not None and not item.future.done():
+                    item.future.set_exception(
+                        ConnectionError("Authenticated channel is no longer usable")
+                    )
+                return
             # Waiting for another writer must not retain an authorization decision.
             # A rejected guard has not packed ciphertext or advanced its sequence.
-            if before_send is not None and not await before_send():
-                return False
-            # A replacement can fence this socket while the database guard is
-            # awaiting its worker result. Do not pack or send on the old channel.
-            if self.unusable:
-                raise ConnectionError("Authenticated channel is no longer usable")
-            try:
-                await asyncio.wait_for(self.socket.send_text(self.channel.pack(body)), 4)
-            except BaseException:
+            if item.before_send is not None:
+                try:
+                    allowed = await item.before_send()
+                except BaseException as exc:
+                    if item.future is not None and not item.future.done():
+                        item.future.set_exception(exc)
+                    return
+                if not allowed:
+                    if item.future is not None and not item.future.done():
+                        item.future.set_result(False)
+                    return
+            # Backpressure/state check before advancing SecureChannel sequence: if the
+            # socket already disconnected, fail cleanly without corrupting ciphertext state.
+            if self.unusable or self._closing or self._socket_closed_or_stalled():
                 self.unusable = True
-                # pack advanced its sequence number. Never reuse this channel after
-                # an ambiguous send: reconnect and replay the *operation*, not ciphertext.
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self.socket.close(code=1011), 1)
-                raise
+                if item.future is not None and not item.future.done():
+                    item.future.set_exception(
+                        ConnectionError("Authenticated channel is no longer usable")
+                    )
+                return
+            if item.cancelled:
+                return
+            try:
+                packed = await pack_channel(self.channel, item.body)
+                payload_mb = len(packed) / (1024 * 1024)
+                send_timeout = max(10.0, 10.0 + payload_mb * 2.0)
+                await asyncio.wait_for(self.socket.send_text(packed), send_timeout)
+            except BaseException as exc:
+                # Verify socket state/backpressure once packed ciphertext consumed a sequence;
+                # closed/unhealthy tunnels cannot safely reuse a desynced stream.
+                self.unusable = True
+                if not self._socket_closed_or_stalled() or isinstance(
+                    exc, (TimeoutError, asyncio.TimeoutError)
+                ):
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(self.socket.close(code=1011), 1)
+                if item.future is not None and not item.future.done():
+                    item.future.set_exception(exc)
+                return
+            if item.future is not None and not item.future.done():
+                item.future.set_result(True)
+
+    async def _writer_loop(self):
+        try:
+            while not self._closing and not self.unusable:
+                while True:
+                    item = None
+                    if self._control_queue is not None and not self._control_queue.empty():
+                        item = self._control_queue.get_nowait()
+                    elif self._data_queue is not None and not self._data_queue.empty():
+                        item = self._data_queue.get_nowait()
+                    if item is None:
+                        break
+                    await self._write_one(item)
+                    if self.unusable or self._closing:
+                        return
+                if self._queue_event is None:
+                    return
+                self._queue_event.clear()
+                if (self._control_queue is not None and not self._control_queue.empty()) or (
+                    self._data_queue is not None and not self._data_queue.empty()
+                ):
+                    continue
+                await self._queue_event.wait()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._fail_pending_frames()
+
+    def send_nowait(self, body) -> bool:
+        """Non-blocking control/reply enqueue for the WebSocket receive loop."""
+        if self.unusable or self._closing:
+            return False
+        try:
+            self._ensure_writer()
+        except RuntimeError:
+            return False
+        queue = self._control_queue if self._is_control_frame(body) else self._data_queue
+        if queue is None:
+            return False
+        try:
+            queue.put_nowait(_OutboundFrame(body))
+        except asyncio.QueueFull:
+            return False
+        if self._queue_event is not None:
+            self._queue_event.set()
+        return True
+
+    async def enqueue_reply(self, body) -> bool:
+        """Admit a reply without waiting for earlier frames to finish sending."""
+        if self.send_nowait(body):
             return True
+        if self.unusable or self._closing:
+            return False
+        queue = self._control_queue if self._is_control_frame(body) else self._data_queue
+        if queue is None or self._queue_event is None:
+            return False
+        item = _OutboundFrame(body)
+        try:
+            async with asyncio.timeout(_REPLY_ENQUEUE_TIMEOUT_SECONDS):
+                await queue.put(item)
+        except TimeoutError:
+            return False
+        if self.unusable or self._closing:
+            # Close or writer failure can drain the queue while we wait for a
+            # slot. No frame admitted after that fence may reach the channel.
+            item.cancelled = True
+            self._fail_pending_frames()
+            return False
+        self._queue_event.set()
+        return True
+
+    async def send(self, body, *, before_send=None):
+        if self.unusable or self._closing:
+            raise ConnectionError("Authenticated channel is no longer usable")
+        loop = self._ensure_writer()
+        queue = self._control_queue if self._is_control_frame(body) else self._data_queue
+        assert queue is not None and self._queue_event is not None
+        future = loop.create_future()
+        item = _OutboundFrame(body, before_send=before_send, future=future)
+        await queue.put(item)
+        if self.unusable or self._closing:
+            item.cancelled = True
+            raise ConnectionError("Authenticated channel is no longer usable")
+        self._queue_event.set()
+        try:
+            return await future
+        except BaseException:
+            item.cancelled = True
+            raise
+
+    async def flush_control(self, wait_seconds: float = 1.0) -> None:
+        """Drain queued priority control frames (e.g., ACKs) before WebSocket detach."""
+        if (
+            self.unusable
+            or self._closing
+            or self._control_queue is None
+            or self._writer_task is None
+            or self._writer_task.done()
+            or self._socket_closed_or_stalled()
+        ):
+            return
+        future = asyncio.get_running_loop().create_future()
+        try:
+            self._control_queue.put_nowait(_OutboundFrame(None, future=future))
+        except asyncio.QueueFull:
+            return
+        if self._queue_event is not None:
+            self._queue_event.set()
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(future, wait_seconds)
 
 
 class Runtime:
@@ -177,6 +444,8 @@ class Runtime:
         self.operation_waiters: dict[str, set[asyncio.Event]] = {}
         self.watchers: set[asyncio.Queue] = set()
         self.dispatch_locks = weakref.WeakValueDictionary()
+        self.delivery_locks = weakref.WeakValueDictionary()
+        self._evidence_contexts: dict[str, tuple[dict, object, object, int]] = {}
         self._handshake_tokens = 16.0
         self._handshake_updated = time.monotonic()
         self.stopping = False
@@ -374,26 +643,124 @@ class Runtime:
                 continue
             self._signal_owner(q, self._enqueue, q, message)
 
-    def online(self, device_id: str):
+    def online(self, device_id: str) -> bool:
         connection = self.connections.get(device_id)
-        return bool(
-            connection
+        if not (connection and not connection.unusable and time.time() - connection.last_seen < 45):
+            return False
+        if getattr(self.connection_authorized, "__func__", None) is Runtime.connection_authorized:
+            return bool(self.connection_authorized(device_id, connection, allow_cache=True))
+        try:
+            return bool(self.connection_authorized(device_id, connection, allow_cache=True))
+        except TypeError:
+            return bool(self.connection_authorized(device_id, connection))
+
+    def security_epoch(self) -> int:
+        return self.store.security_epoch()
+
+    def epoch_stamp(self) -> tuple[int, int]:
+        return self.store.epoch_stamp()
+
+    @property
+    def session_revision(self) -> int:
+        return self.store.session_revision
+
+    def device_last_seen(self, device_id: str, db_last_seen: float | None = None) -> float | None:
+        connection = self.connections.get(device_id)
+        if (
+            connection is not None
             and not connection.unusable
-            and time.time() - connection.last_seen < 45
-            and self.connection_authorized(device_id, connection)
+            and getattr(connection, "last_seen", None) is not None
+        ):
+            return connection.last_seen
+        presence = self.store.one(
+            "SELECT last_seen FROM device_presence WHERE device_id=?",
+            (device_id,),
+        )
+        if presence and presence.get("last_seen") is not None:
+            return presence["last_seen"]
+        return db_last_seen
+
+    def device_runtime_snapshot(self, device_id: str, fallback_info: dict | None = None):
+        connection = self.connections.get(device_id)
+        snapshot = getattr(connection, "runtime_snapshot", None) if connection is not None else None
+        if snapshot is not None:
+            return snapshot
+        presence = self.store.one(
+            "SELECT runtime_info FROM device_presence WHERE device_id=?",
+            (device_id,),
+        )
+        if presence and presence.get("runtime_info"):
+            try:
+                parsed = json.loads(presence["runtime_info"])
+                if isinstance(parsed, dict):
+                    return parsed
+            except (TypeError, ValueError):
+                pass
+        if isinstance(fallback_info, dict):
+            sched = fallback_info.get("scheduler")
+            if isinstance(sched, dict):
+                return sched
+        return None
+
+    def _upsert_device_presence(self, device_id: str, last_seen: float, runtime_snapshot=None):
+        runtime_json = (
+            json.dumps(runtime_snapshot, ensure_ascii=False)
+            if runtime_snapshot is not None
+            else None
+        )
+        self.store.execute(
+            "INSERT INTO device_presence(device_id,last_seen,runtime_info,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(device_id) DO UPDATE SET "
+            "last_seen=COALESCE(excluded.last_seen,device_presence.last_seen),"
+            "runtime_info=COALESCE(excluded.runtime_info,device_presence.runtime_info),"
+            "updated_at=excluded.updated_at",
+            (device_id, last_seen, runtime_json, time.time()),
+            security_write=False,
         )
 
-    def connection_authorized(self, device_id, connection):
+    def _remember_evidence_context(self, operation_id: str, *, payload: dict, principal, project):
+        if len(self._evidence_contexts) >= 2048:
+            with contextlib.suppress(StopIteration):
+                self._evidence_contexts.pop(next(iter(self._evidence_contexts)))
+        self._evidence_contexts[operation_id] = (
+            payload,
+            principal,
+            project,
+            self.store.session_revision,
+        )
+
+    def connection_authorized(self, device_id, connection, *, allow_cache=False):
+        # A reader transaction can observe an earlier SQLite snapshot even
+        # while a newer process revision is visible. Its decision stays local
+        # until Store finishes validating that read phase; it cannot seed or
+        # depend on the mutable, process-wide connection authorization cache.
+        in_read_phase = getattr(self.store, "in_read_phase", False)
+        rev = getattr(self.store, "session_revision", None)
+        cached = getattr(connection, "_auth_cache", None)
+        if (
+            allow_cache
+            and not in_read_phase
+            and rev is not None
+            and cached is not None
+            and cached[:2] == (rev, device_id)
+        ):
+            return cached[2]
         device = self.store.one(
             "SELECT id,enabled,secret,space_id,owner_user_id FROM devices WHERE id=?", (device_id,)
         )
-        return bool(
+        ok = bool(
             iam.device_identity_active(self.store, device)
             and (
                 getattr(connection, "device_secret", None) is None
                 or connection.device_secret == device["secret"]
             )
         )
+        if not in_read_phase and rev is not None and self.store.session_revision == rev:
+            try:
+                connection._auth_cache = (rev, device_id, ok)
+            except (AttributeError, TypeError):
+                pass
+        return ok
 
     def _attach_connection(self, device_id, connection):
         old = self.connections.get(device_id)
@@ -410,12 +777,23 @@ class Runtime:
         if self.connections.get(device_id) is not connection:
             return False
         self.connections.pop(device_id, None)
-        connection.unusable = True
+        if hasattr(connection, "close"):
+            connection.close()
+        else:
+            connection.unusable = True
         self.delivery_metrics.connection("disconnected")
         return True
 
     def _record_disconnect(self, device_id, connection):
         self.computer_approvals.drop(connection)
+        last_seen = getattr(connection, "last_seen", None)
+        if last_seen is not None:
+            with contextlib.suppress(Exception):
+                self._upsert_device_presence(
+                    device_id,
+                    last_seen,
+                    getattr(connection, "runtime_snapshot", None),
+                )
         with contextlib.suppress(Exception):
             self.store.execute(
                 "UPDATE operations SET state='reconnecting',transport_error='Agent disconnected; durable recovery pending',next_attempt=0 WHERE device_id=? AND state IN ('running','cancelling')",
@@ -916,7 +1294,69 @@ class Runtime:
                     error["blocker_visibility"] = "restricted_or_unavailable"
         return result
 
-    async def wait_operation(self, id: str, principal: Principal, seconds: int):
+    async def wait_for_operation(
+        self,
+        operation_id: str,
+        wait_seconds: float,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ) -> dict | None:
+        event = asyncio.Event()
+        waiters = self.operation_waiters.setdefault(operation_id, set())
+        waiters.add(event)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(wait_seconds))
+        query = (
+            "SELECT id,device_id,project_id,actor,grant_id,tool,state,updated,result,error,"
+            "output,cancel_requested,accepted_at,deadline,args_summary,space_id,owner_user_id,"
+            "visibility,created FROM operations WHERE id=?"
+        )
+        try:
+            while True:
+                event.clear()
+                row = await self.store.run_hint_read(self.store.one, query, (operation_id,))
+                if row is None or row["state"] not in ACTIVE | {"unknown"}:
+                    return row
+                if self.stopping or (cancel_event is not None and cancel_event.is_set()):
+                    return None
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                wait_task = asyncio.create_task(event.wait())
+                watch: set[asyncio.Future] = {wait_task}
+                future = self.futures.get(operation_id)
+                if future is not None and not future.done():
+                    watch.add(asyncio.shield(future))
+                cancel_task = (
+                    asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
+                )
+                if cancel_task is not None:
+                    watch.add(cancel_task)
+                try:
+                    done, _ = await asyncio.wait(
+                        watch, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for task in (wait_task, cancel_task):
+                        if task is not None and not task.done():
+                            task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await task
+                if not done or (cancel_task is not None and cancel_task in done):
+                    return None
+        finally:
+            waiters.discard(event)
+            if not waiters:
+                self.operation_waiters.pop(operation_id, None)
+
+    async def wait_operation(
+        self,
+        id: str,
+        principal: Principal,
+        seconds: float | int,
+        *,
+        cancel_event: asyncio.Event | None = None,
+    ):
         event = asyncio.Event()
         waiters = self.operation_waiters.setdefault(id, set())
         waiters.add(event)
@@ -924,9 +1364,31 @@ class Runtime:
             # Register before checking the durable state so completion cannot
             # fall between the check and subscription. Reauthorize on return.
             row = await self.store.run_read(self.operation_row, id, principal, status_only=True)
-            if seconds > 0 and not self.stopping and row["state"] in ACTIVE | {"unknown"}:
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(event.wait(), seconds)
+            wait_seconds = max(0.0, float(seconds))
+            if (
+                wait_seconds > 0
+                and not self.stopping
+                and row["state"] in ACTIVE | {"unknown"}
+                and not (cancel_event is not None and cancel_event.is_set())
+            ):
+                if cancel_event is None:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(event.wait(), wait_seconds)
+                else:
+                    wait_task = asyncio.create_task(event.wait())
+                    cancel_task = asyncio.create_task(cancel_event.wait())
+                    try:
+                        await asyncio.wait(
+                            {wait_task, cancel_task},
+                            timeout=wait_seconds,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    finally:
+                        for task in (wait_task, cancel_task):
+                            if not task.done():
+                                task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await task
         finally:
             waiters.discard(event)
             if not waiters:
@@ -1358,7 +1820,9 @@ class Runtime:
 
             principal = authorize(self, principal, self.project(args["project"], principal))
         require_tool(self.store, principal, name, args)
-        scope = required_scope(name, args)
+        # B8: Defer fine-grained cancel scope validation (read for own cancellable
+        # reads vs execute for writes/exec/cross-principal) to _cancel().
+        scope = "read" if name == "operations_cancel" else required_scope(name, args)
         if scope not in principal.scopes:
             self.store.audit(principal.actor, name, status="denied", detail={"reason": "scope"})
             code = (
@@ -1579,16 +2043,59 @@ class Runtime:
             lock = self.dispatch_locks[device_id] = asyncio.Lock()
         return lock
 
+    def device_delivery_lock(self, device_id):
+        # Separate per-device delivery lock so admission/cancel never block _prepare_for_send.
+        lock = self.delivery_locks.get(device_id)
+        if lock is None:
+            lock = self.delivery_locks[device_id] = asyncio.Lock()
+        return lock
+
     async def cancel(self, id, principal):
-        row = await self.store.run_read(self.operation_row, id, principal, status_only=True)
-        async with self.device_dispatch_lock(row["device_id"]):
-            return await self.store.run(self._cancel, id, principal)
+        await self.store.run_read(self.operation_row, id, principal, status_only=True)
+        return await self.store.run(self._cancel, id, principal)
 
     def _cancel(self, id, principal):
         principal = refresh_principal(self.store, principal)
         op = self.operation(id, principal)
+        raw_summary = op.get("args_summary")
+        if isinstance(raw_summary, dict):
+            op_args = raw_summary
+        else:
+            try:
+                op_args = json.loads(raw_summary or "{}")
+            except (TypeError, ValueError):
+                op_args = None
+        op_tool = op.get("tool") or ""
+        op_tool_scope = (
+            required_scope(op_tool, op_args)
+            if op_tool in TOOLS
+            else ("read" if op_tool == "project_knowledge_refresh" else "execute")
+        )
+        is_cancellable_read = op_tool in CANCELLABLE_READ_TOOLS and op_tool_scope == "read"
+        cancel_scope = (
+            "read" if is_cancellable_read and operation_same_principal(op, principal) else "execute"
+        )
+        if cancel_scope not in principal.scopes:
+            self.store.audit(
+                principal.actor,
+                "operations_cancel",
+                id,
+                status="denied",
+                detail={"reason": "scope", "required_scope": cancel_scope},
+            )
+            code = (
+                "ROLE_POLICY_DENIED"
+                if principal.authorization_mode == "role"
+                else "INSUFFICIENT_SCOPE"
+            )
+            raise DevError(
+                code,
+                f"当前凭据/角色缺少 {cancel_scope} 权限",
+                403,
+                required_scope=cancel_scope,
+            )
         if op["project_id"]:
-            self.authorize(principal, "execute", project_id=op["project_id"])
+            self.authorize(principal, cancel_scope, project_id=op["project_id"])
         if not op["pending"]:
             return {"operation_id": id, "state": op["state"], "cancel_requested": False}
         if op["tool"] in DEVICE_ACTIONS:
@@ -1597,15 +2104,7 @@ class Runtime:
                 "Agent 生命周期操作不能在准备或交接过程中取消；请等待结果后再处理",
                 409,
             )
-        cancellable_reads = {
-            "read",
-            "fs_tree",
-            "fs_read",
-            "fs_read_many",
-            "fs_search",
-            "project_context",
-        }
-        if op["tool"] not in PROCESS_TOOLS | cancellable_reads and op["attempts"]:
+        if op["tool"] not in PROCESS_TOOLS | CANCELLABLE_READ_TOOLS and op["attempts"]:
             raise DevError(
                 "NOT_CANCELLABLE", "已投递的文件操作不能中途撤销；可在完成后使用备份恢复"
             )
@@ -1712,7 +2211,7 @@ class Runtime:
                 future.add_done_callback(lambda done, handle=expiry: handle.cancel())
         self.wake_delivery()
         # Offline and long task submissions return a durable receipt immediately.
-        if not background and await self.store.run(self.online, project["device_id"]):
+        if not background and await self.store.run_read(self.online, project["device_id"]):
             try:
                 result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
                 return await self.store.run_read(self.authorized_result, id, result, principal)
@@ -2068,6 +2567,15 @@ class Runtime:
                 if maintenance is None:
                     self.knowledge_maintenance.enroll_on_write(name, args, project, principal)
                 self._publish_operation(id, "queued", tool=name)
+                self._remember_evidence_context(
+                    id,
+                    payload={
+                        "project": {"root": project.get("root", "")},
+                        "args": {"workspace_id": args.get("workspace_id")},
+                    },
+                    principal=principal,
+                    project=project,
+                )
         return id, None
 
     def _check_durable_admission(self, project, name, args, payload_size, *, device_online):
@@ -2435,7 +2943,7 @@ class Runtime:
             device_id = row["device_id"]
         timing = timing or DeliveryTiming(identifier)
         waited = time.monotonic()
-        async with self.device_dispatch_lock(device_id):
+        async with self.device_delivery_lock(device_id):
             timing.add("device_lock_wait", waited)
             return await self.store.run(
                 timed_phase(
@@ -2707,6 +3215,15 @@ class Runtime:
                 )
                 return
             denied, delivery_principal, project = self._delivery_authority(op, request)
+            self._remember_evidence_context(
+                id,
+                payload={
+                    "project": {"root": request["project"].get("root", "")},
+                    "args": {"workspace_id": request["args"].get("workspace_id")},
+                },
+                principal=delivery_principal if not denied else None,
+                project=project if not denied else None,
+            )
             denied = denied or self.collaboration.coordination.operation_denial(op)
             if retain_source:
                 source = (op["payload"], request)
@@ -3098,8 +3615,16 @@ class Runtime:
                 self.collaboration.events.operation_completed(op["id"])
         # Capture only non-secret completion evidence from the old in-memory
         # request. The durable encrypted payload was already cleared above.
+        ctx = self._evidence_contexts.pop(op["id"], None)
+        evidence_kwargs = {"state": state, "completed_at": time.time()}
+        if ctx is not None:
+            cached_payload, cached_principal, cached_project, cached_rev = ctx
+            evidence_kwargs["payload"] = cached_payload
+            if cached_rev == self.store.session_revision:
+                evidence_kwargs["principal"] = cached_principal
+                evidence_kwargs["project"] = cached_project
         try:
-            self.diagnostics.connection.completed(op, result, state=state, completed_at=time.time())
+            self.diagnostics.connection.completed(op, result, **evidence_kwargs)
         except Exception:
             self.diagnostics.connection.write_errors += 1
         # Notify after commit, even if auxiliary auditing subsequently fails.
@@ -3279,7 +3804,11 @@ class Runtime:
             return
         changed = False
         build = data.get("build")
-        if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
+        if (
+            isinstance(build, dict)
+            and len(json.dumps(build)) <= 12000
+            and build != info.get("build")
+        ):
             info["build"] = build
             changed = True
         actions = data.get("device_actions")
@@ -3288,8 +3817,10 @@ class Runtime:
             and len(actions) <= 16
             and all(isinstance(x, str) and len(x) <= 100 for x in actions)
         ):
-            info["device_actions"] = sorted(set(actions) & DEVICE_ACTIONS)
-            changed = True
+            normalized_actions = sorted(set(actions) & DEVICE_ACTIONS)
+            if normalized_actions != info.get("device_actions"):
+                info["device_actions"] = normalized_actions
+                changed = True
         management = public_management(data.get("management"))
         if management != info.get("management"):
             info["management"] = management
@@ -3300,10 +3831,12 @@ class Runtime:
 
             snapshot = public_snapshot(data.get("scheduler"))
             if snapshot is not None:
-                info["scheduler"] = snapshot
-                changed = True
+                connection.runtime_snapshot = snapshot
             scheduler_error = data.get("scheduler_error")
-            if scheduler_error in ("", "SCHEDULER_SETTINGS_INVALID"):
+            if scheduler_error in (
+                "",
+                "SCHEDULER_SETTINGS_INVALID",
+            ) and scheduler_error != info.get("scheduler_error"):
                 info["scheduler_error"] = scheduler_error
                 changed = True
             reported_revision = data.get("scheduler_revision")
@@ -3311,6 +3844,7 @@ class Runtime:
                 isinstance(reported_revision, str)
                 and len(reported_revision) == 64
                 and all(char in "0123456789abcdef" for char in reported_revision)
+                and reported_revision != info.get("scheduler_revision")
             ):
                 info["scheduler_revision"] = reported_revision
                 changed = True
@@ -3338,6 +3872,7 @@ class Runtime:
             self.store.execute(
                 "UPDATE devices SET info=? WHERE id=?",
                 (json.dumps(info, ensure_ascii=False), device_id),
+                security_write=False,
             )
         return desired
 
@@ -3347,9 +3882,14 @@ class Runtime:
         ):
             return False
         connection.last_seen = time.time()
-        if connection.last_seen - getattr(connection, "_persisted_last_seen", 0) >= 12:
-            self.store.execute(
-                "UPDATE devices SET last_seen=? WHERE id=?", (connection.last_seen, device_id)
+        if (
+            connection.last_seen - getattr(connection, "_persisted_last_seen", 0)
+            >= PRESENCE_PERSIST_INTERVAL
+        ):
+            self._upsert_device_presence(
+                device_id,
+                connection.last_seen,
+                getattr(connection, "runtime_snapshot", None),
             )
             connection._persisted_last_seen = connection.last_seen
         return True
@@ -3359,8 +3899,9 @@ class Runtime:
             return False
         with self.store.lock, self.store.db:
             self.store.execute(
-                "UPDATE devices SET info=?,last_seen=? WHERE id=?",
-                (json.dumps(info, ensure_ascii=False), time.time(), device_id),
+                "UPDATE devices SET info=? WHERE id=?",
+                (json.dumps(info, ensure_ascii=False), device_id),
+                security_write=False,
             )
             self.store.execute(
                 "UPDATE operations SET next_attempt=0 WHERE device_id=? AND state IN ('queued','running','reconnecting','cancelling')",
@@ -3470,7 +4011,9 @@ class Runtime:
             )
             connection = Connection(websocket, channel)
             connection.device_secret = device["secret"]
-            hello = channel.unpack(await asyncio.wait_for(websocket.receive_text(), 10))
+            hello = await unpack_channel(
+                channel, await asyncio.wait_for(websocket.receive_text(), 10)
+            )
             if hello.get("type") != "hello":
                 raise ValueError("Invalid hello")
             self._read_agent_protocol(connection, hello)
@@ -3567,7 +4110,7 @@ class Runtime:
                 return
             old = self._attach_connection(device_id, connection)
             if old:
-                old.unusable = True
+                old.close()
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
                         old.socket.close(
@@ -3583,11 +4126,12 @@ class Runtime:
                 return
             while not self.stopping:
                 packet = await asyncio.wait_for(websocket.receive_text(), 45)
-                data = channel.unpack(packet)
+                data = await unpack_channel(channel, packet)
                 kind = data.get("type")
                 if (
                     kind in {"artifact_chunk", "native_sync", "native_reply"}
-                    and time.time() - getattr(connection, "_persisted_last_seen", 0) < 12
+                    and time.time() - getattr(connection, "_persisted_last_seen", 0)
+                    < PRESENCE_PERSIST_INTERVAL
                 ):
                     current = await self.store.run_read(
                         self.connection_authorized, device_id, connection
@@ -3607,7 +4151,8 @@ class Runtime:
                     break  # Fence a replaced socket before accepting its late events.
                 if kind == "heartbeat":
                     if reply is not None:
-                        await connection.send(reply)
+                        if not await connection.enqueue_reply(reply):
+                            break
                     continue
                 if kind in {"computer_approval", "computer_approval_closed"}:
                     continue
@@ -3621,9 +4166,13 @@ class Runtime:
                     self.artifacts.receive(connection, data)
                     continue
                 if reply is not None:
-                    await connection.send(reply)
+                    if not await connection.enqueue_reply(reply):
+                        break
 
-        except (WebSocketDisconnect, asyncio.TimeoutError):
+        except WebSocketDisconnect:
+            if connection is not None and not connection.unusable:
+                await connection.flush_control(1.0)
+        except asyncio.TimeoutError:
             pass
         except Exception as exc:
             with contextlib.suppress(Exception):
@@ -3698,7 +4247,10 @@ class Runtime:
                 await self.worker
 
         async def close_connection(c):
-            c.unusable = True
+            if hasattr(c, "close"):
+                c.close()
+            else:
+                c.unusable = True
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(c.socket.close(code=1001), 2)
 

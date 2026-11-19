@@ -265,6 +265,7 @@ class Diagnostics:
             )
             if not row:
                 continue
+            row["last_seen"] = runtime.device_last_seen(identifier, row["last_seen"])
             info = json.loads(row.pop("info"))
             capabilities = info.get("capabilities")
             known = isinstance(capabilities, list)

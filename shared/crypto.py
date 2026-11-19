@@ -1,6 +1,7 @@
 """Small authenticated channel; it does not make browser HTTP traffic private."""
 
 from __future__ import annotations
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -10,6 +11,41 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from shared.util import valid_json_value
+
+ASYNC_OFFLOAD_BYTES = 64 * 1024
+
+
+def _exceeds_json_threshold(value, threshold: int = ASYNC_OFFLOAD_BYTES) -> bool:
+    if not isinstance(value, dict):
+        return False
+    # Account for {"seq":1,"body":...} outer envelope (~20 bytes).
+    approx = 24
+    nodes = 0
+    stack: list[object] = [value]
+    while stack:
+        item = stack.pop()
+        nodes += 1
+        if nodes > 2048 or approx > threshold:
+            return True
+        if isinstance(item, dict):
+            approx += 2
+            for k, v in item.items():
+                approx += (
+                    (len(k) * (1 if isinstance(k, str) and k.isascii() else 3) + 4)
+                    if isinstance(k, str)
+                    else 8
+                )
+                stack.append(v)
+        elif isinstance(item, (list, tuple)):
+            approx += 2 + len(item)
+            stack.extend(item)
+        elif isinstance(item, str):
+            approx += len(item) * (1 if item.isascii() else 3) + 2
+        else:
+            approx += 8
+        if approx > threshold:
+            return True
+    return False
 
 
 def token(size: int = 32) -> str:
@@ -85,9 +121,26 @@ class SecureChannel:
         self.recv_dir = "agent" if role == "hub" else "hub"
         self.sent = 0
         self.received = 0
+        self._pack_lock: asyncio.Lock | None = None
+        self._pack_loop: asyncio.AbstractEventLoop | None = None
+        self._unpack_lock: asyncio.Lock | None = None
+        self._unpack_loop: asyncio.AbstractEventLoop | None = None
 
-    def pack(self, body: dict) -> str:
-        sequence = self.sent + 1
+    def _get_pack_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._pack_lock is None or self._pack_loop is not loop:
+            self._pack_lock = asyncio.Lock()
+            self._pack_loop = loop
+        return self._pack_lock
+
+    def _get_unpack_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._unpack_lock is None or self._unpack_loop is not loop:
+            self._unpack_lock = asyncio.Lock()
+            self._unpack_loop = loop
+        return self._unpack_lock
+
+    def _pack_sequence(self, body: dict, sequence: int) -> str:
         message = {"seq": sequence, "body": body}
         if not isinstance(body, dict) or not valid_json_value(message):
             raise ValueError("Invalid channel message")
@@ -99,10 +152,9 @@ class SecureChannel:
             raise ValueError("Packet too large")
         nonce = secrets.token_bytes(12)
         encrypted = self.cipher.encrypt(nonce, clear, self.prefix + self.send_dir.encode())
-        self.sent = sequence
         return base64.b64encode(nonce + encrypted).decode()
 
-    def unpack(self, packet: str) -> dict:
+    def _unpack_sequence(self, packet: str, expected_sequence: int) -> dict:
         if not isinstance(packet, (str, bytes)):
             raise ValueError("Invalid channel packet")
         if len(packet) > 16 * 1024 * 1024:
@@ -115,9 +167,56 @@ class SecureChannel:
             raise ValueError("Invalid channel message") from exc
         if not isinstance(message, dict) or not valid_json_value(message):
             raise ValueError("Invalid channel message")
-        if type(message.get("seq")) is not int or message["seq"] != self.received + 1:
+        if type(message.get("seq")) is not int or message["seq"] != expected_sequence:
             raise ValueError("Unexpected channel sequence")
         if not isinstance(message.get("body"), dict):
             raise ValueError("Invalid channel message")
-        self.received += 1
         return message["body"]
+
+    def pack(self, body: dict) -> str:
+        sequence = self.sent + 1
+        packet = self._pack_sequence(body, sequence)
+        self.sent = sequence
+        return packet
+
+    def unpack(self, packet: str) -> dict:
+        expected = self.received + 1
+        body = self._unpack_sequence(packet, expected)
+        self.received = expected
+        return body
+
+    async def pack_async(self, body: dict, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> str:
+        """Pack body asynchronously, offloading payloads > threshold via asyncio.to_thread."""
+        async with self._get_pack_lock():
+            sequence = self.sent + 1
+            if _exceeds_json_threshold(body, threshold):
+                packet = await asyncio.to_thread(self._pack_sequence, body, sequence)
+            else:
+                packet = self._pack_sequence(body, sequence)
+            self.sent = sequence
+            return packet
+
+    async def unpack_async(self, packet: str, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> dict:
+        """Unpack packet asynchronously, offloading payloads > threshold via asyncio.to_thread."""
+        async with self._get_unpack_lock():
+            expected = self.received + 1
+            if isinstance(packet, (str, bytes)) and len(packet) > threshold:
+                body = await asyncio.to_thread(self._unpack_sequence, packet, expected)
+            else:
+                body = self._unpack_sequence(packet, expected)
+            self.received = expected
+            return body
+
+
+async def pack_channel(channel, body: dict, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> str:
+    """Pack via channel.pack_async when supported, preserving mock channels with sync pack."""
+    if hasattr(channel, "pack_async"):
+        return await channel.pack_async(body, threshold=threshold)
+    return channel.pack(body)
+
+
+async def unpack_channel(channel, packet: str, *, threshold: int = ASYNC_OFFLOAD_BYTES) -> dict:
+    """Unpack via channel.unpack_async when supported, preserving mock channels with sync unpack."""
+    if hasattr(channel, "unpack_async"):
+        return await channel.unpack_async(packet, threshold=threshold)
+    return channel.unpack(packet)

@@ -42,8 +42,7 @@ async def test_warm_worker_rechecks_root_and_reaps_failed_lease(local_agent):
             process = lease.process
         async with workspace_probe.ReadWorker(pool=pool) as lease:
             assert lease.process is process
-            for _ in range(2):
-                await workspace_probe.root(agent.engine,'read',project,args,worker=lease,expected_root=root)
+            await workspace_probe.root(agent.engine,'read',project,args,worker=lease,expected_root=root)
             value = await workspace_probe.probe(agent.engine,'read',project,args,worker=lease,expected_root=root)
             assert value['content'] == 'alpha'
         with pytest.raises(DevError):
@@ -352,16 +351,18 @@ async def test_cancelled_handle_releases_slots_and_recovers(local_agent, monkeyp
 async def test_preflight_burst_is_bounded_and_other_project_has_reserved_slot(local_agent, monkeypatch):
     agent, root = local_agent
     release = asyncio.Event()
+    first_release = asyncio.Event()
     gamma_entered = asyncio.Event()
     entered = []
     peak = 0
     async def blocked(engine, tool, project, args):
         nonlocal peak
+        index = len(entered)
         entered.append(project['id'])
         peak = max(peak, len(agent.scheduler.active))
         if project['id'] == 'gamma':
             gamma_entered.set()
-        await release.wait()
+        await (first_release if index == 0 else release).wait()
         return root, {}
     monkeypatch.setattr(workspace_probe, 'root', blocked)
     alpha = {'id': 'alpha', 'root': str(root)}
@@ -369,16 +370,24 @@ async def test_preflight_burst_is_bounded_and_other_project_has_reserved_slot(lo
         'read', alpha, {}, preflight_id=f'alpha-{i}')) for i in range(128)]
     try:
         limit = agent.scheduler.lane_limit('read')
+        # B10: an uncontended single project may borrow the whole read lane.
         async with asyncio.timeout(5):
-            while len(entered) < limit - 1:
+            while len(entered) < limit:
                 await asyncio.sleep(.01)
-        assert len(entered) == limit - 1
+        await asyncio.sleep(.05)
+        assert len(entered) == limit
         gamma = asyncio.create_task(agent._operation_root(
             'read', {'id': 'gamma', 'root': str(root)}, {}, preflight_id='gamma'))
         tasks.append(gamma)
+        async with asyncio.timeout(2):
+            while not any(t.project == 'gamma' for t in agent.scheduler.waiting):
+                await asyncio.sleep(.01)
+        # Once another project waits, one slot is reserved for it: freeing a
+        # single alpha slot admits gamma, not another queued alpha.
+        first_release.set()
         await asyncio.wait_for(gamma_entered.wait(), 2)
         assert peak <= limit
-        assert entered.count('alpha') == limit - 1
+        assert entered.count('alpha') == limit
         # Cancelling a queued preflight removes its scheduler ticket, without
         # creating a worker or consuming a filesystem resource.
         tasks[-2].cancel()
@@ -389,6 +398,7 @@ async def test_preflight_burst_is_bounded_and_other_project_has_reserved_slot(lo
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
         assert entered.count('alpha') == 127
     finally:
+        first_release.set()
         release.set()
         for task in tasks:
             if not task.done():
@@ -437,7 +447,7 @@ async def test_read_rechecks_do_not_reenter_execution_slot(local_agent, monkeypa
         'project': {'id': 'fixture', 'root': str(root), 'alias': 'fixture', 'mode': 'write'},
         'args': {'project': 'fixture', 'path': 'README.md'}}), 5)
     assert agent.journal.status('single-slot')['result']['ok']
-    assert [phase for phase, _ in observed] == ['admission', 'root', 'root', 'execute']
+    assert [phase for phase, _ in observed] == ['admission', 'root', 'execute']
     assert all(active == [('single-slot', 'read')] for _, active in observed)
     assert len(processes) == 1
     assert all(process.returncode == 0 for process in processes)
@@ -455,7 +465,8 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
     async def forbidden(*args, **kwargs):
         pytest.fail('An unadmitted preflight must not spawn a root worker')
     monkeypatch.setattr(workspace_probe, 'probe', forbidden)
-    reserved = agent.scheduler.lane_limit('read') - 1
+    # B10: one uncontended project may use the entire read lane.
+    reserved = agent.scheduler.lane_limit('read')
     async with contextlib.AsyncExitStack() as stack:
         for index in range(reserved):
             await stack.enter_async_context(agent.scheduler.slot(
@@ -488,7 +499,7 @@ async def test_first_preflight_wait_expires_or_cancels_without_spawning(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tool', ['read', 'open_workspace'])
-@pytest.mark.parametrize('change_at,change', [(1, 'revoke'), (1, 'remap'), (2, 'revoke')])
+@pytest.mark.parametrize('change_at,change', [(0, 'revoke'), (0, 'remap'), (1, 'revoke')])
 async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_path, tool, change_at, change):
     agent, root = local_agent
     (root / 'README.md').write_text('authorized content')
@@ -507,7 +518,7 @@ async def test_session_rechecks_current_authority_and_mapping(local_agent, tmp_p
             project['root'] = str(second)
         with pytest.raises(DevError) as error:
             await workspace_probe.probe(agent.engine, tool, project, args,
-                phase='execute' if change_at == 2 else 'root', expected_root=root, worker=worker)
+                phase='execute' if change_at == 1 else 'root', expected_root=root, worker=worker)
         assert error.value.code == ('ROOT_NOT_ALLOWED' if change == 'revoke' else 'ROOT_CHANGED')
     assert worker.process.returncode is not None
 
@@ -519,9 +530,8 @@ async def test_session_execute_once_and_parent_rejects_duplicate(local_agent):
     project = {'id': 'fixture', 'root': str(root), 'mode': 'write'}
     args = TOOLS['read'].model.model_validate({'project': 'fixture', 'path': 'README.md'}).model_dump()
     async with workspace_probe.ReadWorker() as worker:
-        for _ in range(2):
-            await workspace_probe.probe(agent.engine, 'read', project, args, phase='root',
-                                        expected_root=root, worker=worker)
+        await workspace_probe.probe(agent.engine, 'read', project, args, phase='root',
+                                    expected_root=root, worker=worker)
         result = await workspace_probe.probe(agent.engine, 'read', project, args,
                                             expected_root=root, worker=worker)
         assert result['content'] == 'once'
@@ -533,8 +543,8 @@ async def test_session_execute_once_and_parent_rejects_duplicate(local_agent):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('phases', [('execute',), ('root', 'execute'),
-                                  ('root', 'root', 'execute', 'execute')])
+@pytest.mark.parametrize('phases', [('execute',), ('root', 'root', 'execute'),
+                                  ('root', 'execute')])
 async def test_worker_enforces_protocol_even_without_parent(local_agent, phases):
     import json
     agent, root = local_agent
@@ -551,10 +561,10 @@ async def test_worker_enforces_protocol_even_without_parent(local_agent, phases)
         frames = b''.join((json.dumps({**request, 'phase': phase}) + chr(10)).encode() for phase in phases)
         output, _ = await asyncio.wait_for(process.communicate(frames), 5)
         results = [json.loads(line) for line in output.splitlines()]
-        if len(phases) < 3:
+        if phases != ('root', 'execute'):
             assert results[-1]['error']['code'] == 'INVALID_REQUEST'
         else:
-            assert len(results) == 3
+            assert len(results) == 2
             assert results[-1]['data']['content'] == 'once'
         assert process.returncode == 0
     finally:
@@ -569,7 +579,6 @@ async def test_session_blocked_read_reaps_process(local_agent, monkeypatch, tmp_
     code = (
         "import sys,json,time; from pathlib import Path; "
         "json.loads(sys.stdin.readline()); print(json.dumps({'ok':True,'data':{}}),flush=True); "
-        "json.loads(sys.stdin.readline()); print(json.dumps({'ok':True,'data':{}}),flush=True); "
         f"json.loads(sys.stdin.readline()); Path({str(marker)!r}).write_text('ready'); time.sleep(60)")
     def synthetic(entry='main'):
         if entry == 'session_main':
@@ -578,8 +587,7 @@ async def test_session_blocked_read_reaps_process(local_agent, monkeypatch, tmp_
     monkeypatch.setattr(workspace_probe, 'worker_command', synthetic)
     async with workspace_probe.ReadWorker() as worker:
         await worker.request({'phase': 'root'})
-        await worker.request({'phase': 'root'})
-        # Both prior frames prove interpreter startup has completed.
+        # The prior frame proves interpreter startup has completed.
         if ending == 'timeout':
             monkeypatch.setattr(workspace_probe, 'PROBE_TIMEOUT', .25)
         pending = asyncio.create_task(worker.request({'phase': 'execute'}))
@@ -617,12 +625,14 @@ async def test_fastpath_scheduler_rejection_reaps_before_wait_and_cancellation(
         local_agent, monkeypatch):
     agent, root = local_agent
     (root / 'README.md').write_text('find this')
-    agent.scheduler.capacity.limit = 0
     processes = []
     spawn = asyncio.create_subprocess_exec
     async def counted(*args, **kwargs):
         process = await spawn(*args, **kwargs)
         processes.append(process)
+        # B10: fs_search uses the read lane. Once the admission worker exists,
+        # read capacity disappears so try_reserve rejects the fastpath.
+        agent.scheduler.config['read_limit'] = 0
         return process
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', counted)
     task = asyncio.create_task(agent.handle({
@@ -630,13 +640,13 @@ async def test_fastpath_scheduler_rejection_reaps_before_wait_and_cancellation(
         'project': {'id': 'fixture', 'root': str(root), 'mode': 'write'},
         'args': {'project': 'fixture', 'path': '.', 'query': 'find'}}))
     async with asyncio.timeout(5):
-        while not any(ticket.lane == 'execution' for ticket in agent.scheduler.waiting):
+        while not any(ticket.lane == 'read' for ticket in agent.scheduler.waiting):
             assert not task.done(), agent.journal.status('contended-search')
             await asyncio.sleep(.01)
     assert len(processes) == 1 and processes[0].returncode == 0
     assert not agent.scheduler.active
     # Joint admission queues the complete claim without owning it while waiting
-    # for execution capacity. No provisional fastpath reservation survives.
+    # for read capacity. No provisional fastpath reservation survives.
     assert len(agent.resources.active) == 0
     assert len(agent.resources.waiting) == 1
     assert agent.resources.waiting[0][1] == 'contended-search'

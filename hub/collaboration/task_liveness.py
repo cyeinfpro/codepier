@@ -17,6 +17,10 @@ from shared.util import DevError
 UNCERTAIN = frozenset({"unknown", "needs_review", "reconnecting"})
 SETTLED = frozenset({"succeeded", "failed", "cancelled"})
 WAKE_DELAYS = (30, 120, 600)
+# A disconnected node's last observation may have been persisted on the prior
+# 60-second presence flush. Do not give live nodes the wider fallback window.
+PERSISTED_NODE_FRESHNESS_SECONDS = 75
+LIVE_NODE_FRESHNESS_SECONDS = 45
 
 
 def migrate(db):
@@ -183,6 +187,28 @@ class TaskLiveness:
                 "legacy_receipt": row is None,
             }
 
+    def _live_node_contacts(self, ids, placeholders):
+        runtime = getattr(self.c, "runtime", None)
+        connections = getattr(runtime, "connections", None)
+        if not connections:
+            return {}
+        rows = self.store.all(
+            """SELECT DISTINCT c.work_item_id,o.device_id
+            FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
+            WHERE c.work_item_id IN ("""
+            + placeholders
+            + ")",
+            tuple(ids),
+        )
+        contacts = {}
+        for row in rows:
+            conn = connections.get(row["device_id"])
+            seen = getattr(conn, "last_seen", None)
+            if seen is not None and not conn.unusable:
+                item_id = row["work_item_id"]
+                contacts[item_id] = max(seen, contacts.get(item_id, 0))
+        return contacts
+
     def work_summary(self, items):
         """Two batched queries; no operation output, command, file path or credential."""
         if not items:
@@ -199,14 +225,15 @@ class TaskLiveness:
                 THEN COALESCE(o.last_operation_verified_at,0) ELSE NULL END) AS oldest_pending_verified_at,
             MAX(o.last_output_at) AS last_output_at,
             MAX(CASE WHEN o.state IN ('succeeded','failed','cancelled') THEN o.updated ELSE NULL END) AS last_result_recorded_at,
-            MAX(d.last_seen) AS last_node_contact_at
+            MAX(p.last_seen) AS last_node_contact_at
             FROM coordination_operations c JOIN operations o ON o.id=c.operation_id
-            LEFT JOIN devices d ON d.id=o.device_id WHERE c.work_item_id IN ("""
+            LEFT JOIN device_presence p ON p.device_id=o.device_id WHERE c.work_item_id IN ("""
             + placeholders
             + """)
             GROUP BY c.work_item_id""",
             tuple(ids),
         )
+        contacts = self._live_node_contacts(ids, placeholders)
         by_id, now, result = {row["work_item_id"]: row for row in aggregates}, self.c.clock(), {}
         for item in items:
             proof = by_id.get(
@@ -231,6 +258,10 @@ class TaskLiveness:
                 if proof["pending_count"] or proof["uncertain_count"]
                 else proof["last_operation_verified_at"]
             )
+            live_contact = contacts.get(item["id"])
+            persisted_contact = proof["last_node_contact_at"]
+            if live_contact is not None:
+                proof["last_node_contact_at"] = max(live_contact, persisted_contact or 0)
             last_heartbeat = item.get("last_consumer_heartbeat_at")
             if item["result"]:
                 waiting = "result_committed"
@@ -260,7 +291,13 @@ class TaskLiveness:
                 "last_progress_summary": item.get("last_progress_summary", ""),
                 "last_dot_contact_at": item.get("last_consumer_contact_at"),
                 "operation_freshness": freshness(verified, now, 45),
-                "node_contact_freshness": freshness(proof["last_node_contact_at"], now, 45),
+                "node_contact_freshness": freshness(
+                    proof["last_node_contact_at"],
+                    now,
+                    LIVE_NODE_FRESHNESS_SECONDS
+                    if live_contact is not None
+                    else PERSISTED_NODE_FRESHNESS_SECONDS,
+                ),
                 "consumer_freshness": freshness(last_heartbeat, now, 90),
                 "wait_reason": waiting,
                 "reason_code": item["reason_code"],

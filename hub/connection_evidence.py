@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from collections.abc import Mapping
 import hashlib
 import json
+import os
+import threading
 import time
 
 from hub.access_preview import grant_access_preview
@@ -13,6 +17,23 @@ from shared.util import DevError
 
 STAGES = frozenset({"authentication", "discovery", "catalog", "readonly", "call"})
 FRESH_SECONDS = 600
+DEDUP_WINDOW_SECONDS = 60.0
+DEDUP_MAX_ENTRIES = 4096
+
+
+def _is_row(value):
+    return isinstance(value, Mapping) or hasattr(value, "keys")
+
+
+def _field(row, key, default=None):
+    if row is None:
+        return default
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
 
 
 def digest(value):
@@ -22,17 +43,98 @@ def digest(value):
 
 
 class ConnectionEvidence:
-    def __init__(self, runtime):
+    def __init__(
+        self,
+        runtime,
+        *,
+        dedup_seconds=None,
+        max_dedup_entries=DEDUP_MAX_ENTRIES,
+    ):
         self.runtime, self.store = runtime, runtime.store
         self.write_errors = 0
         self._authentication_observed = {}
         self._writes_since_prune = 0
+        self.dedup_seconds = (
+            float(os.getenv("CODEPIER_EVIDENCE_DEDUP_SECONDS", DEDUP_WINDOW_SECONDS))
+            if dedup_seconds is None
+            else float(dedup_seconds)
+        )
+        self.max_dedup_entries = max(1, int(max_dedup_entries))
+        self._observed_lru: OrderedDict[tuple, tuple[float, float, int]] = OrderedDict()
+        self._lru_lock = threading.Lock()
         self.store.execute("""CREATE TABLE IF NOT EXISTS mcp_connection_evidence (
             space_id TEXT NOT NULL, user_id TEXT NOT NULL, grant_id TEXT NOT NULL,
             stage TEXT NOT NULL, project_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
             binding TEXT NOT NULL, mapping TEXT NOT NULL, observed REAL NOT NULL,
             detail TEXT NOT NULL,
             PRIMARY KEY(space_id,user_id,grant_id,stage,project_id,workspace_id))""")
+
+    def reset_dedup(self):
+        """Clear in-memory observation deduplication cache (for tests/admin reset)."""
+        with self._lru_lock:
+            self._observed_lru.clear()
+        self._authentication_observed.clear()
+
+    @staticmethod
+    def _dedup_key(
+        grant_id,
+        project_id,
+        kind,
+        *,
+        workspace_id="",
+        tool=None,
+        catalog_sha256=None,
+    ):
+        discriminator = catalog_sha256 if kind == "catalog" and catalog_sha256 else (tool or "")
+        return (grant_id, project_id or "", kind, workspace_id or "", discriminator)
+
+    def _session_revision(self):
+        return getattr(self.store, "session_revision", 0)
+
+    def _is_throttled(self, key, *, observed_at=None):
+        window = self.dedup_seconds
+        if window <= 0:
+            return False
+        now_mono = time.monotonic()
+        rev = self._session_revision()
+        with self._lru_lock:
+            entry = self._observed_lru.get(key)
+            if entry is None:
+                return False
+            cached_mono, cached_wall, cached_rev = entry
+            if cached_rev != rev:
+                self._observed_lru.pop(key, None)
+                return False
+            if observed_at is not None and observed_at < cached_wall:
+                self._observed_lru.move_to_end(key)
+                return True
+            if now_mono - cached_mono < window:
+                self._observed_lru.move_to_end(key)
+                return True
+            self._observed_lru.pop(key, None)
+            return False
+
+    def _record_observed(self, key, observed_at):
+        now_mono = time.monotonic()
+        rev = self._session_revision()
+        with self._lru_lock:
+            self._observed_lru[key] = (now_mono, observed_at, rev)
+            self._observed_lru.move_to_end(key)
+            while len(self._observed_lru) > self.max_dedup_entries:
+                self._observed_lru.popitem(last=False)
+
+    def _evict_stage(self, grant_id, project_id, stage, workspace_id=""):
+        with self._lru_lock:
+            stale_keys = [
+                key
+                for key in self._observed_lru
+                if key[0] == grant_id
+                and key[1] == (project_id or "")
+                and key[2] == stage
+                and key[3] == (workspace_id or "")
+            ]
+            for key in stale_keys:
+                self._observed_lru.pop(key, None)
 
     def binding(self, grant):
         from hub.access import grant_revision
@@ -64,11 +166,22 @@ class ConnectionEvidence:
         if stage not in STAGES or not principal.grant_id:
             return
         try:
-            key = (principal.space_id, principal.user_id, principal.grant_id)
-            if (
-                stage == "authentication"
-                and time.monotonic() - self._authentication_observed.get(key, 0) < 30
-            ):
+            project_id = project["id"] if project else ""
+            effective_workspace = workspace_id if project else ""
+            observed_at = (
+                min(time.time(), completed_at)
+                if type(completed_at) in {int, float}
+                else time.time()
+            )
+            dedup_key = self._dedup_key(
+                principal.grant_id,
+                project_id,
+                stage,
+                workspace_id=effective_workspace,
+                tool=tool,
+                catalog_sha256=catalog_sha256,
+            )
+            if self._is_throttled(dedup_key, observed_at=observed_at):
                 return  # Observation throttling only; live authorization already ran.
             grant = self.store.one(
                 "SELECT * FROM grants WHERE id=? AND user_id=? AND space_id=? AND revoked=0",
@@ -97,19 +210,20 @@ class ConnectionEvidence:
                     principal.user_id,
                     principal.grant_id,
                     stage,
-                    project["id"] if project else "",
-                    workspace_id if project else "",
+                    project_id,
+                    effective_workspace,
                     self.binding(grant),
                     digest([project["root"], project["device_id"]]) if project else "",
-                    min(time.time(), completed_at)
-                    if type(completed_at) in {int, float}
-                    else time.time(),
+                    observed_at,
                     json.dumps(detail),
                 ),
             )
+            self._record_observed(dedup_key, observed_at)
             if stage == "authentication":
-                self._authentication_observed[key] = time.monotonic()
-                if len(self._authentication_observed) > 4096:
+                self._authentication_observed[
+                    (principal.space_id, principal.user_id, principal.grant_id)
+                ] = time.monotonic()
+                if len(self._authentication_observed) > self.max_dedup_entries:
                     self._authentication_observed.pop(next(iter(self._authentication_observed)))
             self._writes_since_prune += 1
             if self._writes_since_prune >= 64:
@@ -124,55 +238,129 @@ class ConnectionEvidence:
         """A returned tool call is evidence of the contract, never of host scanning."""
         self.observe(principal, "call", tool=name)
 
-    def completed(self, operation, result, *, state, completed_at):
+    def completed(
+        self,
+        op=None,
+        result=None,
+        *,
+        state=None,
+        completed_at=None,
+        principal=None,
+        project=None,
+        tool=None,
+        operation=None,
+        payload=None,
+    ):
         """Use the old in-memory request after the real terminal result commits.
 
         Runtime clears encrypted payload at completion. Never retain that payload
         or infer a historical mapping from the current project when polling.
         """
+        op_row = operation if _is_row(operation) or (op is None and operation is not None) else op
+        if op_row is None:
+            return
+        res = result if isinstance(result, Mapping) else {}
+        tool_name = tool if tool is not None else _field(op_row, "tool")
+        row_state = _field(op_row, "state")
+        effective_state = (
+            state
+            if state is not None
+            else row_state
+            if row_state is not None
+            else ("succeeded" if res.get("ok") is True else None)
+        )
+        effective_completed_at = completed_at if type(completed_at) in {int, float} else time.time()
+        grant_id = (principal.grant_id if principal is not None else None) or _field(
+            op_row, "grant_id"
+        )
         if (
-            operation["tool"] != "read"
-            or state != "succeeded"
-            or not operation["grant_id"]
-            or result.get("ok") is not True
+            tool_name != "read"
+            or effective_state != "succeeded"
+            or not grant_id
+            or res.get("ok") is not True
+        ):
+            return
+        data = res.get("data") or {}
+        if data.get("batch") is True and not any(
+            item.get("ok") is True and "content" in item for item in data.get("files", [])
         ):
             return
         try:
-            grant = self.store.one(
-                "SELECT * FROM grants WHERE id=? AND revoked=0", (operation["grant_id"],)
+            if isinstance(payload, Mapping):
+                args_part = payload.get("args")
+                workspace_id = (
+                    args_part.get("workspace_id", "")
+                    if isinstance(args_part, Mapping)
+                    else payload.get("workspace_id", "")
+                )
+                if not isinstance(workspace_id, str):
+                    workspace_id = ""
+            else:
+                original = json.loads(_field(op_row, "args_summary") or "{}")
+                workspace_id = (
+                    original.get("workspace_id", "") if isinstance(original, Mapping) else ""
+                )
+            project_id = (
+                _field(project, "id") if project is not None else _field(op_row, "project_id", "")
             )
-            if not grant:
-                return
-            principal = self.runtime.grant_principal(grant)
-            row = self.runtime.operation_row(operation["id"], principal)
-            if row["grant_id"] != principal.grant_id or row["state"] != "succeeded":
-                return
-            project = self.runtime.project(row["project_id"], principal)
-            request = (
-                json.loads(self.store.decrypt(operation["payload"]))
-                if operation.get("payload")
-                else {}
-            )
-            original_project = request.get("project") or {}
-            if (
-                original_project.get("root") != project["root"]
-                or row["device_id"] != project["device_id"]
-            ):
-                return
-            data = result.get("data") or {}
-            if data.get("batch") is True and not any(
-                item.get("ok") is True and "content" in item for item in data.get("files", [])
-            ):
-                return
-            original = json.loads(operation["args_summary"] or "{}")
+            if project_id:
+                early_key = self._dedup_key(
+                    grant_id,
+                    project_id,
+                    "readonly",
+                    workspace_id=workspace_id,
+                    tool="read",
+                )
+                if self._is_throttled(early_key, observed_at=effective_completed_at):
+                    return
+
+            if principal is None:
+                grant = self.store.one("SELECT * FROM grants WHERE id=? AND revoked=0", (grant_id,))
+                if not grant:
+                    return
+                principal = self.runtime.grant_principal(grant)
+                row = self.runtime.operation_row(_field(op_row, "id"), principal)
+                if row["grant_id"] != principal.grant_id or row["state"] != "succeeded":
+                    return
+            else:
+                row = op_row
+                if _field(row, "grant_id") != principal.grant_id:
+                    return
+
+            if project is None:
+                project = self.runtime.project(_field(row, "project_id"), principal)
+
+            if payload is not None:
+                request = payload if isinstance(payload, Mapping) else {}
+                if "project" in request:
+                    original_project = request.get("project") or {}
+                    if (
+                        original_project.get("root") != project["root"]
+                        or _field(row, "device_id") != project["device_id"]
+                    ):
+                        return
+                elif _field(row, "device_id") != project["device_id"]:
+                    return
+            else:
+                encrypted_payload = _field(op_row, "payload")
+                request = (
+                    json.loads(self.store.decrypt(encrypted_payload)) if encrypted_payload else {}
+                )
+                original_project = request.get("project") or {}
+                if (
+                    original_project.get("root") != project["root"]
+                    or _field(row, "device_id") != project["device_id"]
+                ):
+                    return
+
             self.observe(
                 principal,
                 "readonly",
                 project=project,
-                workspace_id=original.get("workspace_id", ""),
+                workspace_id=workspace_id,
                 tool="read",
-                operation_id=row["id"],
-                completed_at=completed_at,
+                operation_id=_field(row, "id"),
+                completed_at=effective_completed_at,
             )
         except DevError:
             # A current denial is not a telemetry failure and grants no evidence.
@@ -237,11 +425,14 @@ class ConnectionEvidence:
                 not row["project_id"] or row["mapping"] == mapping
             )
             age = max(0, round(now - row["observed"]))
+            freshness = "fresh" if current and age <= FRESH_SECONDS else "stale"
+            if freshness != "fresh":
+                self._evict_stage(grant_id, row["project_id"], row["stage"], row["workspace_id"])
             evidence[row["stage"]] = {
                 **json.loads(row["detail"]),
                 "observed_at": row["observed"],
                 "age_seconds": age,
-                "freshness": "fresh" if current and age <= FRESH_SECONDS else "stale",
+                "freshness": freshness,
                 "binding_current": current,
                 "source": "server_observation",
             }
@@ -285,6 +476,14 @@ class ConnectionEvidence:
             if project and read_allowed
             else None
         )
+        last_seen = None
+        if device and project:
+            device_last_seen = getattr(self.runtime, "device_last_seen", None)
+            last_seen = (
+                device_last_seen(project["device_id"], device["last_seen"])
+                if callable(device_last_seen)
+                else device["last_seen"]
+            )
         info = json.loads(device["info"]) if device else {}
         capabilities = info.get("capabilities")
         layers.append(
@@ -297,7 +496,7 @@ class ConnectionEvidence:
                 if device
                 else "unknown",
                 "checked_at": now,
-                "observed_at": device["last_seen"] if device else None,
+                "observed_at": last_seen,
                 "read_capability": "available"
                 if isinstance(capabilities, list) and "read" in capabilities
                 else "unavailable"

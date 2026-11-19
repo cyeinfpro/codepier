@@ -187,6 +187,9 @@ class RoomSubscriptionRenewals:
                 member["id"],
             ),
         )
+        loops = getattr(self.c, "loops", None)
+        if loops is not None:
+            self.store.after_commit(loops.wake_renewals)
 
     def current(self, events, row, now):
         events.guard()

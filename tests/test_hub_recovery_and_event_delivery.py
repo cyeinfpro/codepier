@@ -125,7 +125,7 @@ def test_frames_authenticate_once_and_coalesce_last_seen(store):
     for _ in range(30):
         assert runtime._receive_agent_frame("device", connection, {}, {"type": "unknown"})[0]
     assert len(calls) == 30
-    persisted = store.one("SELECT last_seen FROM devices WHERE id='device'")["last_seen"]
+    persisted = store.one("SELECT last_seen FROM device_presence WHERE device_id='device'")["last_seen"]
     assert persisted <= connection.last_seen
     assert connection._persisted_last_seen == persisted
     runtime.connection_authorized = lambda *args: False

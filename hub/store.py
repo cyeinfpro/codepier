@@ -18,6 +18,333 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from cryptography.fernet import Fernet
 
+_VALID_SYNCHRONOUS_MODES = frozenset({"NORMAL", "FULL", "EXTRA"})
+
+# Explicit authorization-critical tables covered by transactional security_epoch triggers
+# and synchronous session_revision invalidation.
+_SECURITY_TABLES = frozenset(
+    {
+        "sessions",
+        "session_security",
+        "users",
+        "iam_users",
+        "spaces",
+        "memberships",
+        "membership_blocks",
+        "external_identities",
+        "oidc_providers",
+        "access_roles",
+        "access_profiles",
+        "role_assignments",
+        "role_created_projects",
+        "grants",
+        "grant_expirations",
+        "tokens",
+        "projects",
+        "devices",
+        "vps_connections",
+        "vps_projects",
+        "group_mappings",
+        "oauth_lifetime_grants",
+        "oauth_lifetime_access",
+        "oauth_lifetime_credentials",
+        "room_scope_manifests",
+        "conversation_project_revocations",
+        "conversation_project_scopes",
+        "conversation_projects",
+        "conversation_working_scopes",
+        "delegation_policies",
+        "oauth_clients",
+        "room_host_connections",
+        "room_member_paused_policies",
+        "room_member_scopes",
+        "room_members",
+        "room_permission_policies",
+        "gateway_secrets",
+        "gateway_connectors",
+        "gateway_accounts",
+        "gateway_bindings",
+        "gateway_consents",
+    }
+)
+
+# Only security/ownership/secret columns on `devices` invalidate authorization decisions.
+_DEVICE_SECURITY_COLUMNS = frozenset({"id", "secret", "enabled", "space_id", "owner_user_id"})
+_DEVICE_ROUTINE_COLUMNS = frozenset({"name", "info", "last_seen", "created"})
+
+# Operational/business-state tables whose concurrent non-security writes are safe to read
+# within a single consistent WAL snapshot as long as security_epoch & schema are unchanged.
+_SNAPSHOT_TABLES = frozenset(
+    {
+        "operations",
+        "operation_events",
+        "operation_output_tails",
+        "device_presence",
+        "mcp_activity",
+        "mcp_usage",
+        "mcp_connection_evidence",
+        "mcp_tasks",
+        "integration_admission",
+        "knowledge_maintenance",
+        "audit",
+        "login_attempts",
+        "login_account_attempts",
+        "artifacts",
+        "workflows",
+        "workflow_events",
+        "workflow_replays",
+        "token_dashboard_revision",
+    }
+)
+
+
+# Only reviewed operational tables bypass write invalidation. Keeping this
+# separate from snapshot eligibility avoids expanding the reader fast path.
+_NON_SECURITY_WRITE_TABLES = _SNAPSHOT_TABLES | {"gateway_calls"}
+
+
+def _table_write_kind(table: str) -> tuple[bool, bool]:
+    if table == "meta":
+        return False, True
+    return table not in _NON_SECURITY_WRITE_TABLES, False
+
+
+def _tokenize_sql(sql: str):
+    tokens = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            nl = sql.find("\n", i + 2)
+            i = n if nl == -1 else nl + 1
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                return None
+            i = end + 2
+            continue
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            else:
+                return None
+            tokens.append(("STRING", sql[i:j]))
+            i = j
+            continue
+        if ch in {'"', "`"}:
+            quote = ch
+            j = i + 1
+            buf = []
+            while j < n:
+                if sql[j] == quote:
+                    if j + 1 < n and sql[j + 1] == quote:
+                        buf.append(quote)
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                buf.append(sql[j])
+                j += 1
+            else:
+                return None
+            tokens.append(("IDENT", "".join(buf).lower()))
+            i = j
+            continue
+        if ch == "[":
+            end = sql.find("]", i + 1)
+            if end == -1:
+                return None
+            tokens.append(("IDENT", sql[i + 1 : end].lower()))
+            i = end + 1
+            continue
+        if ch.isalpha() or ch == "_":
+            j = i + 1
+            while j < n and (sql[j].isalnum() or sql[j] in {"_", "$"}):
+                j += 1
+            tokens.append(("WORD", sql[i:j].lower()))
+            i = j
+            continue
+        if ch in {"(", ")", ",", ".", "=", ";"}:
+            tokens.append(("SYM", ch))
+            i += 1
+            continue
+        tokens.append(("OTHER", ch))
+        i += 1
+    return tokens
+
+
+def _read_table_name(tokens, idx: int):
+    if idx >= len(tokens) or tokens[idx][0] not in {"IDENT", "WORD"}:
+        return None, idx
+    name = tokens[idx][1]
+    idx += 1
+    if idx < len(tokens) and tokens[idx] == ("SYM", "."):
+        idx += 1
+        if idx >= len(tokens) or tokens[idx][0] not in {"IDENT", "WORD"}:
+            return None, idx
+        name = tokens[idx][1]
+        idx += 1
+    return name, idx
+
+
+def _parse_update_columns(tokens, idx: int) -> set[str] | None:
+    cols: set[str] = set()
+    n = len(tokens)
+    while idx < n:
+        tok = tokens[idx]
+        if tok == ("SYM", "("):
+            idx += 1
+            while idx < n and tokens[idx] != ("SYM", ")"):
+                if tokens[idx][0] not in {"IDENT", "WORD"}:
+                    return None
+                cols.add(tokens[idx][1])
+                idx += 1
+                if idx < n and tokens[idx] == ("SYM", ","):
+                    idx += 1
+                elif idx < n and tokens[idx] != ("SYM", ")"):
+                    return None
+            if idx >= n or tokens[idx] != ("SYM", ")"):
+                return None
+            idx += 1
+        elif tok[0] in {"IDENT", "WORD"}:
+            cols.add(tok[1])
+            idx += 1
+        else:
+            return None
+        if idx >= n or tokens[idx] != ("SYM", "="):
+            return None
+        idx += 1
+        depth = 0
+        while idx < n:
+            cur = tokens[idx]
+            if cur == ("SYM", "("):
+                depth += 1
+            elif cur == ("SYM", ")"):
+                if depth == 0:
+                    return None
+                depth -= 1
+            elif depth == 0:
+                if cur == ("SYM", ","):
+                    idx += 1
+                    break
+                if cur[0] == "WORD" and cur[1] in {"where", "from", "returning", "order", "limit"}:
+                    return cols or None
+            idx += 1
+        else:
+            return cols or None
+    return cols or None
+
+
+def _classify_write(sql: str) -> tuple[bool, bool]:
+    """Return (is_security_write, is_meta_write) failing closed on unknown/complex SQL."""
+    tokens = _tokenize_sql(sql)
+    if tokens is None:
+        return True, False
+    while tokens and tokens[-1] == ("SYM", ";"):
+        tokens.pop()
+    if not tokens:
+        return False, False
+    if any(tok == ("SYM", ";") for tok in tokens):
+        return True, False
+    first = tokens[0]
+    if first[0] != "WORD":
+        return True, False
+    op = first[1]
+    idx = 1
+    if op == "insert":
+        if idx < len(tokens) and tokens[idx] == ("WORD", "or"):
+            idx += 2
+        if idx < len(tokens) and tokens[idx] == ("WORD", "into"):
+            idx += 1
+        else:
+            return True, False
+        table, _ = _read_table_name(tokens, idx)
+        if not table:
+            return True, False
+        return _table_write_kind(table)
+    if op == "replace":
+        if idx < len(tokens) and tokens[idx] == ("WORD", "into"):
+            idx += 1
+        else:
+            return True, False
+        table, _ = _read_table_name(tokens, idx)
+        if not table:
+            return True, False
+        return _table_write_kind(table)
+    if op == "delete":
+        if idx < len(tokens) and tokens[idx] == ("WORD", "from"):
+            idx += 1
+        else:
+            return True, False
+        table, _ = _read_table_name(tokens, idx)
+        if not table:
+            return True, False
+        return _table_write_kind(table)
+    if op == "update":
+        if idx < len(tokens) and tokens[idx] == ("WORD", "or"):
+            idx += 2
+        table, idx = _read_table_name(tokens, idx)
+        if not table:
+            return True, False
+        if table != "devices":
+            return _table_write_kind(table)
+        while idx < len(tokens) and tokens[idx] != ("WORD", "set"):
+            idx += 1
+        if idx >= len(tokens):
+            return True, False
+        cols = _parse_update_columns(tokens, idx + 1)
+        if not cols:
+            return True, False
+        return not cols <= _DEVICE_ROUTINE_COLUMNS, False
+    return True, False
+
+
+_DDL_VERBS = frozenset(
+    {"create", "alter", "drop", "vacuum", "attach", "detach", "reindex", "analyze"}
+)
+
+
+def _is_ddl_sql(sql: str) -> bool:
+    tokens = _tokenize_sql(sql)
+    if not tokens:
+        return False
+    first = tokens[0]
+    return first[0] == "WORD" and first[1] in _DDL_VERBS
+
+
+class _StoreWriterConnection(CheckedConnection):
+    """CheckedConnection subclass notifying Store when internal DDL commits."""
+
+    def __init__(self, connection, lock, on_write=None, on_transaction=None, on_ddl=None):
+        super().__init__(connection, lock, on_write=on_write, on_transaction=on_transaction)
+        self._on_ddl = on_ddl
+
+    def execute(self, sql, parameters=()):
+        is_ddl = self._on_ddl is not None and _is_ddl_sql(sql)
+        cursor = super().execute(sql, parameters)
+        if is_ddl:
+            self._on_ddl()
+        return cursor
+
+    def executescript(self, script):
+        cursor = super().executescript(script)
+        if self._on_ddl is not None:
+            self._on_ddl()
+        return cursor
+
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -25,6 +352,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, csrf TEXT NOT NULL, expires REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, info TEXT NOT NULL DEFAULT '{}', last_seen REAL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS device_presence (device_id TEXT PRIMARY KEY, last_seen REAL, runtime_info TEXT, updated_at REAL);
 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, alias TEXT NOT NULL, alias_key TEXT UNIQUE NOT NULL, device_id TEXT NOT NULL REFERENCES devices(id), root TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT 'write', allow_tasks INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS vps_connections (id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT UNIQUE NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535), username TEXT NOT NULL, secret TEXT NOT NULL, host_key_policy TEXT NOT NULL DEFAULT 'strict', provider TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', system TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1, connection_revision INTEGER NOT NULL DEFAULT 1, created REAL NOT NULL, updated REAL NOT NULL, UNIQUE(host,port,username));
 CREATE TABLE IF NOT EXISTS vps_projects (vps_id TEXT NOT NULL REFERENCES vps_connections(id) ON DELETE CASCADE, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, binding_id TEXT NOT NULL, PRIMARY KEY(vps_id,project_id));
@@ -94,13 +422,19 @@ class Store:
         self._writer_lock = OwnedRLock(on_release=self.lock_metrics.observe)
         self.iam_enabled = True
         self.session_revision = 0
+        self.config_revision = 0
+        self._write_override = threading.local()
+        self._epoch_tables = frozenset()
+        self._epoch_schema = None
+        self._refreshing_epoch = False
         self._event_loop = None
         self.transaction_metrics = TransactionMetrics()
-        self._writer_db = CheckedConnection(
+        self._writer_db = _StoreWriterConnection(
             connection,
             self.lock,
             self._security_write,
             on_transaction=self.transaction_metrics.observe,
+            on_ddl=self._handle_internal_ddl,
         )
         self._executor = StoreWorker()
         self.worker_metrics = WorkerMetrics()
@@ -122,6 +456,14 @@ class Store:
                         ):
                             raise
                         time.sleep(0.05)
+                # An acknowledged authorization change must survive a power loss
+                # by default. NORMAL remains an explicit performance opt-in.
+                sync_mode = (os.getenv("CODEPIER_SQLITE_SYNCHRONOUS") or "FULL").strip().upper()
+                if sync_mode not in _VALID_SYNCHRONOUS_MODES:
+                    raise ValueError(
+                        f"Invalid CODEPIER_SQLITE_SYNCHRONOUS={sync_mode!r}; expected NORMAL, FULL, or EXTRA"
+                    )
+                self.db.execute(f"PRAGMA synchronous={sync_mode}")
                 self.db.execute("PRAGMA foreign_keys=OFF")
                 with self.db:
                     # Serialize the reads that decide which migrations/key creation
@@ -155,6 +497,11 @@ class Store:
         self.read_worker_metrics = WorkerMetrics()
 
     @property
+    def in_read_phase(self) -> bool:
+        """True when the caller is inside a worker's SQLite read snapshot."""
+        return getattr(self._reader_state, "binding", None) is not None
+
+    @property
     def lock(self):
         binding = getattr(self._reader_state, "binding", None)
         return binding[0] if binding else self._writer_lock
@@ -167,29 +514,69 @@ class Store:
     def _install_security_epoch(self):
         # A fast read may depend only on tables with transactional triggers.
         # Unknown tables and later schema changes keep the conservative fence.
-        from re import fullmatch
-
-        pattern = (
-            r"sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|"
-            r"external_identities|oidc_providers|access_roles|access_profiles|role_assignments|"
-            r"role_created_projects|grants|tokens|projects|devices|vps_connections|vps_projects|"
-            r"gateway_[a-z_]+"
-        )
-        self._epoch_tables = frozenset(
+        tables = {
             row[0]
             for row in self.db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
-            if fullmatch(pattern, row[0])
-        )
-        self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('security_epoch','0')")
+        }
+        self._epoch_tables = frozenset(tables & _SECURITY_TABLES)
+        if not self.db.execute("SELECT 1 FROM meta WHERE key='security_epoch'").fetchone():
+            self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('security_epoch','0')")
+        # Drop any stale epoch triggers from excluded non-security tables (e.g. gateway_calls).
+        for row in self.db.execute(
+            "SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' AND name LIKE 'cp_epoch_%'"
+        ).fetchall():
+            if row["tbl_name"] not in self._epoch_tables:
+                self.db.execute(f'DROP TRIGGER IF EXISTS "{row["name"]}"')
+
+        device_columns = {r[1] for r in self.db.execute("PRAGMA table_info(devices)").fetchall()}
+        watched_device_cols = [
+            col for col in sorted(_DEVICE_SECURITY_COLUMNS) if col in device_columns
+        ]
         for table in sorted(self._epoch_tables):
             for operation in ("INSERT", "UPDATE", "DELETE"):
-                self.db.execute(
-                    f'CREATE TRIGGER IF NOT EXISTS cp_epoch_{table}_{operation} AFTER {operation} ON "{table}" '
-                    "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='security_epoch'; END"
-                )
+                trigger_name = f"cp_epoch_{table}_{operation}"
+                if table == "devices" and operation == "UPDATE" and watched_device_cols:
+                    cols_sql = ", ".join(f'"{col}"' for col in watched_device_cols)
+                    create_sql = (
+                        f'CREATE TRIGGER "{trigger_name}" AFTER UPDATE OF {cols_sql} ON "devices" '
+                        "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='security_epoch'; END"
+                    )
+                    existing = self.db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                        (trigger_name,),
+                    ).fetchone()
+                    if existing and existing[0] != create_sql:
+                        self.db.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+                        existing = None
+                    if existing is None:
+                        self.db.execute(create_sql)
+                else:
+                    self.db.execute(
+                        f'CREATE TRIGGER IF NOT EXISTS "{trigger_name}" AFTER {operation} ON "{table}" '
+                        "BEGIN UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='security_epoch'; END"
+                    )
         self._epoch_schema = self.db.execute("PRAGMA schema_version").fetchone()[0]
+
+    def _handle_internal_ddl(self):
+        if self._epoch_schema is None or self._refreshing_epoch:
+            return
+        if self._writer_db.depth:
+            if self._refresh_epoch_schema not in self._writer_db._callbacks:
+                self._writer_db.after_commit(self._refresh_epoch_schema)
+        else:
+            self._refresh_epoch_schema()
+
+    def _refresh_epoch_schema(self):
+        if self._epoch_schema is None or self._refreshing_epoch:
+            return
+        self._refreshing_epoch = True
+        try:
+            with self.lock, self._writer_db:
+                self._install_security_epoch()
+        finally:
+            self._refreshing_epoch = False
 
     @contextmanager
     def _read_transaction_timing(self):
@@ -249,6 +636,7 @@ class Store:
                         version = self.db.execute("PRAGMA data_version").fetchone()[0]
                     with self.lock, self._read_transaction_timing(), self.db:
                         self.db.execute("BEGIN")
+                        schema_before = self.db.execute("PRAGMA schema_version").fetchone()[0]
                         epoch = self.db.execute(
                             "SELECT value FROM meta WHERE key='security_epoch'"
                         ).fetchone()
@@ -259,7 +647,7 @@ class Store:
                         if (
                             current_version != version
                             and epoch
-                            and dependencies <= self._epoch_tables
+                            and dependencies <= (self._epoch_tables | _SNAPSHOT_TABLES)
                         ):
                             # Validate both values in one current snapshot. A schema edit
                             # (including removal of a trigger) disables this shortcut.
@@ -270,7 +658,8 @@ class Store:
                                     "SELECT value FROM meta WHERE key='security_epoch'"
                                 ).fetchone()
                             if (
-                                schema == self._epoch_schema
+                                schema == schema_before
+                                and schema == self._epoch_schema
                                 and current_epoch
                                 and current_epoch[0] == epoch[0]
                             ):
@@ -471,6 +860,11 @@ class Store:
         from hub.oauth_lifetime import migrate_schema as migrate_oauth_lifetime
 
         migrate_oauth_lifetime(self.db)
+        # Backfill non-null devices.last_seen into device_presence once if absent.
+        self.db.execute(
+            "INSERT OR IGNORE INTO device_presence(device_id,last_seen,updated_at) "
+            "SELECT id,last_seen,COALESCE(last_seen,created) FROM devices WHERE last_seen IS NOT NULL"
+        )
 
     @contextmanager
     def transaction(self, *, immediate=True):
@@ -487,9 +881,30 @@ class Store:
             with self.db.savepoint() as db:
                 yield db
 
-    def execute(self, sql: str, args=()):
+    def execute(self, sql: str, args=(), *, security_write: bool | None = None):
         with self.lock, self.db:
-            return self.db.execute(sql, args)
+            if security_write is None or self.db is not self._writer_db:
+                return self.db.execute(sql, args)
+            previous = getattr(self._write_override, "security_write", None)
+            self._write_override.security_write = bool(security_write)
+            try:
+                return self.db.execute(sql, args)
+            finally:
+                self._write_override.security_write = previous
+
+    def security_epoch(self) -> int:
+        with self.lock:
+            row = self.db.execute("SELECT value FROM meta WHERE key='security_epoch'").fetchone()
+        return int(row[0]) if row else 0
+
+    async def async_security_epoch(self) -> int:
+        return await self.run_hint_read(self.security_epoch)
+
+    def epoch_stamp(self) -> tuple[int, int]:
+        return (self.security_epoch(), self.session_revision)
+
+    async def async_epoch_stamp(self) -> tuple[int, int]:
+        return await self.run_hint_read(self.epoch_stamp)
 
     def one(self, sql: str, args=()):
         with self.lock:
@@ -580,13 +995,14 @@ class Store:
     def _security_write(self, sql):
         # Conservative invalidation is safe even if the transaction rolls back.
         # No SQL text or bound value is retained in this process-local revision.
-        import re
-
-        if re.search(
-            r"\b(?:sessions|session_security|users|iam_users|spaces|memberships|membership_blocks|external_identities|oidc_providers|access_roles|access_profiles|role_assignments|role_created_projects|grants|tokens|projects|devices|vps_connections|vps_projects|gateway_[a-z_]+)\b",
-            sql,
-            re.I,
-        ):
+        override = getattr(self._write_override, "security_write", None)
+        is_security, is_meta = _classify_write(sql)
+        if override is not None:
+            is_security = bool(override)
+        if is_meta:
+            self.config_revision += 1
+            self._writer_db.after_commit(self._advance_config_revision)
+        if is_security:
             self.session_revision += 1
             # A reader can observe the increment while this writer is still
             # uncommitted, and cache the old permissions with the new revision.
@@ -596,6 +1012,9 @@ class Store:
 
     def _advance_session_revision(self):
         self.session_revision += 1
+
+    def _advance_config_revision(self):
+        self.config_revision += 1
 
     def after_commit(self, callback):
         if self.lock.owned:

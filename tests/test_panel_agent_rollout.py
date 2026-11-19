@@ -120,9 +120,11 @@ async def test_original_receipt_recovers_after_database_reopen_and_repeated_call
     assert (await view(rig))['nodes'][0]['state'] == 'awaiting_restart'
     record = rig.store.one("SELECT info FROM devices WHERE id='d1'")
     info = json.loads(record['info']); info['version'] = VERSION
-    rig.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id='d1'", (json.dumps(info), time.time()))
+    rig.store.execute("UPDATE devices SET info=?,last_seen=1 WHERE id='d1'", (json.dumps(info),))
+    connect(rig, 'd1')
     await rig.rollout.tick()
     assert (await view(rig))['state'] == 'succeeded'
+    assert rig.store.one("SELECT last_seen FROM devices WHERE id='d1'")['last_seen'] == 1
     assert len(operations(rig)) == 1
 
 
@@ -213,7 +215,8 @@ async def test_partial_failure_and_agent_rollback_are_terminal(rig):
     rig.store.execute("UPDATE operations SET state='succeeded',updated=? WHERE id=?", (time.time(), op['id']))
     info = json.loads(rig.store.one("SELECT info FROM devices WHERE id='bad'")['info'])
     info['management'].update(status='rollback', last_error='Synthetic startup failed; restored old runtime')
-    rig.store.execute("UPDATE devices SET info=?,last_seen=? WHERE id='bad'", (json.dumps(info), time.time()))
+    rig.store.execute("UPDATE devices SET info=?,last_seen=1 WHERE id='bad'", (json.dumps(info),))
+    connect(rig, 'bad')
     await rig.rollout.tick(); await rig.rollout.tick()
     result = await view(rig)
     assert result['state'] == 'partial_failure'

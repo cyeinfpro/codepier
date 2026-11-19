@@ -505,27 +505,33 @@ def claims_for(engine, tool, project, args, root, operation_id=None):
         return [Claim("agent", "path", canonical_path(path), tool != "read")]
     if tool != "exec":
         return []
+    from shared.scheduler_config import is_read_only_exec
+
     if args.get("task"):
         task = engine.config.get("tasks", {}).get(args["task"], {})
         # This is local task policy, never caller-declared resource policy.
         # Public exec(task=...) must preserve legacy tasks_run's exclusion.
+        allow_concurrency = task.get("allow_read_concurrency") is True
         return [
             Claim(
                 "agent",
                 "path",
                 canonical_path(root),
-                not task.get("allow_read_concurrency", False),
+                not allow_concurrency,
                 "process",
                 True,
             )
         ]
     remote = project.get("_core_ssh")
     namespace = f"ssh:{remote['host']}:{remote['port']}" if remote else "agent"
-    cwd = Path(args["cwd"]).expanduser()
+    cwd = Path(args.get("cwd", ".")).expanduser()
     if not cwd.is_absolute():
         cwd = root / cwd
+    if not args.get("resources") and is_read_only_exec(tool, args, config=engine.config):
+        target_path = "/" if remote else canonical_path(cwd)
+        return [Claim(namespace, "path", target_path, False, "process", False)]
     claims = []
-    for resource in args["resources"]:
+    for resource in args.get("resources", []):
         name = resource["name"]
         if resource["kind"] == "path":
             if remote:
@@ -537,14 +543,15 @@ def claims_for(engine, tool, project, args, root, operation_id=None):
             else:
                 path = Path(name).expanduser()
                 name = canonical_path(path if path.is_absolute() else cwd / path)
+        mode = resource["mode"]
         claims.append(
             Claim(
                 namespace,
                 resource["kind"],
                 name,
-                resource["mode"] == "write",
+                mode == "write",
                 "process",
-                resource["mode"] == "read_stable",
+                mode == "read_stable",
             )
         )
     return claims

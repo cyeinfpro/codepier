@@ -24,6 +24,7 @@ class MonitorService:
         self.c, self.store = collaboration, collaboration.store
         self.prober = prober or network.probe
         self._limit = asyncio.Semaphore(2)
+        self._next_delay = 30
 
     def probes_view(self, room, *, include_targets=False):
         return [
@@ -246,6 +247,9 @@ class MonitorService:
                     AND state IN ('queued','leased','running','retry_wait')""",
                     (self.c.clock(), room["id"], args["plan_version"]),
                 )
+                loops = getattr(self.c, "loops", None)
+                if loops is not None and hasattr(loops, "wake_monitor"):
+                    self.store.after_commit(loops.wake_monitor)
                 return {
                     "id": binding["id"],
                     "version": binding["version"] + 1,
@@ -874,7 +878,57 @@ class MonitorService:
                 (now - 30 * 86400,),
             )
 
+    def _probe_pending(self):
+        if not self.c.config.collector_enabled:
+            return False, False, None
+        now = self.c.clock()
+        has_due = bool(
+            self.store.one(
+                "SELECT 1 FROM monitor_plan_bindings WHERE state='active' AND next_due<=? AND (collection_lease_until IS NULL OR collection_lease_until<=?) LIMIT 1",
+                (now, now),
+            )
+        )
+        next_due_row = (
+            None
+            if has_due
+            else self.store.one(
+                "SELECT MIN(next_due) AS next_due FROM monitor_plan_bindings WHERE state='active'",
+            )
+        )
+        next_due = next_due_row["next_due"] if next_due_row else None
+        has_cleanup = bool(
+            self.store.one(
+                "SELECT 1 FROM monitor_samples WHERE collected_at<? LIMIT 1",
+                (now - 7 * 86400,),
+            )
+            or self.store.one(
+                "SELECT 1 FROM monitor_evidence WHERE expires_at<? AND body!='null' AND id NOT IN (SELECT evidence_id FROM monitor_incidents WHERE state!='resolved' AND evidence_id IS NOT NULL) LIMIT 1",
+                (now,),
+            )
+            or self.store.one(
+                "SELECT 1 FROM monitor_evidence WHERE body='null' AND expires_at<? AND id NOT IN (SELECT evidence_id FROM monitor_incidents WHERE evidence_id IS NOT NULL) LIMIT 1",
+                (now - 30 * 86400,),
+            )
+        )
+        return has_due, has_cleanup, next_due
+
+    def next_collect_delay(self, default=30):
+        return self._next_delay if self._next_delay is not None else default
+
     async def tick(self):
-        items = await self.store.run(self.reserve)
-        await asyncio.gather(*(self.collect(item) for item in items))
-        await self.store.run(self.cleanup)
+        if not self.c.config.collector_enabled:
+            self._next_delay = 30
+            return
+        has_due, has_cleanup, next_due = await self.store.run_read(self._probe_pending)
+        if not has_due and not has_cleanup:
+            if next_due is None:
+                self._next_delay = 30
+            else:
+                self._next_delay = max(1, min(30, next_due - self.c.clock()))
+            return
+        items = await self.store.run(self.reserve) if has_due else []
+        if items:
+            await asyncio.gather(*(self.collect(item) for item in items))
+        if has_cleanup:
+            await self.store.run(self.cleanup)
+        self._next_delay = 2 if items else 15

@@ -129,7 +129,10 @@ def test_roots_notification_keeps_project_tools_available(wire, version, with_me
                    {'Mcp-Name': 'query'})
     result = response.json()['result']
     assert not result['isError'], result
-    assert [project['alias'] for project in result['structuredContent']['projects']] == ['fixture']
+    assert [
+        project if isinstance(project, str) else project["alias"]
+        for project in result["structuredContent"]["projects"]
+    ] == ["fixture"]
 
 
 @pytest.mark.parametrize(('method', 'version', 'extra', 'authorized', 'status'), [

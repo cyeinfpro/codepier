@@ -8,6 +8,7 @@ old aliases and new actions therefore share the same business idempotency record
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 from typing import Annotated, Literal, Union
 
 from pydantic import Field, TypeAdapter, ValidationError, create_model
@@ -515,7 +516,9 @@ def checked_request(name, arguments):
     return value
 
 
-def tool_definitions(authorization="fixed"):
+@lru_cache(maxsize=4)
+def _cached_tool_definitions(authorization="fixed"):
+    from shared.contracts import freeze_schema
     from shared.role_contracts import ROLE_SCOPE
     from shared.schema_cache import schema_for
     from shared.host_parameter_schema import host_parameter_schema
@@ -529,30 +532,37 @@ def tool_definitions(authorization="fixed"):
         # to its first Literal action. resolve() still uses the exact ADAPTER above.
         schema = host_parameter_schema({"type": "object", **schema_for(ADAPTERS[name])})
         result.append(
-            {
-                "name": name,
-                "description": DESCRIPTIONS[name],
-                "inputSchema": schema,
-                "outputSchema": {"type": "object", "additionalProperties": True},
-                "annotations": {
-                    "readOnlyHint": name == "collaboration_query",
-                    "destructiveHint": name == "collaboration_work",
-                    "idempotentHint": name != "collaboration_work",
-                    "openWorldHint": name == "collaboration_work",
-                },
-                "_meta": {
-                    "securitySchemes": [{"type": "oauth2", "scopes": [scope]}],
-                    "codepier/inputSchemaVersion": "object-envelope-v1",
-                    "codepier/authorization": "Discovery is not authority. Each action rechecks current project scope, grants, speaking rights or managed approval and lease at its original business boundary.",
-                    "codepier/migration": "Rescan to discover the three collaboration tools. Existing legacy tool calls remain compatible; existing native subscriptions and consumer mode are unchanged.",
-                },
-            }
+            freeze_schema(
+                {
+                    "name": name,
+                    "description": DESCRIPTIONS[name],
+                    "inputSchema": schema,
+                    "outputSchema": {"type": "object", "additionalProperties": True},
+                    "annotations": {
+                        "readOnlyHint": name == "collaboration_query",
+                        "destructiveHint": name == "collaboration_work",
+                        "idempotentHint": name != "collaboration_work",
+                        "openWorldHint": name == "collaboration_work",
+                    },
+                    "_meta": {
+                        "securitySchemes": [{"type": "oauth2", "scopes": [scope]}],
+                        "codepier/inputSchemaVersion": "object-envelope-v1",
+                        "codepier/authorization": "Discovery is not authority. Each action rechecks current project scope, grants, speaking rights or managed approval and lease at its original business boundary.",
+                        "codepier/migration": "Rescan to discover the three collaboration tools. Existing legacy tool calls remain compatible; existing native subscriptions and consumer mode are unchanged.",
+                    },
+                }
+            )
         )
-    return result
+    return tuple(result)
+
+
+def tool_definitions(authorization="fixed"):
+    return list(_cached_tool_definitions(authorization))
 
 
 def lean_input_schema(schema):
     """Discovery-only shallow envelope; preserve every accepted top-level name."""
+    from shared.core_output_schemas import factor
 
     def shallow(spec):
         if not isinstance(spec, dict):
@@ -582,13 +592,15 @@ def lean_input_schema(schema):
             result["items"] = shallow(spec.get("items", {}))
         return result
 
-    return {
+    envelope = {
         "type": "object",
         "properties": {name: shallow(spec) for name, spec in schema["properties"].items()},
         "required": list(schema.get("required", [])),
         "additionalProperties": False,
-        "description": 'Discovery envelope only. Before calling an unfamiliar action, fetch its exact schema with project_query(operation="help", tool="<tool>", action="<action>"). Server validation and authorization are unchanged.',
+        "description": 'Discovery only. Exact action: project_query(operation="help", tool="<tool>", action="<action>"). Server validation and authorization are unchanged.',
     }
+    # Factor repeated shallow property schemas without changing constraints.
+    return factor(envelope)
 
 
 def action_help(tool, action="", *, scopes=None):

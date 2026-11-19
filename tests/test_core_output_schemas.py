@@ -261,3 +261,115 @@ def test_exec_initial_wait_accepts_full_operation_receipt(profile, state, error,
             Draft202012Validator(schema).validate({**receipt, field: wrong})
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate({'error': None})
+
+
+def test_factor_shared_properties_in_only_some_open_alternatives():
+    from itertools import product
+
+    from jsonschema import Draft202012Validator
+
+    from shared.core_output_schemas import factor
+
+    common = {
+        "long_text_field": {"type": "string", "minLength": 7},
+        "positive_integer_field": {"type": "integer", "minimum": 1},
+    }
+    original = {
+        "type": "object",
+        "anyOf": [
+            {
+                "properties": {**common, "a": {"const": True}},
+                "required": ["long_text_field", "positive_integer_field", "a"],
+            },
+            {
+                "properties": {**common, "b": {"type": "string"}},
+                "required": ["long_text_field", "positive_integer_field", "b"],
+            },
+            {
+                "properties": {"c": {"const": "unrelated"}},
+                "required": ["c"],
+                "additionalProperties": False,
+            },
+        ],
+    }
+    result = factor(original)
+    Draft202012Validator.check_schema(result)
+    grouped, closed = result["anyOf"]
+    assert grouped["properties"] == common
+    assert len(grouped["anyOf"]) == 2
+    assert closed == original["anyOf"][2]
+    before, after = map(Draft202012Validator, (original, result))
+    missing = object()
+    choices = {
+        "long_text_field": [missing, "short", "long enough", 3],
+        "positive_integer_field": [missing, 0, 1, True],
+        "a": [missing, True, False],
+        "b": [missing, "text", True],
+        "c": [missing, "unrelated", "other"],
+    }
+    for combination in product(*choices.values()):
+        example = {k: v for k, v in zip(choices, combination) if v is not missing}
+        assert before.is_valid(example) == after.is_valid(example), example
+
+
+def test_factor_removes_only_type_already_enforced_by_string_discriminators():
+    from jsonschema import Draft202012Validator
+
+    from shared.core_output_schemas import factor
+
+    original = {
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["launch", "observe"], "description": "Required choice"},
+            "const_choice": {"type": "string", "const": "value"},
+            "mixed": {"type": "string", "enum": ["keep", 2]},
+        },
+    }
+    result = factor(original)
+    assert "type" not in result["properties"]["op"]
+    assert "type" not in result["properties"]["const_choice"]
+    assert result["properties"]["op"]["description"] == "Required choice"
+    assert result["properties"]["mixed"]["type"] == "string"
+    before, after = map(Draft202012Validator, (original, result))
+    for field in original["properties"]:
+        for value in (None, 2, True, {}, [], "launch", "observe", "value", "keep", "unknown"):
+            assert before.is_valid({field: value}) == after.is_valid({field: value})
+
+
+def test_factor_normalizes_exact_disjunction_without_erasing_annotations():
+    from jsonschema import Draft202012Validator
+
+    from shared.core_output_schemas import factor
+
+    original = {
+        "type": "object",
+        "properties": {
+            "choice": {"anyOf": [{"const": "a"}, {"enum": ["b", 7]}, {"type": "null"}]},
+            "open_text": {"anyOf": [{"const": "a"}, {"type": "string"}, {"type": "boolean"}]},
+            "bounded_int": {"anyOf": [{"type": "integer", "minimum": 2}, {"type": "null"}]},
+            "nullable_record": {
+                "anyOf": [
+                    {"type": "object", "properties": {"v": {"type": "string"}}, "required": ["v"]},
+                    {"type": "null"},
+                ],
+            },
+            "annotated": {
+                "anyOf": [
+                    {"type": "integer", "minimum": 2, "description": "Intentional hint"},
+                    {"type": "null"},
+                ],
+            },
+        },
+    }
+    result = factor(original)
+    Draft202012Validator.check_schema(result)
+    values = result["properties"]
+    assert values["open_text"]["type"] == ["string", "boolean"]
+    assert values["bounded_int"] == {"type": ["integer", "null"], "minimum": 2}
+    assert values["nullable_record"]["type"] == ["object", "null"]
+    assert "Intentional hint" in repr(values["annotated"])
+    before, after = map(Draft202012Validator, (original, result))
+    samples = (None, 0, 2, 7, True, False, "a", "b", "other", {}, {"v": "x"}, {"v": 3}, [])
+    for name in values:
+        for sample in samples:
+            assert before.is_valid({name: sample}) == after.is_valid({name: sample}), (name, sample)

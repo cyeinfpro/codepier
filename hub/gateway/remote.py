@@ -8,6 +8,7 @@ is advertised. Legacy sessions are isolated by credential binding AND grant.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import inspect
 import json
 import time
@@ -46,6 +47,24 @@ def decode_json(raw):
         raise BackendError("GATEWAY_BACKEND_PROTOCOL", "后端返回无效 JSON-RPC") from exc
 
 
+def _connector_concurrency(connector, concurrency):
+    connector_raw = None
+    if connector is not None:
+        if isinstance(connector, Mapping):
+            connector_raw = connector.get("concurrency")
+        else:
+            try:
+                connector_raw = connector["concurrency"]
+            except (KeyError, IndexError, TypeError):
+                connector_raw = None
+    raw = connector_raw if connector_raw is not None else concurrency
+    if raw is None:
+        return MAX_SESSION_CONCURRENCY
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= 32:
+        raise ValueError("session concurrency must be between 1 and 32")
+    return raw
+
+
 class Session:
     def __init__(
         self,
@@ -54,19 +73,18 @@ class Session:
         *,
         resolver=network.resolve,
         transport=None,
-        concurrency=MAX_SESSION_CONCURRENCY,
+        concurrency=None,
     ):
         self.connector, self.secret = connector, secret
         self.resolver, self.transport = resolver, transport
         self.client = None
-        if not 1 <= concurrency <= 32:
-            raise ValueError("session concurrency must be between 1 and 32")
-        self.concurrency = concurrency
+        self.concurrency = _connector_concurrency(connector, concurrency)
         self.lock = asyncio.Lock()
         self.condition = asyncio.Condition(self.lock)
         self.waiters = deque()
         self.active = 0
         self.exclusive = False
+        self.initializing = False
         self.closing = False
         self.stateless = False
         # Aggregate timings are bounded and contain no request or identity data.
@@ -85,86 +103,131 @@ class Session:
             await client.aclose()
 
     async def close(self, *, drain_seconds=CLOSE_DRAIN_SECONDS):
-        # Stop admission immediately, even if initialization currently owns the
-        # condition. A timed-out drain never closes a transport under active RPCs;
-        # the last lease closes it instead. close() is safe to repeat.
+        # Stop admission immediately, even if initialization is currently running
+        # without the condition lock. A timed-out drain never closes a transport
+        # under active RPCs; the last lease closes it instead. close() is safe to repeat.
         self.closing = True
+        should_close = False
         try:
             async with asyncio.timeout(drain_seconds):
                 async with self.condition:
                     self.condition.notify_all()
                     await self.condition.wait_for(lambda: not self.active)
-                    await self._close_transport()
+                    should_close = not self.initializing
         except TimeoutError:
             pass
+        if should_close:
+            await self._close_transport()
 
     def _stale(self):
         return self.invalid or (
             self.client is not None and time.monotonic() - self.connected_at >= MAX_SESSION_AGE
         )
 
+    def _effective_concurrency(self):
+        # A configured cap cannot override the negotiated protocol/session.
+        return self.concurrency if self.version == MODERN and self.stateless else 1
+
     def _ready(self, ticket, exclusive):
         if self.closing:
             return True
+        if self.initializing:
+            return False
         if self.waiters[0] is not ticket or self.exclusive:
             return False
-        if self.active and (
-            exclusive or self._stale() or self.version != MODERN or not self.stateless
-        ):
+        if self.active and (exclusive or self._stale()):
             return False
-        return self.active < self.concurrency
+        return self.active < self._effective_concurrency()
 
     @asynccontextmanager
     async def operation(self, *, exclusive=False):
         ticket = object()
         started = time.monotonic()
         admitted = None
-        async with self.condition:
-            self.waiters.append(ticket)
-            try:
-                await self.condition.wait_for(lambda: self._ready(ticket, exclusive))
-                if self.closing:
-                    raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
-                # Only an empty generation may initialize/rotate; active modern
-                # leases share the same pinned transport without mutating it.
-                if not self.active:
+        initialized_once = False
+        try:
+            while True:
+                do_init = False
+                async with self.condition:
+                    if ticket not in self.waiters:
+                        self.waiters.append(ticket)
+                    await self.condition.wait_for(lambda: self._ready(ticket, exclusive))
+                    if self.closing:
+                        self.waiters.remove(ticket)
+                        self.condition.notify_all()
+                        raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
+                    # Only an empty generation may initialize/rotate; release
+                    # self.condition during the network handshake so close() and
+                    # concurrent waiters are never deadlocked on slow handshakes.
+                    if (
+                        not initialized_once
+                        and not self.active
+                        and (self.version is None or self._stale())
+                    ):
+                        self.initializing = True
+                        do_init = True
+                    else:
+                        self.waiters.remove(ticket)
+                        self.active += 1
+                        self.exclusive = exclusive
+                        admitted = time.monotonic()
+                        self.used = admitted
+                        self.stats["admitted"] += 1
+                        self.stats["queued_seconds"] += admitted - started
+                        self.stats["peak_active"] = max(self.stats["peak_active"], self.active)
+                        self.condition.notify_all()
+                        break
+                if do_init:
                     await self.initialize()
-                if self.closing:
-                    raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
-                self.active += 1
-                self.exclusive = exclusive
-                admitted = time.monotonic()
-                self.used = admitted
-                self.stats["admitted"] += 1
-                self.stats["queued_seconds"] += admitted - started
-                self.stats["peak_active"] = max(self.stats["peak_active"], self.active)
-            finally:
-                self.waiters.remove(ticket)
-                self.condition.notify_all()
-                if admitted is None and self.closing and not self.active:
+                    initialized_once = True
+                    async with self.condition:
+                        self.initializing = False
+                        self.condition.notify_all()
+        except BaseException:
+            if admitted is None:
+                should_close = False
+                async with self.condition:
+                    self.initializing = False
+                    if ticket in self.waiters:
+                        self.waiters.remove(ticket)
+                    self.condition.notify_all()
+                    if self.closing and not self.active and not self.initializing:
+                        should_close = True
+                if should_close:
                     await self._close_transport()
+            raise
         try:
             yield
         finally:
+            should_close = False
             async with self.condition:
                 self.active -= 1
                 self.exclusive = False
                 self.used = time.monotonic()
                 self.stats["active_seconds"] += self.used - admitted
                 self.condition.notify_all()
-                if self.closing and not self.active:
-                    await self._close_transport()
+                if self.closing and not self.active and not self.initializing:
+                    should_close = True
+            if should_close:
+                await self._close_transport()
 
     async def connect(self):
+        if self.closing:
+            raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
         if self.client is not None:
             return
         connector = self.connector
-        self.url, self.host, self.sni = await network.pin(
+        url, host, sni = await network.pin(
             connector["endpoint"],
             json.loads(connector["networks"]),
             bool(connector["allow_http"]),
             self.resolver,
         )
+        if self.closing:
+            raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
+        if self.client is not None:
+            return
+        self.url, self.host, self.sni = url, host, sni
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(20, connect=5),
             follow_redirects=False,
@@ -179,6 +242,9 @@ class Session:
 
     async def rpc(self, method, params=None, *, version=None, notification=False):
         await self.connect()
+        client = self.client
+        if self.closing or client is None:
+            raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
         version = version or self.version
         params = dict(params or {})
         headers = {"Accept": "application/json, text/event-stream", "Host": self.host}
@@ -201,7 +267,7 @@ class Session:
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         try:
-            async with self.client.stream(
+            async with client.stream(
                 "POST", self.url, headers=headers, json=body, extensions={"sni_hostname": self.sni}
             ) as response:
                 status = response.status_code
@@ -316,8 +382,11 @@ class Session:
         return decode_json(bytes(raw))
 
     async def initialize(self):
-        # Called under the admission condition with no active leases. DNS expiry
-        # or a failed transport cannot close a sibling RPC or replay its request.
+        # Called without holding self.condition while self.initializing serializes
+        # concurrent initialization. DNS expiry or a failed transport cannot close
+        # a sibling RPC or replay its request.
+        if self.closing:
+            raise DevError("GATEWAY_CLOSED", "MCP 连接正在关闭；未发送操作", 503)
         if self._stale():
             await self._close_transport()
         if self.version:
@@ -406,11 +475,18 @@ class RemotePool:
         transport=None,
         limit=64,
         idle_seconds=300,
-        concurrency=MAX_SESSION_CONCURRENCY,
+        concurrency=None,
     ):
         self.resolver, self.transport = resolver, transport
         self.limit, self.idle_seconds = limit, idle_seconds
-        self.concurrency = concurrency
+        self._configured_concurrency = concurrency
+        self.concurrency = MAX_SESSION_CONCURRENCY if concurrency is None else concurrency
+        if (
+            isinstance(self.concurrency, bool)
+            or not isinstance(self.concurrency, int)
+            or not 1 <= self.concurrency <= 32
+        ):
+            raise ValueError("session concurrency must be between 1 and 32")
         self.sessions = {}
         self.lock = asyncio.Lock()
         self.active = {}
@@ -441,7 +517,7 @@ class RemotePool:
                     secret,
                     resolver=self.resolver,
                     transport=self.transport,
-                    concurrency=self.concurrency,
+                    concurrency=self._configured_concurrency,
                 )
             self.active[key] = self.active.get(key, 0) + 1
             session = self.sessions[key]

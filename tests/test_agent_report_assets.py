@@ -115,7 +115,7 @@ def test_search_reports_skips_and_continues(assets):
             'offset': 0, 'limit': 100}
     result = engine.search(project, args)
     assert result['matches'][0]['path'] == 'small.txt'
-    assert result['truncated'] and result['skipped_reasons'] == {'FILE_TOO_LARGE': 1}
+    assert not result['truncated'] and result['skipped_files'] == 1 and result['skipped_reasons'] == {'FILE_TOO_LARGE': 1}
     manager = Searches(engine)
     sid = uuid.uuid4().hex
     manager.start(sid, project, {**args, 'mode': 'text', 'timeout_seconds': 10, 'max_results': 100, 'max_files': 100})

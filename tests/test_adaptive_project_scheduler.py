@@ -110,7 +110,7 @@ def test_other_project_has_reserved_capacity_and_no_duplicate_admission():
 
 def test_cancel_timeout_and_exception_release_all_state():
     async def run():
-        scheduler = ProjectScheduler({"adaptive": False, "initial": 2})
+        scheduler = ProjectScheduler({"adaptive": False, "initial": 2, "project_limits": {"A": 1}})
         async with scheduler.slot("first", "A"):
             queued = asyncio.create_task(scheduler.slot("second", "A").__aenter__())
             await asyncio.sleep(0)
@@ -203,7 +203,7 @@ def test_project_override_is_independent_but_does_not_bypass_node_limit(monkeypa
 
 def test_close_wakes_waiters_but_does_not_cancel_owned_running_work():
     async def run():
-        scheduler = ProjectScheduler({"initial": 2})
+        scheduler = ProjectScheduler({"initial": 2, "project_limits": {"A": 1}})
         async with scheduler.slot("a1", "A"):
             queued = asyncio.create_task(scheduler.slot("a2", "A").__aenter__())
             await asyncio.sleep(0)

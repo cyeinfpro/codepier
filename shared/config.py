@@ -80,6 +80,7 @@ class RuntimeConfig:
     delivery_prefetch: int = 2
     # Only enrolled canary devices use this chunk size and refill.
     delivery_device_chunk: int = 16
+    # Empty by default: opt in by device, or explicitly use * after validation.
     delivery_rolling_devices: tuple[str, ...] = ()
 
     def rolling_for(self, device_id: str | None) -> bool:

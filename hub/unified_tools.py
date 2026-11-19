@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import typing
 
@@ -225,7 +226,7 @@ def public_fields(tool, action):
 
 
 async def _apply_handle(runtime, plan, principal):
-    fields = await runtime.store.run(open_handle, runtime.store, principal, plan.handle)
+    fields = open_handle(runtime.store, principal, plan.handle)
     allowed = public_fields(plan.tool, plan.args["action"])
     for key, value in fields.items():
         if key in allowed and key not in plan.args:
@@ -233,7 +234,7 @@ async def _apply_handle(runtime, plan, principal):
     plan.notes = [fields]
 
 
-async def _mint(runtime, plan, value, principal):
+def _mint(runtime, plan, value, principal):
     issued = {key: value[key] for key in _ISSUED if value.get(key) not in (None, "")}
     if not issued:
         return value
@@ -246,7 +247,7 @@ async def _mint(runtime, plan, value, principal):
     )
     if not ({"consumer_proof", "connection_proof"} & credentials.keys()):
         return value
-    handle = await runtime.store.run(mint_handle, runtime.store, principal, credentials)
+    handle = mint_handle(runtime.store, principal, credentials)
     return {**value, "handle": handle}
 
 
@@ -256,7 +257,8 @@ async def _mint(runtime, plan, value, principal):
 async def _prepare_help(runtime, plan, principal):
     from hub.principal import refresh_principal
 
-    user = await runtime.store.run(refresh_principal, runtime.store, principal)
+    run_read = getattr(runtime.store, "run_read", runtime.store.run)
+    user = await run_read(refresh_principal, runtime.store, principal)
     if "read" not in user.scopes:
         raise DevError("INSUFFICIENT_SCOPE", "缺少 read 权限", 403, required_scope="read")
     request = plan.help_for
@@ -268,7 +270,7 @@ async def _prepare_help(runtime, plan, principal):
             )
         if collaboration is None or not collaboration.config.events_enabled:
             raise DevError("EVENTS_DISABLED", "Events are unavailable on this connection.", 403)
-        plan.local = await runtime.store.run(
+        plan.local = await run_read(
             collaboration.events.help, request["event"], user, request.get("detail", "brief")
         )
         return
@@ -311,32 +313,54 @@ async def _wait(runtime, plan, value, principal):
 
     stop = wait_cancelled.get()
     latest = None
-    while stop is None or not stop.is_set():
+    if stop is None or not stop.is_set():
         remaining = deadline - time.monotonic()
-        if remaining < 1:
-            break
-        read = runtime.invoke(
-            "process", {**call, "wait_seconds": max(1, min(10, int(remaining)))}, principal
-        )
-        if stop is None:
-            latest = await read
-        else:
-            poll = asyncio.create_task(read)
-            cancelled = asyncio.create_task(stop.wait())
-            try:
-                done, _ = await asyncio.wait({poll, cancelled}, return_when=asyncio.FIRST_COMPLETED)
-                if poll not in done:
-                    break
-                latest = poll.result()
-            finally:
-                for task in (poll, cancelled):
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(poll, cancelled, return_exceptions=True)
-        rows = latest.get("operations") if isinstance(latest, dict) else None
-        row = rows[0] if isinstance(rows, list) and rows else {}
-        if not isinstance(row, dict) or row.get("error") or not row.get("pending"):
-            break
+        if remaining > 0:
+            wait_for_operation = getattr(runtime, "wait_for_operation", None)
+            if callable(wait_for_operation):
+                await wait_for_operation(
+                    value["operation_id"],
+                    remaining,
+                    cancel_event=stop,
+                )
+                # A wake is not an authorized receipt. Read the original
+                # operation through process, which rechecks current access.
+                if stop is None or not stop.is_set():
+                    latest = await runtime.invoke("process", {**call, "wait_seconds": 0}, principal)
+            else:
+                # Fallback polling loop for lightweight mock runtimes without Runtime.wait_for_operation.
+                while stop is None or not stop.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    wait_seconds = min(10, max(1, math.ceil(remaining)))
+                    read = runtime.invoke(
+                        "process", {**call, "wait_seconds": wait_seconds}, principal
+                    )
+                    if stop is None and remaining >= 1:
+                        latest = await read
+                    else:
+                        poll = asyncio.create_task(read)
+                        tasks = {poll}
+                        cancelled = asyncio.create_task(stop.wait()) if stop is not None else None
+                        if cancelled is not None:
+                            tasks.add(cancelled)
+                        try:
+                            done, _ = await asyncio.wait(
+                                tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if poll not in done:
+                                break
+                            latest = poll.result()
+                        finally:
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                    rows = latest.get("operations") if isinstance(latest, dict) else None
+                    row = rows[0] if isinstance(rows, list) and rows else {}
+                    if not isinstance(row, dict) or row.get("error") or not row.get("pending"):
+                        break
     if latest is None:
         return value, plan.tool, plan.args
     return latest, "process", call
@@ -348,7 +372,7 @@ async def execute(runtime, plan, principal):
         return plan.local, plan.tool, plan.args
     value = await runtime.invoke(plan.tool, plan.args, principal)
     if plan.collab and isinstance(value, dict):
-        value = await _mint(runtime, plan, value, principal)
+        value = _mint(runtime, plan, value, principal)
     if (
         plan.wait
         and isinstance(value, dict)

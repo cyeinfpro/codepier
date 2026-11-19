@@ -1,11 +1,13 @@
 from __future__ import annotations
 from agent.run_directories import run_environment
 import asyncio
+from collections import deque
 import contextlib
 import codecs
 import json
 import logging
 import hashlib
+import inspect
 import ipaddress
 import math
 import os
@@ -36,6 +38,7 @@ from shared.scheduler_config import (
     effective_scheduler,
     validate_scheduler_overrides,
     is_metadata_observation,
+    is_read_only_exec,
 )
 from shared.core_contracts import CORE_REMOTE
 from agent.journal import Journal
@@ -55,7 +58,7 @@ from agent.shell import execution_info, prepare_shell
 from shared.contracts import TOOLS, MUTATING, required_scope
 from shared.runtime_panel_contracts import PANEL_RUNTIME_TOOLS
 from shared.agent_roots_contracts import PANEL_ROOTS_TOOLS
-from shared.crypto import SecureChannel
+from shared.crypto import SecureChannel, pack_channel, unpack_channel
 from shared.util import DevError, VERSION
 from shared.file_sources import safe_import_error_detail
 from shared.filesystem_errors import safe_filesystem_error_detail, safe_review_error_detail
@@ -95,6 +98,7 @@ class Agent:
             self.telemetry = AgentTelemetry(
                 self.journal,
                 process_diagnostics=os.environ.get("CODEPIER_TEST_PROCESS_DIAGNOSTICS") == "1",
+                deferred_persist=True,
             )
             self.build = BuildIdentity("agent")
             self.lifecycle = LifecycleManager(self.config_path, self.state_dir, lambda: self.config)
@@ -149,6 +153,13 @@ class Agent:
         self.transfer_tasks = set()
         self.integration_projects = {}
         self.integration_tool_names = {}
+        self.active_states = self.journal.active_states
+        self._journal_persist_queue: deque[tuple[str, tuple]] = deque()
+        self._journal_persist_task: asyncio.Task | None = None
+        self._ack_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=4096)
+        self._queued_ack_ids: set[str] = set()
+        self._ack_task: asyncio.Task | None = None
+        self._reply_tasks: set[asyncio.Task] = set()
         self.lifecycle.activity_check = self.check_maintenance_idle
 
     def check_maintenance_idle(self, operation_id):
@@ -182,7 +193,10 @@ class Agent:
             if not socket or not channel:
                 return False
             try:
-                await asyncio.wait_for(socket.send(channel.pack(body)), 4)
+                packed = await pack_channel(channel, body)
+                payload_bytes = len(packed) if isinstance(packed, (str, bytes)) else 0
+                send_timeout = max(10.0, 10.0 + (payload_bytes / (1024 * 1024)) * 2.0)
+                await asyncio.wait_for(socket.send(packed), send_timeout)
                 return True
             except (Exception, asyncio.CancelledError) as exc:
                 # A failed send consumes a sequence number; discard this channel.
@@ -210,19 +224,144 @@ class Agent:
             # Bound update rate even for tasks printing thousands of lines/second.
             await asyncio.sleep(0.2)
 
+    def _enqueue_journal_persist(self, kind: str, *args):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            if kind == "mark_running":
+                self.journal.mark_running_db(*args)
+            elif kind == "cancel":
+                self.journal.cancel_db(*args)
+            elif kind == "telemetry":
+                self.telemetry.flush()
+            return
+        if kind == "telemetry":
+            if not any(item[0] == "telemetry" for item in self._journal_persist_queue):
+                self._journal_persist_queue.append((kind, args))
+        else:
+            while (
+                len(self._journal_persist_queue) >= 8192
+                and self._journal_persist_queue[0][0] == "telemetry"
+            ):
+                self._journal_persist_queue.popleft()
+            self._journal_persist_queue.append((kind, args))
+        if self._journal_persist_task is None or self._journal_persist_task.done():
+            self._journal_persist_task = asyncio.create_task(self._drain_journal_persist())
+
+    async def _drain_journal_persist(self):
+        while self._journal_persist_queue:
+            batch = []
+            while self._journal_persist_queue and len(batch) < 128:
+                batch.append(self._journal_persist_queue.popleft())
+
+            def apply(items=batch):
+                for kind, args in items:
+                    if kind == "mark_running":
+                        self.journal.mark_running_db(*args)
+                    elif kind == "cancel":
+                        self.journal.cancel_db(*args)
+                    elif kind == "telemetry":
+                        self.telemetry.flush()
+
+            try:
+                await self.disk_call(apply)
+            except (sqlite3.Error, OSError) as exc:
+                LOGGER.warning("Agent 日志异步持久化异常（%s）", type(exc).__name__)
+
+    def _mark_running(self, id):
+        if self.journal.mark_running_memory(id):
+            self._enqueue_journal_persist("mark_running", id)
+
+    async def _begin_operation(self, id, tool, args, *, deadline=None):
+        """Commit a write-ahead start receipt before acknowledging or executing."""
+        if tool in TOOLS and TOOLS[tool].scope == "read" and workspace_probe.eligible(tool, args):
+            self._mark_running(id)
+        else:
+            # Do not use caller-declared read_only or scheduler lane as proof
+            # that a command cannot produce externally visible side effects.
+            if not await self.disk_call(self.journal.mark_running_db, id):
+                raise DevError("JOURNAL_STATE_CONFLICT", "操作开始记录无法持久化；已停止执行")
+            self.journal.mark_running_memory(id)
+        if id in self.cancelled or self.journal.is_cancelled(id) or self.stop_event.is_set():
+            raise DevError("CANCELLED", "操作开始前已取消")
+        if deadline is not None and time.time() > deadline:
+            # The durable fence remains in effect; expiry must never restore
+            # an accepted receipt or allow a timed-out mutation to execute.
+            raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
+
+    def _dispatch_status_reply(self, identifier: str):
+        task = asyncio.create_task(self.report_status(identifier))
+        self._reply_tasks.add(task)
+        task.add_done_callback(self._reply_done)
+
+    def _reply_done(self, task: asyncio.Task):
+        self._reply_tasks.discard(task)
+        if not task.cancelled() and task.exception():
+            LOGGER.warning("状态回复发送异常（%s）", type(task.exception()).__name__)
+
+    def _enqueue_ack(self, identifier: str):
+        if identifier in self._queued_ack_ids:
+            return
+        self._queued_ack_ids.add(identifier)
+        try:
+            self._ack_queue.put_nowait(identifier)
+        except asyncio.QueueFull:
+            task = asyncio.create_task(self.disk_call(self.journal.ack, identifier))
+            self._reply_tasks.add(task)
+
+            def done_cb(done, key=identifier):
+                self._queued_ack_ids.discard(key)
+                self._reply_done(done)
+
+            task.add_done_callback(done_cb)
+            return
+        if self._ack_task is None or self._ack_task.done():
+            self._ack_task = asyncio.create_task(self._drain_acks())
+
+    async def _drain_acks(self):
+        while not self._ack_queue.empty():
+            # Yield once so burst ACK frames coalesce into a single SQLite batch.
+            await asyncio.sleep(0)
+            batch: list[str] = []
+            while len(batch) < 256:
+                try:
+                    item = self._ack_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._queued_ack_ids.discard(item)
+                batch.append(item)
+            if not batch:
+                continue
+            try:
+                await self.disk_call(self.journal.acks_batch, batch)
+            except (sqlite3.Error, OSError) as exc:
+                LOGGER.warning("批量确认 ACK 持久化失败（%s）", type(exc).__name__)
+            finally:
+                for _ in batch:
+                    self._ack_queue.task_done()
+
     def phase(self, id, stage, **detail):
         if not self.telemetry.record(id, stage, **detail):
-            return
+            return None
+        trace = self.telemetry.snapshot(id)
         self.pending_output["trace:" + id] = {
             "type": "trace",
             "id": id,
-            "trace": self.telemetry.snapshot(id),
+            "trace": trace,
         }
         self.output_wake.set()
+        self._enqueue_journal_persist("telemetry")
+        return trace
 
     async def report_status(self, id):
-        state = await self.disk_call(self.journal.status, id)
-        trace = await self.disk_call(self.telemetry.snapshot, id)
+        state = self.journal.active_status(id)
+        if state is None:
+            state = await self.disk_call(self.journal.status, id)
+        has_cached = getattr(self.telemetry, "has_cached", None)
+        if callable(has_cached) and has_cached(id):
+            trace = self.telemetry.snapshot(id)
+        else:
+            trace = await self.disk_call(self.telemetry.snapshot, id)
         await self.send({"type": "trace", "id": id, "trace": trace})
         if state.get("result") is not None:
             await self.send({"type": "result", "id": id, "result": state["result"]})
@@ -254,7 +393,7 @@ class Agent:
                         "running": len(self.jobs),
                         "build": self.build.describe(),
                         "management": self.lifecycle.describe(),
-                        **(await self.disk_call(self.job_counts)),
+                        **self.job_counts(),
                         "scheduler": self.scheduler.snapshot(),
                         "admission": self.scheduler.admission_snapshot(),
                         "scheduler_revision": self.scheduler_revision,
@@ -299,6 +438,8 @@ class Agent:
         return True
 
     async def watch_scheduler(self):
+        from agent import lsp_navigation, memory_relief
+
         while not self.stop_event.is_set():
             try:
                 sample = await asyncio.wait_for(asyncio.to_thread(self.resource_sampler.sample), 2)
@@ -312,14 +453,19 @@ class Agent:
                     )
                 except (TimeoutError, OSError, ValueError):
                     pass
+            if getattr(self.scheduler.capacity, "memory_paused", False) or (
+                sample is not None and memory_relief.below_recovery(sample)
+            ):
+                with contextlib.suppress(Exception):
+                    await lsp_navigation.evict_for_memory_pressure(self)
             try:
                 await asyncio.wait_for(self.stop_event.wait(), 3)
             except TimeoutError:
                 pass
 
     def job_counts(self):
-        # Journal states distinguish accepted queue entries from admitted work.
-        states = [self.journal.status(identifier)["status"] for identifier in self.jobs]
+        # Journal active_states distinguish accepted queue entries from admitted work in O(1).
+        states = [self.journal.fast_status(identifier)["status"] for identifier in list(self.jobs)]
         return {
             "running_jobs": states.count("running"),
             "queued_jobs": states.count("accepted"),
@@ -443,7 +589,8 @@ class Agent:
 
             binding = new_binding()
             await socket.send(
-                channel.pack(
+                await pack_channel(
+                    channel,
                     {
                         "type": "hello",
                         "channel_binding": binding,
@@ -472,10 +619,10 @@ class Agent:
                         "native_protocol": 1,
                         "native_chat_protocol": 3,
                         **advertisement(self.build.catalog_sha256),
-                    }
+                    },
                 )
             )
-            reply = channel.unpack(await asyncio.wait_for(socket.recv(), 10))
+            reply = await unpack_channel(channel, await asyncio.wait_for(socket.recv(), 10))
             if not self._ready_reply(reply):
                 return
             await self.disk_call(verify_binding, self.journal, binding, reply)
@@ -501,7 +648,7 @@ class Agent:
             native_sync = asyncio.create_task(self.native.sync())
             try:
                 async for packet in socket:
-                    data = channel.unpack(packet)
+                    data = await unpack_channel(channel, packet)
                     kind = data.get("type")
                     if kind == "going_away":
                         self._apply_reconnect_notice(data)
@@ -568,14 +715,14 @@ class Agent:
                             self.jobs[id] = task
                             task.add_done_callback(lambda done, key=id: self.job_done(key, done))
                         else:
-                            await self.report_status(id)
+                            self._dispatch_status_reply(id)
                     elif kind == "probe":
-                        await self.report_status(data["id"])
+                        self._dispatch_status_reply(data["id"])
                     elif kind == "ack":
-                        lifecycle_started = False
-                        if self.lifecycle.has_pending(data["id"]):
+                        ack_id = data["id"]
+                        if self.lifecycle.has_pending(ack_id):
                             try:
-                                lifecycle_started = await self.lifecycle.acknowledge(data["id"])
+                                lifecycle_started = await self.lifecycle.acknowledge(ack_id)
                             except Exception as exc:
                                 # Keep the durable result in the outbox. A repeated Hub ACK
                                 # will retry the handoff without creating another operation.
@@ -583,15 +730,17 @@ class Agent:
                                     "生命周期操作交接失败，将等待重试（%s）", type(exc).__name__
                                 )
                                 continue
-                        await self.disk_call(self.journal.ack, data["id"])
-                        if lifecycle_started:
-                            self.stop_event.set()
-                            with contextlib.suppress(Exception):
-                                await socket.close(code=1000, reason="Agent lifecycle change")
+                            await self.disk_call(self.journal.ack, ack_id)
+                            if lifecycle_started:
+                                self.stop_event.set()
+                                with contextlib.suppress(Exception):
+                                    await socket.close(code=1000, reason="Agent lifecycle change")
+                        else:
+                            self._enqueue_ack(ack_id)
                     elif kind == "cancel":
                         self.cancel_call(id)
                     elif kind == "cancel_pending":
-                        self.cancel_pending_call(id)
+                        await self._cancel_pending_frame(id)
             finally:
                 self.computer_approvals.cancel()
                 native_sync.cancel()
@@ -601,18 +750,37 @@ class Agent:
                 try:
                     with contextlib.suppress(asyncio.CancelledError):
                         await heartbeat
+                    if not self.stop_event.is_set() and self._reply_tasks:
+                        with contextlib.suppress(TimeoutError):
+                            await asyncio.wait_for(
+                                asyncio.gather(*list(self._reply_tasks), return_exceptions=True),
+                                2,
+                            )
+                    if self._ack_task is not None and not self._ack_task.done():
+                        with contextlib.suppress(TimeoutError, Exception):
+                            await asyncio.wait_for(asyncio.shield(self._ack_task), 5)
                 finally:
                     if self.socket is socket:
                         self.socket = self.channel = None
 
+    async def _cancel_pending_frame(self, id):
+        if self.journal.fast_status(id)["status"] == "missing":
+            # A bounded in-memory cache cannot distinguish an unknown ID from
+            # an old terminal tombstone. Never recreate a cancellation for that
+            # terminal receipt; the DB check runs outside the event loop.
+            status = await self.disk_call(self.journal.durable_status, id)
+            if status not in {"accepted", "missing", "retryable"}:
+                return
+        self.cancel_pending_call(id)
+
     def cancel_pending_call(self, id):
         """Fence revoked work only before execution; never kill running work.
 
-        Called synchronously on the event loop, as is mark_running. There is no
-        await between the journal check and cancellation, so a start cannot race
-        through this decision. Missing/retryable IDs retain a durable fence.
+        There is no await between the local state check and cancellation.
+        A concurrent durable start must still recheck cancellation before it
+        can execute. Missing/retryable IDs also retain a durable fence.
         """
-        if id in self.finishing or self.journal.status(id)["status"] not in {
+        if id in self.finishing or self.journal.fast_status(id)["status"] not in {
             "accepted",
             "missing",
             "retryable",
@@ -622,7 +790,8 @@ class Agent:
         return True
 
     def cancel_call(self, id):
-        self.journal.cancel(id)
+        at = self.journal.cancel_memory(id)
+        self._enqueue_journal_persist("cancel", id, at)
         self.cancelled.add(id)
         process = self.processes.get(id)
         if process:
@@ -632,7 +801,11 @@ class Agent:
         job = self.jobs.get(id)
         # Wake accepted work waiting behind a long task. Never cancel a thread
         # already mutating files: it must keep its project lock until it finishes.
-        if job and id not in self.finishing and self.journal.status(id)["status"] == "accepted":
+        if (
+            job
+            and id not in self.finishing
+            and self.journal.fast_status(id)["status"] == "accepted"
+        ):
             job.cancel()
         if not job:
             self.cancelled.discard(id)
@@ -741,6 +914,9 @@ class Agent:
                                     args,
                                     phase="claims",
                                     expected_root=root,
+                                    **self._probe_timeout_kwargs(
+                                        workspace_probe.probe, deadline, allow_outer_margin=True
+                                    ),
                                 )
                         claims = [Claim(**item) for item in read_admission["claims"]]
                     elif (
@@ -789,13 +965,8 @@ class Agent:
                         claims = []
                     # The panel still uses legacy bounded file reads. Give them
                     # the existing file-I/O lane, just like core read, so long
-                    # commands cannot starve directory navigation. Resource locks
-                    # still exclude conflicting writes; searches stay heavy.
-                    lane = (
-                        "read"
-                        if metadata or tool in BOUNDED_FILE_TOOLS and tool != "fs_search"
-                        else "execution"
-                    )
+                    # commands cannot starve directory navigation or searches.
+                    lane = "read" if metadata or tool in BOUNDED_FILE_TOOLS else "execution"
                     # Match the typed execution dispatcher, including the panel's
                     # legacy SSH entry. Never infer remote work from shell text.
                     remote = args if tool == "ssh_exec" else None
@@ -888,13 +1059,44 @@ class Agent:
         ) as ticket:
             yield ticket
 
+    @staticmethod
+    def _probe_timeout(deadline, *, allow_outer_margin=False):
+        if deadline is None:
+            return workspace_probe.PROBE_TIMEOUT
+        remaining = max(0.0, deadline - time.time())
+        if allow_outer_margin:
+            remaining += 0.05
+        return min(float(workspace_probe.PROBE_TIMEOUT), remaining)
+
+    def _probe_timeout_kwargs(self, fn, deadline, *, allow_outer_margin=False):
+        if deadline is None:
+            return {}
+        try:
+            params = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        if "timeout_seconds" not in params and not any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return {}
+        return {
+            "timeout_seconds": self._probe_timeout(deadline, allow_outer_margin=allow_outer_margin)
+        }
+
     async def _read_admission(self, identifier, tool, project, args, deadline):
         remaining = max(0, deadline - time.time()) if deadline is not None else None
         try:
             async with asyncio.timeout(remaining):
                 async with self._read_preflight_slot(identifier, project):
                     return await workspace_probe.probe(
-                        self.engine, tool, project, args, phase="admission"
+                        self.engine,
+                        tool,
+                        project,
+                        args,
+                        phase="admission",
+                        **self._probe_timeout_kwargs(
+                            workspace_probe.probe, deadline, allow_outer_margin=True
+                        ),
                     )
         except TimeoutError as exc:
             raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
@@ -914,12 +1116,18 @@ class Agent:
                 async with self._read_preflight_slot(identifier, project) as ticket:
                     async with self._read_worker(admission=True) as worker:
                         admission = await workspace_probe.probe(
-                            self.engine, tool, project, args, phase="admission", worker=worker
+                            self.engine,
+                            tool,
+                            project,
+                            args,
+                            phase="admission",
+                            worker=worker,
+                            **self._probe_timeout_kwargs(
+                                workspace_probe.probe, deadline, allow_outer_margin=True
+                            ),
                         )
                         claims = [] if metadata else [Claim(**item) for item in admission["claims"]]
-                        # Recursive content search retains execution pressure
-                        # accounting even though its path claim is read-only.
-                        lane = "execution" if tool == "fs_search" else "read"
+                        lane = "read"
                         # One synchronous decision converts the preflight ticket
                         # and reserves resources. Failure leaves neither a path
                         # reservation nor a fairness turn behind while reaping.
@@ -941,7 +1149,11 @@ class Agent:
                             timer.reschedule(None)
                             yield admission, worker, True
                             return
-                        await worker.abandon_admission()
+                        await worker.abandon_admission(
+                            **self._probe_timeout_kwargs(
+                                worker.abandon_admission, deadline, allow_outer_margin=True
+                            )
+                        )
                     # The child is closed/reaped BEFORE waiting on either queue.
         except TimeoutError as exc:
             if not timer.expired():
@@ -986,6 +1198,7 @@ class Agent:
         preflight_deadline=None,
         worker=None,
         expected_root=None,
+        deadline=None,
     ):
         if workspace_probe.eligible(tool, args):
             if preflight_id is not None:
@@ -997,13 +1210,29 @@ class Agent:
                 try:
                     async with asyncio.timeout(remaining):
                         async with self._read_preflight_slot(preflight_id, project):
-                            return await workspace_probe.root(self.engine, tool, project, args)
+                            return await workspace_probe.root(
+                                self.engine,
+                                tool,
+                                project,
+                                args,
+                                **self._probe_timeout_kwargs(
+                                    workspace_probe.root,
+                                    preflight_deadline,
+                                    allow_outer_margin=True,
+                                ),
+                            )
                 except TimeoutError as exc:
                     raise DevError("QUEUE_EXPIRED", "超过首次执行期限，未开始操作") from exc
             # These rechecks already hold the execution slot. Re-entering the
             # lane here could deadlock when all slots are occupied by readers.
             return await workspace_probe.root(
-                self.engine, tool, project, args, worker=worker, expected_root=expected_root
+                self.engine,
+                tool,
+                project,
+                args,
+                worker=worker,
+                expected_root=expected_root,
+                **self._probe_timeout_kwargs(workspace_probe.root, deadline),
             )
         return await self.disk_call(self.engine.root, project, tool in MUTATING)
 
@@ -1083,13 +1312,7 @@ class Agent:
                     **({"bounded_execution": bounded_execution} if bounded_execution else {}),
                 }
             )
-            if await self.disk_call(self.telemetry.record, id, "accepted"):
-                self.pending_output["trace:" + id] = {
-                    "type": "trace",
-                    "id": id,
-                    "trace": await self.disk_call(self.telemetry.snapshot, id),
-                }
-                self.output_wake.set()
+            self.phase(id, "accepted")
             tool, project, args = request["tool"], request["project"], request["args"]
             if (
                 not isinstance(tool, str)
@@ -1178,7 +1401,7 @@ class Agent:
                 raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未开始操作；请确认后重新提交")
             if tool == "system_validate":
                 root, spec = self.engine.root(project)
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 result = {
                     "root": str(root),
                     "writable": spec.get("writable", True),
@@ -1199,7 +1422,11 @@ class Agent:
                     )
                 if any(job_id != id for job_id in self.jobs) or self.processes:
                     raise DevError("AGENT_BUSY", "设备仍有本机操作在执行；等待完成后再管理 Agent")
-                self.journal.mark_running(id)
+                from agent import lsp_navigation
+
+                await self._begin_operation(id, tool, args, deadline=not_after)
+                with contextlib.suppress(Exception):
+                    await lsp_navigation.shutdown_all(self)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "preparing_lifecycle", action=tool)
                 result = await self.lifecycle.prepare(id, tool, args)
@@ -1210,7 +1437,7 @@ class Agent:
                 from agent.roots_panel import call as roots_settings_call
 
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "directory_grants")
                 result = await self._committed_io(roots_settings_call, self, tool, project, args)
@@ -1218,14 +1445,14 @@ class Agent:
                 from agent.runtime_panel import call as runtime_settings_call
 
                 args = TOOLS[tool].model.model_validate(args).model_dump()
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "runtime_settings")
                 result = await self._committed_io(runtime_settings_call, self, tool, project, args)
             elif tool in {"execution_info", "agent_diagnostics"}:
                 TOOLS[tool].model.model_validate(args)
                 root, spec = self.engine.root(project)
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 result = (
                     {
                         "build": self.build.describe(),
@@ -1234,6 +1461,7 @@ class Agent:
                             project.get("id") or canonical_path(root)
                         ),
                         "telemetry_errors": self.telemetry.errors,
+                        "telemetry_dropped": getattr(self.telemetry, "dropped", 0),
                     }
                     if tool == "agent_diagnostics"
                     else execution_info(self.config, project, spec, root)
@@ -1256,7 +1484,7 @@ class Agent:
                         "原生 computer 调用需要当前已认证的 computer 权限",
                         403,
                     )
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "executing")
                 result = await self.computer.execute(
@@ -1283,7 +1511,7 @@ class Agent:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 if tool != "readiness_get" or not args.get("operation_kind"):
                     self.engine.root(project)
-                self.journal.mark_running(id)
+                await self._begin_operation(id, tool, args, deadline=not_after)
                 await self.send({"type": "started", "id": id})
                 self.phase(id, "executing")
                 result = await self.execute(id, tool, project, args)
@@ -1297,13 +1525,17 @@ class Agent:
                     if admission is not None:
                         root = Path(admission["root"])
                     else:
-                        root, _ = await self._operation_root(tool, project, args)
+                        root, _ = await self._operation_root(
+                            tool, project, args, deadline=not_after
+                        )
                     # Resource ownership and execution capacity are one grant;
                     # waiting work owns neither and independent projects can run.
                     slot_write = tool in MUTATING
                     if tool == "tasks_run":
                         task_config = self.config.get("tasks", {}).get(args["task"], {})
-                        slot_write = not task_config.get("allow_read_concurrency", False)
+                        slot_write = task_config.get("allow_read_concurrency") is not True
+                    elif tool == "exec" and is_read_only_exec(tool, args, config=self.config):
+                        slot_write = False
                     async with self.execution_slot(
                         id,
                         tool,
@@ -1336,14 +1568,19 @@ class Agent:
                                     self.integrations.project, project, args
                                 )
                             current_root, _ = await self._operation_root(
-                                tool, project, args, worker=read_worker, expected_root=root
+                                tool,
+                                project,
+                                args,
+                                worker=read_worker,
+                                expected_root=root,
+                                deadline=not_after,
                             )
                             if current_root != root:
                                 raise DevError(
                                     "ROOT_CHANGED",
                                     "排队期间项目根目录发生变化，请确认映射后重新提交",
                                 )
-                            self.journal.mark_running(id)
+                            await self._begin_operation(id, tool, args, deadline=not_after)
                             await self.send({"type": "started", "id": id})
                             if (
                                 id in self.cancelled
@@ -1351,18 +1588,6 @@ class Agent:
                                 or self.stop_event.is_set()
                             ):
                                 raise DevError("CANCELLED", "操作开始前已取消")
-                            self.integrations.control.guard(tool, project)
-                            if args.get("workspace_id"):
-                                project = await self.disk_call(
-                                    self.integrations.project, project, args
-                                )
-                            current_root, _ = await self._operation_root(
-                                tool, project, args, worker=read_worker, expected_root=root
-                            )
-                            if current_root != root:
-                                raise DevError(
-                                    "ROOT_CHANGED", "项目根目录发生变化，请确认映射后重新提交"
-                                )
                             self.phase(id, "executing")
                             result = await self.execute(id, tool, project, args)
                             concurrency = self.resources.concurrency_for(id)
@@ -1374,13 +1599,14 @@ class Agent:
                 )
             result = {"ok": True, "data": result}
         except asyncio.CancelledError:
-            if self.journal.status(id)["status"] == "accepted" and not self.journal.is_cancelled(
-                id
-            ):
+            if self.journal.fast_status(id)[
+                "status"
+            ] == "accepted" and not self.journal.is_cancelled(id):
                 # No side effect began. Leave the durable accepted receipt for
                 # startup's accepted -> retryable recovery, never finish it.
                 self.telemetry.starts.pop(id, None)
                 self.pending_output.pop(id, None)
+                self.pending_output.pop("trace:" + id, None)
                 self.integration_projects.pop(id, None)
                 self.integration_tool_names.pop(id, None)
                 raise
@@ -1396,13 +1622,14 @@ class Agent:
         except DevError as exc:
             if (
                 exc.code == "AGENT_STOPPING"
-                and self.journal.status(id)["status"] == "accepted"
+                and self.journal.fast_status(id)["status"] == "accepted"
                 and not self.journal.is_cancelled(id)
             ):
                 # Scheduler.close may wake the waiter before shutdown cancels
                 # its task. It has exactly the same never-started receipt.
                 self.telemetry.starts.pop(id, None)
                 self.pending_output.pop(id, None)
+                self.pending_output.pop("trace:" + id, None)
                 self.integration_projects.pop(id, None)
                 self.integration_tool_names.pop(id, None)
                 raise asyncio.CancelledError from exc
@@ -1447,8 +1674,7 @@ class Agent:
             self.cancelled.discard(id)
             self.shutdown_interrupted.discard(id)
         self.finishing.add(id)
-        self.phase(id, "persisting")
-        result["trace"] = self.telemetry.snapshot(id)
+        result["trace"] = self.phase(id, "persisting") or self.telemetry.snapshot(id)
         delay = 1
         while True:
             try:
@@ -1469,6 +1695,7 @@ class Agent:
         self.phase(id, "result_ready")
         self.telemetry.starts.pop(id, None)
         self.pending_output.pop(id, None)
+        self.pending_output.pop("trace:" + id, None)
         self.finishing.discard(id)
         self.integration_projects.pop(id, None)
         self.integration_tool_names.pop(id, None)
@@ -1707,9 +1934,18 @@ class Agent:
 
     async def execute(self, id, tool, project, args, *, saved_vps_target=None):
         if workspace_probe.eligible(tool, args):
-            worker, root = self._read_workers.get(id, (None, None))
+            entry = self._read_workers.get(id)
+            if entry is None:
+                worker, root = None, None
+            else:
+                worker, root = entry[0], entry[1]
             return await workspace_probe.probe(
-                self.engine, tool, project, args, worker=worker, expected_root=root
+                self.engine,
+                tool,
+                project,
+                args,
+                worker=worker,
+                expected_root=root,
             )
         from shared.integration_contracts import REMOTE_TOOLS
 
@@ -2678,7 +2914,7 @@ class Agent:
     async def run(self):
         await self.integrations.start()
         self.computer.start_guard()
-        self._read_pool = workspace_probe.ReadPool(min(self.scheduler.config["read_limit"], 4))
+        self._read_pool = workspace_probe.ReadPool(scheduler=self.scheduler)
         watcher = asyncio.create_task(self.watch_config())
         sender = asyncio.create_task(self.output_sender())
         scheduler_monitor = asyncio.create_task(self.watch_scheduler())
@@ -2717,6 +2953,10 @@ class Agent:
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
+            with contextlib.suppress(Exception):
+                from agent import lsp_navigation
+
+                await lsp_navigation.shutdown_all(self)
             background = [
                 watcher,
                 sender,
@@ -2737,7 +2977,10 @@ class Agent:
                     id for id, process in self.processes.items() if process.returncode is None
                 )
                 for id, job in list(self.jobs.items()):
-                    if id not in self.finishing and self.journal.status(id)["status"] == "accepted":
+                    if (
+                        id not in self.finishing
+                        and self.journal.fast_status(id)["status"] == "accepted"
+                    ):
                         job.cancel()
                 await asyncio.gather(
                     *(
@@ -2750,6 +2993,15 @@ class Agent:
                 await asyncio.gather(*list(self.jobs.values()), return_exceptions=True)
                 await asyncio.gather(*list(self.kill_tasks), return_exceptions=True)
                 await asyncio.gather(*list(self.transfer_tasks), return_exceptions=True)
+                await asyncio.gather(*list(self._reply_tasks), return_exceptions=True)
+                while self._ack_task is not None and not self._ack_task.done():
+                    with contextlib.suppress(Exception):
+                        await self._ack_task
+                while (
+                    self._journal_persist_task is not None and not self._journal_persist_task.done()
+                ):
+                    with contextlib.suppress(Exception):
+                        await self._journal_persist_task
             finally:
                 await self._read_pool.close()
                 try:

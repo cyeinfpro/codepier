@@ -209,6 +209,7 @@ def queue_options(value):
 
 class ExecQueueOptions(QueueOptions):
     max_queue_ms: int | None = Field(default=None, ge=1, le=600000)
+    read_only: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class ReadOptions(QueueOptions):
@@ -351,7 +352,7 @@ class Exec(Mutation):
         default=1,
         ge=0,
         le=10,
-        description="Wait: VPS 10s, local 1s; then pending receipt. Polling never restarts SSH.",
+        description="Wait defaults: VPS 10s/local 1s, then pending; poll never restarts SSH.",
     )
     resources: list[Resource] = Field(
         default_factory=list,
@@ -367,6 +368,7 @@ class Exec(Mutation):
         max_length=32,
         description="Relative snapshot artifacts to export to CODEPIER_RUN_DIR.",
     )
+    read_only: bool = Field(default=False, exclude_if=lambda value: not value)
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="order=default|strict; wait_policy=queue|fail_fast; max_queue_ms bounds Agent admission.",
@@ -588,7 +590,7 @@ def register(tool, tools):
         "read": (
             Read,
             "read",
-            "Read UTF-8 (2000 lines/50 KiB) or PNG/JPEG with SHA/continuation; batch<=8 options.items, one workspace, 128 KiB. Help: project_query.",
+            "UTF-8 (2000 lines/50 KiB), PNG/JPEG; SHA/continuation. Batch <=8 options.items, one workspace, 128 KiB. Help: project_query.",
             False,
             False,
         ),
@@ -609,7 +611,7 @@ def register(tool, tools):
         "exec": (
             Exec,
             "execute",
-            "Run commands/tasks; native is not a sandbox. Tests: source read; edits: write; artifacts: $CODEPIER_RUN_DIR. Freeze: read_stable/snapshot. Poll CI briefly. Saved VPS: max3 SSH retries, proven pre-command failures only, same receipt. Recover ID via task_query; config is not isolation proof.",
+            "Run command/task; native is not a sandbox; config is not isolation proof. Tests read; edits write; freeze read_stable/snapshot. Artifacts: $CODEPIER_RUN_DIR. Brief CI polls. Saved VPS: <=3 retries only for proven pre-command SSH failure, same receipt; recover via task_query.",
             True,
             False,
         ),

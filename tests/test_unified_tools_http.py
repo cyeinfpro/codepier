@@ -66,8 +66,12 @@ def test_help_and_guards(api):  # noqa: F811
     blocked = structured(call(client, credential, 'tools/call', {'name': 'query', 'arguments': {
         'action': 'project', 'project': 'x', 'args': {'capture_baseline': True}}}))
     assert blocked['isError']
-    assert blocked['structuredContent']['recovery']['execution_started'] is False
+    assert json.loads(blocked['content'][0]['text'])['recovery']['execution_started'] is False
+    assert blocked['structuredContent']['error_code'] == 'INVALID_ARGUMENTS'
     assert blocked['structuredContent']['next_call']['arguments']['action'] == 'help'
+    blocked_v2 = structured(call(client, credential, 'tools/call', {'name': 'query', 'arguments': {
+        'action': 'project', 'project': 'x', 'args': {'capture_baseline': True}}}, query='?view=2'))
+    assert blocked_v2['structuredContent']['recovery']['execution_started'] is False
     wrong = structured(call(client, credential, 'tools/call', {'name': 'query', 'arguments': {'action': 'exec'}}))
     assert wrong['isError']
     assert json.loads(wrong['content'][0]['text'])['error']['code'] == 'UNKNOWN_OPERATION'

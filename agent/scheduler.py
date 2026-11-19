@@ -173,10 +173,20 @@ class ProjectScheduler:
     def _reason(self, item):
         held = list(self.active.values())
         limit = self.lane_limit(item.lane)
+        if limit == 0:
+            return "resource_pressure"
         same_lane = [entry for entry in held if entry.lane == item.lane]
-        # Leave one slot for another project even before it joins the queue.
-        # Other idle capacity can be borrowed, up to the project owner's cap.
-        project_cap = min(self.config["project_limits"].get(item.project, 64), max(1, limit - 1))
+        # Reserve one slot when another project is waiting on this lane (and
+        # proactively on wide execution lanes where work is non-preemptible);
+        # otherwise allow a single active project to borrow the full limit.
+        other_waiting = any(
+            entry.lane == item.lane and entry.project != item.project for entry in self.waiting
+        )
+        if (item.lane == "execution" and limit > 2) or other_waiting:
+            lane_cap = max(1, limit - 1)
+        else:
+            lane_cap = max(1, limit)
+        project_cap = min(self.config["project_limits"].get(item.project, 64), lane_cap)
         if sum(entry.project == item.project for entry in same_lane) >= project_cap:
             return "project_limit"
         if (
@@ -376,6 +386,22 @@ class ProjectScheduler:
         async with self.condition:
             self._drain_all()
 
+    def _abort_waiting(self, item):
+        """Remove a timed-out waiter under self.condition and return (reason, blockers)."""
+        blockers = self._blockers(item)
+        reason = self._reason(item)
+        if item in self.waiting:
+            self.waiting.remove(item)
+        if item.token in self._resource_tokens:
+            self.resources.discard(item.token)
+            self._resource_tokens.discard(item.token)
+        self._events.pop(item.token, None)
+        self._callbacks.pop(item.token, None)
+        self._resource_callbacks.pop(item.token, None)
+        self._reported.pop(item.token, None)
+        self._drain_all()
+        return reason, blockers
+
     async def _release_owned(self, item):
         async with self.condition:
             if item in self.waiting:
@@ -444,26 +470,31 @@ class ProjectScheduler:
                     await asyncio.wait_for(event.wait(), max_queue_ms / 1000)
                 except TimeoutError:
                     async with self.condition:
-                        blockers = self._blockers(item)
-                    raise DevError(
-                        "RESOURCE_BUSY",
-                        "超过最大资源等待时间，未开始执行",
-                        409,
-                        blocked_by=blockers,
-                    ) from None
+                        if event.is_set():
+                            pass
+                        else:
+                            reason, blockers = self._abort_waiting(item)
+                            raise DevError(
+                                "RESOURCE_BUSY",
+                                "超过最大资源等待时间，未开始执行",
+                                409,
+                                reason=reason,
+                                blocked_by=blockers,
+                            ) from None
             elif wait_policy == "fail_fast":
                 try:
                     await asyncio.wait_for(event.wait(), initial_wait_seconds)
                 except TimeoutError:
                     async with self.condition:
-                        if not event.is_set() and self._blockers(item):
+                        if not event.is_set():
+                            reason, blockers = self._abort_waiting(item)
                             raise DevError(
                                 "RESOURCE_BUSY",
                                 "资源仍被其他操作占用，未执行任何副作用",
                                 409,
-                                blocked_by=self._blockers(item),
+                                reason=reason,
+                                blocked_by=blockers,
                             ) from None
-                    await event.wait()
             else:
                 await event.wait()
             if self.closed:

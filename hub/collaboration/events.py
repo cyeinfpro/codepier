@@ -7,6 +7,7 @@ await. Payloads contain authorized object references, never callback credentials
 from __future__ import annotations
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -51,6 +52,8 @@ from shared.util import DevError
 logger = logging.getLogger(__name__)
 
 DISPATCH_CAPACITY = 4
+IDLE_POLL_SECONDS = 20.0
+FULL_EVENT_RECOVERY_INTERVAL_SECONDS = 60.0
 MAX_ENVELOPE_BYTES = 16384
 WIRE_HEADER_BYTES = 768  # Two signatures plus bounded webhook/HTTP header overhead.
 # rate, burst, byte rate, byte burst; shared by all dispatcher processes.
@@ -172,7 +175,10 @@ class EventService:
         self._tick_lock = asyncio.Lock()
         self._scan_after = ""
         self._relay_recover_after = 0
+        self._full_event_recovery_at = None
         self._budget_retry_at = None
+        self._idle = True
+        self._next_wake_at = None
         from hub.operation_events import OperationEvents
 
         self.operations = OperationEvents(self)
@@ -668,6 +674,7 @@ class EventService:
                             "expires_at": lifetime,
                         }
                     )
+                self._wake_after_commit()
                 return result
 
         return await self.store.run(commit)
@@ -950,10 +957,21 @@ class EventService:
                 )
         return True
 
+    def _wake_after_commit(self):
+        loops = getattr(self.c, "loops", None)
+        if loops is not None:
+            self.store.after_commit(loops.wake_events)
+
     def next_dispatch_delay(self, default=2):
-        if self._budget_retry_at is None:
-            return default
-        return min(default, max(0.01, self._budget_retry_at - self.c.clock()))
+        now = self.c.clock()
+        delay = default
+        if self._idle:
+            delay = max(default, IDLE_POLL_SECONDS)
+            if self._next_wake_at is not None:
+                delay = min(delay, max(0.05, self._next_wake_at - now))
+        if self._budget_retry_at is not None:
+            delay = min(delay, max(0.01, self._budget_retry_at - now))
+        return delay
 
     def coalesce_mailbox(self, subscription, filters):
         if subscription["name"] not in {MAILBOX_EVENT, ROOM_INBOX_EVENT}:
@@ -1677,6 +1695,235 @@ class EventService:
             logger.warning("Event delivery failed: %s", type(exc).__name__)
             await self.store.run(self.finish, item, None, "delivery_internal_error")
 
+    def _probe_tick(self, capacity, check_recovery):
+        config = getattr(self.c, "config", None)
+        if config is not None and (not config.enabled or not config.events_enabled):
+            return False, False, True, None
+        if not hasattr(self.store, "one"):
+            return False, False, True, None
+        now = self.c.clock()
+        has_dispatch = bool(self._scan_after)
+        if not has_dispatch:
+            has_dispatch = bool(
+                self.store.one(
+                    "SELECT 1 FROM room_subscription_routes WHERE state IN ('approved','controlled','verifying') AND expires_at<=? LIMIT 1",
+                    (now,),
+                )
+                or self.store.one(
+                    """SELECT 1 FROM mcp_event_deliveries WHERE state='leased'
+                    AND reason_code IN ('route_rotated_in_flight','route_candidate_ended_in_flight')
+                    AND lease_until<=? LIMIT 1""",
+                    (now,),
+                )
+                or self.store.one(
+                    """SELECT 1 FROM mcp_event_subscriptions s
+                    WHERE s.state='active' AND (s.expires_at<=?
+                        OR (s.room_id IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_outbox e
+                            WHERE e.room_id=s.room_id AND e.seq>s.scan_seq))
+                        OR (s.conversation_id IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_outbox e
+                            WHERE e.conversation_id=s.conversation_id AND e.seq>s.scan_seq)))
+                    LIMIT 1""",
+                    (now,),
+                )
+            )
+        if not has_dispatch and capacity > 0:
+            leased = self.store.one(
+                "SELECT COUNT(*) AS n FROM mcp_event_deliveries WHERE state='leased' AND lease_until>?",
+                (now,),
+            )["n"]
+            if leased < DISPATCH_CAPACITY:
+                has_dispatch = bool(
+                    self.store.one(
+                        """SELECT 1 FROM mcp_event_dispatch_routes r
+                        JOIN mcp_event_subscriptions s ON s.id=r.subscription_id
+                        JOIN mcp_event_deliveries d ON d.id=(
+                            SELECT h.id FROM mcp_event_deliveries h
+                            WHERE h.subscription_id=s.id AND h.state IN ('pending','retry_wait','leased')
+                            ORDER BY h.event_seq LIMIT 1)
+                        LEFT JOIN collaboration_rooms lr ON lr.id=s.room_id
+                        LEFT JOIN conversation_rooms cr ON cr.id=s.conversation_id
+                        LEFT JOIN mcp_event_dispatch_endpoints ep ON ep.endpoint_key=r.endpoint_key
+                        WHERE s.state='active' AND s.expires_at>:now
+                          AND COALESCE(cr.state,lr.state)='active'
+                          AND d.next_at<=:now
+                          AND (d.state!='leased' OR COALESCE(d.lease_until,0)<=:now)
+                          AND COALESCE(ep.cooldown_until,0)<=:now
+                        LIMIT 1""",
+                        {"now": now},
+                    )
+                    or self.store.one(
+                        """SELECT 1 FROM mcp_event_deliveries d
+                        JOIN mcp_event_subscriptions s ON s.id=d.subscription_id
+                        LEFT JOIN mcp_event_dispatch_routes r ON r.subscription_id=s.id
+                        WHERE r.subscription_id IS NULL AND s.state='active'
+                          AND d.state IN ('pending','retry_wait','leased')
+                          AND d.next_at<=:now
+                          AND (d.state!='leased' OR COALESCE(d.lease_until,0)<=:now)
+                        LIMIT 1""",
+                        {"now": now},
+                    )
+                )
+
+        has_continuations = False
+        has_recovery = False
+        if check_recovery:
+            recovery = getattr(
+                getattr(self.c, "room_goal_recovery", None),
+                "recover_continuations",
+                None,
+            )
+            if recovery is not None:
+                has_continuations = bool(
+                    self.store.one(
+                        "SELECT 1 FROM room_continuation_items WHERE state IN ('pending','waiting_operations') AND retry_at<=? LIMIT 1",
+                        (now,),
+                    )
+                )
+            has_recovery = bool(
+                self.store.one(
+                    """SELECT 1 FROM coordination_work w
+                    JOIN room_native_work_assignments a ON a.work_id=w.id
+                    JOIN coordination_goals g ON g.id=w.goal_id AND g.approval_id=w.approval_id
+                    JOIN conversation_rooms r ON r.id=g.conversation_id
+                    LEFT JOIN room_work_intents i ON i.goal_id=g.id
+                    WHERE w.state='blocked' AND w.reason_code IN ('ROOM_PAUSED','ROOM_MEMBER_PAUSE')
+                      AND g.state='active' AND r.state='active' AND r.room_protocol!=0
+                      AND a.intent_revision=COALESCE(i.intent_revision,1)
+                    LIMIT 1"""
+                )
+                or self.store.one(
+                    """SELECT 1 FROM collaboration_dot_messages m
+                    JOIN mcp_event_subscriptions s ON s.state='active' AND s.expires_at>?
+                    JOIN collaboration_join_routes jr ON jr.subscription_id=s.id AND jr.slot_id=m.dot_id
+                    WHERE m.state!='handled' AND m.wake_count<3
+                      AND (? - MAX(m.created,m.last_wake_at,m.last_activity_at,COALESCE(m.received_at,0))) >=
+                          CASE WHEN m.state='read' THEN 300 ELSE (CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END) END
+                    LIMIT 1""",
+                    (now, now),
+                )
+            )
+            if not has_recovery and getattr(self.c, "dot_mailbox", None) is not None:
+                has_recovery = bool(
+                    self.store.one(
+                        """SELECT 1 FROM dot_mailbox_bindings b
+                        WHERE b.state='active' AND b.dirty_revision>b.drained_revision AND b.wake_count<3
+                          AND (? - b.last_wake_at) >= CASE b.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 ELSE 600 END
+                          AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
+                              WHERE cs.dot_id=b.dot_id AND cs.state='active' AND cs.lease_until>?)
+                        LIMIT 1""",
+                        (now, now),
+                    )
+                    or self.store.one(
+                        """SELECT 1 FROM dot_mailbox_bindings b
+                        JOIN mcp_event_subscriptions s ON s.id=b.subscription_id
+                        WHERE b.state='active' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
+                          AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
+                              WHERE e.dot_id=b.dot_id AND e.kind='control_notice'
+                                AND e.object_id=('subscription-expiry:'||s.id) AND e.object_version=s.version)
+                        LIMIT 1""",
+                        (now, now + 3600),
+                    )
+                )
+            if not has_recovery and getattr(self.c, "room_consumers", None) is not None:
+                has_recovery = bool(
+                    self.store.one(
+                        """SELECT 1 FROM room_pending_bindings p
+                        JOIN mcp_event_subscriptions s ON s.id=p.subscription_id
+                        WHERE p.status='verifying' AND p.revoked_at IS NULL AND p.probe_replied_at IS NULL
+                          AND p.prepare_expires_at>? AND p.probe_created_at>? AND p.probe_created_at<=?
+                          AND s.state='active' AND s.expires_at>? AND s.last_accepted>=p.probe_created_at
+                        LIMIT 1""",
+                        (now, now - 1800, now - 60, now),
+                    )
+                    or self.store.one(
+                        """SELECT 1 FROM room_members m
+                        JOIN mcp_event_subscriptions s ON s.id=m.subscription_id
+                        WHERE m.status='bound' AND s.state='active' AND s.expires_at>? AND s.expires_at<=?
+                          AND (? - s.expires_at) >= -MIN(3600.0, MAX(15.0, (s.expires_at - s.updated) * 0.2))
+                          AND NOT EXISTS (SELECT 1 FROM dot_mailbox_entries e
+                              WHERE e.member_id=m.id AND e.kind='control_notice'
+                                AND e.object_id=('subscription-expiry:'||m.subscription_id) AND e.object_version=s.version)
+                        LIMIT 1""",
+                        (now, now + 3600, now),
+                    )
+                    or self.store.one(
+                        "SELECT 1 FROM room_members WHERE status='bound' AND consumer_continuation_at<=? LIMIT 1",
+                        (now,),
+                    )
+                    or self.store.one(
+                        """SELECT 1 FROM room_members m
+                        WHERE m.status='bound' AND m.dirty_revision>m.drained_revision
+                          AND m.consumer_continuation_at IS NULL AND m.wake_count<51
+                          AND COALESCE(m.wake_episode_at,m.last_wake_at)>?
+                          AND (? - m.last_wake_at) >= CASE m.wake_count WHEN 0 THEN 30 WHEN 1 THEN 120 WHEN 2 THEN 600 ELSE 1800 END
+                          AND NOT EXISTS (SELECT 1 FROM dot_consumer_sessions cs
+                              WHERE cs.member_id=m.id AND cs.state='active' AND cs.lease_until>?)
+                        LIMIT 1""",
+                        (now - 86400, now, now),
+                    )
+                )
+            # Episode identity, eligibility and delay live in TaskLiveness.
+            # For unhinted recovery sources, run that canonical logic on a
+            # coarse bounded cadence rather than maintaining a divergent query.
+            if self._full_event_recovery_at is not None and now >= self._full_event_recovery_at:
+                has_continuations = has_continuations or recovery is not None
+                has_recovery = True
+
+        next_due_at = None
+        if not has_dispatch and not has_recovery and not has_continuations:
+            row = self.store.one(
+                """SELECT MIN(due) AS next_due FROM (
+                    SELECT MIN(next_at) AS due FROM mcp_event_deliveries WHERE state IN ('pending','retry_wait') AND next_at>:now
+                    UNION ALL
+                    SELECT MIN(lease_until) AS due FROM mcp_event_deliveries WHERE state='leased' AND lease_until>:now
+                    UNION ALL
+                    SELECT MIN(cooldown_until) AS due FROM mcp_event_dispatch_endpoints WHERE cooldown_until>:now
+                )""",
+                {"now": now},
+            )
+            next_due_at = row["next_due"] if row else None
+        return has_continuations, has_recovery, has_dispatch, next_due_at
+
+    def _recovery_step(self, name, callback, default=None):
+        try:
+            tx = getattr(self.store, "transaction", None)
+            with tx() if callable(tx) else contextlib.nullcontext():
+                return callback()
+        except Exception as exc:
+            # Do not log exception bodies (callbacks may include credentials).
+            logger.warning("Collaboration event recovery %s failed (%s)", name, type(exc).__name__)
+            return default
+
+    def _run_tick_work(self, capacity, run_continuations, run_recovery, run_dispatch):
+        if run_continuations:
+            recovery = getattr(
+                getattr(self.c, "room_goal_recovery", None),
+                "recover_continuations",
+                None,
+            )
+            if recovery is not None:
+                self._recovery_step("continuations", lambda: recovery(limit=8))
+        if run_recovery:
+            self._recovery_step("paused_work", self.c.rooms.recover_paused_work)
+            available = max(0, 4 - self._recovery_step("relay", self.c.dot_relay.recover, 0))
+            for name, service in (
+                ("mailbox", getattr(self.c, "dot_mailbox", None)),
+                ("room_consumers", getattr(self.c, "room_consumers", None)),
+                ("task_liveness", self.c.task_liveness),
+            ):
+                if service is not None:
+                    used = self._recovery_step(
+                        name,
+                        lambda service=service, available=available: service.recover(
+                            max_wakes=available,
+                        ),
+                        0,
+                    )
+                    available = max(0, available - used)
+        # Reserve commits independently and is attempted even if a recovery
+        # source failed. Do not catch lease errors or report phantom items.
+        return self.reserve(capacity) if run_dispatch else []
+
     async def tick(self, *, wake=None):
         """One owned pump, bounded children, replenished on each completion/hint.
 
@@ -1695,47 +1942,40 @@ class EventService:
                     # visible and is consumed by the following wait.
                     if wake is not None:
                         wake.clear()
-                    if self.c.clock() >= self._relay_recover_after:
-                        self._relay_recover_after = self.c.clock() + 5
-                        await self.store.run(self.c.rooms.recover_paused_work)
-                        recovery = getattr(
-                            getattr(self.c, "room_goal_recovery", None),
-                            "recover_continuations",
-                            None,
+                    now = self.c.clock()
+                    if self._full_event_recovery_at is None:
+                        self._full_event_recovery_at = now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
+                    check_recovery = now >= self._relay_recover_after
+                    capacity = DISPATCH_CAPACITY - len(pending)
+                    run_read = getattr(self.store, "run_read", self.store.run)
+                    has_continuations, has_recovery, has_dispatch, next_due_at = await run_read(
+                        self._probe_tick, capacity, check_recovery
+                    )
+                    has_work = has_continuations or has_recovery or has_dispatch
+                    if check_recovery:
+                        self._relay_recover_after = now + (
+                            5 if has_continuations or has_recovery else IDLE_POLL_SECONDS
                         )
-                        if recovery is not None:
-                            await self.store.run(lambda *, recovery=recovery: recovery(limit=8))
-                        chat_wakes = await self.store.run(self.c.dot_relay.recover)
-                        mailbox = getattr(self.c, "dot_mailbox", None)
-                        mailbox_wakes = (
-                            await self.store.run(
-                                lambda *, chat_wakes=chat_wakes, mailbox=mailbox: mailbox.recover(
-                                    max_wakes=max(0, 4 - chat_wakes)
-                                )
+                        if (
+                            self._full_event_recovery_at is not None
+                            and now >= self._full_event_recovery_at
+                            and has_recovery
+                        ):
+                            self._full_event_recovery_at = (
+                                now + FULL_EVENT_RECOVERY_INTERVAL_SECONDS
                             )
-                            if mailbox is not None
-                            else 0
+                    if has_work:
+                        items = await self.store.run(
+                            self._run_tick_work,
+                            capacity,
+                            has_continuations,
+                            has_recovery,
+                            has_dispatch,
                         )
-                        room_consumers = getattr(self.c, "room_consumers", None)
-                        room_wakes = (
-                            await self.store.run(
-                                lambda *, chat_wakes=chat_wakes, mailbox_wakes=mailbox_wakes, room_consumers=room_consumers: (
-                                    room_consumers.recover(
-                                        max_wakes=max(0, 4 - chat_wakes - mailbox_wakes)
-                                    )
-                                )
-                            )
-                            if room_consumers is not None
-                            else 0
-                        )
-                        await self.store.run(
-                            lambda *, chat_wakes=chat_wakes, mailbox_wakes=mailbox_wakes, room_wakes=room_wakes: (
-                                self.c.task_liveness.recover(
-                                    max_wakes=max(0, 4 - chat_wakes - mailbox_wakes - room_wakes)
-                                )
-                            )
-                        )
-                    items = await self.store.run(self.reserve, DISPATCH_CAPACITY - len(pending))
+                        self._idle = False
+                        self._next_wake_at = None
+                    else:
+                        items = []
                     pending.update(
                         asyncio.create_task(self.deliver(item), name="collaboration:event-delivery")
                         for item in items
@@ -1745,8 +1985,12 @@ class EventService:
                         empty_pages += 1
                         if self._scan_after and empty_pages < 8:
                             continue
+                        self._idle = not has_work
+                        self._next_wake_at = next_due_at if self._idle else None
                         return
                     empty_pages = 0
+                    self._idle = False
+                    self._next_wake_at = None
                     waiting = set(pending)
                     if wake is not None:
                         waiter = asyncio.create_task(wake.wait(), name="collaboration:event-wake")

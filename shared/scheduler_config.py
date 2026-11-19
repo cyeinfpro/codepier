@@ -6,6 +6,7 @@ import os
 
 QUEUE_REASONS = {
     "resource_conflict": "等待冲突的文件或服务资源释放",
+    "lsp_busy": "等待同项目语言服务完成当前查询",
     "project_limit": "等待本项目并发额度",
     "remote_target_limit": "等待该远程目标并发额度",
     "resource_pressure": "等待节点资源压力回落",
@@ -55,6 +56,26 @@ def is_metadata_observation(tool, args):
         and not args.get("capture_baseline")
         and args.get("context_detail", "minimal") == "minimal"
     )
+
+
+def is_read_only_exec(tool, args, *, config=None):
+    """True only when exec/tasks explicitly declare non-exclusive read-only concurrency."""
+    if tool not in {"exec", "tasks_run"} or not isinstance(args, dict):
+        return False
+    if args.get("isolation", "none") == "snapshot":
+        return False
+    task_name = args.get("task")
+    if task_name:
+        tasks = config.get("tasks", {}) if isinstance(config, dict) else {}
+        task_cfg = tasks.get(task_name, {}) if isinstance(tasks, dict) else {}
+        return isinstance(task_cfg, dict) and task_cfg.get("allow_read_concurrency") is True
+    resources = args.get("resources")
+    if isinstance(resources, list) and resources:
+        return all(isinstance(item, dict) and item.get("mode") == "read" for item in resources)
+    if args.get("read_only") is True:
+        return True
+    options = args.get("options")
+    return isinstance(options, dict) and options.get("read_only") is True
 
 
 FIELDS = frozenset(

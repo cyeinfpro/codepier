@@ -70,7 +70,7 @@ def test_http_catalog_and_hidden_route(api, modern):
     assert 'com.codepier/serviceVersion' in old['_meta']
 
 
-@pytest.mark.parametrize('query', ['?schemas=bad', '?profile=bad', '?view=4', '?verbosity=bad', '?text=bad', '?output=bad', '?mirror=bad', '?mirror=meta'])
+@pytest.mark.parametrize('query', ['?schemas=bad', '?profile=bad', '?view=4', '?verbosity=bad', '?text=bad', '?output=bad', '?mirror=bad', '?view=2&mirror=meta', '?text=json&mirror=meta', '?profile=core&mirror=meta'])
 def test_invalid_modes_rejected(api, query):
     _, client, credential = api
     response = call(client, credential, 'tools/list', query=query)
@@ -176,3 +176,33 @@ def test_duplicate_options_help_preserves_schema_boundaries_and_cache(name):
     assert schema_for(model) == cached
     assert model.model_json_schema() == original
     assert tool_definitions() == list(catalog.values())
+
+
+
+def test_lean_output_keeps_root_and_variant_fields_not_nested_hints():
+    from jsonschema import Draft202012Validator
+    from shared.contracts import project_output_schemas
+
+    full = {
+        "type": "object",
+        "properties": {
+            "operation_id": {"type": "string"},
+            "child": {"type": "object", "properties": {"next_offset": {"type": "integer"}}},
+        },
+        "anyOf": [{"$ref": "#/$defs/receipt"}, {"required": ["child"]}],
+        "$defs": {"receipt": {"allOf": [{"properties": {"truncated": {"type": "boolean"}}}]}},
+    }
+    projected = project_output_schemas([{"outputSchema": full}], "lean")[0]["outputSchema"]
+    assert set(projected["properties"]) == {"operation_id", "truncated"}
+    Draft202012Validator.check_schema(projected)
+    for candidate in (
+        {"operation_id": "fixture", "truncated": True},
+        {"operation_id": "fixture", "child": {"next_offset": 12}},
+    ):
+        Draft202012Validator(full).validate(candidate)
+        Draft202012Validator(projected).validate(candidate)
+
+    by_name = {item["name"]: item["outputSchema"] for item in tool_definitions(schemas="lean")}
+    assert by_name["get_profile"] == {"type": "object"}
+    assert set(by_name["vps"]["properties"]) == {"next_offset", "error"}
+    assert {"operation_id", "pending", "error"} <= set(by_name["exec"]["properties"])

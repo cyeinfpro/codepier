@@ -53,7 +53,7 @@ async def test_selected_row_is_rechecked_on_the_writer(delivery, change):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["none", "payload", "deadline", "journal", "attempt"])
+@pytest.mark.parametrize("change", ["none", "payload", "deadline", "journal", "attempt", "cancel"])
 async def test_retained_payload_and_current_operation_bind_wire_send(delivery, monkeypatch, change):
     e = delivery
     con = connect(e)
@@ -83,6 +83,10 @@ async def test_retained_payload_and_current_operation_bind_wire_send(delivery, m
         e.store.execute("UPDATE operations SET journal_id='other' WHERE id=?", (identifier,))
     elif change == "attempt":
         e.store.execute("UPDATE operations SET attempts=0 WHERE id=?", (identifier,))
+    elif change == "cancel":
+        # Wait for durable cancellation after preparation but before the wire fence.
+        outcome = await e.runtime.cancel(identifier, e.principal)
+        assert outcome["cancel_requested"]
 
     allow = change in {"none", "deadline"}
     assert await e.runtime._send_prepared(identifier, prepared) is allow

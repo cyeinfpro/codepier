@@ -1,13 +1,16 @@
-"""Bounded real LSP stdio client. No fallback pretending text search is semantics.
+"""Bounded real LSP stdio client with resident pooling and incremental sync.
 
 Servers are configured by the local owner, never supplied by a tool argument.
-Each query owns its process group and closes it, including on timeout/cancellation.
+Pooled servers stay warm across queries per (project_root, language) with idle
+TTL, LRU eviction, memory-pressure reclamation, and clean respawn on crash.
 """
 
 from __future__ import annotations
-import asyncio, contextlib, hashlib, json, os, shutil, time
+import asyncio, contextlib, hashlib, json, os, shutil, time, weakref
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
+from shared.config import env_float, env_int
 from shared.execution_policy import enforce_argv
 from shared.util import DevError, valid_json_value
 
@@ -30,6 +33,27 @@ LANGUAGES = {
     ".vue": "vue",
 }
 MAX_MESSAGE = 4 * 1024 * 1024
+DEFAULT_IDLE_TTL = 300.0
+DEFAULT_MAX_INSTANCES = 3
+_LIVE_POOLS: weakref.WeakSet[LspPool] = weakref.WeakSet()
+
+
+def _server_language(config, language):
+    servers = config.get("integrations", {}).get("language_servers", {})
+    if language not in servers and isinstance(language, str) and language.endswith("react"):
+        return language[:-5]
+    return language
+
+
+def _spec_fingerprint(spec):
+    return json.dumps(
+        {
+            key: spec.get(key)
+            for key in ("command", "env", "settings", "initialization_options", "timeout_seconds")
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def selected(config, project, language):
@@ -93,6 +117,19 @@ class Peer:
         self.changed = asyncio.Event()
         self.notifications = 0
         self.error = None
+        self.capabilities = {}
+        self.documents = {}
+        self.closed = False
+
+    def is_alive(self) -> bool:
+        return (
+            not self.closed
+            and self.error is None
+            and self.process is not None
+            and self.process.returncode is None
+            and (self.reader is None or not self.reader.done())
+            and (self.process.stdin is None or not self.process.stdin.is_closing())
+        )
 
     async def start(self):
         env = {
@@ -144,43 +181,48 @@ class Peer:
         self.agent.processes[self.identifier] = self.process
         self.reader = asyncio.create_task(self.read_loop())
         self.stderr = asyncio.create_task(self.drain_stderr())
-        response = await self.request(
-            "initialize",
-            {
-                "processId": os.getpid(),
-                "rootUri": self.root.as_uri(),
-                "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name}],
-                "capabilities": {
-                    "general": {"positionEncodings": ["utf-16"]},
-                    "workspace": {
-                        "configuration": True,
-                        "workspaceFolders": True,
-                        "applyEdit": False,
+        try:
+            response = await self.request(
+                "initialize",
+                {
+                    "processId": os.getpid(),
+                    "rootUri": self.root.as_uri(),
+                    "workspaceFolders": [{"uri": self.root.as_uri(), "name": self.root.name}],
+                    "capabilities": {
+                        "general": {"positionEncodings": ["utf-16"]},
+                        "workspace": {
+                            "configuration": True,
+                            "workspaceFolders": True,
+                            "applyEdit": False,
+                        },
+                        "textDocument": {
+                            "publishDiagnostics": {"versionSupport": True},
+                            "hover": {"contentFormat": ["plaintext", "markdown"]},
+                            "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
+                            "diagnostic": {},
+                        },
                     },
-                    "textDocument": {
-                        "publishDiagnostics": {"versionSupport": True},
-                        "hover": {"contentFormat": ["plaintext", "markdown"]},
-                        "documentSymbol": {"hierarchicalDocumentSymbolSupport": True},
-                        "diagnostic": {},
-                    },
+                    "initializationOptions": self.spec.get("initialization_options", {}),
                 },
-                "initializationOptions": self.spec.get("initialization_options", {}),
-            },
-        )
-        if not isinstance(response, dict):
-            raise DevError("LSP_PROTOCOL", "initialize 返回类型无效")
-        capabilities = response.get("capabilities", {})
-        if (
-            not isinstance(capabilities, dict)
-            or capabilities.get("positionEncoding", "utf-16") != "utf-16"
-        ):
-            raise DevError("LSP_ENCODING", "语言服务未使用协商的 UTF-16 坐标")
-        await self.notify("initialized", {})
-        if self.spec.get("settings"):
-            await self.notify(
-                "workspace/didChangeConfiguration", {"settings": self.spec["settings"]}
             )
-        return capabilities
+            if not isinstance(response, dict):
+                raise DevError("LSP_PROTOCOL", "initialize 返回类型无效")
+            capabilities = response.get("capabilities", {})
+            if (
+                not isinstance(capabilities, dict)
+                or capabilities.get("positionEncoding", "utf-16") != "utf-16"
+            ):
+                raise DevError("LSP_ENCODING", "语言服务未使用协商的 UTF-16 坐标")
+            await self.notify("initialized", {})
+            if self.spec.get("settings"):
+                await self.notify(
+                    "workspace/didChangeConfiguration", {"settings": self.spec["settings"]}
+                )
+            self.capabilities = capabilities
+            return capabilities
+        except BaseException:
+            await self.close()
+            raise
 
     async def send(self, message):
         if not self.process or self.process.returncode is not None:
@@ -188,8 +230,12 @@ class Peer:
         body = json.dumps(message, ensure_ascii=False).encode()
         if len(body) > MAX_MESSAGE:
             raise DevError("LSP_LIMIT", "语言服务请求超过大小限制")
-        self.process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
-        await self.process.stdin.drain()
+        try:
+            self.process.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            await self.process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            self.error = DevError("LSP_DISCONNECTED", "语言服务已退出", 409)
+            raise self.error from exc
 
     async def notify(self, method, params):
         await self.send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -308,7 +354,7 @@ class Peer:
             reply["error"] = {"code": -32601, "message": "Unsupported read-only client callback"}
         await self.send(reply)
 
-    async def await_source_diagnostics(self, uri, capabilities):
+    async def await_source_diagnostics(self, uri, capabilities, *, expected_version=1):
         """Do not query a cold workspace index before the seed was analyzed.
 
         A positive protocol observation is required, never an arbitrary sleep or
@@ -324,7 +370,7 @@ class Peer:
         deadline = time.monotonic() + self.spec.get("timeout_seconds", 20)
         while time.monotonic() < deadline:
             reported = self.diagnostics.get(uri)
-            if reported is not None and reported.get("version") in (None, 1):
+            if reported is not None and reported.get("version") in (None, expected_version):
                 return "source_diagnostics_observed"
             if self.error:
                 raise self.error
@@ -337,26 +383,138 @@ class Peer:
             409,
         )
 
+    async def sync_document(
+        self, *, uri: str, language_id: str, source: str, sha: str, stat_info=None
+    ) -> int:
+        mtime_ns = getattr(stat_info, "st_mtime_ns", None)
+        size = getattr(stat_info, "st_size", None)
+        existing = self.documents.get(uri)
+        if existing is None:
+            version = 1
+            self.diagnostics.pop(uri, None)
+            await self.notify(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": language_id,
+                        "version": version,
+                        "text": source,
+                    }
+                },
+            )
+            self.documents[uri] = {
+                "sha256": sha,
+                "version": version,
+                "language_id": language_id,
+                "mtime_ns": mtime_ns,
+                "size": size,
+            }
+            return version
+        if existing["sha256"] == sha:
+            existing["mtime_ns"] = mtime_ns
+            existing["size"] = size
+            return existing["version"]
+        self.diagnostics.pop(uri, None)
+        sync = self.capabilities.get("textDocumentSync")
+        change_kind = sync.get("change", 1) if isinstance(sync, dict) else sync
+        version = existing["version"] + 1
+        if change_kind == 0:
+            await self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+            await self.notify(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": existing["language_id"],
+                        "version": version,
+                        "text": source,
+                    }
+                },
+            )
+        else:
+            await self.notify(
+                "textDocument/didChange",
+                {
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": source}],
+                },
+            )
+        await self.notify(
+            "workspace/didChangeWatchedFiles",
+            {"changes": [{"uri": uri, "type": 2}]},
+        )
+        existing.update(sha256=sha, version=version, mtime_ns=mtime_ns, size=size)
+        return version
+
+    async def _close_missing_document(self, open_uri: str):
+        self.documents.pop(open_uri, None)
+        self.diagnostics.pop(open_uri, None)
+        await self.notify("textDocument/didClose", {"textDocument": {"uri": open_uri}})
+        await self.notify(
+            "workspace/didChangeWatchedFiles",
+            {"changes": [{"uri": open_uri, "type": 3}]},
+        )
+
+    async def refresh_other_documents(self, active_uri: str | None):
+        for open_uri, doc in list(self.documents.items()):
+            if open_uri == active_uri:
+                continue
+            p = _uri_to_path(self.agent.engine, self.root, open_uri)
+            if p is None:
+                await self._close_missing_document(open_uri)
+                continue
+            try:
+                st = p.lstat()
+                if (st.st_mtime_ns, st.st_size) == (doc.get("mtime_ns"), doc.get("size")):
+                    continue
+                raw = self.agent.engine.read_bytes(p)
+                text = self.agent.engine.text(raw)
+                sha = hashlib.sha256(raw).hexdigest()
+            except (DevError, OSError):
+                await self._close_missing_document(open_uri)
+                continue
+            if sha != doc["sha256"]:
+                await self.sync_document(
+                    uri=open_uri,
+                    language_id=doc["language_id"],
+                    source=text,
+                    sha=sha,
+                    stat_info=st,
+                )
+            else:
+                doc["mtime_ns"] = st.st_mtime_ns
+                doc["size"] = st.st_size
+
     async def drain_stderr(self):
         while await self.process.stderr.read(65536):
             pass
 
     async def close(self):
-        if self.process:
+        if self.closed and self.process is None and self.reader is None and self.stderr is None:
+            return
+        self.closed = True
+        process = self.process
+        if process:
             with contextlib.suppress(Exception):
-                if self.process.returncode is None and self.reader and not self.reader.done():
+                if process.returncode is None and self.reader and not self.reader.done():
                     await asyncio.wait_for(self.request("shutdown", None), 1)
                     await self.notify("exit", {})
                     # Give the protocol peer a bounded chance to flush state and
                     # exit normally. Group cleanup below still reaps descendants.
-                    await asyncio.wait_for(self.process.wait(), 1)
-            await self.agent.kill_process(self.process, include_finished=True)
+                    await asyncio.wait_for(process.wait(), 1)
+            await self.agent.kill_process(process, include_finished=True)
         for t in (self.reader, self.stderr):
             if t:
                 t.cancel()
         await asyncio.gather(*(t for t in (self.reader, self.stderr) if t), return_exceptions=True)
-        if self.agent.processes.get(self.identifier) is self.process:
-            self.agent.processes.pop(self.identifier, None)
+        self.reader = None
+        self.stderr = None
+        self.process = None
+        if process is not None:
+            for key, val in list(self.agent.processes.items()):
+                if val is process:
+                    self.agent.processes.pop(key, None)
 
 
 class Projector:
@@ -482,11 +640,538 @@ class Projector:
         return result
 
 
-async def query(agent, identifier, project, args):
+def _uri_to_path(engine, root, uri):
+    try:
+        parsed = urlsplit(uri)
+        if (
+            parsed.scheme != "file"
+            or parsed.netloc not in {"", "localhost"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        text = unquote(parsed.path)
+        if os.name == "nt" and len(text) > 2 and text[0] == "/" and text[2] == ":":
+            text = text[1:]
+        rel = Path(text).relative_to(root).as_posix()
+        actual = engine.path(root, rel, False)
+        return actual if actual.is_file() else None
+    except (ValueError, TypeError, DevError, OSError):
+        return None
+
+
+_FATAL_POOL_ERRORS = frozenset(
+    {
+        "LSP_TIMEOUT",
+        "LSP_DISCONNECTED",
+        "LSP_PROTOCOL",
+        "LSP_LIMIT",
+        "LSP_ENCODING",
+        "LSP_UNAVAILABLE",
+    }
+)
+
+
+class _PoolEntry:
+    def __init__(self, key: tuple[str, str], spec_fingerprint: str, clock):
+        self.key = key
+        self.spec_fingerprint = spec_fingerprint
+        self.lock = asyncio.Lock()
+        self.peer: Peer | None = None
+        self.last_used: float = clock()
+        self.waiters: int = 0
+
+    @property
+    def in_use(self) -> bool:
+        return self.waiters > 0 or self.lock.locked()
+
+    async def close(self):
+        peer = self.peer
+        self.peer = None
+        if peer is not None:
+            await peer.close()
+
+
+class LspPool:
+    """Bounded resident pool of LSP servers keyed by (project_root, language)."""
+
+    def __init__(
+        self,
+        *,
+        idle_ttl: float | None = None,
+        max_instances: int | None = None,
+        clock=time.monotonic,
+    ):
+        self.idle_ttl = (
+            float(idle_ttl)
+            if idle_ttl is not None
+            else env_float("CODEPIER_LSP_IDLE_TTL_SECONDS", DEFAULT_IDLE_TTL, 0.01, 86400.0)
+        )
+        self.max_instances = (
+            int(max_instances)
+            if max_instances is not None
+            else env_int("CODEPIER_LSP_MAX_INSTANCES", DEFAULT_MAX_INSTANCES, 1, 32)
+        )
+        self.clock = clock
+        self._entries: OrderedDict[tuple[str, str], _PoolEntry] = OrderedDict()
+        self._lock = asyncio.Lock()
+        self._reaper_task: asyncio.Task | None = None
+        self._reaper_wake = asyncio.Event()
+        self._loop = None
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+        _LIVE_POOLS.add(self)
+
+    def _sync_loop(self):
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._entries.clear()
+            self._reaper_task = None
+            self._reaper_wake = asyncio.Event()
+            self._loop = loop
+
+    def _ensure_reaper(self):
+        if self.idle_ttl <= 0 or not self._entries:
+            return
+        if self._reaper_task is None or self._reaper_task.done():
+            self._reaper_task = asyncio.create_task(self._reaper_loop())
+        else:
+            self._reaper_wake.set()
+
+    def resident_count(self) -> int:
+        return sum(
+            1
+            for entry in self._entries.values()
+            if entry.peer is not None and entry.peer.is_alive()
+        )
+
+    async def _close_entries(self, entries):
+        for entry in entries:
+            with contextlib.suppress(Exception):
+                await entry.close()
+
+    def _pop_expired_locked(self, now: float) -> list[_PoolEntry]:
+        expired_keys = [
+            key
+            for key, entry in self._entries.items()
+            if not entry.in_use
+            and (
+                entry.peer is None
+                or not entry.peer.is_alive()
+                or (now - entry.last_used) >= self.idle_ttl
+            )
+        ]
+        to_close = [self._entries.pop(key) for key in expired_keys]
+        self.evictions += len(to_close)
+        return to_close
+
+    async def _reaper_loop(self):
+        try:
+            while True:
+                now = self.clock()
+                next_wait = None
+                async with self._lock:
+                    if not self._entries:
+                        self._reaper_task = None
+                        return
+                    to_close = self._pop_expired_locked(now)
+                    for entry in self._entries.values():
+                        if not entry.in_use:
+                            remaining = (entry.last_used + self.idle_ttl) - now
+                            if next_wait is None or remaining < next_wait:
+                                next_wait = remaining
+                    if not self._entries and not to_close:
+                        self._reaper_task = None
+                        return
+                    self._reaper_wake.clear()
+                await self._close_entries(to_close)
+                async with self._lock:
+                    if not self._entries:
+                        self._reaper_task = None
+                        return
+                wait_seconds = (
+                    max(0.01, next_wait) if next_wait is not None else max(0.05, self.idle_ttl)
+                )
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._reaper_wake.wait(), wait_seconds)
+        except asyncio.CancelledError:
+            raise
+
+    async def evict_idle(self) -> int:
+        self._sync_loop()
+        now = self.clock()
+        async with self._lock:
+            to_close = self._pop_expired_locked(now)
+        await self._close_entries(to_close)
+        return len(to_close)
+
+    async def evict_for_memory_pressure(self, *, keep: int = 0) -> int:
+        self._sync_loop()
+        target_keep = max(0, keep)
+        async with self._lock:
+            idle_keys = [key for key, entry in self._entries.items() if not entry.in_use]
+            drop_count = max(0, len(idle_keys) - target_keep)
+            to_close = [self._entries.pop(key) for key in idle_keys[:drop_count]]
+            self.evictions += len(to_close)
+        await self._close_entries(to_close)
+        return len(to_close)
+
+    async def shutdown_all(self) -> int:
+        loop = asyncio.get_running_loop()
+        if self._loop is not None and self._loop is not loop:
+            self._entries.clear()
+            self._reaper_task = None
+            self._loop = loop
+            return 0
+        async with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+            reaper = self._reaper_task
+            self._reaper_task = None
+            self._reaper_wake.set()
+        if reaper is not None and reaper is not asyncio.current_task():
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reaper
+        closed = sum(1 for entry in entries if entry.peer is not None)
+        await self._close_entries(entries)
+        return closed
+
+    async def _checkout(self, key: tuple[str, str], spec_fp: str) -> tuple[_PoolEntry, bool]:
+        self._sync_loop()
+        now = self.clock()
+        async with self._lock:
+            to_close = self._pop_expired_locked(now)
+            entry = self._entries.get(key)
+            if entry is not None and not entry.in_use:
+                if entry.spec_fingerprint != spec_fp or (
+                    entry.peer is not None and not entry.peer.is_alive()
+                ):
+                    to_close.append(self._entries.pop(key))
+                    self.evictions += 1
+                    entry = None
+            if entry is None:
+                if len(self._entries) >= self.max_instances:
+                    lru_key = next(
+                        (k for k, item in self._entries.items() if not item.in_use), None
+                    )
+                    if lru_key is not None:
+                        to_close.append(self._entries.pop(lru_key))
+                        self.evictions += 1
+                if len(self._entries) < self.max_instances:
+                    entry = _PoolEntry(key, spec_fp, self.clock)
+                    self._entries[key] = entry
+                    pooled = True
+                else:
+                    entry = _PoolEntry(key, spec_fp, self.clock)
+                    pooled = False
+            else:
+                self._entries.move_to_end(key)
+                pooled = True
+            entry.waiters += 1
+        await self._close_entries(to_close)
+        return entry, pooled
+
+    async def _spawn_peer(
+        self, entry: _PoolEntry, agent, identifier, project, root, config: dict, spec_fp: str
+    ) -> Peer:
+        self.misses += 1
+        peer = Peer(agent, identifier, project, root, config)
+        await peer.start()
+        entry.peer = peer
+        entry.spec_fingerprint = spec_fp
+        return peer
+
+    async def run_query(
+        self,
+        agent,
+        identifier,
+        project,
+        root,
+        key: tuple[str, str],
+        config: dict,
+        runner,
+    ):
+        spec_fp = _spec_fingerprint(config)
+        phase = getattr(agent, "phase", None)
+        reported_waiting = False
+        while True:
+            entry, pooled = await self._checkout(key, spec_fp)
+            try:
+                if callable(phase) and entry.lock.locked() and not reported_waiting:
+                    phase(
+                        identifier,
+                        "waiting_resource",
+                        queue_reason="lsp_busy",
+                        resource_kinds=["service"],
+                    )
+                    reported_waiting = True
+                async with entry.lock:
+                    if pooled and self._entries.get(key) is not entry:
+                        continue
+                    if reported_waiting:
+                        phase(identifier, "executing")
+                    if entry.peer is not None and (
+                        not entry.peer.is_alive() or entry.spec_fingerprint != spec_fp
+                    ):
+                        await entry.close()
+                    reused = entry.peer is not None
+                    if entry.peer is None:
+                        await self._spawn_peer(
+                            entry, agent, identifier, project, root, config, spec_fp
+                        )
+                    else:
+                        self.hits += 1
+                    try:
+                        agent.processes[identifier] = entry.peer.process
+                        try:
+                            return await runner(entry.peer)
+                        except DevError as exc:
+                            if reused and exc.code == "LSP_DISCONNECTED":
+                                await entry.close()
+                                peer = await self._spawn_peer(
+                                    entry, agent, identifier, project, root, config, spec_fp
+                                )
+                                agent.processes[identifier] = peer.process
+                                return await runner(peer)
+                            raise
+                    except DevError as exc:
+                        if exc.code in _FATAL_POOL_ERRORS or (
+                            entry.peer is not None and not entry.peer.is_alive()
+                        ):
+                            async with self._lock:
+                                if self._entries.get(key) is entry:
+                                    self._entries.pop(key, None)
+                                    self.evictions += 1
+                            await entry.close()
+                        raise
+                    except BaseException:
+                        async with self._lock:
+                            if self._entries.get(key) is entry:
+                                self._entries.pop(key, None)
+                                self.evictions += 1
+                        await entry.close()
+                        raise
+                    finally:
+                        if (
+                            entry.peer is None
+                            or agent.processes.get(identifier) is entry.peer.process
+                        ):
+                            agent.processes.pop(identifier, None)
+                        if not pooled or entry.peer is None or not entry.peer.is_alive():
+                            async with self._lock:
+                                if self._entries.get(key) is entry:
+                                    self._entries.pop(key, None)
+                            await entry.close()
+                        else:
+                            async with self._lock:
+                                if self._entries.get(key) is entry:
+                                    entry.last_used = self.clock()
+                                    self._entries.move_to_end(key)
+                                    self._ensure_reaper()
+            finally:
+                entry.waiters -= 1
+
+
+_DEFAULT_POOL: LspPool | None = None
+
+
+def get_pool(agent=None) -> LspPool:
+    global _DEFAULT_POOL
+    if agent is not None:
+        pool = getattr(agent, "lsp_pool", None)
+        if not isinstance(pool, LspPool):
+            pool = LspPool()
+            agent.lsp_pool = pool
+        return pool
+    if _DEFAULT_POOL is None:
+        _DEFAULT_POOL = LspPool()
+    return _DEFAULT_POOL
+
+
+async def evict_for_memory_pressure(agent=None, *, keep: int = 0) -> int:
+    if agent is not None:
+        pool = getattr(agent, "lsp_pool", None)
+        return await pool.evict_for_memory_pressure(keep=keep) if isinstance(pool, LspPool) else 0
+    loop = asyncio.get_running_loop()
+    total = 0
+    for pool in list(_LIVE_POOLS):
+        if pool._loop is None or pool._loop is loop:
+            total += await pool.evict_for_memory_pressure(keep=keep)
+    return total
+
+
+async def shutdown_all(agent=None) -> int:
+    if agent is not None:
+        pool = getattr(agent, "lsp_pool", None)
+        return await pool.shutdown_all() if isinstance(pool, LspPool) else 0
+    loop = asyncio.get_running_loop()
+    total = 0
+    for pool in list(_LIVE_POOLS):
+        if pool._loop is None or pool._loop is loop:
+            total += await pool.shutdown_all()
+    return total
+
+
+async def _execute_query(
+    peer: Peer,
+    agent,
+    root: Path,
+    args: dict,
+    language: str,
+    source: str | None,
+    sha: str | None,
+    uri: str | None,
+    position: dict | None,
+    stat_info,
+    config: dict,
+):
+    projector = Projector(agent.engine, root, args["limit"])
+    action = args["action"]
+    fresh = True
+    capabilities = peer.capabilities
+    await peer.refresh_other_documents(uri)
+    doc_version = 1
+    if uri:
+        doc_version = await peer.sync_document(
+            uri=uri,
+            language_id=language,
+            source=source,
+            sha=sha,
+            stat_info=stat_info,
+        )
+    params = {"textDocument": {"uri": uri}, "position": position}
+    items = []
+    extra = {}
+    if action in {"workspace_symbols", "references", "incoming_calls", "outgoing_calls"}:
+        extra = {
+            "index_state": await peer.await_source_diagnostics(
+                uri, capabilities, expected_version=doc_version
+            ),
+            "index_seed": args["path"],
+            "workspace_completeness": "language-server reported; not a proof of complete repository coverage",
+        }
+    if action == "workspace_symbols":
+        items = projector.symbols(await peer.request("workspace/symbol", {"query": args["query"]}))
+    elif action == "symbols":
+        items = projector.symbols(
+            await peer.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}),
+            args["path"],
+        )
+    elif action in {"definition", "references"}:
+        if action == "references":
+            params["context"] = {"includeDeclaration": True}
+        result = await peer.request("textDocument/" + action, params)
+        if result is None:
+            result = []
+        if isinstance(result, dict):
+            result = [result]
+        if not isinstance(result, list):
+            raise DevError("LSP_PROTOCOL", "位置响应格式无效")
+        seen = set()
+        for item in result:
+            loc = projector.location(item)
+            if loc:
+                key = json.dumps(loc, sort_keys=True)
+                if key not in seen and projector.take(loc):
+                    items.append(loc)
+                    seen.add(key)
+    elif action == "hover":
+        result = await peer.request("textDocument/hover", params)
+        content = result.get("contents", []) if isinstance(result, dict) else []
+        if not isinstance(content, list):
+            content = [content]
+        text = "\n".join(
+            str(c.get("value", "")) if isinstance(c, dict) else str(c) for c in content
+        )
+        extra = {"text": text[:16000], "text_truncated": len(text) > 16000}
+    elif action == "diagnostics":
+        if capabilities.get("diagnosticProvider"):
+            response = await peer.request("textDocument/diagnostic", {"textDocument": {"uri": uri}})
+            rawitems = response.get("items", []) if isinstance(response, dict) else []
+            fresh = isinstance(response, dict) and response.get("kind") == "full"
+        else:
+            deadline = time.monotonic() + min(config.get("timeout_seconds", 20), 12)
+            while uri not in peer.diagnostics and not peer.error and time.monotonic() < deadline:
+                peer.changed.clear()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        peer.changed.wait(), max(0.01, deadline - time.monotonic())
+                    )
+            reported = peer.diagnostics.get(uri)
+            fresh = bool(reported is not None and reported.get("version") in (None, doc_version))
+            rawitems = reported.get("diagnostics", []) if reported else []
+        for item in rawitems:
+            try:
+                row = {
+                    "path": args["path"],
+                    "range": projector.range(args["path"], item["range"]),
+                    "message": str(item.get("message", ""))[:2000],
+                    "severity": item.get("severity"),
+                    "code": str(item.get("code", ""))[:100],
+                }
+                if projector.take(row):
+                    items.append(row)
+            except (TypeError, ValueError, KeyError, DevError):
+                projector.omitted += 1
+        extra = {
+            "diagnostics_fresh": fresh,
+            "diagnostics_state": "observed" if fresh else "not_received",
+            "not_a_test_run": True,
+        }
+    else:
+        prepared = await peer.request("textDocument/prepareCallHierarchy", params)
+        if prepared is None:
+            prepared = []
+        if not isinstance(prepared, list):
+            raise DevError("LSP_PROTOCOL", "调用层级响应无效")
+        for item in prepared[:8]:
+            if not projector.location(item):
+                continue
+            method = (
+                "callHierarchy/incomingCalls"
+                if action == "incoming_calls"
+                else "callHierarchy/outgoingCalls"
+            )
+            calls = await peer.request(method, {"item": item}) or []
+            if not isinstance(calls, list):
+                raise DevError("LSP_PROTOCOL", "调用层级数据格式错误")
+            for call in calls:
+                target = call.get("from" if action == "incoming_calls" else "to", {})
+                loc = projector.location(target)
+                if loc and projector.take(loc):
+                    items.append(
+                        {
+                            **loc,
+                            "name": str(target.get("name", ""))[:300],
+                            "kind": target.get("kind"),
+                        }
+                    )
+    if source is not None:
+        current = agent.engine.read_bytes(agent.engine.path(root, args["path"], False))
+        fresh = fresh and hashlib.sha256(current).hexdigest() == sha
+    return {
+        "action": action,
+        "language": language,
+        "backend": "lsp",
+        "precision": "semantic",
+        "items": items,
+        "source_sha256": sha,
+        "source_current": fresh,
+        "truncated": projector.omitted > 0,
+        "omitted": projector.omitted,
+        "column_unit": "one-based Unicode scalar",
+        **extra,
+    }
+
+
+async def query(agent, identifier, project, args, *, pool: LspPool | None = None):
     root, spec = agent.engine.root(project)
     if not project.get("allow_tasks") or not spec.get("allow_tasks"):
         raise DevError("TASKS_DISABLED", "语义查询需本机与项目执行许可", 403)
-    language = args["language"] or LANGUAGES.get(Path(args["path"]).suffix.lower())
+    path_arg = args.get("path", "")
+    language = args.get("language") or LANGUAGES.get(Path(path_arg).suffix.lower())
     config = selected(agent.config, project, language)
     if not config:
         raise DevError(
@@ -496,7 +1181,8 @@ async def query(agent, identifier, project, args):
     sha = None
     uri = None
     position = None
-    if args["action"] == "workspace_symbols" and not args["path"]:
+    stat_info = None
+    if args["action"] == "workspace_symbols" and not path_arg:
         # A file-scoped protocol barrier also works when a workspace query had
         # no path. Discover a bounded allowed seed, never a private config file.
         from agent.coding_reviews import excluded
@@ -507,178 +1193,60 @@ async def query(agent, identifier, project, args):
         ):
             if stat.S_ISREG(info.st_mode) and LANGUAGES.get(candidate.suffix.lower()) == language:
                 args = {**args, "path": relative, "line": 1, "column": 1}
+                path_arg = relative
                 break
-        if not args["path"]:
+        if not path_arg:
             raise DevError(
                 "LSP_WORKSPACE_SEED",
                 "未找到可分析的授权源码，请提供本语言的项目相对路径作为初始化依据",
                 409,
             )
-    if args["path"]:
-        path = agent.engine.path(root, args["path"], False)
+    if path_arg:
+        path = agent.engine.path(root, path_arg, False)
         raw = agent.engine.read_bytes(path)
+        stat_info = path.lstat()
         source = agent.engine.text(raw)
         sha = hashlib.sha256(raw).hexdigest()
         uri = path.as_uri()
-        if args["expected_sha256"] and sha != args["expected_sha256"]:
+        expected_sha256 = args.get("expected_sha256", "")
+        if expected_sha256 and sha != expected_sha256:
             raise DevError("LSP_SOURCE_CHANGED", "源码 SHA 已变化，请重新读取后定位", 409)
         lines = source.split("\n")
-        line = args["line"] - 1
-        column = args["column"] - 1
+        line = args.get("line", 1) - 1
+        column = args.get("column", 1) - 1
         if not 0 <= line < len(lines) or not 0 <= column <= len(lines[line]):
             raise DevError("LSP_POSITION", "查询位置超出源码")
         position = {"line": line, "character": len(lines[line][:column].encode("utf-16-le")) // 2}
-    peer = Peer(agent, identifier, project, root, config)
-    projector = Projector(agent.engine, root, args["limit"])
-    action = args["action"]
-    fresh = True
+    normalized_args = {
+        "limit": 100,
+        "query": "",
+        **args,
+        "path": path_arg,
+    }
+    active_pool = pool or get_pool(agent)
+    key = (str(root), _server_language(agent.config, language))
     try:
         async with asyncio.timeout(min(config.get("timeout_seconds", 20) * 3, 120)):
-            capabilities = await peer.start()
-            if uri:
-                await peer.notify(
-                    "textDocument/didOpen",
-                    {
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": language,
-                            "version": 1,
-                            "text": source,
-                        }
-                    },
-                )
-            params = {"textDocument": {"uri": uri}, "position": position}
-            items = []
-            extra = {}
-            if action in {"workspace_symbols", "references", "incoming_calls", "outgoing_calls"}:
-                extra = {
-                    "index_state": await peer.await_source_diagnostics(uri, capabilities),
-                    "index_seed": args["path"],
-                    "workspace_completeness": "language-server reported; not a proof of complete repository coverage",
-                }
-            if action == "workspace_symbols":
-                items = projector.symbols(
-                    await peer.request("workspace/symbol", {"query": args["query"]})
-                )
-            elif action == "symbols":
-                items = projector.symbols(
-                    await peer.request(
-                        "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
-                    ),
-                    args["path"],
-                )
-            elif action in {"definition", "references"}:
-                if action == "references":
-                    params["context"] = {"includeDeclaration": True}
-                result = await peer.request("textDocument/" + action, params)
-                if result is None:
-                    result = []
-                if isinstance(result, dict):
-                    result = [result]
-                if not isinstance(result, list):
-                    raise DevError("LSP_PROTOCOL", "位置响应格式无效")
-                seen = set()
-                for item in result:
-                    loc = projector.location(item)
-                    if loc:
-                        key = json.dumps(loc, sort_keys=True)
-                        if key not in seen and projector.take(loc):
-                            items.append(loc)
-                            seen.add(key)
-            elif action == "hover":
-                result = await peer.request("textDocument/hover", params)
-                content = result.get("contents", []) if isinstance(result, dict) else []
-                if not isinstance(content, list):
-                    content = [content]
-                text = "\n".join(
-                    str(c.get("value", "")) if isinstance(c, dict) else str(c) for c in content
-                )
-                extra = {"text": text[:16000], "text_truncated": len(text) > 16000}
-            elif action == "diagnostics":
-                if capabilities.get("diagnosticProvider"):
-                    response = await peer.request(
-                        "textDocument/diagnostic", {"textDocument": {"uri": uri}}
-                    )
-                    rawitems = response.get("items", []) if isinstance(response, dict) else []
-                    fresh = isinstance(response, dict) and response.get("kind") == "full"
-                else:
-                    deadline = time.monotonic() + min(config.get("timeout_seconds", 20), 12)
-                    while (
-                        uri not in peer.diagnostics
-                        and not peer.error
-                        and time.monotonic() < deadline
-                    ):
-                        peer.changed.clear()
-                        with contextlib.suppress(asyncio.TimeoutError):
-                            await asyncio.wait_for(
-                                peer.changed.wait(), max(0.01, deadline - time.monotonic())
-                            )
-                    reported = peer.diagnostics.get(uri)
-                    fresh = bool(reported is not None and reported.get("version") in (None, 1))
-                    rawitems = reported.get("diagnostics", []) if reported else []
-                for item in rawitems:
-                    try:
-                        row = {
-                            "path": args["path"],
-                            "range": projector.range(args["path"], item["range"]),
-                            "message": str(item.get("message", ""))[:2000],
-                            "severity": item.get("severity"),
-                            "code": str(item.get("code", ""))[:100],
-                        }
-                        if projector.take(row):
-                            items.append(row)
-                    except (TypeError, ValueError, KeyError, DevError):
-                        projector.omitted += 1
-                extra = {
-                    "diagnostics_fresh": fresh,
-                    "diagnostics_state": "observed" if fresh else "not_received",
-                    "not_a_test_run": True,
-                }
-            else:
-                prepared = await peer.request("textDocument/prepareCallHierarchy", params)
-                if prepared is None:
-                    prepared = []
-                if not isinstance(prepared, list):
-                    raise DevError("LSP_PROTOCOL", "调用层级响应无效")
-                for item in prepared[:8]:
-                    if not projector.location(item):
-                        continue
-                    method = (
-                        "callHierarchy/incomingCalls"
-                        if action == "incoming_calls"
-                        else "callHierarchy/outgoingCalls"
-                    )
-                    calls = await peer.request(method, {"item": item}) or []
-                    if not isinstance(calls, list):
-                        raise DevError("LSP_PROTOCOL", "调用层级数据格式错误")
-                    for call in calls:
-                        target = call.get("from" if action == "incoming_calls" else "to", {})
-                        loc = projector.location(target)
-                        if loc and projector.take(loc):
-                            items.append(
-                                {
-                                    **loc,
-                                    "name": str(target.get("name", ""))[:300],
-                                    "kind": target.get("kind"),
-                                }
-                            )
-            if source is not None:
-                current = agent.engine.read_bytes(agent.engine.path(root, args["path"], False))
-                fresh = fresh and hashlib.sha256(current).hexdigest() == sha
-            return {
-                "action": action,
-                "language": language,
-                "backend": "lsp",
-                "precision": "semantic",
-                "items": items,
-                "source_sha256": sha,
-                "source_current": fresh,
-                "truncated": projector.omitted > 0,
-                "omitted": projector.omitted,
-                "column_unit": "one-based Unicode scalar",
-                **extra,
-            }
+            return await active_pool.run_query(
+                agent,
+                identifier,
+                project,
+                root,
+                key,
+                config,
+                lambda peer: _execute_query(
+                    peer,
+                    agent,
+                    root,
+                    normalized_args,
+                    language,
+                    source,
+                    sha,
+                    uri,
+                    position,
+                    stat_info,
+                    config,
+                ),
+            )
     except asyncio.TimeoutError as exc:
         raise DevError("LSP_TIMEOUT", "语义查询超过总期限，已回收语言服务", 409) from exc
-    finally:
-        await peer.close()

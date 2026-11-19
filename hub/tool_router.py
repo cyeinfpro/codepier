@@ -5,6 +5,7 @@ is not authorization: both backends revalidate at execution boundaries.
 """
 
 from __future__ import annotations
+from collections import OrderedDict
 from dataclasses import dataclass
 from hub import iam
 from hub.principal import refresh_principal
@@ -24,6 +25,65 @@ class ToolRoute:
 class ToolRouter:
     def __init__(self, store, gateway):
         self.store, self.gateway = store, gateway
+        self._collision_cache = OrderedDict()
+        self._native_names_cache = {}
+
+    def _native_tool_names(self, collaboration_enabled, authorization_mode):
+        key = (collaboration_enabled, authorization_mode)
+        cached = self._native_names_cache.get(key)
+        if cached is None:
+            names = {item["name"] for item in tool_definitions(authorization=authorization_mode)}
+            if collaboration_enabled:
+                from shared.collaboration_contracts import tool_definitions as collaboration_tools
+
+                names.update(
+                    item["name"] for item in collaboration_tools(authorization=authorization_mode)
+                )
+            cached = frozenset(names)
+            self._native_names_cache[key] = cached
+        return cached
+
+    def _check_unified_collision(self, principal, collaboration_enabled):
+        epoch = (
+            self.store.epoch_stamp()
+            if hasattr(self.store, "epoch_stamp")
+            else getattr(self.store, "session_revision", 0)
+        )
+        gw_rev = (
+            bool(getattr(self.gateway, "enabled", True)),
+            getattr(self.gateway, "catalog_revision", None),
+            id(getattr(self.gateway, "__dict__", {}).get("tools")),
+        )
+        cache_key = (
+            principal.space_id,
+            principal.user_id,
+            principal.grant_id,
+            principal.role_id,
+            principal.authorization_mode,
+            epoch,
+            gw_rev,
+            collaboration_enabled,
+        )
+        if cache_key in self._collision_cache:
+            self._collision_cache.move_to_end(cache_key)
+            return
+        external = self.gateway.tools(principal)
+        from shared.public_collaboration import LEGACY_TOOLS
+        from shared.unified_contracts import UNIFIED_TOOLS
+
+        ext_names = [item["name"] for item in external]
+        if len(ext_names) != len(set(ext_names)):
+            raise DevError("TOOL_NAME_COLLISION", "工具发布名称冲突；未选择任意后端", 409)
+        ext_set = set(ext_names)
+        if collaboration_enabled and (ext_set & LEGACY_TOOLS):
+            raise DevError("TOOL_NAME_COLLISION", "远端工具不能覆盖兼容协作调用", 409)
+        if ext_set & UNIFIED_TOOLS:
+            raise DevError("TOOL_NAME_COLLISION", "远端工具不能覆盖统一工具 query/act", 409)
+        if ext_set & self._native_tool_names(collaboration_enabled, principal.authorization_mode):
+            raise DevError("TOOL_NAME_COLLISION", "工具发布名称冲突；未选择任意后端", 409)
+        self._collision_cache[cache_key] = True
+        while len(self._collision_cache) > 1024:
+            self._collision_cache.popitem(last=False)
 
     @iam.read_decision
     def definitions(self, principal, *, discovery=True, profile="unified", schemas="full"):
@@ -81,9 +141,12 @@ class ToolRouter:
             if schemas == "lean":
                 from shared.public_collaboration import PUBLIC_TOOLS, lean_input_schema
 
-                for item in native:
-                    if item["name"] in PUBLIC_TOOLS:
-                        item["inputSchema"] = lean_input_schema(item["inputSchema"])
+                native = [
+                    {**item, "inputSchema": lean_input_schema(item["inputSchema"])}
+                    if item["name"] in PUBLIC_TOOLS
+                    else item
+                    for item in native
+                ]
         return principal, native, external
 
     def list_tools(self, principal, cursor=None, profile="unified", schemas="full"):
@@ -103,6 +166,7 @@ class ToolRouter:
         }
         return result
 
+    @iam.read_decision
     def resolve(self, principal, name):
         if name in INCOMING_UPLOAD_TOOLS:
             raise DevError(
@@ -112,13 +176,17 @@ class ToolRouter:
             raise DevError("TOOL_REMOVED", "旧工具已移除，请使用 " + REPLACED_MCP_TOOLS[name], 404)
         if name in ADMIN_TOOLS:
             raise DevError("OWNER_REQUIRED", "此操作只接受已授权的管理入口", 403)
-        principal, native, external = self.definitions(principal, discovery=False)
         from shared.unified_contracts import UNIFIED_TOOLS
 
         if name in UNIFIED_TOOLS:
+            principal = refresh_principal(self.store, principal)
+            collaboration = getattr(self.store, "collaboration", None)
+            collab_enabled = bool(collaboration is not None and collaboration.config.enabled)
+            self._check_unified_collision(principal, collab_enabled)
             # A call-shape adapter over the native facades; each translated call
             # is re-resolved and re-authorized by the same native handlers.
             return ToolRoute("native", name)
+        principal, native, external = self.definitions(principal, discovery=False)
         from shared.public_collaboration import LEGACY_TOOLS
 
         collaboration = getattr(self.store, "collaboration", None)

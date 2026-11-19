@@ -543,18 +543,31 @@ def bound_batch_response(
     if not _batch_reads(public) and not (output_budget and output_records(public, tool_name)):
         return payload
 
+    budget = READ_BATCH_PAYLOAD_BYTES
+
+    def _encoded_size(target):
+        return len(
+            json.dumps(target, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+
+    if _encoded_size(payload) <= budget and (
+        not output_budget
+        or not any(
+            row.get("output") and not row.get("output_budget_limited")
+            for row in output_records(public, tool_name)
+        )
+    ):
+        return payload
+
     payload = copy.deepcopy(payload)
     rendered = payload["result"]
     public = copy.deepcopy(public)
     batches = _batch_reads(public)
-    budget = READ_BATCH_PAYLOAD_BYTES
 
     def size():
-        return len(
-            json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        )
+        return _encoded_size(payload)
 
     def render():
         _render_text(
@@ -804,6 +817,7 @@ def result(
     unified=False,
     unified_views=None,
     mirror="full",
+    bound=True,
 ):
     from shared.mcp_presentation import token_view, raw_output_sources
 
@@ -884,6 +898,8 @@ def result(
         tool_name=name,
         fold=verbosity != "full",
     )
+    if not bound:
+        return rendered
     return bound_batch_response(
         {"jsonrpc": "2.0", "id": None, "result": rendered},
         output_budget=view >= 2 and verbosity != "full",

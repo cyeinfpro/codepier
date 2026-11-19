@@ -173,8 +173,10 @@ def prune(journal, *, now=None, **settings):
                 journal.db.execute(
                     "DELETE FROM execution_stages WHERE operation_id=?", (row["id"],)
                 )
-        if _active(journal):
-            return removed
+        active = _active(journal)
+    journal.forget_retired_terminals(row["id"] for row in rows)
+    if active:
+        return removed
 
     checkpoints = _checkpoint_candidates(journal, now, settings)
     orphans = _orphan_candidates(journal, now, settings)

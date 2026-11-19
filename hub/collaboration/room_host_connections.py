@@ -495,6 +495,9 @@ class HostConnections:
                     },
                 )
                 self.store.after_commit(self.c.relay_hints.wake)
+                loops = getattr(self.c, "loops", None)
+                if loops is not None:
+                    self.store.after_commit(loops.wake_reconcile)
                 return {
                     "host_connection_id": host["id"],
                     "state": "revoked",

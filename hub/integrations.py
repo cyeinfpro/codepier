@@ -1,7 +1,7 @@
 """Hub-owned admission, compact handoff and authorized timing evidence."""
 
 from __future__ import annotations
-import hmac, json, secrets, time
+import hmac, json, math, secrets, time
 from shared.util import DevError
 from hub.mcp_request_audit import request_id
 from shared.contracts import TOOLS, MUTATING
@@ -37,6 +37,8 @@ class HubIntegrations:
         self.previous = {}
         self.active = {}
         self.write_errors = 0
+        self._finishes_since_prune = 0
+        self._last_prune_at = time.monotonic()
         self.store.execute(
             "CREATE TABLE IF NOT EXISTS integration_admission (project TEXT PRIMARY KEY,root TEXT NOT NULL,device TEXT NOT NULL,paused INTEGER NOT NULL,last_operation TEXT NOT NULL,updated REAL NOT NULL,phase TEXT NOT NULL)"
         )
@@ -271,6 +273,8 @@ class HubIntegrations:
         now = time.monotonic()
         started = now if started is None else started
         transition = "no_host_correlation" if key is None else "gap_unavailable"
+        overlap_ids = []
+        prior_update = None
         if meaningful and key:
             prior = self.previous.pop(key, None)
             if self.active.get(key):
@@ -279,34 +283,42 @@ class HubIntegrations:
                 # Neither can establish the next serial timing anchor.
                 for existing in self.active[key].values():
                     existing["transition"] = "overlap"
-                    self.store.execute(
-                        "UPDATE mcp_activity SET transition='overlap' WHERE id=?", (existing["id"],)
-                    )
+                    overlap_ids.append(existing["id"])
             elif prior:
                 delta = max(0, round((now - prior["ended"]) * 1000))
                 cycle = max(0, round((now - prior["started"]) * 1000))
+                prior_update = (delta, cycle, prior["id"])
+                transition = "serial"
+        with self.store.transaction():
+            for offset in range(0, len(overlap_ids), 400):
+                batch = overlap_ids[offset : offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                self.store.execute(
+                    f"UPDATE mcp_activity SET transition='overlap' WHERE id IN ({placeholders})",
+                    tuple(batch),
+                )
+            if prior_update is not None:
                 self.store.execute(
                     "UPDATE mcp_activity SET next_call_gap_ms=?,cycle_ms=? WHERE id=?",
-                    (delta, cycle, prior["id"]),
+                    prior_update,
                 )
-                transition = "serial"
-        row = self.store.execute(
-            "INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                project["id"],
-                project["root"],
-                project["device_id"],
-                principal.grant_id,
-                principal.actor,
-                key,
-                name,
-                time.time() - (now - started),
-                "running",
-                transition,
-                int(meaningful),
-                request_id(),
-            ),
-        )
+            row = self.store.execute(
+                "INSERT INTO mcp_activity(project,root,device,grant_id,actor,window_key,tool,started,status,transition,meaningful,request_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    project["id"],
+                    project["root"],
+                    project["device_id"],
+                    principal.grant_id,
+                    principal.actor,
+                    key,
+                    name,
+                    time.time() - (now - started),
+                    "running",
+                    transition,
+                    int(meaningful),
+                    request_id(),
+                ),
+            )
         trace = {
             "id": row.lastrowid,
             "key": key,
@@ -331,7 +343,17 @@ class HubIntegrations:
             return
         try:
             metrics = trace.setdefault("token_usage", usage())
-            metrics["output"] = estimate_output(result)
+            output_metric = estimate_output(result)
+            metrics["output"] = output_metric
+            wire_tokens = output_metric.get("wire_tokens_est")
+            semantic_tokens = output_metric.get("semantic_tokens_est")
+            overhead_ratio = output_metric.get("mirror_overhead_ratio")
+            if isinstance(overhead_ratio, (int, float)) and not math.isfinite(overhead_ratio):
+                overhead_ratio = None
+                output_metric["mirror_overhead_ratio"] = None
+            metrics["wire_tokens_est"] = wire_tokens
+            metrics["semantic_tokens_est"] = semantic_tokens
+            metrics["mirror_overhead_ratio"] = overhead_ratio
         except Exception:
             self.write_errors += 1
 
@@ -349,35 +371,42 @@ class HubIntegrations:
             active.pop(trace["id"], None)
             if not active:
                 self.active.pop(key, None)
+        if (
+            trace["meaningful"]
+            and key
+            and not self.active.get(key)
+            and actual == "complete"
+            and trace["transition"] != "overlap"
+        ):
+            self.previous[key] = {"id": trace["id"], "started": trace["started"], "ended": now}
+        if len(self.previous) > 1000:
+            self.previous.pop(next(iter(self.previous)))
+        self._finishes_since_prune += 1
+        should_prune = self._finishes_since_prune >= 500 or (now - self._last_prune_at) >= 300.0
         try:
-            self.store.execute(
-                "UPDATE mcp_activity SET service_ms=?,status=?,operation_id=? WHERE id=?",
-                (
-                    max(0, round((now - trace["started"]) * 1000)),
-                    actual,
-                    trace["operation_id"],
-                    trace["id"],
-                ),
-            )
-            if (
-                trace["meaningful"]
-                and key
-                and not self.active.get(key)
-                and actual == "complete"
-                and trace["transition"] != "overlap"
-            ):
-                self.previous[key] = {"id": trace["id"], "started": trace["started"], "ended": now}
-            if len(self.previous) > 1000:
-                self.previous.pop(next(iter(self.previous)))
-            # Bounded retained metadata only; no tool arguments or outputs.
-            self.store.execute(
-                "DELETE FROM mcp_activity WHERE id < (SELECT COALESCE(MAX(id),0)-10000 FROM mcp_activity)"
-            )
-        except Exception:
-            self.write_errors += 1
-        try:
-            if self.usage_metrics and trace.get("token_usage"):
-                self.usage_metrics.record(trace["id"], trace["token_usage"])
+            with self.store.transaction():
+                self.store.execute(
+                    "UPDATE mcp_activity SET service_ms=?,status=?,operation_id=? WHERE id=?",
+                    (
+                        max(0, round((now - trace["started"]) * 1000)),
+                        actual,
+                        trace["operation_id"],
+                        trace["id"],
+                    ),
+                )
+                if should_prune:
+                    # Bounded retained metadata only; no tool arguments or outputs.
+                    self.store.execute(
+                        "DELETE FROM mcp_activity WHERE id < (SELECT COALESCE(MAX(id),0)-10000 FROM mcp_activity)"
+                    )
+                    self._finishes_since_prune = 0
+                    self._last_prune_at = now
+                if self.usage_metrics and trace.get("token_usage"):
+                    try:
+                        with self.store.savepoint():
+                            self.usage_metrics.record(trace["id"], trace["token_usage"])
+                    except Exception:
+                        self.write_errors += 1
         except Exception:
             self.write_errors += 1
 

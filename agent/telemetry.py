@@ -28,19 +28,46 @@ STAGES = (
 )
 
 
+_PENDING_DB_LIMIT = 8192
+
+
 class AgentTelemetry:
-    def __init__(self, journal, *, process_diagnostics=False):
+    def __init__(self, journal, *, process_diagnostics=False, deferred_persist=False):
         self.journal = journal
         self.process_diagnostics = process_diagnostics
+        self.deferred_persist = bool(deferred_persist)
         self.starts = OrderedDict()
         self._last = {}
         self.errors = 0
         self._process_pending = OrderedDict()
         self._process_lock = threading.Lock()
+        self._mem_lock = threading.Lock()
+        self._stages: OrderedDict[str, list[dict]] = OrderedDict()
+        self._next_seq: dict[str, int] = {}
+        self._pending_db: list[tuple[str, int, str, int, str]] = []
+        self._dropped = 0
         with journal.lock, journal.db:
             journal.db.execute(
                 "CREATE TABLE IF NOT EXISTS execution_stages (operation_id TEXT NOT NULL, seq INTEGER NOT NULL, stage TEXT NOT NULL, elapsed_ms INTEGER NOT NULL, detail TEXT NOT NULL, PRIMARY KEY(operation_id,seq))"
             )
+            for row in journal.db.execute(
+                "SELECT operation_id,seq,stage,elapsed_ms,detail FROM execution_stages "
+                "WHERE operation_id IN (SELECT id FROM calls WHERE status IN ('accepted','running','retryable')) "
+                "ORDER BY operation_id,seq"
+            ):
+                op_id = row[0]
+                stages = self._stages.setdefault(op_id, [])
+                stages.append(
+                    {
+                        "seq": row[1],
+                        "stage": row[2],
+                        "elapsed_ms": row[3],
+                        "detail": json.loads(row[4]),
+                    }
+                )
+                if len(stages) > 32:
+                    del stages[:-32]
+                self._next_seq[op_id] = row[1]
 
     def process_event(self, identifier, stage, **detail):
         """Bounded, best-effort memory only: never delay a workload on disk I/O."""
@@ -71,6 +98,85 @@ class AgentTelemetry:
         for stage, elapsed, detail in pending:
             self.record(identifier, stage, _elapsed_ms=elapsed, _flush=False, **detail)
 
+    def _record_memory_locked(
+        self,
+        identifier,
+        stage,
+        seq,
+        elapsed,
+        allowed,
+        signature,
+        now,
+        *,
+        queue_persist: bool,
+    ):
+        self.starts.setdefault(identifier, now)
+        self.starts.move_to_end(identifier)
+        self._next_seq[identifier] = seq
+        entry = {"seq": seq, "stage": stage, "elapsed_ms": elapsed, "detail": allowed}
+        stages = self._stages.setdefault(identifier, [])
+        stages.append(entry)
+        if len(stages) > 32:
+            del stages[:-32]
+        self._stages.move_to_end(identifier)
+        self._last[identifier] = signature
+        if queue_persist:
+            if len(self._pending_db) < _PENDING_DB_LIMIT:
+                self._pending_db.append((identifier, seq, stage, elapsed, json.dumps(allowed)))
+            else:
+                self._dropped += 1
+        if stage == "result_ready":
+            self.starts.pop(identifier, None)
+            self._last.pop(identifier, None)
+        while len(self.starts) > 4096:
+            expired, _ = self.starts.popitem(last=False)
+            self._last.pop(expired, None)
+        while len(self._stages) > 4096:
+            expired, _ = self._stages.popitem(last=False)
+            self._next_seq.pop(expired, None)
+
+    def _record_sync(self, identifier, stage, allowed, signature, _elapsed_ms):
+        with self._mem_lock:
+            if stage.startswith("waiting_") and self._last.get(identifier) == signature:
+                return False
+            start = self.starts.get(identifier)
+        now = time.monotonic()
+        elapsed = (
+            max(0, round((now - (now if start is None else start)) * 1000))
+            if _elapsed_ms is None
+            else _elapsed_ms
+        )
+        payload = json.dumps(allowed)
+        try:
+            with self.journal.lock, self.journal.db:
+                seq = self.journal.db.execute(
+                    "SELECT COALESCE(MAX(seq),0)+1 FROM execution_stages WHERE operation_id=?",
+                    (identifier,),
+                ).fetchone()[0]
+                self.journal.db.execute(
+                    "INSERT INTO execution_stages VALUES (?,?,?,?,?)",
+                    (identifier, seq, stage, elapsed, payload),
+                )
+                self.journal.db.execute(
+                    "DELETE FROM execution_stages WHERE operation_id=? AND seq<?",
+                    (identifier, seq - 31),
+                )
+        except (sqlite3.Error, OSError):
+            self.errors += 1
+            return False
+        with self._mem_lock:
+            self._record_memory_locked(
+                identifier,
+                stage,
+                seq,
+                elapsed,
+                allowed,
+                signature,
+                now,
+                queue_persist=False,
+            )
+        return True
+
     def record(self, identifier, stage, *, _elapsed_ms=None, _flush=True, **detail):
         if stage not in STAGES:
             return False
@@ -92,46 +198,91 @@ class AgentTelemetry:
             stage,
             json.dumps({k: v for k, v in allowed.items() if k != "queue_age_ms"}, sort_keys=True),
         )
+        if not self.deferred_persist:
+            return self._record_sync(identifier, stage, allowed, signature, _elapsed_ms)
+        now = time.monotonic()
+        with self._mem_lock:
+            if stage.startswith("waiting_") and self._last.get(identifier) == signature:
+                return False
+            start = self.starts.get(identifier)
+            seq = self._next_seq.get(identifier, 0) + 1
+            elapsed = (
+                max(0, round((now - (now if start is None else start)) * 1000))
+                if _elapsed_ms is None
+                else _elapsed_ms
+            )
+            self._record_memory_locked(
+                identifier,
+                stage,
+                seq,
+                elapsed,
+                allowed,
+                signature,
+                now,
+                queue_persist=True,
+            )
+            return True
+
+    @property
+    def dropped(self) -> int:
+        """Lifetime count of deferred records lost before a durable commit."""
+        with self._mem_lock:
+            return self._dropped
+
+    def has_pending(self) -> bool:
+        with self._mem_lock:
+            return bool(self._pending_db)
+
+    def flush(self) -> int:
+        with self._mem_lock:
+            if not self._pending_db:
+                return 0
+            batch = self._pending_db[:]
+            self._pending_db.clear()
+        affected: dict[str, int] = {}
+        for op_id, seq, _, _, _ in batch:
+            if seq > affected.get(op_id, 0):
+                affected[op_id] = seq
         try:
             with self.journal.lock, self.journal.db:
-                if stage.startswith("waiting_") and self._last.get(identifier) == signature:
-                    return False
-                start = self.starts.setdefault(identifier, time.monotonic())
-                self.starts.move_to_end(identifier)
-                seq = self.journal.db.execute(
-                    "SELECT COALESCE(MAX(seq),0)+1 FROM execution_stages WHERE operation_id=?",
-                    (identifier,),
-                ).fetchone()[0]
-                self.journal.db.execute(
-                    "INSERT INTO execution_stages VALUES (?,?,?,?,?)",
-                    (
-                        identifier,
-                        seq,
-                        stage,
-                        max(0, round((time.monotonic() - start) * 1000))
-                        if _elapsed_ms is None
-                        else _elapsed_ms,
-                        json.dumps(allowed),
-                    ),
+                self.journal.db.executemany(
+                    "INSERT OR REPLACE INTO execution_stages VALUES (?,?,?,?,?)", batch
                 )
-                self.journal.db.execute(
-                    "DELETE FROM execution_stages WHERE operation_id=? AND seq<?",
-                    (identifier, seq - 31),
-                )
-            self._last[identifier] = signature
-            if stage == "result_ready":
-                self.starts.pop(identifier, None)
-                self._last.pop(identifier, None)
-            while len(self.starts) > 4096:
-                expired, _ = self.starts.popitem(last=False)
-                self._last.pop(expired, None)
-            return True
+                for op_id, max_seq in affected.items():
+                    self.journal.db.execute(
+                        "DELETE FROM execution_stages WHERE operation_id=? AND seq<?",
+                        (op_id, max_seq - 31),
+                    )
+            return len(batch)
         except (sqlite3.Error, OSError):
-            self.errors += 1
+            with self._mem_lock:
+                for op_id in affected:
+                    self._last.pop(op_id, None)
+                self._dropped += len(batch)
+                self.errors += 1
+            return 0
+
+    def has_cached(self, identifier) -> bool:
+        if not self.deferred_persist:
             return False
+        with self._mem_lock:
+            return identifier in self._stages
 
     def snapshot(self, identifier):
         self._flush_process(identifier)
+        if self.deferred_persist:
+            with self._mem_lock:
+                cached = self._stages.get(identifier)
+                if cached is not None:
+                    return [
+                        {
+                            "seq": item["seq"],
+                            "stage": item["stage"],
+                            "elapsed_ms": item["elapsed_ms"],
+                            "detail": dict(item["detail"]),
+                        }
+                        for item in cached
+                    ]
         try:
             with self.journal.lock:
                 rows = self.journal.db.execute(

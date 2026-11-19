@@ -320,7 +320,7 @@ async def test_workspace_resolution_stays_off_loop_at_all_runner_rechecks(local_
     frame['args']['workspace_id'] = 'a' * 32
     await asyncio.wait_for(agent.handle(frame), 3)
     assert agent.journal.status('operation')['result']['ok']
-    assert len(observed) == 3
+    assert len(observed) == 2
     assert (root / 'created.txt').read_text() == 'once'
 
 

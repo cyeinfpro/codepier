@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 from shared.util import DevError
 
-PROBE_TIMEOUT = 15
+PROBE_TIMEOUT = 30
 READ_TOOLS = frozenset(
     {
         "open_workspace",
@@ -29,6 +29,13 @@ READ_TOOLS = frozenset(
         "project_knowledge_query",
     }
 )
+
+
+def effective_probe_timeout(timeout=None):
+    """Bound probe operations by remaining wait budget, capped at PROBE_TIMEOUT (30s)."""
+    if timeout is None:
+        return PROBE_TIMEOUT
+    return min(float(PROBE_TIMEOUT), max(0.0, float(timeout)))
 
 
 def eligible(tool, args):
@@ -47,7 +54,17 @@ def worker_command(entry="main"):
     ]
 
 
-async def probe(engine, tool, project, args, *, phase="execute", expected_root=None, worker=None):
+async def probe(
+    engine,
+    tool,
+    project,
+    args,
+    *,
+    phase="execute",
+    expected_root=None,
+    worker=None,
+    timeout_seconds=None,
+):
     payload = {
         "config": engine.config,
         "config_path": str(engine.config_path),
@@ -60,9 +77,11 @@ async def probe(engine, tool, project, args, *, phase="execute", expected_root=N
     }
     if worker is None:
         base, command = worker_command()
-        result = await run_worker(command, json.dumps(payload).encode(), cwd=base)
+        result = await run_worker(
+            command, json.dumps(payload).encode(), cwd=base, timeout=timeout_seconds
+        )
     else:
-        result = await worker.request(payload)
+        result = await worker.request(payload, timeout_seconds=timeout_seconds)
     if not result["ok"]:
         error = result["error"]
         raise DevError(
@@ -71,9 +90,19 @@ async def probe(engine, tool, project, args, *, phase="execute", expected_root=N
     return result["data"]
 
 
-async def root(engine, tool, project, args, *, worker=None, expected_root=None):
+async def root(
+    engine, tool, project, args, *, worker=None, expected_root=None, timeout_seconds=None
+):
+    kwargs = {"timeout_seconds": timeout_seconds} if timeout_seconds is not None else {}
     result = await probe(
-        engine, tool, project, args, phase="root", worker=worker, expected_root=expected_root
+        engine,
+        tool,
+        project,
+        args,
+        phase="root",
+        worker=worker,
+        expected_root=expected_root,
+        **kwargs,
     )
     return Path(result["root"]), result["spec"]
 
@@ -112,7 +141,7 @@ async def run_worker(command, payload, *, cwd, timeout=None):  # noqa: ASYNC109 
         # Cancellation during creation must still recover and reap that child.
         process = await asyncio.shield(spawning)
         output, _ = await asyncio.wait_for(
-            process.communicate(payload), PROBE_TIMEOUT if timeout is None else timeout
+            process.communicate(payload), effective_probe_timeout(timeout)
         )
         if process.returncode:
             raise DevError("PROJECT_DISCOVERY_FAILED", "项目概览读取进程异常退出")
@@ -157,12 +186,25 @@ def decode_result(output):
 class ReadPool:
     """Lease whole subprocesses. No paths, credentials or returned data live here."""
 
-    def __init__(self, limit=4):
-        self.limit = limit
+    def __init__(self, limit=None, *, scheduler=None):
+        from shared.scheduler_config import validate_scheduler
+
+        self._scheduler = scheduler
+        self._limit = validate_scheduler({})["read_limit"] if limit is None else limit
         self.idle = []
         self.leased = 0
         self.epoch = 0
         self.closed = False
+
+    @property
+    def limit(self):
+        if self._scheduler is not None:
+            return self._scheduler.config["read_limit"]
+        return self._limit
+
+    @limit.setter
+    def limit(self, value):
+        self._limit = value
 
     def take(self):
         if self.closed or self.leased >= self.limit:
@@ -238,12 +280,13 @@ class ReadWorker:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def abandon_admission(self):
+    async def abandon_admission(self, timeout_seconds=None):
         """Normal contention fallback: EOF, coverage flush, then reap before queuing."""
         if not self.admission or self.index != 1 or self.failed:
             raise DevError("INVALID_REQUEST", "仅已完成的准入会话可正常结束")
+        budget = effective_probe_timeout(timeout_seconds)
         if self.epoch is not None:
-            async with asyncio.timeout(PROBE_TIMEOUT):
+            async with asyncio.timeout(budget):
                 self.process.stdin.write(json.dumps({"release_lease": self.epoch}).encode() + b"\n")
                 await self.process.stdin.drain()
                 ack = decode_result(await self.process.stdout.readline())
@@ -254,21 +297,21 @@ class ReadWorker:
         self.failed = True
         self.process.stdin.close()
         try:
-            async with asyncio.timeout(PROBE_TIMEOUT):
+            async with asyncio.timeout(budget):
                 await self.process.wait()
         except TimeoutError as exc:
             raise DevError("PROJECT_DISCOVERY_TIMEOUT", "项目准入读取进程结束超时") from exc
         if self.process.returncode:
             raise DevError("PROJECT_DISCOVERY_FAILED", "项目准入读取进程异常退出")
 
-    async def request(self, payload):
-        phases = (("admission",) if self.admission else ()) + ("root", "root", "execute")
+    async def request(self, payload, *, timeout_seconds=None):
+        phases = (("admission",) if self.admission else ()) + ("root", "execute")
         if self.failed or self.index >= len(phases) or payload.get("phase") != phases[self.index]:
             self.failed = True
             raise DevError("INVALID_REQUEST", "独立读取会话阶段乱序或重复执行")
         self.index += 1
         try:
-            async with asyncio.timeout(PROBE_TIMEOUT):
+            async with asyncio.timeout(effective_probe_timeout(timeout_seconds)):
                 if self.epoch is not None:
                     payload = {**payload, "lease_epoch": self.epoch}
                 self.process.stdin.write(json.dumps(payload).encode() + b"\n")
@@ -399,7 +442,7 @@ def pool_main():
 def _session_main(admission, epoch=None, first=None):
     identity = None
     admitted_root = None
-    phases = (("admission",) if admission else ()) + ("root", "root", "execute")
+    phases = (("admission",) if admission else ()) + ("root", "execute")
     for phase in phases:
         line = first if first is not None else sys.stdin.buffer.readline(64 * 1024 * 1024 + 1)
         first = None

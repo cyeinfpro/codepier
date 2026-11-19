@@ -656,11 +656,20 @@ class FileEngine:
 
     def tree(self, project, args):
         root, _ = self.root(project)
-        start = self.path(root, args["path"])
+        start = self.path(root, args.get("path", "."))
         if not start.is_dir():
             raise DevError("NOT_DIRECTORY", "目录不存在", 404)
         scope = args.get("scope", "git")
-        per_dir = args.get("per_dir", 40)
+        depth = args.get("depth", 2)
+        offset = args.get("offset", 0)
+        limit = args.get("limit", 300)
+        per_dir_raw = args.get("per_dir", 40)
+        per_dir = 40 if per_dir_raw is None else per_dir_raw
+        if type(per_dir) is not int or per_dir < 1:
+            raise DevError("INVALID_ARGUMENTS", "per_dir 必须是正整数", 422)
+        # Single-directory listing (depth == 1) paginates strictly via offset/limit;
+        # per-directory sibling folding applies only to multi-level trees (depth > 1).
+        enforce_per_dir = depth is None or depth > 1
         indexed = self.git_candidates(root, start, paths_only=True) if scope == "git" else None
         visible = None
         scan_error = None
@@ -670,7 +679,6 @@ class FileEngine:
             visible = set()
             base = start.relative_to(root).as_posix()
             prefix = "" if base == "." else base + "/"
-            depth = args["depth"]
             for path in paths:
                 if path.startswith(prefix):
                     parts = path[len(prefix) :].split("/", depth)[:depth]
@@ -699,23 +707,24 @@ class FileEngine:
             for p, rel, st in self.walk(
                 root,
                 start,
-                args["depth"],
+                depth,
                 exclude=excluded,
                 deadline=time.monotonic() + 8,
                 descend=lambda rel: rel not in pruned,
                 indexed_children=indexed_children,
             ):
-                parent = rel.rpartition("/")[0] or "."
-                shown[parent] = shown.get(parent, 0) + 1
-                if shown[parent] > per_dir:
-                    omitted[parent] = omitted.get(parent, 0) + 1
-                    if stat.S_ISDIR(st.st_mode):
-                        pruned.add(rel)
-                    continue
+                if enforce_per_dir:
+                    parent = rel.rpartition("/")[0] or "."
+                    shown[parent] = shown.get(parent, 0) + 1
+                    if shown[parent] > per_dir:
+                        omitted[parent] = omitted.get(parent, 0) + 1
+                        if stat.S_ISDIR(st.st_mode):
+                            pruned.add(rel)
+                        continue
                 index += 1
-                if index <= args["offset"]:
+                if index <= offset:
                     continue
-                if len(rows) >= args["limit"]:
+                if len(rows) >= limit:
                     more = True
                     break
                 is_file = stat.S_ISREG(st.st_mode)
@@ -732,10 +741,26 @@ class FileEngine:
                 raise
             scan_error = exc.code
             walk_limited = True
+        next_offset = offset + len(rows) if (more or walk_limited) and rows else None
+        page_truncated = next_offset is not None
+        per_dir_capped = bool(omitted)
+        truncated = bool(page_truncated or per_dir_capped or scan_error)
+        next_hint = None
+        if per_dir_capped:
+            capped_dirs = ", ".join(sorted(omitted)[:5])
+            if len(omitted) > 5:
+                capped_dirs += f" (+{len(omitted) - 5} more)"
+            next_hint = (
+                f"Directories capped at per_dir={per_dir}: {capped_dirs}. "
+                "Call tree with depth=1 and path=<directory> (or increase per_dir) to paginate all entries."
+            )
         result = {
             "entries": rows,
-            "truncated": bool(more or scan_error or omitted),
-            "next_offset": args["offset"] + len(rows) if (more or walk_limited) and rows else None,
+            "truncated": truncated,
+            "page_truncated": page_truncated,
+            "per_dir_capped": per_dir_capped,
+            "next_offset": next_offset,
+            "next_hint": next_hint,
             "scan_scope": "git_index" if indexed is not None else "filesystem_walk",
             "scan_error": scan_error,
         }
@@ -789,7 +814,7 @@ class FileEngine:
             "next_start_line": end + 1 if end < len(lines) else None,
         }
 
-    def git_candidates(self, root, start, *, max_files=20000, paths_only=False):
+    def git_candidates(self, root, start, *, max_files=20000, paths_only=False, after_path=None):
         """Bounded Git enumeration; content still passes every filesystem guard."""
         if scan_ignored(start.relative_to(root).as_posix()) or not (root / ".git").exists():
             return None
@@ -838,6 +863,27 @@ class FileEngine:
         rows, seen = [], set()
         start_name = start.relative_to(root).as_posix()
         prefix = "" if start_name == "." else start_name + "/"
+        if paths_only:
+            for name in raw.split(b"\0"):
+                if time.monotonic() > deadline:
+                    capped = True
+                    break
+                if not name:
+                    continue
+                try:
+                    rel = name.decode("utf-8")
+                    if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
+                        continue
+                    if rel not in seen:
+                        if len(rows) >= max_files:
+                            capped = True
+                            break
+                        seen.add(rel)
+                        rows.append(rel)
+                except (UnicodeError, DevError, OSError):
+                    continue
+            return rows, capped
+        candidates = []
         for name in raw.split(b"\0"):
             if time.monotonic() > deadline:
                 capped = True
@@ -846,24 +892,26 @@ class FileEngine:
                 continue
             try:
                 rel = name.decode("utf-8")
-                if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
-                    continue
-                if paths_only:
-                    if rel not in seen:
-                        if len(rows) >= max_files:
-                            capped = True
-                            break
-                        seen.add(rel)
-                        rows.append(rel)
-                    continue
-                path = self.path(root, rel, False)
-                if rel in seen:
-                    continue
+            except UnicodeError:
+                continue
+            if not rel.startswith(prefix) or scan_ignored(rel[len(prefix) :]):
+                continue
+            if rel not in seen:
                 seen.add(rel)
+                candidates.append(rel)
+        candidates.sort()
+        for rel in candidates:
+            if time.monotonic() > deadline:
+                capped = True
+                break
+            if after_path is not None and rel <= after_path:
+                continue
+            try:
+                path = self.path(root, rel, False)
                 info = path.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
                     continue
-            except (UnicodeError, DevError, OSError):
+            except (DevError, OSError):
                 continue
             if len(rows) >= max_files:
                 capped = True
@@ -871,28 +919,86 @@ class FileEngine:
             rows.append((path, rel, info))
         return rows, capped
 
+    @staticmethod
+    def _walk_file_key(start_rel: str, rel: str):
+        sub = rel[len(start_rel) + 1 :] if start_rel != "." else rel
+        parts = sub.split("/")
+        return tuple(
+            (1 if i < len(parts) - 1 else 0, part.casefold(), part) for i, part in enumerate(parts)
+        )
+
+    @staticmethod
+    def _walk_dir_key(start_rel: str, rel: str):
+        sub = rel[len(start_rel) + 1 :] if start_rel != "." else rel
+        parts = sub.split("/")
+        return tuple((1, part.casefold(), part) for part in parts)
+
     def search(self, project, args):
         root, _ = self.root(project)
-        start = self.path(root, args["path"])
+        start = self.path(root, args.get("path", "."))
+        start_rel = start.relative_to(root).as_posix()
+        resume_after_raw = args.get("resume_after_path") or ""
+        resume_after = relative_path(resume_after_raw, False) if resume_after_raw else None
         budget = time.monotonic()
         scan_scope, candidates_capped = "filesystem_walk", False
+        resume_key = None
         if start.is_file():
-            entries = [(start, start.relative_to(root).as_posix(), start.stat())]
+            if resume_after is not None:
+                if resume_after != start_rel:
+                    raise DevError("INVALID_PATH", "resume_after_path 必须位于搜索 path 范围内")
+                entries = []
+            else:
+                entries = [(start, start_rel, start.stat())]
             scan_scope = "explicit_file"
         elif start.is_dir():
-            candidates = self.git_candidates(root, start)
+            if (
+                resume_after is not None
+                and start_rel != "."
+                and not resume_after.startswith(start_rel + "/")
+            ):
+                raise DevError("INVALID_PATH", "resume_after_path 必须位于搜索 path 范围内")
+            candidates = self.git_candidates(root, start, after_path=resume_after)
             if candidates is None:
-                entries = self.walk(root, start, deadline=budget + 8, files_first=True)
+                if resume_after is not None:
+                    resume_key = self._walk_file_key(start_rel, resume_after)
+
+                    def descend_after(rel):
+                        dkey = self._walk_dir_key(start_rel, rel)
+                        return dkey >= resume_key[: len(dkey)]
+
+                    entries = self.walk(
+                        root,
+                        start,
+                        deadline=budget + 8,
+                        files_first=True,
+                        descend=descend_after,
+                    )
+                else:
+                    entries = self.walk(root, start, deadline=budget + 8, files_first=True)
             else:
                 entries, candidates_capped = candidates
                 scan_scope = "git_index"
         else:
             raise DevError("NOT_FOUND", "搜索路径不存在或不是普通文件/目录", 404)
-        needle = args["query"] if args["case_sensitive"] else args["query"].casefold()
+        expected_scope = args.get("resume_scan_scope")
+        if expected_scope is not None and expected_scope != scan_scope:
+            raise DevError(
+                "SEARCH_SCAN_SCOPE_CHANGED",
+                "搜索范围的遍历方式已变化。请清除游标和 offset 后重新搜索。",
+                409,
+                expected_scan_scope=expected_scope,
+                scan_scope=scan_scope,
+            )
+        case_sensitive = args.get("case_sensitive", False)
+        file_glob = args.get("file_glob", "*")
+        offset = args.get("offset", 0)
+        limit = args.get("limit", 100)
+        needle = args["query"] if case_sensitive else args["query"].casefold()
         results, seen, read_total, matches, skipped = [], 0, 0, 0, 0
-        truncated, page_full, scan_error = False, False, None
+        scan_limited, page_full, scan_error = False, False, None
         skipped_reasons = {}
         context_bytes = 0
+        last_scanned_path = None
         iterator = iter(entries)
         while True:
             try:
@@ -902,13 +1008,20 @@ class FileEngine:
             except DevError as exc:
                 if exc.code not in {"SCAN_LIMIT", "SCAN_FAILED"}:
                     raise
-                truncated, scan_error = True, exc.code
+                scan_limited, scan_error = True, exc.code
                 break
-            if not stat.S_ISREG(st.st_mode) or not fnmatch.fnmatchcase(rel, args["file_glob"]):
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if resume_key is not None and self._walk_file_key(start_rel, rel) <= resume_key:
+                continue
+            if scan_scope == "git_index" and resume_after is not None and rel <= resume_after:
+                continue
+            if not fnmatch.fnmatchcase(rel, file_glob):
+                last_scanned_path = rel
                 continue
             seen += 1
             if seen > 20000 or read_total >= 32 * MAX_FILE or time.monotonic() - budget > 8:
-                truncated = True
+                scan_limited = True
                 break
             try:
                 self.path(root, rel, False)
@@ -918,27 +1031,29 @@ class FileEngine:
                 skipped += 1
                 reason = exc.code if isinstance(exc, DevError) else "FILESYSTEM_ERROR"
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                last_scanned_path = rel
                 continue
             read_total += len(data)
             if read_total > 32 * MAX_FILE:
-                truncated = True
+                scan_limited = True
                 break
             # Preserve encoding/error accounting, but avoid splitting and walking
             # every line of files that cannot match.
-            haystack = text if args["case_sensitive"] else text.casefold()
+            haystack = text if case_sensitive else text.casefold()
             if needle not in haystack:
+                last_scanned_path = rel
                 continue
             lines = text.splitlines()
             radius = args.get("context_lines", 0)
             checksum = digest(data) if radius or args.get("include_sha256") else None
             for n, line in enumerate(lines, 1):
-                if needle not in (line if args["case_sensitive"] else line.casefold()):
+                if needle not in (line if case_sensitive else line.casefold()):
                     continue
                 matches += 1
-                if matches <= args["offset"]:
+                if matches <= offset:
                     continue
-                if len(results) >= args["limit"]:
-                    truncated = page_full = True
+                if len(results) >= limit:
+                    page_full = True
                     break
                 match = {
                     "path": rel,
@@ -952,15 +1067,18 @@ class FileEngine:
                     match.update(search_context(lines, n, radius))
                     context_bytes += len(json.dumps(match, ensure_ascii=False).encode())
                     if results and context_bytes > 32 * 1024:
-                        truncated = page_full = True
+                        page_full = True
                         break
                 results.append(match)
-            if truncated:
+            if page_full:
                 break
-        if candidates_capped or (truncated and not page_full):
-            scan_status = "scan_limited"
-        elif page_full:
+            last_scanned_path = rel
+        if page_full:
+            scan_limited = False
             scan_status = "page_limited"
+        elif candidates_capped or scan_limited:
+            scan_limited = True
+            scan_status = "scan_limited"
         elif not seen:
             scan_status = "no_files"
         elif seen == skipped:
@@ -969,12 +1087,22 @@ class FileEngine:
             scan_status = "end_of_results" if matches else "no_matches"
         else:
             scan_status = "matches"
-        truncated = truncated or candidates_capped or bool(skipped_reasons)
+        truncated = bool(page_full or scan_limited)
+        next_offset = offset + len(results) if page_full and results else None
+        next_resume_path = (
+            last_scanned_path
+            if scan_limited
+            else resume_after
+            if page_full and resume_after is not None
+            else None
+        )
         hint = None
         if scan_status == "no_files":
             hint = "path 和 file_glob 范围内没有可扫描文件。file_glob 匹配项目相对路径。"
-        elif truncated:
-            hint = "结果不完整；检查分页或缩小 path / file_glob。"
+        elif scan_limited:
+            hint = "扫描达到预算上限；使用 resume_after_path 和 resume_scan_scope 继续扫描，或缩小 path / file_glob。"
+        elif page_full:
+            hint = "结果已分页；使用 next_offset 和 resume_scan_scope 继续翻页。"
         return {
             "matches": results,
             "scanned_files": min(seen, 20000),
@@ -984,7 +1112,8 @@ class FileEngine:
             "scan_status": scan_status,
             "skipped_reasons": skipped_reasons,
             "hint": hint,
-            "next_offset": args["offset"] + len(results) if truncated and results else None,
+            "next_offset": next_offset,
+            "resume_after_path": next_resume_path,
             "scan_error": scan_error,
             "limits": "1 MiB per file / 20,000 files / 100,000 directory entries / 32 MiB / 8 seconds per call; narrow the path if the scan limit is reached. Protected paths, generated build caches (including .build) and unsupported filenames are excluded.",
         }

@@ -8,8 +8,9 @@ The panel's own persistent chat SSE is an independent application protocol.
 """
 
 from __future__ import annotations
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from shared.config import env_csv
-from hub.db_worker import database_endpoint
 from hub.principal import refresh_principal
 from shared.public_collaboration import PUBLIC_TOOLS, LEGACY_TOOLS
 
@@ -57,6 +58,120 @@ from shared.mcp_protocol import (
 # Public legacy name retained for existing integrations importing it.
 VERSIONS = set(LEGACY)
 
+_METERING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hub-metering")
+
+_COLLAB_META_KEYS = (
+    "action",
+    "ok",
+    "status",
+    "collaboration_state",
+    "can_manage",
+    "room_id",
+    "thread_id",
+    "message_id",
+    "decision_id",
+    "handoff_id",
+    "channel_id",
+    "cursor",
+    "next_cursor",
+    "has_more",
+    "handle",
+    "next",
+    "next_call",
+)
+
+
+def _store_run_read(store):
+    return getattr(store, "run_read", store.run)
+
+
+def _num_wait(value, default=0.0):
+    return (
+        float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else default
+    )
+
+
+def _expected_wait_seconds(name, arguments, plan, runtime):
+    if plan is not None:
+        return float(plan.wait or 0)
+    if name == "process" and arguments.get("operation", "list") == "wait":
+        return _num_wait(arguments.get("wait_seconds"), 5.0)
+    if name == "operations_wait":
+        return _num_wait(arguments.get("wait_seconds"), 30.0)
+    if name == "exec":
+        opts = arguments.get("options") if isinstance(arguments.get("options"), dict) else {}
+        explicit = max(
+            _num_wait(arguments.get("yield_seconds"), 0.0),
+            _num_wait(opts.get("yield_seconds"), 0.0),
+        )
+        if explicit > 0:
+            return explicit
+        target = arguments.get("target")
+        if isinstance(target, str) and target.startswith("vps:"):
+            return 10.0
+    tool = TOOLS.get(name)
+    if tool is not None and not getattr(tool, "local", True):
+        return float(getattr(runtime, "wait_seconds", 0) or 0)
+    return _num_wait(arguments.get("wait_seconds"), 0.0)
+
+
+async def _invoke_cancellable_wait(runtime, name, arguments, principal, stop):
+    if stop.is_set():
+        return await runtime.invoke(name, {**arguments, "wait_seconds": 0}, principal)
+    wait_task = asyncio.create_task(runtime.invoke(name, arguments, principal))
+    cancel_task = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait({wait_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if wait_task in done:
+            return wait_task.result()
+    finally:
+        for task in (wait_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(wait_task, cancel_task, return_exceptions=True)
+    return await runtime.invoke(name, {**arguments, "wait_seconds": 0}, principal)
+
+
+def _compact_error_structured(error_code, value):
+    recovery = value.get("recovery") if isinstance(value, dict) else None
+    summary = None
+    if isinstance(recovery, dict):
+        category = recovery.get("category") or ""
+        next_action = recovery.get("next_action") or ""
+        summary = (
+            f"{category}: {next_action}"
+            if category and next_action
+            else (next_action or category or None)
+        )
+    stub = {
+        "error_code": (value.get("error_code") if isinstance(value, dict) else None) or error_code
+    }
+    if summary:
+        stub["recovery_summary"] = summary
+    if isinstance(value, dict) and value.get("next_call") is not None:
+        stub["next_call"] = value["next_call"]
+    return stub
+
+
+def _compact_collab_structured(value):
+    if not isinstance(value, dict):
+        return {"content_in": "text"}
+    if value.get("error"):
+        err = value.get("error")
+        code = (
+            value.get("error_code")
+            or (err.get("code") if isinstance(err, dict) else None)
+            or "ERROR"
+        )
+        return {**_compact_error_structured(code, value), "content_in": "text"}
+    stub = {"content_in": "text"}
+    for key in _COLLAB_META_KEYS:
+        if key in value and value[key] is not None:
+            stub[key] = value[key]
+    if "collaboration_state" in value and "room" in value and value["room"] is None:
+        stub["room"] = None
+    return stub
+
 
 def presentation_options(query):
     """Resolve presentation settings independently of request authentication."""
@@ -66,7 +181,7 @@ def presentation_options(query):
     schemas = query.get("schemas", "full")
     if schemas not in {"full", "lean", "none"}:
         raise ValueError("Unknown schemas mode; choose full, lean or none")
-    default_view = os.getenv("CODEPIER_MCP_DEFAULT_VIEW", "2") if profile == "unified" else "2"
+    default_view = os.getenv("CODEPIER_MCP_DEFAULT_VIEW", "3") if profile == "unified" else "2"
     view = query.get("view", default_view)
     verbosity = query.get("verbosity", "lean")
     lean_v3 = profile == "unified" and view == "3" and verbosity == "lean"
@@ -97,7 +212,7 @@ async def _begin_project_trace(runtime, principal, name, metadata, arguments):
     alias = arguments.get("project")
     if name in COLLABORATION_TOOLS or not isinstance(alias, str) or not alias:
         return None
-    project = await runtime.store.run(runtime.project, alias, principal)
+    project = await _store_run_read(runtime.store)(runtime.project, alias, principal)
     try:
         return await runtime.store.run(
             runtime.integrations.begin, principal, project, name, metadata, arguments
@@ -123,9 +238,37 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
     router = APIRouter()
     tools = ToolRouter(runtime.store, runtime.gateway)
     tasks = TaskService(runtime)
-    from hub.mcp_streams import Streams
+    from hub.mcp_streams import Streams, wait_cancelled
 
     streams = Streams()
+    run_read = _store_run_read(runtime.store)
+    public_url_cache = {"key": None, "value": None}
+    origin_env_cache = {"raw": None, "origins": ()}
+
+    async def cached_public_url():
+        rev = getattr(runtime.store, "config_revision", None)
+        cache_key = (
+            rev,
+            os.getenv("MCP_PUBLIC_URL", ""),
+            os.getenv("HUB_PUBLIC_URL", ""),
+        )
+        if rev is not None and public_url_cache["key"] == cache_key:
+            return public_url_cache["value"]
+        value = await run_read(public_url)
+        if rev is not None:
+            public_url_cache["key"] = cache_key
+            public_url_cache["value"] = value
+        return value
+
+    def _sync_epoch_stamp():
+        fn = getattr(runtime.store, "epoch_stamp", None)
+        return fn() if callable(fn) else None
+
+    async def _current_epoch_stamp():
+        fn = getattr(runtime.store, "async_epoch_stamp", None)
+        if callable(fn):
+            return await fn()
+        return _sync_epoch_stamp()
 
     async def observe(principal, stage, **details):
         try:
@@ -151,11 +294,18 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             },
         )
 
-    def origin_allowed(request):
+    async def origin_allowed(request, base_url=None):
         origin = request.headers.get("origin")
+        if not origin:
+            return True
+        raw_env = os.getenv("MCP_ALLOWED_ORIGINS", "")
+        if origin_env_cache["raw"] != raw_env:
+            origin_env_cache["raw"] = raw_env
+            origin_env_cache["origins"] = tuple(v for v in env_csv("MCP_ALLOWED_ORIGINS") if v)
+        base = base_url if base_url is not None else await cached_public_url()
         allowed = {
             f"{request.url.scheme}://{request.url.netloc}",
-            public_url(),
+            base,
             "https://chatgpt.com",
             "https://chat.openai.com",
             "https://claude.ai",
@@ -163,14 +313,13 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
             "https://gemini.google.com",
             "https://antigravity.google",
             "https://antigravity.google.com",
+            *origin_env_cache["origins"],
         }
-        allowed.update(v for v in env_csv("MCP_ALLOWED_ORIGINS") if v)
-        return not origin or origin in allowed
+        return origin in allowed
 
     @router.options("/mcp")
-    @database_endpoint(runtime.store)
-    def options(request: Request):
-        if not origin_allowed(request):
+    async def options(request: Request):
+        if not await origin_allowed(request):
             return failure(None, -32000, "Origin not allowed", 403)
         return Response(
             status_code=204,
@@ -183,9 +332,8 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         )
 
     @router.api_route("/mcp", methods=["GET", "DELETE"])
-    @database_endpoint(runtime.store)
-    def unused(request: Request):
-        if not origin_allowed(request):
+    async def unused(request: Request):
+        if not await origin_allowed(request):
             return failure(None, -32000, "Origin not allowed", 403)
         return Response(status_code=405, headers={"Allow": "POST, OPTIONS"})
 
@@ -194,10 +342,10 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         return await streams.respond(request, handle)
 
     async def handle(request, stream_ready):
-        if not await runtime.store.run(origin_allowed, request):
+        public_base = await cached_public_url()
+        if not await origin_allowed(request, public_base):
             return failure(None, -32000, "Origin not allowed", 403)
         origin = request.headers.get("origin")
-        public_base = await runtime.store.run(public_url)
         request_public_url = lambda: public_base
         authorization = request.query_params.get("authorization", "fixed")
         if authorization not in {"fixed", "role"}:
@@ -207,7 +355,13 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         auth_scope = ROLE_SCOPE if authorization == "role" else " ".join(LEGACY_OAUTH_SCOPES)
         mark("authenticate")
         try:
-            principal = await runtime.store.run_read(auth.bearer, request)
+
+            def _authenticate():
+                stamp = _sync_epoch_stamp()
+                return auth.bearer(request), stamp
+
+            principal, auth_stamp = await run_read(_authenticate)
+            auth_checked_at = time.monotonic()
         except DevError as exc:
             metadata = public_base + "/.well-known/oauth-protected-resource/mcp"
             if authorization == "role":
@@ -306,8 +460,28 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     return failure(None, -32602, "Invalid cancellation requestId", 400)
                 streams.cancel(request, principal, target)
             return Response(status_code=202)
+
+        async def _revalidate_principal(*, refresh_only=False):
+            nonlocal principal, auth_stamp, auth_checked_at
+            stamp = await _current_epoch_stamp()
+            elapsed = time.monotonic() - auth_checked_at
+            if auth_stamp is not None and stamp == auth_stamp and (refresh_only or elapsed < 1.0):
+                return principal
+            if refresh_only:
+                principal = await run_read(refresh_principal, runtime.store, principal)
+            else:
+
+                def _reauth():
+                    next_stamp = _sync_epoch_stamp()
+                    return auth.bearer(request), next_stamp
+
+                principal, stamp = await run_read(_reauth)
+            auth_stamp = stamp
+            auth_checked_at = time.monotonic()
+            return principal
+
         try:
-            principal = await runtime.store.run(refresh_principal, runtime.store, principal)
+            principal = await _revalidate_principal(refresh_only=True)
             await observe(principal, "authentication")
             if profile == "unified" and method in {"initialize", "server/discover"}:
                 from hub.unified_tools import runtime_directory
@@ -357,7 +531,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                         principal,
                         unified=profile == "unified",
                     )
-                    principal = await runtime.store.run_read(auth.bearer, request)
+                    principal = await _revalidate_principal()
                     if method == "events/list":
                         mark("event_catalog_returned", event_count=len(result["events"]))
                 except CallbackEndpointError as exc:
@@ -382,26 +556,38 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     )
                 task_id = task_arguments(method, params)
                 result = await tasks.call(method, task_id, principal)
-                principal = await runtime.store.run_read(auth.bearer, request)
-                # Refresh the original credential again after cooperative cancel.
-                latest = await runtime.store.run(
-                    tasks.get,
-                    task_id,
-                    principal,
-                    presentation={
+                principal = await _revalidate_principal()
+                task_presentation = (
+                    {
+                        "view": 2,
+                        "text_mode": "json",
+                        "mirror": "full",
+                        "verbosity": verbosity,
+                        "output_mode": output_mode,
+                    }
+                    if profile == "unified"
+                    and not ({"view", "text", "mirror"} & set(request.query_params.keys()))
+                    else {
                         "view": int(view),
                         "text_mode": text_mode,
                         "mirror": mirror,
                         "verbosity": verbosity,
                         "output_mode": output_mode,
-                    },
+                    }
+                )
+                # Refresh the original credential again after cooperative cancel.
+                latest = await runtime.store.run(
+                    tasks.get,
+                    task_id,
+                    principal,
+                    presentation=task_presentation,
                 )
                 if method == "tasks/get":
                     result = latest
                 if method == "tasks/cancel":
                     mark("task_cancel_acknowledged", operation_id=task_id)
             elif method == "tools/list":
-                result = await runtime.store.run(
+                result = await run_read(
                     tools.list_tools, principal, params.get("cursor"), profile, schemas
                 )
             elif method == "tools/call":
@@ -418,8 +604,18 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 route = None
                 plan = None
                 requested_name, requested_arguments = name, arguments
+                # Legacy/non-unified tools called directly on /mcp keep view=2/text=json/mirror=full
+                # outputSchema compatibility unless the caller explicitly sets view/text/mirror.
+                if (
+                    profile == "unified"
+                    and requested_name not in UNIFIED_TOOLS
+                    and not ({"view", "text", "mirror"} & set(request.query_params.keys()))
+                ):
+                    (profile, schemas, view, verbosity, text_mode, mirror, output_mode) = (
+                        presentation_options({**request.query_params, "view": "2"})
+                    )
                 try:
-                    route = await runtime.store.run(tools.resolve, principal, name)
+                    route = await run_read(tools.resolve, principal, name)
                     mark("route_resolved", tool=name)
                     if route.backend == "remote":
                         mark("invoke_started")
@@ -452,25 +648,78 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                             runtime, principal, name, metadata, arguments
                         )
                         request.state.codepier_call_trace = trace
-                        if (
-                            plan is not None
-                            and plan.wait
-                            and (
-                                "progressToken" in metadata
-                                or request.query_params.get("stream") == "1"
-                                and plan.wait > 10
+                        expected_wait = _expected_wait_seconds(name, arguments, plan, runtime)
+                        stop = asyncio.Event()
+                        cancel_token = streams.register_cancel(request, principal, identifier, stop)
+                        promote_timer = None
+                        work_task = asyncio.current_task()
+                        reset_wait = wait_cancelled.set(stop)
+                        try:
+                            wants_immediate_sse = (
+                                "progressToken" in metadata and expected_wait > 0
+                            ) or (
+                                request.query_params.get("stream") == "1"
+                                and expected_wait > streams.grace_seconds
                             )
-                        ):
-                            stream_ready.set_result(streams.begin(request, principal, identifier))
-                        started = time.monotonic()
-                        mark("invoke_started")
-                        if plan is not None:
-                            value, name, arguments = await unified_tools.execute(
-                                runtime, plan, principal
-                            )
-                        else:
-                            value = await runtime.invoke(name, arguments, principal)
-                        principal = await runtime.store.run_read(auth.bearer, request)
+                            if wants_immediate_sse:
+                                promoted = streams.begin(
+                                    request,
+                                    principal,
+                                    identifier,
+                                    stop=stop,
+                                    cancel_token=cancel_token,
+                                    task=work_task,
+                                )
+                                cancel_token = None
+                                stream_ready.set_result(promoted)
+                            elif expected_wait > streams.grace_seconds:
+
+                                def _promote_sse():
+                                    nonlocal cancel_token
+                                    if stream_ready.done() or work_task is None or work_task.done():
+                                        return
+                                    try:
+                                        promoted = streams.begin(
+                                            request,
+                                            principal,
+                                            identifier,
+                                            stop=stop,
+                                            cancel_token=cancel_token,
+                                            task=work_task,
+                                        )
+                                        cancel_token = None
+                                        stream_ready.set_result(promoted)
+                                    except DevError:
+                                        stop.set()
+
+                                promote_timer = asyncio.get_running_loop().call_later(
+                                    streams.grace_seconds, _promote_sse
+                                )
+                            started = time.monotonic()
+                            mark("invoke_started")
+                            if plan is not None:
+                                value, name, arguments = await unified_tools.execute(
+                                    runtime, plan, principal
+                                )
+                            elif (
+                                name == "operations_wait"
+                                or (
+                                    name == "process"
+                                    and arguments.get("operation", "list") == "wait"
+                                )
+                            ) and expected_wait > 0:
+                                value = await _invoke_cancellable_wait(
+                                    runtime, name, arguments, principal, stop
+                                )
+                            else:
+                                value = await runtime.invoke(name, arguments, principal)
+                        finally:
+                            if promote_timer is not None:
+                                promote_timer.cancel()
+                            if cancel_token is not None:
+                                streams.unregister_cancel(cancel_token)
+                            wait_cancelled.reset(reset_wait)
+                        principal = await _revalidate_principal()
                         trace = trace or await _begin_poll_trace(
                             runtime, principal, name, metadata, arguments, value, started
                         )
@@ -483,9 +732,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                         if name == "get_access_context":
                             value = {
                                 **value,
-                                "gateway": await runtime.store.run(
-                                    runtime.gateway.context, principal
-                                ),
+                                "gateway": await run_read(runtime.gateway.context, principal),
                             }
                         if name in COLLABORATION_TOOLS:
                             media = value.pop("_mcp_media_content", [])
@@ -511,12 +758,13 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                                     },
                                     *media,
                                 ],
-                                "structuredContent": value,
+                                "structuredContent": (
+                                    _compact_collab_structured(value) if mirror == "meta" else value
+                                ),
                                 "isError": bool(value.get("error")),
                             }
                         else:
-                            result = await runtime.store.run(
-                                mcp_apps.attach,
+                            result = mcp_apps.attach(
                                 core_result(
                                     name,
                                     arguments,
@@ -529,6 +777,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                                     unified=plan,
                                     unified_views=unified_views,
                                     mirror=mirror,
+                                    bound=False,
                                 ),
                                 name,
                                 arguments,
@@ -609,7 +858,11 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                                 ),
                             }
                         ],
-                        "structuredContent": value,
+                        "structuredContent": (
+                            _compact_error_structured(exc.code, value)
+                            if mirror == "meta"
+                            else value
+                        ),
                         "isError": True,
                     }
                     if name == "get_profile" or route and route.backend == "remote":
@@ -640,15 +893,6 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                             + '"'
                         )
                         result["_meta"] = {"mcp/www_authenticate": [challenge]}
-                if trace:
-                    try:
-                        await runtime.store.run(
-                            runtime.integrations.capture_output,
-                            trace,
-                            result.body if isinstance(result, CreatedTask) else result,
-                        )
-                    except Exception:
-                        runtime.integrations.write_errors += 1
             elif method == "resources/list":
                 result = {
                     "resources": [
@@ -676,13 +920,13 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                 if "read" not in principal.scopes:
                     raise DevError("INSUFFICIENT_SCOPE", "缺少读取权限", 403)
                 if uri in mcp_apps.RESOURCES or uri in mcp_apps.LEGACY_RESOURCES:
-                    item = await runtime.store.run(mcp_apps.read_resource, uri, request_public_url)
+                    item = await asyncio.to_thread(mcp_apps.read_resource, uri, request_public_url)
                 elif uri == "rd://projects":
                     item = {
                         "uri": uri,
                         "mimeType": "application/json",
                         "text": json.dumps(
-                            await runtime.store.run(project_resources, principal),
+                            await run_read(project_resources, principal),
                             ensure_ascii=False,
                         ),
                     }
@@ -815,6 +1059,19 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
                     unified=plan is not None,
                     sources=raw_output_sources(value, name),
                 )
+            if method == "tools/call" and trace:
+                try:
+                    final_result = response_body["result"]
+                    if isinstance(final_result, CreatedTask):
+                        final_result = final_result.body
+                    await asyncio.get_running_loop().run_in_executor(
+                        _METERING_EXECUTOR,
+                        runtime.integrations.capture_output,
+                        trace,
+                        final_result,
+                    )
+                except Exception:
+                    runtime.integrations.write_errors += 1
             return JSONResponse(
                 response_body,
                 headers={

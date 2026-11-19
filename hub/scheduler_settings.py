@@ -97,7 +97,10 @@ def view(store, runtime, principal, device_id):
     except (TypeError, ValueError):
         info = {}
     saved = stored_config(store, device_id)
-    reported = public_snapshot(info.get("scheduler")) if isinstance(info, dict) else None
+    raw_scheduler = runtime.device_runtime_snapshot(device_id)
+    if raw_scheduler is None and isinstance(info, dict):
+        raw_scheduler = info.get("scheduler")
+    reported = public_snapshot(raw_scheduler)
     supported = isinstance(info, dict) and info.get("scheduler_protocol") == 1
     applied = supported and info.get("scheduler_revision") == saved["revision"]
     rejected = (

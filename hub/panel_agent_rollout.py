@@ -347,10 +347,12 @@ class PanelAgentRollouts:
             AND idem=? AND owner_user_id=? AND space_id=? ORDER BY created LIMIT 1""",
             (node["idempotency_key"], principal.user_id, principal.space_id),
         )
-        return principal, device, info, op, self.runtime.online(node["device_id"])
+        online = self.runtime.online(node["device_id"])
+        last_seen = self.runtime.device_last_seen(node["device_id"], device.get("last_seen"))
+        return principal, last_seen, info, op, online
 
     async def advance_node(self, row, node, principal):
-        principal, device, info, op, online = await self.store.run(
+        principal, last_seen, info, op, online = await self.store.run(
             self.inspect_node, node, principal
         )
         management = info.get("management") or {}
@@ -368,7 +370,7 @@ class PanelAgentRollouts:
             if (
                 online
                 and info.get("version") == row["target_version"]
-                and (device.get("last_seen") or 0) > op["created"]
+                and (last_seen or 0) > op["created"]
             ):
                 if management.get("last_error") or management.get("status") in {
                     "error",
@@ -382,11 +384,7 @@ class PanelAgentRollouts:
                 else:
                     node.update(state="succeeded", message="已重连并核对目标版本")
                 return
-            if (
-                online
-                and (device.get("last_seen") or 0) > op["updated"]
-                and management.get("last_error")
-            ):
+            if online and (last_seen or 0) > op["updated"] and management.get("last_error"):
                 node.update(state="failed", message=str(management["last_error"])[:600])
             elif time.time() - op["updated"] > 900:
                 node.update(

@@ -190,8 +190,31 @@ def test_real_stdio_lsp_queries_and_owned_process_cleanup(integrated_stack,actio
     if action=='definition':assert result['omitted']>=1 and all(x['path']!='outside-private.py' for x in result['items'])
     if action=='references':assert len(result['items'])==2
     marker=json.loads((s.directory/'lsp-marker.json').read_text())
-    assert marker['state']=='exited'
-    with pytest.raises(ProcessLookupError):os.kill(marker['pid'],0)
+    assert marker['state']=='running'
+    assert marker['requests'].count('initialize')==1
+    if not hasattr(s,'_warm_lsp_pid'):
+        s._warm_lsp_pid=marker['pid']
+    assert marker['pid']==s._warm_lsp_pid
+    os.kill(marker['pid'],0)
+
+
+def test_real_stdio_lsp_pool_cleanup_on_agent_shutdown(integrated_stack):
+    s=integrated_stack
+    marker_path=s.directory/'lsp-marker.json'
+    if not marker_path.exists() or json.loads(marker_path.read_text()).get('state')!='running':
+        resolved(s,'lsp_query',{'action':'symbols','path':'source.py','language':'python','query':'fixture'})
+    marker=json.loads(marker_path.read_text())
+    pid=marker['pid']
+    assert marker['state']=='running'
+    os.kill(pid,0)
+    try:
+        s.stop_agent()
+        wait_for(lambda:json.loads(marker_path.read_text()).get('state')=='exited',timeout=8)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid,0)
+    finally:
+        s.start_agent()
+        s.__dict__.pop('_warm_lsp_pid',None)
 
 
 def test_validation_is_current_then_stale_and_acceptance_is_panel_only(integrated_stack):

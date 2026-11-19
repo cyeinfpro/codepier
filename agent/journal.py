@@ -4,12 +4,14 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 import uuid
 from pathlib import Path
 from shared.crypto import digest
 from shared.util import DevError, fsync_directory
 
 MAX_INTERRUPTED_READS = 3
+TERMINAL_CACHE_LIMIT = 2048
 
 
 class Journal:
@@ -21,12 +23,18 @@ class Journal:
         self.backups.mkdir(exist_ok=True)
         self.checkpoints = self.directory / "checkpoints"
         self.checkpoints.mkdir(exist_ok=True)
-        self.db = sqlite3.connect(self.directory / "agent.sqlite3", check_same_thread=False)
+        self.db = sqlite3.connect(
+            self.directory / "agent.sqlite3", timeout=30.0, check_same_thread=False
+        )
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self._state_lock = threading.Lock()
         with self.db:
             self.db.executescript("""
             PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=FULL;
+            PRAGMA busy_timeout=30000;
+            PRAGMA temp_store=MEMORY;
             CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status TEXT NOT NULL, result TEXT, acked INTEGER NOT NULL DEFAULT 0, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS backups (id TEXT PRIMARY KEY, root TEXT NOT NULL, path TEXT NOT NULL, existed INTEGER NOT NULL, before_sha TEXT NOT NULL, after_sha TEXT NOT NULL, at REAL NOT NULL);
             """)
@@ -121,11 +129,59 @@ class Journal:
             "SELECT value FROM meta WHERE key='journal_id'"
         ).fetchone()[0]
         os.chmod(self.directory / "agent.sqlite3", 0o600)
+        self.active_states: dict[str, dict] = {}
+        self.terminal_statuses: OrderedDict[str, str] = OrderedDict()
+        self.cancelled_ids: set[str] = set()
+        self._cancelled_at: dict[str, float] = {}
+        for row in self.db.execute(
+            "SELECT id,status,result,output,output_seq FROM calls "
+            "WHERE status IN ('accepted','running','retryable')"
+        ):
+            self.active_states[row["id"]] = {
+                "status": row["status"],
+                "result": json.loads(row["result"]) if row["result"] else None,
+                "output": row["output"] or "",
+                "output_seq": row["output_seq"] or 0,
+            }
+        for row in self.db.execute(
+            "SELECT id,status FROM calls WHERE status IN ('done','interrupted') "
+            "AND result_expired=0 ORDER BY at DESC LIMIT ?",
+            (TERMINAL_CACHE_LIMIT,),
+        ).fetchall()[::-1]:
+            self._remember_terminal(row["id"], row["status"])
+        for row in self.db.execute("SELECT id,at FROM cancellations"):
+            self.cancelled_ids.add(row["id"])
+            self._cancelled_at[row["id"]] = row["at"]
+
+    def _remember_terminal(self, identifier, status):
+        # Caller holds _state_lock (or is initializing the private journal).
+        self.terminal_statuses[identifier] = status
+        self.terminal_statuses.move_to_end(identifier)
+        if len(self.terminal_statuses) > TERMINAL_CACHE_LIMIT:
+            self.terminal_statuses.popitem(last=False)
+
+    def forget_retired_terminals(self, identifiers):
+        with self._state_lock:
+            for identifier in identifiers:
+                self.terminal_statuses.pop(identifier, None)
 
     def prune(self, **settings):
         from agent.journal_retention import prune
 
-        return prune(self, **settings)
+        result = prune(self, **settings)
+        if result.get("cancellations"):
+            with self.lock:
+                current = {r[0] for r in self.db.execute("SELECT id FROM cancellations")}
+            now = time.time()
+            with self._state_lock:
+                for identifier in list(self.cancelled_ids - current):
+                    if (
+                        identifier not in self.active_states
+                        and now - self._cancelled_at.get(identifier, 0) > 60
+                    ):
+                        self.cancelled_ids.discard(identifier)
+                        self._cancelled_at.pop(identifier, None)
+        return result
 
     def meta(self, key):
         with self.lock:
@@ -141,6 +197,9 @@ class Journal:
 
     def start(self, id: str, request: dict):
         fingerprint = digest(json.dumps(request, sort_keys=True, ensure_ascii=False))
+        new_active = None
+        done_status = None
+        done_result = None
         with self.lock, self.db:
             old = self.db.execute("SELECT * FROM calls WHERE id=?", (id,)).fetchone()
             if old:
@@ -152,14 +211,34 @@ class Journal:
                     self.db.execute(
                         "UPDATE calls SET status='accepted',result=NULL,acked=0 WHERE id=?", (id,)
                     )
-                    return None
-                return json.loads(old["result"])
-            tool = request.get("tool")
-            self.db.execute(
-                "INSERT INTO calls(id,fingerprint,status,at,tool) VALUES (?,?,'accepted',?,?)",
-                (id, fingerprint, time.time(), tool if isinstance(tool, str) else None),
-            )
-        return None
+                    new_active = {
+                        "status": "accepted",
+                        "result": None,
+                        "output": old["output"] or "",
+                        "output_seq": old["output_seq"] or 0,
+                    }
+                else:
+                    done_status = old["status"]
+                    done_result = json.loads(old["result"])
+            else:
+                tool = request.get("tool")
+                self.db.execute(
+                    "INSERT INTO calls(id,fingerprint,status,at,tool) VALUES (?,?,'accepted',?,?)",
+                    (id, fingerprint, time.time(), tool if isinstance(tool, str) else None),
+                )
+                new_active = {
+                    "status": "accepted",
+                    "result": None,
+                    "output": "",
+                    "output_seq": 0,
+                }
+        with self._state_lock:
+            if new_active is not None:
+                self.active_states[id] = new_active
+                self.terminal_statuses.pop(id, None)
+            elif done_status is not None:
+                self.active_states.pop(id, None)
+        return done_result
 
     def completed_run(self, identifier):
         with self.lock:
@@ -171,24 +250,70 @@ class Journal:
                 is not None
             )
 
+    def mark_running_memory(self, id):
+        with self._state_lock:
+            entry = self.active_states.get(id)
+            if entry is not None and entry["status"] == "accepted":
+                entry["status"] = "running"
+                return True
+        return False
+
+    def mark_running_db(self, id):
+        with self.lock, self.db:
+            return (
+                self.db.execute(
+                    "UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,)
+                ).rowcount
+                == 1
+            )
+
     def mark_running(self, id):
+        self.mark_running_memory(id)
+        self.mark_running_db(id)
+
+    def cancel_memory(self, id):
+        now = time.time()
+        with self._state_lock:
+            self.cancelled_ids.add(id)
+            self._cancelled_at[id] = now
+        return now
+
+    def cancel_db(self, id, at=None):
         with self.lock, self.db:
             self.db.execute(
-                "UPDATE calls SET status='running' WHERE id=? AND status='accepted'", (id,)
+                "INSERT OR IGNORE INTO cancellations VALUES (?,?)",
+                (id, time.time() if at is None else at),
             )
 
     def cancel(self, id):
-        with self.lock, self.db:
-            self.db.execute("INSERT OR IGNORE INTO cancellations VALUES (?,?)", (id, time.time()))
+        at = self.cancel_memory(id)
+        self.cancel_db(id, at)
 
     def is_cancelled(self, id):
-        with self.lock:
-            return (
-                self.db.execute("SELECT id FROM cancellations WHERE id=?", (id,)).fetchone()
-                is not None
-            )
+        with self._state_lock:
+            return id in self.cancelled_ids
+
+    def active_status(self, id):
+        """Return in-memory state if the call is active, else None (zero SQLite I/O)."""
+        with self._state_lock:
+            entry = self.active_states.get(id)
+            return dict(entry) if entry is not None else None
+
+    def fast_status(self, id):
+        """Check active/recent status without DB I/O; cold terminals use status()."""
+        with self._state_lock:
+            entry = self.active_states.get(id)
+            if entry is not None:
+                return dict(entry)
+            terminal = self.terminal_statuses.get(id)
+            if terminal is not None:
+                return {"status": terminal}
+        return {"status": "missing"}
 
     def status(self, id):
+        active = self.active_status(id)
+        if active is not None:
+            return active
         with self.lock:
             row = self.db.execute(
                 "SELECT status,result,output,output_seq FROM calls WHERE id=?", (id,)
@@ -202,12 +327,24 @@ class Journal:
             "output_seq": row["output_seq"],
         }
 
+    def durable_status(self, id):
+        """Look up cold status without loading a retained operation result."""
+        with self.lock:
+            row = self.db.execute("SELECT status FROM calls WHERE id=?", (id,)).fetchone()
+        return row["status"] if row else "missing"
+
     def update_output(self, id, output, seq):
+        trimmed = output[-131072:]
         with self.lock, self.db:
             self.db.execute(
                 "UPDATE calls SET output=?,output_seq=? WHERE id=? AND output_seq<?",
-                (output[-131072:], seq, id, seq),
+                (trimmed, seq, id, seq),
             )
+        with self._state_lock:
+            entry = self.active_states.get(id)
+            if entry is not None and entry["output_seq"] < seq:
+                entry["output"] = trimmed
+                entry["output_seq"] = seq
 
     def finish(self, id: str, result: dict):
         with self.lock, self.db:
@@ -215,10 +352,23 @@ class Journal:
                 "UPDATE calls SET status='done',result=?,acked=0 WHERE id=?",
                 (json.dumps(result, ensure_ascii=False), id),
             )
+        with self._state_lock:
+            self.active_states.pop(id, None)
+            self._remember_terminal(id, "done")
 
     def ack(self, id: str):
         with self.lock, self.db:
             self.db.execute("UPDATE calls SET acked=1 WHERE id=?", (id,))
+
+    def acks_batch(self, ids: list[str] | tuple[str, ...]):
+        unique = list(dict.fromkeys(i for i in ids if isinstance(i, str) and i))
+        if not unique:
+            return
+        with self.lock, self.db:
+            for offset in range(0, len(unique), 500):
+                chunk = unique[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                self.db.execute(f"UPDATE calls SET acked=1 WHERE id IN ({placeholders})", chunk)
 
     def outbox(self):
         # Bound reconnect memory/burst size. Reading 200 large results into RAM

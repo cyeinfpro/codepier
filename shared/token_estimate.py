@@ -28,7 +28,6 @@ NUMBERS = ("estimated_tokens", "low", "high", "characters", "utf8_bytes")
 # this deliberately avoids trying to distinguish private signed URL formats.
 EXCLUDED_KEYS = frozenset(
     {
-        "_meta",
         "authorization",
         "proxyauthorization",
         "headers",
@@ -52,15 +51,11 @@ EXCLUDED_KEYS = frozenset(
         "uploadurl",
         "signedurl",
         "file",
-        "files",
         "base64",
         "contentbase64",
         "chunkbase64",
         "datauri",
         "blob",
-        "inputschema",
-        "outputschema",
-        "schema",
     }
 )
 URL = re.compile(r"(?:https?://|data:)[^\s\"'<>]+", re.I)
@@ -72,6 +67,9 @@ def unavailable():
     return {
         "state": "unavailable",
         **dict.fromkeys(NUMBERS),
+        "wire_tokens_est": None,
+        "semantic_tokens_est": None,
+        "mirror_overhead_ratio": None,
         "excluded_fields": 0,
         "truncated": False,
         "source_truncated": False,
@@ -80,12 +78,8 @@ def unavailable():
 
 def _excluded(key):
     normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    return (
-        key == "_meta"
-        or normalized in EXCLUDED_KEYS
-        or normalized.endswith(
-            ("password", "secret", "accesstoken", "refreshtoken", "apikey", "base64")
-        )
+    return normalized in EXCLUDED_KEYS or normalized.endswith(
+        ("password", "secret", "accesstoken", "refreshtoken", "apikey", "base64")
     )
 
 
@@ -156,28 +150,6 @@ class Projection:
                     self.truncated = True
                     break
                 if (
-                    self.output
-                    and key == "files"
-                    and value.get("batch") is True
-                    and isinstance(item, list)
-                ):
-                    # Only count returned text pages. Attachment descriptors and
-                    # arbitrary metadata in a files array stay excluded.
-                    for page in item:
-                        self.nodes += 1
-                        if self.nodes >= MAX_NODES or self.characters >= MAX_CHARACTERS:
-                            self.truncated = True
-                            break
-                        if (
-                            isinstance(page, dict)
-                            and page.get("ok") is True
-                            and isinstance(page.get("path"), str)
-                            and isinstance(page.get("content"), str)
-                        ):
-                            self.value(page["content"], depth + 1)
-                            self.source_truncated |= page.get("truncated") is True
-                    continue
-                if (
                     not isinstance(key, str)
                     or _excluded(key)
                     or (key == "data" and "upload_id" in value and "chunk_sha256" in value)
@@ -212,7 +184,7 @@ class Projection:
         else:
             self.excluded += 1
 
-    def metric(self):
+    def _text_and_weight(self):
         text = "".join(self.parts)
         weight = 0.0
         for character in text:
@@ -223,6 +195,10 @@ class Projection:
                 weight += 1.30 if code < 0x1F000 else 2.50
             else:
                 weight += 0.90
+        return text, weight
+
+    def metric(self):
+        text, weight = self._text_and_weight()
         estimate = math.ceil(weight)
         return {
             "state": "partial" if self.truncated else "available",
@@ -237,13 +213,68 @@ class Projection:
         }
 
 
+def _combine_projections(projections):
+    weight = 0.0
+    characters = 0
+    utf8_bytes = 0
+    excluded = 0
+    truncated = False
+    source_truncated = False
+    for proj in projections:
+        if proj is None:
+            continue
+        text, part_weight = proj._text_and_weight()
+        weight += part_weight
+        characters += len(text)
+        utf8_bytes += len(text.encode("utf-8"))
+        excluded += proj.excluded
+        truncated |= proj.truncated
+        source_truncated |= proj.source_truncated
+    estimate = math.ceil(weight)
+    return {
+        "state": "partial" if truncated else "available",
+        "estimated_tokens": estimate,
+        "low": math.ceil(weight * 0.5),
+        "high": math.ceil(weight * 2),
+        "characters": characters,
+        "utf8_bytes": utf8_bytes,
+        "excluded_fields": excluded,
+        "truncated": truncated,
+        "source_truncated": source_truncated,
+    }
+
+
+def _is_meta_stub(result, structured):
+    if not isinstance(structured, dict):
+        return False
+    if structured.get("content_in") == "text" or structured.get("output_in") == "text":
+        return True
+    if structured.get("batch") is True and isinstance(structured.get("files"), list):
+        return any(
+            isinstance(row, dict) and row.get("content_in") == "text" for row in structured["files"]
+        )
+    if result.get("isError") and set(structured) <= {
+        "error_code",
+        "recovery_summary",
+        "next_call",
+        "content_in",
+    }:
+        return True
+    return False
+
+
 def estimate_input(arguments):
     if not isinstance(arguments, dict):
         return unavailable()
     projection = Projection()
     projection.value(arguments)
     try:
-        return projection.metric()
+        metric = projection.metric()
+        est = metric["estimated_tokens"]
+        metric["wire_tokens_est"] = est
+        metric["semantic_tokens_est"] = est
+        metric["mirror_overhead_ratio"] = round(est / max(1, est), 4)
+        return metric
     except UnicodeError:
         return unavailable()
 
@@ -251,52 +282,112 @@ def estimate_input(arguments):
 def estimate_output(result):
     if not isinstance(result, dict):
         return unavailable()
-    projection = Projection(output=True)
     content = result.get("content")
+    has_structured = "structuredContent" in result
+    if not isinstance(content, list) and not has_structured:
+        return unavailable()
+
+    c0_proj = None
+    rest_proj = None
+    media_excluded = 0
     found_text = False
     if isinstance(content, list):
         for block in content:
-            if projection.nodes >= MAX_NODES or projection.characters >= MAX_CHARACTERS:
-                projection.truncated = True
+            target = rest_proj
+            if not found_text:
+                probe = Projection(output=True)
+                target = probe
+            else:
+                if target is None:
+                    rest_proj = Projection(output=True)
+                    target = rest_proj
+            if target.nodes >= MAX_NODES or target.characters >= MAX_CHARACTERS:
+                target.truncated = True
+                if not found_text:
+                    media_excluded += target.excluded
                 break
-            projection.nodes += 1
+            target.nodes += 1
             if not isinstance(block, dict):
-                projection.excluded += 1
+                if found_text:
+                    target.excluded += 1
+                else:
+                    media_excluded += 1
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 if (
                     len(block["text"]) > MAX_CHARACTERS
                     and block["text"].lstrip().startswith(("{", "["))
-                    and "structuredContent" in result
+                    and has_structured
+                    and not _is_meta_stub(result, result["structuredContent"])
                 ):
-                    # Use the already materialized object without reparsing an
-                    # oversized JSON mirror or scanning a raw sensitive prefix.
-                    projection.value(result["structuredContent"])
+                    target.value(result["structuredContent"])
                 else:
-                    projection.text(block["text"])
-                found_text = True
+                    target.text(block["text"])
+                if not found_text:
+                    c0_proj = target
+                    c0_proj.excluded += media_excluded
+                    media_excluded = 0
+                    found_text = True
             elif (
                 block.get("type") == "resource"
                 and isinstance(block.get("resource"), dict)
                 and isinstance(block["resource"].get("text"), str)
             ):
-                projection.text(block["resource"]["text"])
-                found_text = True
+                target.text(block["resource"]["text"])
+                if not found_text:
+                    c0_proj = target
+                    c0_proj.excluded += media_excluded
+                    media_excluded = 0
+                    found_text = True
             else:
-                projection.excluded += 1
-        # Empty or media-only content is observed zero text, not missing data.
-        if not found_text and "structuredContent" in result:
-            projection.value(result["structuredContent"])
-    elif "structuredContent" in result:
-        projection.value(result["structuredContent"])
-    else:
-        return unavailable()
-    # Do not count a mirrored structuredContent again. Distinct text blocks,
-    # including repeated blocks, all remain part of this materialized response.
+                if found_text:
+                    target.excluded += 1
+                else:
+                    media_excluded += 1
+
+    if not found_text and media_excluded and rest_proj is None:
+        rest_proj = Projection(output=True)
+        rest_proj.excluded = media_excluded
+
+    sc_proj = None
+    if has_structured:
+        sc_proj = Projection(output=True)
+        sc_proj.value(result["structuredContent"])
+
+    meta_proj = None
+    if "_meta" in result:
+        meta_proj = Projection(output=True)
+        meta_proj.value(result["_meta"])
+
     try:
-        return projection.metric()
+        wire_metric = _combine_projections((c0_proj, rest_proj, sc_proj, meta_proj))
+        if not found_text:
+            sem_parts = (rest_proj, sc_proj)
+        elif not has_structured:
+            sem_parts = (c0_proj, rest_proj)
+        else:
+            c0_metric = c0_proj.metric()
+            sc_metric = sc_proj.metric()
+            primary = (
+                c0_proj
+                if _is_meta_stub(result, result["structuredContent"])
+                or c0_metric["estimated_tokens"] >= sc_metric["estimated_tokens"]
+                else sc_proj
+            )
+            sem_parts = (primary, rest_proj)
+        sem_metric = _combine_projections(sem_parts)
     except UnicodeError:
         return unavailable()
+
+    wire_tokens = wire_metric["estimated_tokens"]
+    semantic_tokens = sem_metric["estimated_tokens"]
+    wire_metric["source_truncated"] = (
+        wire_metric["source_truncated"] or sem_metric["source_truncated"]
+    )
+    wire_metric["wire_tokens_est"] = wire_tokens
+    wire_metric["semantic_tokens_est"] = semantic_tokens
+    wire_metric["mirror_overhead_ratio"] = round(wire_tokens / max(1, semantic_tokens), 4)
+    return wire_metric
 
 
 def usage(input_metric=None, output_metric=None):
@@ -317,11 +408,38 @@ def summarize(
     for direction in ("input", "output"):
         metrics = [(row.get("token_usage") or {}).get(direction) or unavailable() for row in rows]
         measured = [metric for metric in metrics if metric["state"] != "unavailable"]
+        wire_sum = (
+            sum(
+                metric["wire_tokens_est"]
+                if isinstance(metric.get("wire_tokens_est"), int)
+                else metric["estimated_tokens"]
+                for metric in measured
+            )
+            if measured
+            else None
+        )
+        sem_sum = (
+            sum(
+                metric["semantic_tokens_est"]
+                if isinstance(metric.get("semantic_tokens_est"), int)
+                else metric["estimated_tokens"]
+                for metric in measured
+            )
+            if measured
+            else None
+        )
         directions[direction] = {
             **{
                 key: sum(metric[key] for metric in measured) if measured else None
                 for key in NUMBERS
             },
+            "wire_tokens_est": wire_sum,
+            "semantic_tokens_est": sem_sum,
+            "mirror_overhead_ratio": (
+                round(wire_sum / max(1, sem_sum), 4)
+                if wire_sum is not None and sem_sum is not None
+                else None
+            ),
             "measured_attempts": len(measured),
             "unavailable_attempts": len(metrics) - len(measured),
             "partial_attempts": sum(metric["state"] == "partial" for metric in measured),

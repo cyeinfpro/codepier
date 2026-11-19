@@ -36,9 +36,15 @@ def test_batch_read_counts_visible_text_once_and_skips_attachment_fields():
     page = {"ok": True, "path": "example.txt", "content": "代码 abc\n" * 200}
     batch = {"batch": True, "files": [page, {"download_url": "private", "blob": "private"}]}
     measured = estimate_output({"structuredContent": batch})
-    assert measured == estimate_output(output(json.dumps(batch), structuredContent=batch))
+    mirrored = estimate_output(output(json.dumps(batch), structuredContent=batch))
+    assert mirrored["semantic_tokens_est"] == measured["semantic_tokens_est"]
+    assert mirrored["wire_tokens_est"] >= measured["wire_tokens_est"] * 1.9
+    assert mirrored["mirror_overhead_ratio"] > 1.8
     assert measured["characters"] > len(page["content"])
-    assert estimate_input(batch)["characters"] == estimate_input({"batch": True})["characters"]
+    bigger_attachment = {"batch": True, "files": [page, {"download_url": "X" * 5000, "blob": "Y" * 5000}]}
+    assert estimate_input(batch)["characters"] == estimate_input(bigger_attachment)["characters"]
+    assert estimate_input({"download_url": "private", "blob": "private"})["characters"] == 0
+    assert "private" not in json.dumps(usage(measured))
     page["content"] *= 4
     assert estimate_output({"structuredContent": batch})["estimated_tokens"] > measured["estimated_tokens"]
 
@@ -54,8 +60,11 @@ def test_unicode_density_is_not_calls_times_constant():
 def test_json_normalization_mirrors_and_repeated_blocks():
     value = {"content": "中文😀", "code": "x = 42"}
     text = json.dumps(value, ensure_ascii=False)
-    one = estimate_output(output(text, structuredContent=value))
-    assert one == estimate_output({"structuredContent": value})
+    sc_only = estimate_output({"structuredContent": value})
+    mirrored = estimate_output(output(text, structuredContent=value))
+    assert mirrored["semantic_tokens_est"] == sc_only["semantic_tokens_est"]
+    assert mirrored["wire_tokens_est"] > sc_only["wire_tokens_est"]
+    assert mirrored["mirror_overhead_ratio"] > 1.8
     repeated = estimate_output({"content": [{"type": "text", "text": "same"}] * 2})
     assert repeated["characters"] == 8
     assert repeated["characters"] == 2 * estimate_output(output("same"))["characters"]
@@ -63,15 +72,24 @@ def test_json_normalization_mirrors_and_repeated_blocks():
 
 def test_secret_binary_schema_and_host_meta_exclusions():
     baseline = {"command": "echo test"}
-    expanded = {**baseline, "authorization": "Bearer TOP_SECRET",
-                "api_key": "TOP_SECRET", "clientSecret": "TOP_SECRET",
-                "file": {"download_url": "https://example.test/?sig=PRIVATE", "size": 999999},
-                "chunk_base64": "TINY", "inputSchema": {"secret": "schema"},
-                "_meta": {"actual_usage": {"input_tokens": 999999999}, "secret": "metadata"}}
-    measured = estimate_input(expanded)
+    secret_only = {**baseline, "authorization": "Bearer TOP_SECRET",
+                   "api_key": "TOP_SECRET", "clientSecret": "TOP_SECRET",
+                   "file": {"download_url": "https://example.test/?sig=PRIVATE", "size": 999999},
+                   "chunk_base64": "TINY"}
+    secret_measured = estimate_input(secret_only)
     expected = estimate_input(baseline)
-    assert all(measured[key] == expected[key] for key in NUMBERS)
+    assert all(secret_measured[key] == expected[key] for key in NUMBERS)
+    assert secret_measured["excluded_fields"] == 5
+
+    # Per B12, inputSchema and _meta containers are metered while nested secrets stay excluded (Redline #5).
+    expanded = {**secret_only,
+                "inputSchema": {"properties": {"cmd": {"type": "string"}}, "secret": "TOP_SECRET"},
+                "_meta": {"actual_usage": {"input_tokens": 999999999}, "secret": "TOP_SECRET"}}
+    measured = estimate_input(expanded)
+    assert measured["estimated_tokens"] > expected["estimated_tokens"]
     assert measured["excluded_fields"] == 7
+    assert "TOP_SECRET" not in json.dumps(usage(measured))
+    assert "PRIVATE" not in json.dumps(usage(measured))
     image = {"type": "image", "data": "A" * 50000, "mimeType": "image/png"}
     assert estimate_output({"content": [image]})["estimated_tokens"] == 0
     assert estimate_output({"content": [image]})["characters"] == 0
@@ -269,7 +287,10 @@ def test_large_json_secret_and_binary_payloads_are_never_scanned_as_prose():
     value = {"password": "SECRET " * MAX_CHARACTERS, "text": "ok"}
     raw = json.dumps(value)
     measured = estimate_output(output(raw, structuredContent=value))
-    assert measured["characters"] == len('{"text":"ok"}')
+    assert measured["characters"] == 2 * len('{"text":"ok"}')
+    assert measured["excluded_fields"] == 2
+    assert measured["semantic_tokens_est"] < measured["wire_tokens_est"]
+    assert "SECRET" not in json.dumps(usage(measured))
     assert not measured["truncated"]
     without_object = estimate_output(output(raw))
     assert without_object["truncated"] and without_object["characters"] == 0
