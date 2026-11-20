@@ -716,12 +716,20 @@ async def test_agent_memory_pressure_and_shutdown_invoke_lsp_hooks(agent, monkey
 
 @pytest.mark.asyncio
 async def test_mutation_start_is_durable_before_started_and_execution(agent, monkeypatch, tmp_path):
-    instance, project, _ = agent
-    call = request(project, "exec", command="unused", read_only=True, idempotency_key=uuid.uuid4().hex)
+    instance, project, root = agent
+    call = request(
+        project,
+        "fs_write",
+        path="durable-gate.txt",
+        content="durable write",
+        expected_sha256="new",
+        idempotency_key=uuid.uuid4().hex,
+    )
     identifier = call["id"]
     received = threading.Event()
     release = threading.Event()
     original_mark = instance.journal.mark_running_db
+    original_execute = instance.execute
     events = []
     original_send = instance.send
     restart_dir = tmp_path / "restart-at-execution"
@@ -739,15 +747,13 @@ async def test_mutation_start_is_durable_before_started_and_execution(agent, mon
         return await original_send(message)
 
     async def execute(*args, **kwargs):
-        # Simulate restarting at the first externally visible action, without
-        # performing the requested shell command or using a live system.
-        with closing(sqlite3.connect(restart_dir / "agent.sqlite3")) as output:
+        with instance.journal.lock, closing(sqlite3.connect(restart_dir / "agent.sqlite3")) as output:
             instance.journal.db.backup(output)
         with closing(Journal(restart_dir).db) as recovered:
             row = recovered.execute("SELECT status FROM calls WHERE id=?", (identifier,)).fetchone()
             assert row["status"] == "interrupted"
         events.append("executed")
-        return {}
+        return await original_execute(*args, **kwargs)
 
     monkeypatch.setattr(instance.journal, "mark_running_db", hold_start)
     monkeypatch.setattr(instance, "send", send)
@@ -756,11 +762,13 @@ async def test_mutation_start_is_durable_before_started_and_execution(agent, mon
     try:
         assert await asyncio.to_thread(received.wait, 2)
         assert events == []
+        assert not (root / "durable-gate.txt").exists()
         assert instance.journal.fast_status(identifier)["status"] == "accepted"
     finally:
         release.set()
         await asyncio.wait_for(task, 5)
     assert events == ["started", "executed"]
+    assert (root / "durable-gate.txt").read_text() == "durable write"
 
 
 def test_resource_claims_keep_local_task_and_explicit_resource_policy(agent):

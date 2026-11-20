@@ -1,5 +1,5 @@
 {
-  "version": "1.33.32",
+  "version": "1.33.33",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -43,12 +43,12 @@
       "bytes": 14190
     },
     "call-log.css": {
-      "sha256": "2d757eced991cd2df2ff99202843896ef6876319b90c7ae84bc8e48002f9b40e",
-      "bytes": 20042
+      "sha256": "80055e8e3c5b91a03e1fd69243eb058fb5d41a17575b336f15514c8e93a07025",
+      "bytes": 31748
     },
     "call-log.js": {
-      "sha256": "effd2d11540bed0e11cdd677d5af060bb299f9693ddfb3f413a4f1946d9fa7fd",
-      "bytes": 93714
+      "sha256": "e252076ca5e6e88a423e00ec39ea9b733bc094be39676087bb3310fdf584c10a",
+      "bytes": 113917
     },
     "chat-catalog.js": {
       "sha256": "23ff4f8c3684359b6594ac46d47ca0c2c3fac5367d531340ca5e0ab994a645ab",

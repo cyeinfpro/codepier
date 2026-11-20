@@ -53,25 +53,54 @@
   cursor: pointer;
 }
 
-/* Subtoolbar: Preset capsules + Burst & Density toggles (AUD-15, AUD-16, AUD-22) */
+/* Subtoolbar: Preset capsules + Burst toggle & Density segmented switch (AUD-15, AUD-16, AUD-22) */
 .call-subtoolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px 12px;
-  padding: 4px 0 8px;
+  padding: 6px 0 10px;
 }
 .call-presets,
-.call-view-toggles,
-.call-density-switch {
+.call-view-toggles {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
 }
+.call-toolbar-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--ui-line, var(--ui-border));
+  margin-inline: 2px;
+}
+.call-density-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--ui-line, var(--ui-border));
+  border-radius: var(--ui-radius-pill, 999px);
+  background: var(--ui-side, var(--ui-surface));
+  gap: 2px;
+}
+.call-density-switch .call-chip-toggle {
+  min-height: 22px;
+  padding: 1px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+}
+.call-density-switch .call-chip-toggle.is-active {
+  border-color: var(--ui-accent-line, var(--ui-accent));
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
 .call-preset-pill,
 .call-chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-height: 26px;
   padding: 2px 10px;
   border: 1px solid var(--ui-line, var(--ui-border));
@@ -81,6 +110,7 @@
   font: inherit;
   font-size: var(--ui-text-xs);
   cursor: pointer;
+  white-space: nowrap;
 }
 .call-preset-pill:hover,
 .call-chip-toggle:hover {
@@ -94,6 +124,18 @@
   background: var(--ui-accent-soft, var(--ui-surface));
   color: var(--ui-text);
   font-weight: var(--ui-weight-semibold, 600);
+}
+.call-toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-muted);
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+.call-chip-toggle[aria-pressed='true'] .call-toggle-dot {
+  background: var(--ui-accent);
+  opacity: 1;
 }
 
 /* Sticky new-items pill & 120ms progressive loading shimmer (AUD-02, AUD-05):
@@ -135,11 +177,23 @@
   }
 }
 
+/* Workspace container: single column by default; wide-screen split drawer in table mode (P2) */
+.call-workspace {
+  display: block;
+  min-width: 0;
+}
+.call-inspector {
+  display: none;
+  min-width: 0;
+}
 .call-log {
   display: grid;
   gap: 6px;
   min-width: 0;
   transition: opacity 0.15s ease;
+}
+.call-table-header {
+  display: none;
 }
 .call-log.is-reloading {
   opacity: 0.68;
@@ -192,14 +246,52 @@
 .call-burst-summary::-webkit-details-marker {
   display: none;
 }
+.call-burst-time {
+  color: var(--ui-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.call-burst-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.call-burst-count {
+  color: var(--ui-text);
+  font-weight: var(--ui-weight-semibold, 600);
+  white-space: nowrap;
+}
 .call-burst-title {
   flex: 1;
   min-width: 0;
-  color: var(--ui-text);
+  color: var(--ui-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call-burst-state {
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  white-space: nowrap;
 }
 .call-burst-meta {
   color: var(--ui-muted);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.call-burst-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted);
+  white-space: nowrap;
+}
+.call-burst-chevron {
+  transition: transform 0.15s;
+}
+.call-burst[open] > .call-burst-summary .call-burst-chevron {
+  transform: rotate(180deg);
 }
 .call-burst-items {
   display: grid;
@@ -295,9 +387,16 @@
 }
 .call-top {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px 10px;
+}
+.call-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
 }
 .call-project {
   display: inline-flex;
@@ -324,6 +423,17 @@
   gap: 6px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+.call-args.is-empty {
+  display: none;
+}
+.call-args-empty-dash {
+  display: none;
+  color: var(--ui-muted);
+  opacity: 0.5;
+}
+.call-actor-short {
+  display: none;
 }
 .call-kind {
   font-size: var(--ui-text-xs);
@@ -457,6 +567,8 @@
 .call-chevron {
   transition: transform 0.15s;
   flex: none;
+  width: 16px;
+  text-align: center;
 }
 .call-entry[open] > summary .call-chevron {
   transform: rotate(180deg);
@@ -465,39 +577,364 @@
   border-bottom: 1px solid var(--ui-border);
 }
 
-/* Dense Table Mode (AUD-16) */
+/* Dense Table Mode (P0 Fixed Grid + Sticky Header + P1 Visual Denoising) */
 @media (min-width: 860px) {
   .call-log.call-log-table {
+    --call-table-cols: 78px 180px minmax(0, 1fr) 96px 76px 124px;
     gap: 2px;
   }
-  .call-log.call-log-table .call-entry > summary {
-    min-height: 38px;
-    padding: 4px 10px;
-  }
-  .call-log.call-log-table .call-entry:not([open]) .call-main {
+  .call-log.call-log-table .call-table-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
     display: grid;
-    grid-template-columns: minmax(220px, 1.15fr) minmax(180px, 1.6fr) auto;
+    grid-template-columns: var(--call-table-cols) 16px;
     align-items: center;
-    gap: 8px 12px;
+    gap: 0 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--ui-line, var(--ui-border));
+    background: var(--ui-bg, var(--ui-panel));
+    color: var(--ui-muted);
+    font-size: 11px;
+    font-weight: var(--ui-weight-semibold, 600);
+    letter-spacing: 0.02em;
+    user-select: none;
   }
-  .call-log.call-log-table .call-entry:not([open]) .call-top {
+  .call-log.call-log-table .call-th-right {
+    text-align: right;
+  }
+  .call-log.call-log-table .call-day-divider {
+    top: 28px;
+    padding: 4px 4px;
+  }
+  .call-log.call-log-table .call-entry {
+    border-color: transparent;
+    border-bottom-color: var(--ui-line, var(--ui-border));
+    border-radius: var(--ui-radius-xs, 4px);
+    background: transparent;
+  }
+  .call-log.call-log-table .call-entry:hover {
+    background: var(--ui-hover, var(--ui-surface));
+  }
+  .call-log.call-log-table .call-entry.is-selected {
+    background: var(--ui-accent-soft, var(--ui-surface));
+    border-color: var(--ui-accent-line, var(--ui-accent));
+  }
+  .call-log.call-log-table .call-entry[open] {
+    border-color: var(--ui-border);
+    background: var(--ui-panel);
+    margin-block: 4px;
+  }
+  .call-log.call-log-table .call-entry > summary {
+    min-height: 36px;
+    padding: 5px 10px;
+    gap: 10px;
+  }
+  .call-log.call-log-table .call-entry .call-main {
+    display: grid;
+    grid-template-columns: var(--call-table-cols);
+    align-items: center;
+    gap: 3px 10px;
+    min-width: 0;
+  }
+  .call-log.call-log-table .call-entry .call-top,
+  .call-log.call-log-table .call-entry .call-state,
+  .call-log.call-log-table .call-entry .call-meta {
+    display: contents;
+  }
+  /* Col 1: Time */
+  .call-log.call-log-table .call-entry .call-meta > time {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: var(--ui-text-xs);
+    color: var(--ui-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Col 2: Project + Tool (strictly single-line, zero vertical letter stacking) */
+  .call-log.call-log-table .call-entry .call-identity {
+    grid-column: 2;
+    grid-row: 1;
+    flex-wrap: nowrap;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .call-log.call-log-table .call-entry .call-project {
+    flex-shrink: 0;
+    max-width: 72px;
+    padding: 1px 6px;
+    overflow: hidden;
+  }
+  .call-log.call-log-table .call-entry .call-project strong {
+    font-size: var(--ui-text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+  }
+  .call-log.call-log-table .call-entry .call-tool {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 5px;
+    overflow: hidden;
+    overflow-wrap: normal;
+  }
+  .call-log.call-log-table .call-entry .call-tool > strong {
+    font-size: var(--ui-text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .call-log.call-log-table .call-entry .call-tool .call-kind-generic {
+    display: none;
+  }
+  .call-log.call-log-table .call-entry .call-tool .call-blocker-pill {
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  /* Col 3: Target / Command summary */
+  .call-log.call-log-table .call-entry .call-args {
+    grid-column: 3;
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .call-log.call-log-table .call-entry .call-args.is-empty {
+    display: flex;
+  }
+  .call-log.call-log-table .call-entry .call-args.is-empty .call-args-empty-dash {
+    display: inline;
+  }
+  .call-log.call-log-table .call-entry .call-arg-badge:nth-child(n + 2) {
+    display: none;
+  }
+  /* Col 4: State (denoise succeeded; highlight errors & running) */
+  .call-log.call-log-table .call-entry .call-state-badge {
+    grid-column: 4;
+    grid-row: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .call-log.call-log-table .call-entry[data-call-state='succeeded'] .call-state-badge .badge {
+    background: transparent;
+    border-color: transparent;
+    padding-inline: 0;
+    color: var(--ui-muted);
+    font-weight: 400;
+  }
+  .call-log.call-log-table
+    .call-entry[data-call-state='succeeded']
+    .call-state-badge
+    .badge::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 5px;
+    border-radius: 50%;
+    background: var(--ui-success, #16a34a);
+    vertical-align: middle;
+  }
+  .call-log.call-log-table .call-entry .call-exit {
+    display: none;
+  }
+  /* Col 5: Duration (right-aligned tabular-nums; hide repeated "总历时" prefix visually) */
+  .call-log.call-log-table .call-entry .call-duration {
+    grid-column: 5;
+    grid-row: 1;
+    text-align: right;
+    justify-self: end;
+    font-size: var(--ui-text-xs);
+  }
+  .call-log.call-log-table .call-entry .call-dur-prefix {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  /* Col 6: Compact Source + Hover-reveal ID Copy */
+  .call-log.call-log-table .call-entry .call-meta-device,
+  .call-log.call-log-table .call-entry .call-meta-source,
+  .call-log.call-log-table .call-entry .call-authorization {
+    display: none;
+  }
+  .call-log.call-log-table .call-entry .call-filter-note:not([hidden]) {
+    grid-column: 3 / -1;
+    font-size: 11px;
+    color: var(--ui-warning, #d97706);
+  }
+  .call-log.call-log-table .call-entry .call-source-cell {
+    grid-column: 6;
+    grid-row: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  .call-log.call-log-table .call-entry .call-actor-short {
+    display: inline-block;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--ui-muted);
+    font-size: var(--ui-text-xs);
+  }
+  .call-log.call-log-table .call-entry .call-id-chip {
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    padding: 1px 4px;
+    font-size: 11px;
+  }
+  .call-log.call-log-table .call-entry:hover .call-id-chip,
+  .call-log.call-log-table .call-entry:focus-within .call-id-chip,
+  .call-log.call-log-table .call-entry.is-selected .call-id-chip {
+    opacity: 1;
+  }
+  /* Row 2 (only on failed/non-zero exit): Full-width sub-strip aligned under Target column */
+  .call-log.call-log-table .call-entry .call-inline-error {
+    grid-column: 3 / -1;
+    grid-row: 2;
+    padding: 2px 8px;
+    border-radius: var(--ui-radius-xs, 4px);
+    background: color-mix(in srgb, var(--ui-danger, #dc2626) 10%, transparent);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  /* Burst Grouping aligned to identical 6-column table tracks */
+  .call-log.call-log-table .call-burst {
+    border-style: dashed;
+    border-color: var(--ui-line, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-side, var(--ui-panel)) 75%, transparent);
+  }
+  .call-log.call-log-table .call-burst-summary {
+    display: grid;
+    grid-template-columns: var(--call-table-cols) 16px;
+    align-items: center;
+    gap: 0 10px;
+    padding: 5px 10px;
+    min-height: 34px;
+  }
+  .call-log.call-log-table .call-burst-time {
+    grid-column: 1;
+  }
+  .call-log.call-log-table .call-burst-identity {
+    grid-column: 2;
+    overflow: hidden;
+  }
+  .call-log.call-log-table .call-burst-identity .call-project {
+    flex-shrink: 0;
+    max-width: 72px;
+    padding: 1px 6px;
+    overflow: hidden;
+  }
+  .call-log.call-log-table .call-burst-identity .call-project strong {
+    font-size: var(--ui-text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .call-log.call-log-table .call-burst-title {
+    grid-column: 3;
+  }
+  .call-log.call-log-table .call-burst-state {
+    grid-column: 4;
+  }
+  .call-log.call-log-table .call-burst-meta {
+    grid-column: 5;
+    text-align: right;
+  }
+  .call-log.call-log-table .call-burst-actor {
+    grid-column: 6;
+    justify-content: flex-end;
+    overflow: hidden;
+  }
+  .call-log.call-log-table .call-burst-chevron {
+    grid-column: 7;
+    justify-self: center;
+  }
+  .call-log.call-log-table .call-burst-items {
+    gap: 2px;
+    padding: 4px 0 6px 12px;
+  }
+}
+
+/* Wide-screen Slide-over Inspector Drawer (P2: >= 1280px in Table Mode) */
+@media (min-width: 1280px) {
+  .call-workspace.has-inspector {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) clamp(420px, 38vw, 560px);
+    align-items: start;
+    gap: 12px;
+  }
+  .call-workspace.has-inspector .call-log.call-log-table {
+    --call-table-cols: 68px 148px minmax(0, 1fr) 82px 66px 86px;
+  }
+  .call-workspace.has-inspector .call-log.call-log-table .call-entry .call-id-chip {
+    display: none;
+  }
+  .call-workspace.has-inspector .call-inspector {
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-md, 8px);
+    background: var(--ui-panel);
+    box-shadow: var(--ui-elev-2, 0 8px 24px rgba(0, 0, 0, 0.16));
+    overflow: hidden;
+  }
+  .call-inspector-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--ui-border);
+    background: var(--ui-side, var(--ui-surface));
+    flex-shrink: 0;
+  }
+  .call-inspector-title {
     display: flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
+    font-size: var(--ui-text-sm);
   }
-  .call-log.call-log-table .call-entry:not([open]) .call-state {
-    order: 3;
-  }
-  .call-log.call-log-table .call-entry:not([open]) .call-meta {
-    flex-wrap: nowrap;
-    white-space: nowrap;
-    gap: 8px;
-  }
-  .call-log.call-log-table .call-entry:not([open]) .call-authorization {
-    max-width: 150px;
+  .call-inspector-title > strong {
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .call-inspector-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .call-inspector-body {
+    overflow-y: auto;
+    min-height: 0;
+    flex: 1;
   }
 }
 

@@ -662,3 +662,177 @@ def test_shell_binds_before_initial_snapshot_without_separate_queue_fetch(log_pa
     page.wait_for_function("document.querySelectorAll('[data-call-id]').length === 2")
     assert page.evaluate("document.activeElement.id") == 'audit-query'
     assert page.evaluate("window.queueFetchCount") == 0
+
+
+def test_dense_table_alignment_failed_subrow_burst_and_wide_inspector(log_page):
+    page, rows, details, _ = log_page
+    base = {
+        'actor': 'mcp:grant-1234567890ab:ChatGPT',
+        'project_id': 'p1',
+        'device_id': 'd1',
+        'alias': 'Imago',
+        'device_name': 'Studio',
+        'state': 'succeeded',
+        'elapsed_ms': 276,
+    }
+    fail_id = 'f' * 32
+    empty_id = 'e' * 32
+    ok_id = 'a' * 32
+    rows[:] = [
+        {**base, 'id': fail_id, 'tool': 'exec', 'state': 'failed', 'exit_code': 7,
+         'error': '项目命令退出码 7：请查看原操作详情输出', 'created': 300, 'elapsed_ms': 1570,
+         'summary': 'command=set -eu; python3 -c "import json; p=json.load(open(\'/opt/Imago/.imago\'))"',
+         'alias': 'Imago'},
+        {**base, 'id': empty_id, 'tool': 'open_workspace', 'state': 'succeeded', 'created': 290,
+         'elapsed_ms': 1650, 'summary': '', 'alias': 'SVG'},
+        {**base, 'id': ok_id, 'tool': 'read', 'state': 'succeeded', 'created': 280,
+         'elapsed_ms': 202, 'summary': 'path=backend/app/db/postgres_schema.py', 'alias': 'Nexus'},
+        *[
+            {**base, 'id': f'{i + 1:02x}' + 'c' * 30, 'tool': 'read' if i % 2 == 0 else 'search',
+             'created': 250 - i, 'elapsed_ms': 50, 'summary': 'path=README.md', 'alias': 'Imago'}
+            for i in range(4)
+        ],
+    ]
+    for r in rows:
+        details[r['id']] = {
+            **r,
+            'attempts': 1,
+            'args_summary': {'summary': r['summary'] or 'none'},
+            'output': f'output for {r["tool"]}',
+            'timing': {'wait_ms': 10, 'execution_ms': r['elapsed_ms']},
+            'trace': {'current': {'reason': '完成'}, 'events': []},
+        }
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+    page.locator('[data-call-action="density"][data-density="table"]').click()
+
+    # P0: Sticky table header visible; zero horizontal overflow.
+    assert page.locator('.call-table-header').is_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+    # P0: Failed row project & tool stay single-line (no vertical letter stacking),
+    # and empty-args row aligns its time/state/duration columns with normal rows.
+    fail_entry = page.locator(f'[data-call-id="{fail_id}"]')
+    empty_entry = page.locator(f'[data-call-id="{empty_id}"]')
+    ok_entry = page.locator(f'[data-call-id="{ok_id}"]')
+    fail_proj_box = fail_entry.locator('.call-project').bounding_box()
+    fail_tool_box = fail_entry.locator('.call-tool').bounding_box()
+    assert fail_proj_box['height'] < 32
+    assert fail_tool_box['height'] < 32
+    fail_err_box = fail_entry.locator('.call-inline-error').bounding_box()
+    assert fail_err_box['y'] > fail_proj_box['y'] + fail_proj_box['height'] - 4
+
+    # Vertical column alignment across failed, empty-args, and normal rows.
+    empty_state_box = empty_entry.locator('.call-state-badge').bounding_box()
+    ok_state_box = ok_entry.locator('.call-state-badge').bounding_box()
+    assert abs(empty_state_box['x'] - ok_state_box['x']) <= 2
+    empty_dur_box = empty_entry.locator('.call-duration').bounding_box()
+    ok_dur_box = ok_entry.locator('.call-duration').bounding_box()
+    assert abs((empty_dur_box['x'] + empty_dur_box['width']) - (ok_dur_box['x'] + ok_dur_box['width'])) <= 2
+
+    # P1: Burst row duration aligns with table duration column.
+    burst_dur_box = page.locator('.call-burst .call-burst-meta').bounding_box()
+    assert abs((burst_dur_box['x'] + burst_dur_box['width']) - (ok_dur_box['x'] + ok_dur_box['width'])) <= 4
+
+    # P2: Wide-screen (>=1280px) table click opens right-hand inspector drawer without opening <details>.
+    fail_entry.locator('summary').first.click()
+    drawer = page.locator('.call-inspector')
+    drawer.wait_for(state='visible')
+    assert page.locator('.call-workspace.has-inspector').count() == 1
+    assert fail_entry.get_attribute('open') is None
+    assert 'output for exec' in drawer.inner_text()
+
+    # P2: Keyboard ArrowDown steps to next row (open_workspace); Escape closes drawer.
+    page.keyboard.press('ArrowDown')
+    page.wait_for_function(f'S.callLog.inspectedId === "{empty_id}"')
+    assert 'open_workspace' in drawer.locator('.call-inspector-title').inner_text()
+    page.keyboard.press('Escape')
+    assert drawer.is_hidden()
+    assert page.locator('.call-workspace.has-inspector').count() == 0
+
+
+def test_wide_inspector_live_guard_incremental_resize_and_inline_error_patch(log_page):
+    page, rows, details, requests = log_page
+    run_id = '1' * 32
+    ok_id = '2' * 32
+    rows[:] = [
+        {'id': run_id, 'tool': 'exec', 'actor': 'mcp:g1:ChatGPT', 'project_id': 'p1',
+         'alias': 'MCP', 'device_name': 'Node', 'state': 'running', 'created': 200,
+         'updated': 201, 'elapsed_ms': 1200, 'summary': 'command=pytest -q'},
+        {'id': ok_id, 'tool': 'read', 'actor': 'mcp:g1:ChatGPT', 'project_id': 'p1',
+         'alias': 'MCP', 'device_name': 'Node', 'state': 'succeeded', 'created': 190,
+         'updated': 191, 'elapsed_ms': 80, 'summary': 'path=README.md'},
+    ]
+    details[run_id] = {
+        **rows[0],
+        'attempts': 1,
+        'args_summary': {'command': 'pytest -q'},
+        'output': '\n'.join(f'line {i}' for i in range(60)),
+        'output_seq': 2,
+        'output_clean_chars': 400,
+        'output_clean_sha': 'b' * 64,
+        'timing': {'wait_ms': 10, 'execution_ms': None},
+        'trace': {'latest_event_id': 1, 'current': {'reason': '运行中'}, 'events': []},
+    }
+    details[ok_id] = {
+        **rows[1],
+        'attempts': 1,
+        'args_summary': {'path': 'README.md'},
+        'output': 'readme content',
+        'timing': {'wait_ms': 5, 'execution_ms': 75},
+        'trace': {'current': {'reason': '完成'}, 'events': []},
+    }
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.evaluate("""() => {
+      window.rawRequests = [];
+      const original = window.readCallLog;
+      window.readCallLog = path => {
+        window.rawRequests.push(path);
+        return original(path.startsWith('/api/call-log/') ? path.split('?')[0] : path);
+      };
+    }""")
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+    page.locator('[data-call-action="density"][data-density="table"]').click()
+
+    # Open running row in wide inspector drawer.
+    run_entry = page.locator(f'[data-call-id="{run_id}"]')
+    run_entry.locator('summary').first.click()
+    drawer = page.locator('.call-inspector')
+    drawer.locator('.call-facts').wait_for()
+    output_sec = drawer.locator('[data-call-section="output"]')
+    output_sec.locator('summary').click()
+    output_sec.locator('pre').evaluate('(el) => { window.drawerPre = el; }')
+    page.evaluate('document.activeElement?.blur?.()')
+
+    # B1 + B2: New incoming row during background poll must NOT overwrite list while inspector is open,
+    # and active drawer uses incremental after_output_seq while preserving <pre> identity.
+    rows.insert(0, {**rows[1], 'id': '3' * 32, 'created': 250})
+    details[run_id]['output'] += '\nappended-line'
+    details[run_id]['output_seq'] = 3
+    details[run_id]['updated'] = 205
+    page.evaluate('CodePierCallLog.refresh(true)')
+    assert page.locator('[data-call-id]').count() == 2
+    assert page.locator('#call-new').is_visible()
+    assert page.evaluate('window.rawRequests.some(u => u.includes("after_output_seq=2"))')
+    assert output_sec.locator('pre').evaluate('(el) => el === window.drawerPre')
+    assert output_sec.locator('pre').inner_text().endswith('appended-line')
+
+    # B6 + B4: SSE failure frame dynamically injects .call-inline-error sub-row & updates data-call-state.
+    page.evaluate(
+        f"""CodePierCallLog.onServerEvent({{
+          type: 'operation',
+          at: 210,
+          data: {{id: '{run_id}', state: 'failed', exit_code: 2, error: '断言失败：退出码 2', created: 200, updated: 210}}
+        }})"""
+    )
+    assert run_entry.get_attribute('data-call-state') == 'failed'
+    assert '退出码 2' in run_entry.locator('.call-inline-error').inner_text()
+
+    # B5: Shrinking viewport below 1280px seamlessly hands off drawer to inline <details open>,
+    # and widening back restores the drawer and collapses inline <details>.
+    page.set_viewport_size({'width': 1024, 'height': 900})
+    page.wait_for_function(f'document.querySelector(\'[data-call-id="{run_id}"]\').open === true')
+    assert drawer.is_hidden()
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    drawer.wait_for(state='visible')
+    assert run_entry.get_attribute('open') is None
