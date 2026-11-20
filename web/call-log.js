@@ -29,16 +29,17 @@ window.CodePierCallLog = (() => {
     visListener = null,
     wideMql = null,
     wideMqlHandler = null,
-    inspectorController = null,
+    resizeListener = null,
+    lastAppliedHash = null,
     focusController = null,
     focusTurn = 0,
     retryAt = 0,
     retryTicker = null;
   const cache = new Map(),
+    detailInflight = new Map(),
     opened = new Set(),
     expandedBursts = new Set(),
     detailOutputTimers = new Map(),
-    prefetchControllers = new Map(),
     projectHues = new Map(),
     projectIds = new Map();
 
@@ -110,7 +111,7 @@ window.CodePierCallLog = (() => {
       tool: '',
       triggerSource: '',
       preset: '',
-      density: 'cards',
+      density: 'table',
       burst: true,
       live: true,
       rows: [],
@@ -371,26 +372,34 @@ window.CodePierCallLog = (() => {
   const key = () => params().toString();
 
   function applyHashParams() {
-    const rawHash = typeof location !== 'undefined' ? location.hash.slice(1) : '';
+    if (typeof location === 'undefined') return;
+    const currentHash = location.hash || '';
+    if (currentHash === lastAppliedHash) return;
+    lastAppliedHash = currentHash;
+    const rawHash = currentHash.slice(1);
+    if (!rawHash.startsWith('audit')) return;
     const qIdx = rawHash.indexOf('?');
-    if (qIdx < 0) return;
-    const hp = new URLSearchParams(rawHash.slice(qIdx + 1));
-    if (hp.has('project')) st().project = hp.get('project').slice(0, 100);
-    if (hp.has('tool')) st().tool = hp.get('tool').slice(0, 100);
-    if (hp.has('status') && [...ACTIVE_STATES, ...TERMINAL_STATES, ''].includes(hp.get('status')))
-      S.auditStatus = hp.get('status');
-    if (hp.has('preset') && PRESET_DEFS.some(([k]) => k === hp.get('preset')))
-      st().preset = hp.get('preset');
-    if (hp.has('source') && ['', 'mcp', 'panel'].includes(hp.get('source')))
-      S.auditSource = hp.get('source');
-    if (
+    const hp = new URLSearchParams(qIdx >= 0 ? rawHash.slice(qIdx + 1) : '');
+    st().project = hp.has('project') ? hp.get('project').slice(0, 100) : '';
+    st().tool = hp.has('tool') ? hp.get('tool').slice(0, 100) : '';
+    S.auditStatus =
+      hp.has('status') && [...ACTIVE_STATES, ...TERMINAL_STATES, ''].includes(hp.get('status'))
+        ? hp.get('status')
+        : '';
+    st().preset =
+      hp.has('preset') && PRESET_DEFS.some(([k]) => k === hp.get('preset')) ? hp.get('preset') : '';
+    S.auditSource =
+      hp.has('source') && ['', 'mcp', 'panel'].includes(hp.get('source')) ? hp.get('source') : '';
+    st().triggerSource =
       hp.has('trigger') &&
       ['', 'system_maintenance', 'request', 'unknown'].includes(hp.get('trigger'))
-    )
-      st().triggerSource = hp.get('trigger');
-    if (hp.has('density') && ['cards', 'table'].includes(hp.get('density')))
-      st().density = hp.get('density');
-    if (hp.has('burst')) st().burst = hp.get('burst') !== '0';
+        ? hp.get('trigger')
+        : '';
+    st().density =
+      hp.has('density') && ['cards', 'table'].includes(hp.get('density'))
+        ? hp.get('density')
+        : 'table';
+    st().burst = hp.has('burst') ? hp.get('burst') !== '0' : true;
     if (hp.has('op') && /^[a-zA-Z0-9_-]{1,64}$/.test(hp.get('op'))) pendingFocusId = hp.get('op');
   }
 
@@ -405,16 +414,19 @@ window.CodePierCallLog = (() => {
     if (st().preset) hp.set('preset', st().preset);
     if (S.auditSource) hp.set('source', S.auditSource);
     if (st().triggerSource) hp.set('trigger', st().triggerSource);
-    if (st().density === 'table') hp.set('density', 'table');
+    if (st().density === 'cards') hp.set('density', 'cards');
     if (!st().burst) hp.set('burst', '0');
     const suffix = hp.toString();
     const targetHash = '#audit' + (suffix ? '?' + suffix : '');
     if (location.hash !== targetHash) {
       try {
         history.replaceState(null, '', location.pathname + location.search + targetHash);
+        lastAppliedHash = location.hash || targetHash;
       } catch {
         // Sandboxed about:blank harnesses may disallow replaceState.
       }
+    } else {
+      lastAppliedHash = targetHash;
     }
   }
 
@@ -428,9 +440,27 @@ window.CodePierCallLog = (() => {
       projectHues.clear();
       projectIds.clear();
       window.CodePierOperationStore?.reset();
+      lastAppliedHash = null;
       S.callLog = null;
       ownerSession = S.session;
       ownerSpace = nextSpace;
+    }
+  }
+
+  function abortAllDetailInflight({ prefetchOnly = false } = {}) {
+    for (const [id, req] of [...detailInflight.entries()]) {
+      if (prefetchOnly && !req.prefetch) continue;
+      detailInflight.delete(id);
+      req.controller.abort();
+    }
+  }
+
+  function abortDetailIfUnused(id) {
+    if (!id || opened.has(id) || st().inspectedId === id || st().pinnedOp?.id === id) return;
+    const req = detailInflight.get(id);
+    if (req) {
+      detailInflight.delete(id);
+      req.controller.abort();
     }
   }
 
@@ -447,8 +477,7 @@ window.CodePierCallLog = (() => {
     clearTimeout(sseThrottleTimer);
     for (const t of detailOutputTimers.values()) clearTimeout(t);
     detailOutputTimers.clear();
-    for (const c of prefetchControllers.values()) c.abort();
-    prefetchControllers.clear();
+    abortAllDetailInflight();
     timer = tickTimer = searchTimer = hoverTimer = progressTimer = sseThrottleTimer = null;
     epoch++;
     inflight?.abort();
@@ -466,12 +495,15 @@ window.CodePierCallLog = (() => {
       visListener = null;
     }
     if (wideMql && wideMqlHandler) {
-      wideMql.removeEventListener?.('change', wideMqlHandler);
+      if (wideMql.removeEventListener) wideMql.removeEventListener('change', wideMqlHandler);
+      else wideMql.removeListener?.(wideMqlHandler);
       wideMql = null;
       wideMqlHandler = null;
     }
-    inspectorController?.abort();
-    inspectorController = null;
+    if (resizeListener) {
+      window.removeEventListener('resize', resizeListener);
+      resizeListener = null;
+    }
     root = null;
   }
 
@@ -488,6 +520,7 @@ window.CodePierCallLog = (() => {
     lastSyncedTime = '';
     initialQueueData = null;
     pendingFocusId = '';
+    lastAppliedHash = null;
     S.callLog = null;
   }
 
@@ -531,9 +564,10 @@ window.CodePierCallLog = (() => {
     const showKindBadge = !OBVIOUS_TOOLS.has(r.tool);
     const kindClass = label === '工具' ? 'call-kind call-kind-generic' : 'call-kind';
     const isSelected = st().inspectedId && st().inspectedId === r.id;
+    const inlineOpen = opened.has(r.id) && !useInspectorDrawer();
     const actorShort = shortActorLabel(r);
     const sourceTitle = `${r.device_name || '设备未记录'} · ${source(r)} · ${authorization(r).label}`;
-    return `<details class="call-entry call-${tone}${hasArgs ? '' : ' call-entry-compact'}${isFailed ? ' call-entry-error' : ''}${isStaleActive ? ' call-entry-stale' : ''}${isSelected ? ' is-selected' : ''}" data-call-id="${esc(r.id)}" data-call-state="${esc(r.state || '')}" data-cp-key="call:${esc(r.id)}" ${opened.has(r.id) ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-identity"><span class="call-project${r.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(r)) ?? 270}" title="${esc(r.alias || '未记录')}"><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><i class="call-tool-dot" aria-hidden="true"></i><strong class="mono" title="${esc(title(r))}">${esc(title(r))}</strong>${showKindBadge ? `<span class="${kindClass}">${label}</span>` : ''}${triggerChipHTML(r)}${modelLabel(r)}${waitPill}</span></span><span class="call-state">${status(r)}</span></span>${errBlock}${argsBlock}<span class="call-meta"><time title="${esc(stamp(r.created))}">${esc(timeOnly(r.created))}</time><span class="call-meta-device">${esc(r.device_name || '设备未记录')}</span><span class="call-meta-source">${source(r)}</span><span class="call-authorization">${authorizationHTML(r)}</span><span class="call-source-cell" title="${esc(sourceTitle)}"><span class="call-actor-short">${esc(actorShort)}</span><button type="button" class="call-id-chip mono" data-call-copy-id="${esc(r.id)}" title="点击复制完整编号 ${esc(r.id)}">#${esc(r.id.slice(0, 8))}</button></span><span class="call-filter-note" ${!S.auditStatus || r.state === S.auditStatus ? 'hidden' : ''}>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail">${saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
+    return `<details class="call-entry call-${tone}${hasArgs ? '' : ' call-entry-compact'}${isFailed ? ' call-entry-error' : ''}${isStaleActive ? ' call-entry-stale' : ''}${isSelected ? ' is-selected' : ''}" data-call-id="${esc(r.id)}" data-call-state="${esc(r.state || '')}" data-cp-key="call:${esc(r.id)}" ${inlineOpen ? 'open' : ''}><summary aria-label="展开调用 项目 ${esc(r.alias || '未记录')} ${esc(r.tool)} ${esc(r.id)}"><span class="call-main"><span class="call-top"><span class="call-identity"><span class="call-project${r.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(r)) ?? 270}" title="${esc(r.alias || '未记录')}"><strong>${esc(r.alias || '未记录')}</strong></span><span class="call-tool"><i class="call-tool-dot" aria-hidden="true"></i><strong class="mono" title="${esc(title(r))}">${esc(title(r))}</strong>${showKindBadge ? `<span class="${kindClass}">${label}</span>` : ''}${triggerChipHTML(r)}${modelLabel(r)}${waitPill}</span></span><span class="call-state">${status(r)}</span></span>${errBlock}${argsBlock}<span class="call-meta"><time title="${esc(stamp(r.created))}">${esc(timeShort(r.created))}<span class="call-time-ms">${r.created ? '.' + pad3(Math.floor(r.created * 1000) % 1000) : ''}</span></time><span class="call-meta-device">${esc(r.device_name || '设备未记录')}</span><span class="call-meta-source">${source(r)}</span><span class="call-authorization">${authorizationHTML(r)}</span><span class="call-source-cell" title="${esc(sourceTitle)}"><span class="call-actor-short">${esc(actorShort)}</span><button type="button" class="call-id-chip mono" data-call-copy-id="${esc(r.id)}" title="点击复制完整编号 ${esc(r.id)}">#${esc(r.id.slice(0, 8))}</button></span><span class="call-filter-note" ${!S.auditStatus || r.state === S.auditStatus ? 'hidden' : ''}>状态已变化，不再符合当前筛选</span></span></span><span class="call-chevron" aria-hidden="true">⌄</span></summary><div class="call-detail"${inlineOpen && saved?.data ? ` data-detail-id="${esc(r.id)}"` : ''}>${inlineOpen && saved?.data ? detailHTML(saved.data) : '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>'}</div></details>`;
   }
 
   function isCollapsibleProbe(r) {
@@ -552,14 +586,17 @@ window.CodePierCallLog = (() => {
       `<div class="call-table-header" data-cp-key="table-header" aria-hidden="true"><span>时间</span><span>项目 / 工具</span><span>目标与摘要</span><span>状态</span><span class="call-th-right">耗时</span><span class="call-th-right">来源</span><span></span></div>`,
     ];
     let currentDay = '';
+    let dayOccurrence = new Map();
     let i = 0;
     while (i < rows.length) {
       const r = rows[i];
       const dKey = dayKey(r.created);
       if (dKey && dKey !== currentDay) {
         currentDay = dKey;
+        const occ = (dayOccurrence.get(dKey) || 0) + 1;
+        dayOccurrence.set(dKey, occ);
         chunks.push(
-          `<div class="call-day-divider" data-cp-key="day:${esc(dKey)}" role="separator"><span>${esc(dayHeading(dKey))}</span></div>`,
+          `<div class="call-day-divider" data-cp-key="day:${esc(dKey)}:${occ}" role="separator"><span>${esc(dayHeading(dKey))}</span></div>`,
         );
       }
       if (st().burst && isCollapsibleProbe(r)) {
@@ -636,7 +673,7 @@ window.CodePierCallLog = (() => {
     const tailPct = Math.max(0, 100 - waitPct - execPct);
     // Unknown stages must not be mislabeled as measured return/persistence time.
     const tailMs = waitMs !== null && execMs !== null ? Math.max(0, total - waitMs - execMs) : null;
-    return `<div class="call-waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail" style="width:${tailPct}%" title="${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}</span></div></div>`;
+    return `<div class="call-waterfall" data-detail-part="waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail" style="width:${tailPct}%" title="${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}</span></div></div>`;
   }
 
   function section(
@@ -678,7 +715,14 @@ window.CodePierCallLog = (() => {
       ? `<details class="call-section" data-call-section="diff" open><summary>文件差异<small>+${resData.added_lines || 0} / −${resData.removed_lines || 0} 行</small></summary><div class="call-diff-box">${renderFallbackDiff(resData)}</div></details>`
       : '';
     // AUD-14: Inverted detail hierarchy — Errors & Waterfall & Diff/Output/Arguments first, compact semantic <dl class="call-facts"> & Timeline below.
-    return `<div class="call-detail-toolbar"><span class="muted tiny">${esc(d.actor)}</span>${d.project_id ? `<button type="button" class="btn ghost small" data-call-action="filter-project" data-project="${esc(d.project_id)}">筛选此项目</button>` : ''}${d.tool ? `<button type="button" class="btn ghost small" data-call-action="filter-tool" data-tool="${esc(d.tool)}">筛选此工具</button>` : ''}<button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div>${d.error ? `<div class="notice call-error" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note">连接状态：${esc(d.transport_error)}</p>` : ''}${window.CodePierQueue?.waitingHTML(d) || ''}${window.CodePierQueue?.liveHTML(d) || ''}${window.CodePierQueue?.runHTML(d) || ''}${waterfallHTML(d)}${d.display?.truncated ? '<p class="form-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${diffSection}${section(isKnowledge(d) ? '程序输出（保存的尾部）' : '任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error, liveFollow: true })}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}<dl class="call-facts">${originFacts(d)}<div><dt>授权依据（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${timeline}${d.trace_error ? `<p class="form-note">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
+    return `<div class="call-detail-toolbar" data-detail-part="toolbar"><span class="muted tiny">${esc(d.actor)}</span>${d.project_id ? `<button type="button" class="btn ghost small" data-call-action="filter-project" data-project="${esc(d.project_id)}">筛选此项目</button>` : ''}${d.tool ? `<button type="button" class="btn ghost small" data-call-action="filter-tool" data-tool="${esc(d.tool)}">筛选此工具</button>` : ''}<button type="button" class="btn ghost small" data-call-copy="all">${icon('copy')}复制调用详情</button><button type="button" class="btn ghost small" data-call-action="detail-refresh">${icon('refresh')}刷新详情</button></div>${d.error ? `<div class="notice call-error" data-detail-part="error-banner" role="note">${esc(typeof d.error === 'string' ? d.error : json(d.error))}</div>` : ''}${d.transport_error ? `<p class="form-note" data-detail-part="transport-error">连接状态：${esc(d.transport_error)}</p>` : ''}${window.CodePierQueue?.waitingHTML(d) || ''}${window.CodePierQueue?.liveHTML(d) || ''}${window.CodePierQueue?.runHTML(d) || ''}${waterfallHTML(d)}${d.display?.truncated ? '<p class="form-note" data-detail-part="truncated-note">此详情是有长度限制的已脱敏副本；部分输出或结果已截断，不代表完整记录。</p>' : ''}${diffSection}${section(isKnowledge(d) ? '程序输出（保存的尾部）' : '任务输出（保存的尾部）', d.output, 'output', { truncated: d.output_truncated, open: !!d.error, liveFollow: true })}${section('参数摘要', d.args_summary, 'arguments', { open: true, truncated: d.arguments_truncated })}${section('保存的返回结果', d.result, 'result', { truncated: d.display?.sections?.result })}<dl class="call-facts" data-detail-part="facts">${originFacts(d)}<div><dt>授权依据（调用时记录）</dt><dd class="call-authorization-detail">${authorizationHTML(d, true)}</dd></div><div><dt>操作编号</dt><dd><code>${esc(d.id)}</code></dd></div><div><dt>总历时</dt><dd>${duration(d.elapsed_ms)}</dd></div><div><dt>执行前等待（Hub 观测）</dt><dd>${duration(t.wait_ms)}</dd></div><div><dt>实际执行（本次 Agent 计时）</dt><dd>${duration(t.execution_ms)}</dd></div><div><dt>投递次数</dt><dd>${esc(d.attempts ?? '未记录')}</dd></div><div><dt>当前阶段</dt><dd>${esc(trace?.current?.reason || '未记录')}</dd></div></dl>${timeline}${d.trace_error ? `<p class="form-note" data-detail-part="trace-error">执行链路暂不可用：${esc(d.trace_error)}</p>` : ''}<p class="form-note" data-detail-part="footer-note">工具状态以执行回执为准；HTTP 200 仅表示请求被接收。未采集的耗时不补造，自动脱敏不能识别所有无标签的秘密值。</p>`;
+  }
+
+  function detailChildKey(el, counts) {
+    const base = el.dataset.callSection || el.dataset.detailPart || el.className + ':' + el.tagName;
+    const n = (counts.get(base) || 0) + 1;
+    counts.set(base, n);
+    return n === 1 ? base : `${base}#${n}`;
   }
 
   // Incremental output must keep the terminal element, selection and scroll identity.
@@ -686,18 +730,17 @@ window.CodePierCallLog = (() => {
   function reconcileDetailDOM(body, rendered) {
     const template = document.createElement('template');
     template.innerHTML = rendered;
+    const oldCounts = new Map();
     const oldSections = new Map(
-      [...body.children].map((el) => [
-        el.dataset.callSection || el.className + ':' + el.tagName,
-        el,
-      ]),
+      [...body.children].map((el) => [detailChildKey(el, oldCounts), el]),
     );
+    const incomingCounts = new Map();
     const keep = new Set();
     let cursor = body.firstElementChild;
     for (const incoming of [...template.content.children]) {
-      const key = incoming.dataset.callSection || incoming.className + ':' + incoming.tagName;
-      let target = oldSections.get(key);
-      if (target && target.tagName === incoming.tagName) {
+      const k = detailChildKey(incoming, incomingCounts);
+      let target = oldSections.get(k);
+      if (target && !keep.has(target) && target.tagName === incoming.tagName) {
         if (incoming.dataset.callSection === 'output') {
           const pre = target.querySelector('pre'),
             nextPre = incoming.querySelector('pre');
@@ -823,13 +866,12 @@ window.CodePierCallLog = (() => {
         )
         .join('');
     const pinnedMarkup = st().pinnedOp
-      ? `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(st().pinnedOp.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(st().pinnedOp.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail">${detailHTML(st().pinnedOp)}</div></div>`
+      ? `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(st().pinnedOp.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(st().pinnedOp.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail" data-detail-id="${esc(st().pinnedOp.id)}">${detailHTML(st().pinnedOp)}</div></div>`
       : '';
     return (
       `<div class="call-audit-shell">` +
       heading('操作审计', '调用记录', '', syncPodHTML()) +
-      (window.CodePierQueue?.placeholder() || '') +
-      `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(projects, st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(tools, st().tool, 'name')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><form id="call-search"><div class="call-search-box"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号（/ 聚焦）" value="${esc(S.auditQuery || '')}"><span role="button" tabindex="0" class="call-search-clear" data-call-action="clear-query" aria-label="清空搜索词" ${S.auditQuery ? '' : 'hidden'}>×</span></div><button type="submit" class="btn small">搜索</button></form><details id="call-more-filters" class="call-more-filters"${(st().moreFilters ?? !!(S.auditSource || st().triggerSource)) ? ' open' : ''}><summary>更多筛选${[S.auditSource, st().triggerSource].filter(Boolean).length ? `<span class="call-more-count">${[S.auditSource, st().triggerSource].filter(Boolean).length}</span>` : ''}</summary><div class="call-more-body"><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
+      `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(projects, st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(tools, st().tool, 'name')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><form id="call-search"><div class="call-search-box"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号（/ 聚焦）" value="${esc(S.auditQuery || '')}"><span role="button" tabindex="0" class="call-search-clear" data-call-action="clear-query" aria-label="清空搜索词" ${S.auditQuery ? '' : 'hidden'}>×</span></div><button type="submit" class="btn small">搜索</button></form><details id="call-more-filters" class="call-more-filters"${st().moreFilters ? ' open' : ''}><summary>更多筛选${[S.auditSource, st().triggerSource].filter(Boolean).length ? `<span class="call-more-count">${[S.auditSource, st().triggerSource].filter(Boolean).length}</span>` : ''}</summary><div class="call-more-body"><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
         ['system_maintenance', '自动维护'],
         ['request', '请求发起'],
         ['unknown', '未记录'],
@@ -845,6 +887,7 @@ window.CodePierCallLog = (() => {
       pinnedMarkup +
       `<div class="call-workspace"><section class="call-log${st().density === 'table' ? ' call-log-table' : ''}" aria-label="工具调用流水">${rowsMarkup}</section><aside class="call-inspector" aria-label="调用详情抽屉" hidden></aside></div>` +
       `<div class="pagination"><span id="call-count">${esc(countTextHTML(rowsLen))}</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${hasNext ? '' : 'disabled'}>下一页</button></div></div>` +
+      (window.CodePierQueue?.placeholder() || '') +
       uiHelp(
         '记录范围与隐私',
         '展示已保存的工具执行证据，不含完整对话；搜索覆盖已保存的摘要，支持导出当前页或当前筛选全集。参数正文仍按原有策略省略；密码、令牌、授权请求头和环境变量值默认脱敏。列表按创建时间及操作编号稳定分页；新调用通过滚动锚定平滑合入，不挤动正在展开阅读的内容。触发来源与授权身份分开记录，MCP 是调用渠道，不代表模型仍在运行。旧记录缺少字段时显示未记录。',
@@ -908,33 +951,64 @@ window.CodePierCallLog = (() => {
     });
   }
 
-  // Keyed DOM patcher for .call-log so existing <details data-call-id> preserve DOM identity & open state.
-  function reconcileListDOM(container, htmlString, { syncOpenState = false } = {}) {
-    if (!container) return;
-    if (typeof window.CP?.dom?.replacePage === 'function') {
-      window.CP.dom.replacePage(container, htmlString);
-      if (syncOpenState) {
-        container.querySelectorAll('details[data-call-id]').forEach((node) => {
-          const shouldOpen = opened.has(node.dataset.callId);
-          if (node.open !== shouldOpen) node.open = shouldOpen;
-        });
+  function collectKeyedNodes(container, map = new Map()) {
+    for (const child of container.children) {
+      const k = child.dataset?.cpKey || child.dataset?.callId;
+      if (k && !map.has(k)) map.set(k, child);
+      if (child.classList?.contains('call-burst')) {
+        const itemsBox = child.querySelector(':scope > .call-burst-items');
+        if (itemsBox) collectKeyedNodes(itemsBox, map);
       }
-      return;
     }
+    return map;
+  }
+
+  // Unified keyed DOM patcher for .call-log (identical behavior with or without core/bundle.js):
+  // preserves open <details data-call-id> subtrees, scroll positions, and listeners across list reloads & bursts.
+  function reconcileListDOM(
+    container,
+    htmlString,
+    { syncOpenState = false, keyedPool = null } = {},
+  ) {
+    if (!container) return;
     const template = document.createElement('template');
     template.innerHTML = htmlString;
-    const existingByKey = new Map();
-    for (const child of [...container.children]) {
-      const k = child.dataset?.cpKey || child.dataset?.callId;
-      if (k) existingByKey.set(k, child);
-    }
-    let cursor = container.firstChild;
+    const existingByKey = keyedPool || collectKeyedNodes(container);
+    let prevPlaced = null;
     const used = new Set();
     for (const incoming of [...template.content.children]) {
       const k = incoming.dataset?.cpKey || incoming.dataset?.callId;
       let target = k ? existingByKey.get(k) : null;
-      if (target && target.tagName === incoming.tagName && !used.has(target)) {
-        const nextOpen = syncOpenState ? opened.has(target.dataset.callId) : target.open;
+      const reusing = !!(target && target.tagName === incoming.tagName && !used.has(target));
+      if (!reusing) target = incoming;
+      used.add(target);
+      const refNode = prevPlaced ? prevPlaced.nextSibling : container.firstChild;
+      if (target !== refNode) {
+        const savedScrolls = reusing
+          ? [...target.querySelectorAll('pre')].map((p) => [p, p.scrollTop, p.scrollLeft])
+          : null;
+        container.insertBefore(target, refNode);
+        if (savedScrolls?.length) {
+          for (const [p, top, left] of savedScrolls) {
+            p.scrollTop = top;
+            p.scrollLeft = left;
+            const gutter = p
+              .closest('[data-call-section="output"]')
+              ?.querySelector('.call-output-lines');
+            if (gutter) gutter.scrollTop = top;
+          }
+        }
+      }
+      prevPlaced = target;
+      if (reusing) {
+        const isBurst = target.classList.contains('call-burst');
+        const nextOpen = isBurst
+          ? expandedBursts.has(target.dataset.burstId)
+          : useInspectorDrawer()
+            ? false
+            : syncOpenState
+              ? opened.has(target.dataset.callId)
+              : target.open || opened.has(target.dataset.callId);
         target.className = incoming.className;
         if (incoming.dataset.callState !== undefined)
           target.dataset.callState = incoming.dataset.callState;
@@ -945,19 +1019,26 @@ window.CodePierCallLog = (() => {
           const aria = newSum.getAttribute('aria-label');
           if (aria) oldSum.setAttribute('aria-label', aria);
         }
-        if (!nextOpen) {
+        if (isBurst) {
+          const newItems = incoming.querySelector(':scope > .call-burst-items');
+          const oldItems = target.querySelector(':scope > .call-burst-items');
+          if (newItems && oldItems) {
+            reconcileListDOM(oldItems, newItems.innerHTML, {
+              syncOpenState,
+              keyedPool: existingByKey,
+            });
+          }
+        } else if (!nextOpen) {
           const detailBox = target.querySelector(':scope > .call-detail');
-          if (detailBox)
+          if (detailBox && (detailBox.dataset.detailId || detailBox.querySelector('.call-facts'))) {
+            delete detailBox.dataset.detailId;
+            detailBox._renderedHTML = '';
             detailBox.innerHTML =
               '<p class="muted" role="status">展开后加载参数、输出与执行链路。</p>';
+          }
         }
-        target.open = nextOpen;
-      } else {
-        target = incoming;
+        if (target.open !== nextOpen) target.open = nextOpen;
       }
-      used.add(target);
-      if (target !== cursor) container.insertBefore(target, cursor);
-      cursor = target.nextSibling;
     }
     for (const child of [...container.childNodes]) {
       if (!used.has(child)) child.remove();
@@ -1002,8 +1083,7 @@ window.CodePierCallLog = (() => {
     }
     if (clearDetails) {
       clearTimeout(hoverTimer);
-      for (const c of prefetchControllers.values()) c.abort();
-      prefetchControllers.clear();
+      abortAllDetailInflight();
       cache.clear();
       opened.clear();
     }
@@ -1074,16 +1154,29 @@ window.CodePierCallLog = (() => {
       st().incoming = false;
       st().incomingCount = 0;
       const keep = new Set(st().rows.map((x) => x.id));
+      if (st().pinnedOp?.id) keep.add(st().pinnedOp.id);
       for (const id of cache.keys()) if (!keep.has(id)) cache.delete(id);
-      for (const id of opened) if (!keep.has(id)) opened.delete(id);
-      if (st().inspectedId && (clearDetails || !keep.has(st().inspectedId))) closeInspector();
+      for (const id of [...opened]) {
+        if (!keep.has(id)) {
+          opened.delete(id);
+          abortDetailIfUnused(id);
+        }
+      }
+      if (st().inspectedId && (clearDetails || !st().rows.some((x) => x.id === st().inspectedId)))
+        closeInspector();
       reconcileListDOM(listEl, buildRowsMarkup(st().rows), { syncOpenState: clearDetails });
       const banner = root.querySelector('#call-new');
       if (banner) banner.hidden = true;
       updatePaginationControls();
       bindEntries();
       if (st().inspectedId && useInspectorDrawer()) {
-        updateInspectorNavButtons();
+        if (!root.querySelector('.call-workspace.has-inspector')) {
+          openInspector(st().inspectedId).catch(() => {});
+        } else {
+          updateInspectorNavButtons();
+          const selNode = root.querySelector(`[data-call-id="${CSS.escape(st().inspectedId)}"]`);
+          if (selNode) scrollRowIntoList(selNode);
+        }
       }
       syncLiveTicker();
       setSync(
@@ -1182,165 +1275,194 @@ window.CodePierCallLog = (() => {
     label.textContent = text;
   }
 
-  // AUD-06: 120ms hover/focus intent prefetch (capped at 2 concurrent prefetches).
-  async function prefetchDetail(id) {
-    if (!id || cache.has(id) || prefetchControllers.has(id) || prefetchControllers.size >= 2)
-      return;
+  // Unified detail fetcher shared by inline <details>, wide-screen .call-inspector,
+  // .call-pinned-inspector, and 120ms hover/focus prefetch.
+  async function fetchDetailData(
+    id,
+    { force = false, manual = false, prefetch = false, externalSignal = null } = {},
+  ) {
+    if (!id) return null;
+    const old = cache.get(id);
+    if (!force && old?.data) return old.data;
+    const existing = detailInflight.get(id);
+    if (existing) {
+      if (prefetch) return existing.promise;
+      if (!manual && (!force || existing.force)) {
+        existing.prefetch = false;
+        return existing.promise;
+      }
+      detailInflight.delete(id);
+      existing.controller.abort();
+    } else if (prefetch) {
+      let prefetchCount = 0;
+      for (const req of detailInflight.values()) if (req.prefetch) prefetchCount++;
+      if (prefetchCount >= 2) return null;
+    }
     const session = S.session,
       generation = epoch,
       ctrl = new AbortController();
-    prefetchControllers.set(id, ctrl);
-    try {
-      const d = await api('/api/call-log/' + encodeURIComponent(id), {
-        signal: ctrl.signal,
-        retryDelays: [],
-      });
-      if (session !== S.session || generation !== epoch || cache.has(id)) return;
-      cache.set(id, { loading: false, data: d, rendered: '' });
-    } catch {
-      // Silent prefetch ignore.
-    } finally {
-      prefetchControllers.delete(id);
+    let onExtAbort = null;
+    if (externalSignal) {
+      if (externalSignal.aborted) return null;
+      onExtAbort = () => ctrl.abort();
+      externalSignal.addEventListener('abort', onExtAbort, { once: true });
     }
+    const reqEntry = { controller: ctrl, force, manual, prefetch, promise: null };
+    const run = (async () => {
+      try {
+        let canIncremental =
+          !prefetch &&
+          force &&
+          !manual &&
+          old?.data &&
+          active(old.data) &&
+          Number.isInteger(old.data.output_seq);
+        let detailUrl = '/api/call-log/' + encodeURIComponent(id);
+        if (canIncremental) {
+          const dp = new URLSearchParams({
+            after_output_seq: String(old.data.output_seq),
+            after_event_id: String(old.data.trace?.latest_event_id || 0),
+          });
+          if (
+            Number.isInteger(old.data.output_clean_chars) &&
+            old.data.output_clean_chars > 0 &&
+            typeof old.data.output_clean_sha === 'string'
+          ) {
+            dp.set('after_output_chars', String(old.data.output_clean_chars));
+            dp.set('after_output_sha', old.data.output_clean_sha);
+          }
+          detailUrl += '?' + dp.toString();
+        }
+        const stale = () =>
+          ctrl.signal.aborted ||
+          session !== S.session ||
+          generation !== epoch ||
+          detailInflight.get(id) !== reqEntry;
+        const reqOpts = prefetch
+          ? { signal: ctrl.signal, retryDelays: [] }
+          : { signal: ctrl.signal };
+        let fetched = await api(detailUrl, reqOpts);
+        if (stale()) return null;
+        if (canIncremental && !active(fetched)) {
+          // Incremental reads omit the full trace, so final wait/execution timing
+          // cannot be derived from them. Settle a finished call with one full read.
+          fetched = await api('/api/call-log/' + encodeURIComponent(id), reqOpts);
+          if (stale()) return null;
+          canIncremental = false;
+        }
+        let d = fetched;
+        if (canIncremental && old?.data) {
+          const mergedOutput = fetched.output_unchanged
+            ? old.data.output
+            : typeof fetched.output_delta === 'string' &&
+                typeof old.data.output === 'string' &&
+                fetched.output_base_chars === old.data.output.length
+              ? old.data.output + fetched.output_delta
+              : fetched.output;
+          const prevEvents = objects(old.data.trace?.events);
+          const newEvents = objects(fetched.trace?.events);
+          const mergedTrace =
+            fetched.trace_incremental && old.data.trace
+              ? {
+                  ...old.data.trace,
+                  ...fetched.trace,
+                  events: [...prevEvents, ...newEvents].slice(-200),
+                  latest_event_id:
+                    fetched.trace?.latest_event_id ?? old.data.trace?.latest_event_id ?? 0,
+                }
+              : fetched.trace;
+          d = {
+            ...old.data,
+            ...fetched,
+            output: mergedOutput,
+            timing: fetched.trace_incremental ? old.data.timing : fetched.timing,
+            trace: mergedTrace,
+          };
+        }
+        if (!prefetch) {
+          window.CodePierOperationStore?.ingestCallLog({ operations: [d] });
+          const canonical = window.CodePierOperationStore?.get(id);
+          const localRow = st().rows.find((x) => x.id === id);
+          const newerRow =
+            canonical ||
+            (localRow && Number(localRow.updated || 0) > Number(d.updated || 0) ? localRow : null);
+          if (newerRow) {
+            d = { ...d, state: newerRow.state, updated: newerRow.updated };
+            for (const field of ['elapsed_ms', 'exit_code', 'error']) {
+              if (newerRow[field] !== undefined) d[field] = newerRow[field];
+            }
+          }
+        }
+        const prevEntry = cache.get(id);
+        cache.set(id, { data: d, needsRender: !!prevEntry?.needsRender });
+        if (!prefetch && root?.isConnected) {
+          const rowNode = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
+          if (rowNode) patchVisibleRowInPlace(rowNode, d);
+          const drawer = root.querySelector('.call-inspector');
+          if (drawer && !drawer.hidden && drawer.dataset.inspectorId === id) {
+            renderInspectorHeaderTitle(drawer, id);
+          }
+        }
+        return d;
+      } catch (err) {
+        if (prefetch || ctrl.signal.aborted || err?.name === 'AbortError') return null;
+        throw err;
+      } finally {
+        if (onExtAbort && externalSignal) externalSignal.removeEventListener('abort', onExtAbort);
+        if (detailInflight.get(id) === reqEntry) detailInflight.delete(id);
+      }
+    })();
+    reqEntry.promise = run;
+    detailInflight.set(id, reqEntry);
+    return run;
   }
 
-  async function detail(node, force = false, manual = false) {
-    if (!node?.isConnected || !node.open) return;
-    const id = node.dataset.callId;
-    if (prefetchControllers.has(id)) {
-      prefetchControllers.get(id).abort();
-      prefetchControllers.delete(id);
+  // Unified detail DOM renderer for inline <details>, .call-inspector, and .call-pinned-inspector.
+  // Tracks _renderedHTML and data-detail-id directly on the container DOM node so containers never
+  // pollute one another, and preserves section fold states, <pre> scroll, and button focus.
+  function renderDetailInto(body, d, { force = false, manual = false, focusAction = null } = {}) {
+    if (!body?.isConnected || !d) return false;
+    const sameOp = body.dataset.detailId === d.id && !!body.querySelector('.call-facts');
+    const selection = window.getSelection();
+    if (
+      sameOp &&
+      force &&
+      !manual &&
+      (body.contains(document.activeElement) ||
+        (selection && !selection.isCollapsed && body.contains(selection.anchorNode)))
+    ) {
+      const entry = cache.get(d.id);
+      if (entry) entry.needsRender = true;
+      return false;
     }
-    const old = cache.get(id);
-    if (old?.loading || (!force && old?.data)) {
-      if (old?.data && !node.querySelector('.call-facts')) {
-        const body = node.querySelector('.call-detail');
-        const rendered = detailHTML(old.data);
-        body.innerHTML = rendered;
-        bindOutputScroll(body);
-        old.rendered = rendered;
-      }
-      return;
-    }
-    const session = S.session,
-      generation = epoch,
-      entry = { ...old, loading: true };
-    cache.set(id, entry);
-    if (!entry.data)
-      node.querySelector('.call-detail').innerHTML =
-        '<p class="muted" role="status">正在加载调用详情…</p>';
-    try {
-      let canIncremental =
-        force && !manual && old?.data && active(old.data) && Number.isInteger(old.data.output_seq);
-      let detailUrl = '/api/call-log/' + encodeURIComponent(id);
-      if (canIncremental) {
-        const dp = new URLSearchParams({
-          after_output_seq: String(old.data.output_seq),
-          after_event_id: String(old.data.trace?.latest_event_id || 0),
-        });
-        if (
-          Number.isInteger(old.data.output_clean_chars) &&
-          old.data.output_clean_chars > 0 &&
-          typeof old.data.output_clean_sha === 'string'
-        ) {
-          dp.set('after_output_chars', String(old.data.output_clean_chars));
-          dp.set('after_output_sha', old.data.output_clean_sha);
-        }
-        detailUrl += '?' + dp.toString();
-      }
-      const stale = () =>
-        session !== S.session ||
-        generation !== epoch ||
-        !node.isConnected ||
-        cache.get(id) !== entry;
-      let fetched = await api(detailUrl);
-      if (stale()) return;
-      if (canIncremental && !active(fetched)) {
-        // Incremental reads omit the full trace, so final wait/execution timing
-        // cannot be derived from them. Settle a finished call with one full read.
-        fetched = await api('/api/call-log/' + encodeURIComponent(id));
-        if (stale()) return;
-        canIncremental = false;
-      }
-      let d = fetched;
-      if (canIncremental && old?.data) {
-        const mergedOutput = fetched.output_unchanged
-          ? old.data.output
-          : typeof fetched.output_delta === 'string' &&
-              typeof old.data.output === 'string' &&
-              fetched.output_base_chars === old.data.output.length
-            ? old.data.output + fetched.output_delta
-            : fetched.output;
-        const prevEvents = objects(old.data.trace?.events);
-        const newEvents = objects(fetched.trace?.events);
-        const mergedTrace =
-          fetched.trace_incremental && old.data.trace
-            ? {
-                ...old.data.trace,
-                ...fetched.trace,
-                events: [...prevEvents, ...newEvents].slice(-200),
-                latest_event_id:
-                  fetched.trace?.latest_event_id ?? old.data.trace?.latest_event_id ?? 0,
-              }
-            : fetched.trace;
-        d = {
-          ...old.data,
-          ...fetched,
-          output: mergedOutput,
-          timing: fetched.trace_incremental ? old.data.timing : fetched.timing,
-          trace: mergedTrace,
-        };
-      }
-      window.CodePierOperationStore?.ingestCallLog({ operations: [d] });
-      const canonical = window.CodePierOperationStore?.get(id);
-      const localRow = st().rows.find((x) => x.id === id);
-      const newerRow =
-        canonical ||
-        (localRow && Number(localRow.updated || 0) > Number(d.updated || 0) ? localRow : null);
-      if (newerRow) {
-        d = { ...d, state: newerRow.state, updated: newerRow.updated };
-        for (const field of ['elapsed_ms', 'exit_code', 'error']) {
-          if (newerRow[field] !== undefined) d[field] = newerRow[field];
-        }
-      }
-      entry.data = d;
-      node.querySelector('.call-state').innerHTML = status(d);
-      const body = node.querySelector('.call-detail'),
-        selection = window.getSelection();
-      if (
-        force &&
-        !manual &&
-        (body.contains(document.activeElement) ||
-          (selection && !selection.isCollapsed && body.contains(selection.anchorNode)))
-      ) {
-        entry.needsRender = true;
-        return;
-      }
-      const focusAction = manual ? document.activeElement?.dataset.callAction : null;
-      const expanded = new Set(
-        [...body.querySelectorAll('details[open]')].map((x) => x.dataset.callSection),
-      );
-      const scrolls = new Map(
-        [...body.querySelectorAll('[data-call-section]')].map((x) => {
-          const p = x.querySelector('pre');
-          const nearBottom = p ? p.scrollHeight - p.scrollTop - p.clientHeight < 28 : false;
-          return [
+    const prevSections = sameOp
+      ? new Map(
+          [...body.querySelectorAll('details[data-call-section]')].map((x) => [
             x.dataset.callSection,
-            p ? [p.scrollTop, p.scrollLeft, nearBottom, p.scrollHeight] : [0, 0, false, 0],
-          ];
-        }),
-      );
-      const rendered = detailHTML(d);
-      if (rendered !== entry.rendered) {
-        if (old?.data) reconcileDetailDOM(body, rendered);
-        else {
-          body.innerHTML = rendered;
-          bindOutputScroll(body);
-        }
-        if (old?.data)
-          body.querySelectorAll('details[data-call-section]').forEach((x) => {
-            x.open = expanded.has(x.dataset.callSection);
-          });
+            x.open,
+          ]),
+        )
+      : null;
+    const scrolls = sameOp
+      ? new Map(
+          [...body.querySelectorAll('[data-call-section]')].map((x) => {
+            const p = x.querySelector('pre');
+            const nearBottom = p ? p.scrollHeight - p.scrollTop - p.clientHeight < 28 : false;
+            return [
+              x.dataset.callSection,
+              p ? [p.scrollTop, p.scrollLeft, nearBottom, p.scrollHeight] : [0, 0, false, 0],
+            ];
+          }),
+        )
+      : null;
+    const rendered = detailHTML(d);
+    if (!sameOp || rendered !== body._renderedHTML) {
+      if (sameOp) {
+        reconcileDetailDOM(body, rendered);
+        body.querySelectorAll('details[data-call-section]').forEach((x) => {
+          const secName = x.dataset.callSection;
+          if (prevSections.has(secName)) x.open = prevSections.get(secName);
+        });
         for (const secNode of body.querySelectorAll('[data-call-section]')) {
           const p = secNode.querySelector('pre'),
             savedScroll = scrolls.get(secNode.dataset.callSection);
@@ -1367,20 +1489,68 @@ window.CodePierCallLog = (() => {
             }
           }
         }
-        entry.rendered = rendered;
+      } else {
+        body.innerHTML = rendered;
+        bindOutputScroll(body);
       }
-      entry.needsRender = false;
-      if (focusAction === 'detail-refresh')
-        body.querySelector('[data-call-action="detail-refresh"]')?.focus({ preventScroll: true });
+      body.dataset.detailId = d.id;
+      body._renderedHTML = rendered;
+    } else {
+      bindOutputScroll(body);
+    }
+    const entry = cache.get(d.id);
+    if (entry) entry.needsRender = false;
+    if (focusAction === 'detail-refresh') {
+      body.querySelector('[data-call-action="detail-refresh"]')?.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
+  // AUD-06: 120ms hover/focus intent prefetch (capped at 2 concurrent prefetches).
+  function prefetchDetail(id) {
+    if (!id || cache.has(id) || detailInflight.has(id)) return;
+    fetchDetailData(id, { prefetch: true }).catch(() => {});
+  }
+
+  async function detail(node, force = false, manual = false) {
+    if (!node?.isConnected || !node.open) return;
+    const id = node.dataset.callId,
+      body = node.querySelector(':scope > .call-detail');
+    if (!id || !body) return;
+    const focusAction = manual ? document.activeElement?.dataset.callAction : null;
+    const cached = cache.get(id)?.data;
+    if (!force && cached) {
+      patchVisibleRowInPlace(node, cached);
+      renderDetailInto(body, cached, { force: false, manual, focusAction });
+      return;
+    }
+    if (!cached && !body.querySelector('.call-facts')) {
+      delete body.dataset.detailId;
+      body._renderedHTML = '';
+      body.innerHTML = '<p class="muted" role="status">正在加载调用详情…</p>';
+    }
+    const session = S.session,
+      generation = epoch;
+    try {
+      const d = await fetchDetailData(id, { force, manual });
+      if (!d || session !== S.session || generation !== epoch || !node.isConnected || !node.open)
+        return;
+      renderDetailInto(body, d, { force, manual, focusAction });
     } catch (e) {
-      if (session === S.session && generation === epoch && node.isConnected) {
-        if (entry.data) setSync('详情更新失败，可手动重试：' + e.message, 'reconnecting');
-        else
-          node.querySelector('.call-detail').innerHTML =
-            `<p class="form-note" role="alert">${esc(e.message)}</p><button type="button" class="btn small" data-call-action="detail-refresh">重试详情</button>`;
+      if (
+        e?.name !== 'AbortError' &&
+        session === S.session &&
+        generation === epoch &&
+        node.isConnected &&
+        node.open
+      ) {
+        if (cache.get(id)?.data) setSync('详情更新失败，可手动重试：' + e.message, 'reconnecting');
+        else {
+          delete body.dataset.detailId;
+          body._renderedHTML = '';
+          body.innerHTML = `<p class="form-note" role="alert">${esc(e.message)}</p><button type="button" class="btn small" data-call-action="detail-refresh">重试详情</button>`;
+        }
       }
-    } finally {
-      entry.loading = false;
     }
   }
 
@@ -1540,6 +1710,18 @@ window.CodePierCallLog = (() => {
           await openInspector(inspId, { force: true });
         }
       }
+      if (st().pinnedOp?.id) {
+        const pinId = st().pinnedOp.id;
+        const pinCached = cache.get(pinId);
+        const pinStore = window.CodePierOperationStore?.get(pinId);
+        if (
+          pinCached?.needsRender ||
+          (pinStore && pinStore.updated !== st().pinnedOp.updated) ||
+          active(st().pinnedOp)
+        ) {
+          await refreshPinnedOp({ force: true });
+        }
+      }
       if (
         generation !== epoch ||
         session !== S.session ||
@@ -1577,6 +1759,7 @@ window.CodePierCallLog = (() => {
           if (anchorNode) anchorTop = anchorNode.getBoundingClientRect().top;
         }
         const keep = new Set((r.operations || []).map((x) => x.id));
+        if (st().pinnedOp?.id) keep.add(st().pinnedOp.id);
         for (const id of cache.keys()) if (!keep.has(id)) cache.delete(id);
         st().rows = r.operations || [];
         st().next = r.next_cursor;
@@ -1650,12 +1833,74 @@ window.CodePierCallLog = (() => {
     );
   }
 
-  function closeInspector() {
-    inspectorController?.abort();
-    inspectorController = null;
-    st().inspectedId = '';
+  function syncWorkspaceSplitHeight() {
     if (!root?.isConnected) return;
-    root.querySelector('.call-workspace')?.classList.remove('has-inspector');
+    const workspace = root.querySelector('.call-workspace');
+    if (!workspace) return;
+    if (!workspace.classList.contains('has-inspector')) {
+      workspace.style.removeProperty('--call-split-height');
+      return;
+    }
+    const rect = workspace.getBoundingClientRect();
+    const minH = Math.min(360, Math.max(240, window.innerHeight - 48));
+    // Compute scroll-invariant document offset so outer window scrolling never resizes the split pane.
+    const naturalTop = Math.max(12, Math.round(rect.top + window.scrollY));
+    const headerBudget = Math.min(naturalTop, Math.round(window.innerHeight * 0.36));
+    const avail = Math.max(minH, Math.floor(window.innerHeight - headerBudget - 44));
+    workspace.style.setProperty('--call-split-height', `${avail}px`);
+  }
+
+  function ensureWorkspaceVisible() {
+    if (!root?.isConnected) return;
+    const workspace = root.querySelector('.call-workspace');
+    if (!workspace) return;
+    const wsRect = workspace.getBoundingClientRect();
+    if (wsRect.top < 8 || wsRect.top > window.innerHeight * 0.65) {
+      window.scrollTo?.({
+        top: Math.max(0, Math.round(window.scrollY + wsRect.top - 12)),
+        behavior: 'instant',
+      });
+    }
+  }
+
+  function scrollRowIntoList(entryNode, { center = false } = {}) {
+    if (!entryNode?.isConnected || !root?.isConnected) return;
+    const listEl = root.querySelector('.call-log');
+    if (!listEl || listEl.scrollHeight <= listEl.clientHeight + 1) return;
+    const listRect = listEl.getBoundingClientRect();
+    const rowRect = entryNode.getBoundingClientRect();
+    const headerEl = root.querySelector('.call-table-header');
+    const headerH =
+      headerEl && getComputedStyle(headerEl).position === 'sticky' ? headerEl.offsetHeight : 0;
+    const dayH = root.querySelector('.call-day-divider')?.offsetHeight || 0;
+    const topSafeOffset = headerH + dayH + 6;
+    const safeTop = listRect.top + topSafeOffset;
+    const safeBottom = listRect.bottom - 8;
+    if (center) {
+      const usableH = Math.max(rowRect.height, listEl.clientHeight - topSafeOffset);
+      const targetTop =
+        listEl.scrollTop +
+        (rowRect.top - listRect.top) -
+        topSafeOffset -
+        (usableH - rowRect.height) / 2;
+      listEl.scrollTop = Math.max(0, Math.round(targetTop));
+      return;
+    }
+    if (rowRect.top < safeTop) {
+      listEl.scrollTop = Math.max(0, Math.round(listEl.scrollTop - (safeTop - rowRect.top)));
+    } else if (rowRect.bottom > safeBottom) {
+      listEl.scrollTop = Math.round(listEl.scrollTop + (rowRect.bottom - safeBottom));
+    }
+  }
+
+  function closeInspector({ restoreFocus = false, keepInflight = false } = {}) {
+    const prevId = st().inspectedId;
+    st().inspectedId = '';
+    if (!keepInflight && prevId) abortDetailIfUnused(prevId);
+    if (!root?.isConnected) return;
+    const workspace = root.querySelector('.call-workspace');
+    workspace?.classList.remove('has-inspector');
+    workspace?.style.removeProperty('--call-split-height');
     const drawer = root.querySelector('.call-inspector');
     if (drawer) {
       drawer.hidden = true;
@@ -1665,6 +1910,10 @@ window.CodePierCallLog = (() => {
     root
       .querySelectorAll('.call-entry.is-selected')
       .forEach((n) => n.classList.remove('is-selected'));
+    if (restoreFocus && prevId) {
+      const sum = root.querySelector(`[data-call-id="${CSS.escape(prevId)}"] > summary`);
+      if (sum && sum.offsetParent !== null) sum.focus({ preventScroll: true });
+    }
   }
 
   function updateInspectorNavButtons() {
@@ -1672,10 +1921,20 @@ window.CodePierCallLog = (() => {
     if (!drawer || drawer.hidden || !st().inspectedId) return;
     const ids = visibleEntryIds();
     const idx = ids.indexOf(st().inspectedId);
+    const hasPrev = idx > 0;
+    const hasNext = idx >= 0 && idx < ids.length - 1;
     const prevBtn = drawer.querySelector('[data-call-action="inspector-prev"]');
     const nextBtn = drawer.querySelector('[data-call-action="inspector-next"]');
-    if (prevBtn) prevBtn.disabled = !(idx > 0);
-    if (nextBtn) nextBtn.disabled = !(idx >= 0 && idx < ids.length - 1);
+    const closeBtn = drawer.querySelector('[data-call-action="inspector-close"]');
+    const prevFocused = document.activeElement === prevBtn;
+    const nextFocused = document.activeElement === nextBtn;
+    if (prevBtn) prevBtn.disabled = !hasPrev;
+    if (nextBtn) nextBtn.disabled = !hasNext;
+    if (prevFocused && !hasPrev) {
+      (hasNext ? nextBtn : closeBtn)?.focus({ preventScroll: true });
+    } else if (nextFocused && !hasNext) {
+      (hasPrev ? prevBtn : closeBtn)?.focus({ preventScroll: true });
+    }
   }
 
   function syncDetailLayoutMode() {
@@ -1691,12 +1950,14 @@ window.CodePierCallLog = (() => {
       if (pickId) openInspector(pickId).catch(() => {});
     } else if (st().inspectedId) {
       const id = st().inspectedId;
-      closeInspector();
+      closeInspector({ keepInflight: true });
       const node = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
       if (node) {
         node.open = true;
         opened.add(id);
         detail(node).catch(() => {});
+      } else {
+        abortDetailIfUnused(id);
       }
     }
   }
@@ -1708,30 +1969,36 @@ window.CodePierCallLog = (() => {
       .map((n) => n.dataset.callId);
   }
 
-  function renderInspectorFrame(id) {
-    const drawer = root?.querySelector('.call-inspector');
-    if (!drawer) return null;
+  function renderInspectorHeaderTitle(drawer, id) {
+    const titleBox = drawer?.querySelector('.call-inspector-title');
+    if (!titleBox) return;
     const row = st().rows.find((x) => x.id === id) || cache.get(id)?.data || { id, tool: '' };
-    const ids = visibleEntryIds();
-    const idx = ids.indexOf(id);
-    const hasPrev = idx > 0;
-    const hasNext = idx >= 0 && idx < ids.length - 1;
-    drawer.dataset.inspectorId = id;
-    drawer.innerHTML =
-      `<div class="call-inspector-head">` +
-      `<div class="call-inspector-title">` +
+    titleBox.innerHTML =
       `<span class="call-project${row.alias ? '' : ' call-project-unknown'}" style="--call-project-hue:${projectHues.get(projectKey(row)) ?? 270}"><strong>${esc(row.alias || '未记录')}</strong></span>` +
       `<strong class="mono">${esc(title(row))}</strong>` +
-      `<span class="muted mono tiny">#${esc(id.slice(0, 8))}</span>` +
-      `</div>` +
-      `<div class="call-inspector-nav">` +
-      `<button type="button" class="btn ghost small" data-call-action="inspector-prev" title="上一条 (↑ / k)" ${hasPrev ? '' : 'disabled'}>↑</button>` +
-      `<button type="button" class="btn ghost small" data-call-action="inspector-next" title="下一条 (↓ / j)" ${hasNext ? '' : 'disabled'}>↓</button>` +
-      `<button type="button" class="btn ghost small" data-call-action="inspector-close" title="关闭抽屉 (Esc)">关闭</button>` +
-      `</div></div>` +
-      `<div class="call-inspector-body"><div class="call-detail"><p class="muted" role="status">正在加载调用详情…</p></div></div>`;
+      `<span class="muted mono tiny">#${esc(id.slice(0, 8))}</span>`;
+  }
+
+  function ensureInspectorFrame(id) {
+    const drawer = root?.querySelector('.call-inspector');
+    if (!drawer) return null;
+    if (!drawer.querySelector('.call-inspector-head')) {
+      drawer.innerHTML =
+        `<div class="call-inspector-head">` +
+        `<div class="call-inspector-title"></div>` +
+        `<div class="call-inspector-nav">` +
+        `<button type="button" class="btn ghost small" data-call-action="inspector-prev" title="上一条 (↑ / k)">↑</button>` +
+        `<button type="button" class="btn ghost small" data-call-action="inspector-next" title="下一条 (↓ / j)">↓</button>` +
+        `<button type="button" class="btn ghost small" data-call-action="inspector-close" title="关闭抽屉 (Esc)">关闭</button>` +
+        `</div></div>` +
+        `<div class="call-inspector-body"><div class="call-detail"><p class="muted" role="status">正在加载调用详情…</p></div></div>`;
+    }
+    drawer.dataset.inspectorId = id;
     drawer.hidden = false;
     root.querySelector('.call-workspace')?.classList.add('has-inspector');
+    renderInspectorHeaderTitle(drawer, id);
+    updateInspectorNavButtons();
+    syncWorkspaceSplitHeight();
     return drawer.querySelector('.call-detail');
   }
 
@@ -1748,219 +2015,91 @@ window.CodePierCallLog = (() => {
     }
     const prevId = st().inspectedId;
     st().inspectedId = id;
+    if (prevId && prevId !== id) abortDetailIfUnused(prevId);
     // Collapse any stale inline-expanded rows so table stays compact alongside the drawer.
     if (opened.size) {
       for (const openId of [...opened]) {
         const openNode = root.querySelector(`[data-call-id="${CSS.escape(openId)}"]`);
         if (openNode) openNode.open = false;
+        opened.delete(openId);
+        abortDetailIfUnused(openId);
       }
-      opened.clear();
+    }
+    const burstAncestor = root
+      .querySelector(`[data-call-id="${CSS.escape(id)}"]`)
+      ?.closest?.('details.call-burst');
+    if (burstAncestor && !burstAncestor.open) {
+      burstAncestor.open = true;
+      expandedBursts.add(burstAncestor.dataset.burstId);
     }
     root
       .querySelectorAll('.call-entry.is-selected')
       .forEach((n) => n.classList.remove('is-selected'));
+    const workspace = root.querySelector('.call-workspace');
+    const wasSplit = !!workspace?.classList.contains('has-inspector');
     const entryNode = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
-    if (entryNode) {
-      entryNode.classList.add('is-selected');
-      if (prevId !== id) {
-        entryNode.scrollIntoView({
-          behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
-          block: 'nearest',
-        });
-      }
-    }
+    if (entryNode) entryNode.classList.add('is-selected');
     const drawer = root.querySelector('.call-inspector');
-    const sameDrawer = drawer && !drawer.hidden && drawer.dataset.inspectorId === id;
-    let body = sameDrawer ? drawer.querySelector('.call-detail') : null;
-    if (!body) body = renderInspectorFrame(id);
-    else updateInspectorNavButtons();
-    if (!body) return;
-    if (prefetchControllers.has(id)) {
-      prefetchControllers.get(id).abort();
-      prefetchControllers.delete(id);
+    const sameDrawer = !!(drawer && !drawer.hidden && drawer.dataset.inspectorId === id);
+    const body = ensureInspectorFrame(id);
+    if (!wasSplit && workspace) {
+      ensureWorkspaceVisible();
+      syncWorkspaceSplitHeight();
     }
-    const old = cache.get(id);
-    if (!force && old?.data) {
-      if (!sameDrawer || !body.querySelector('.call-facts')) {
-        const rendered = detailHTML(old.data);
-        body.innerHTML = rendered;
-        bindOutputScroll(body);
-        old.rendered = rendered;
-      }
+    if (!sameDrawer && drawer) {
+      const scroller = drawer.querySelector('.call-inspector-body');
+      if (scroller) scroller.scrollTop = 0;
+    }
+    if (entryNode && (prevId !== id || !wasSplit)) {
+      scrollRowIntoList(entryNode, { center: !wasSplit });
+    }
+    if (!body) return;
+    const focusAction = manual ? document.activeElement?.dataset.callAction : null;
+    const cached = cache.get(id)?.data;
+    if (!force && cached) {
+      if (entryNode) patchVisibleRowInPlace(entryNode, cached);
+      renderDetailInto(body, cached, { force: false, manual, focusAction });
       return;
     }
-    inspectorController?.abort();
-    const ctrl = new AbortController();
-    inspectorController = ctrl;
+    if (!sameDrawer || (!cached && !body.querySelector('.call-facts'))) {
+      delete body.dataset.detailId;
+      body._renderedHTML = '';
+      body.innerHTML = '<p class="muted" role="status">正在加载调用详情…</p>';
+    }
     const session = S.session,
-      generation = epoch,
-      entry = { ...old, loading: true };
-    cache.set(id, entry);
+      generation = epoch;
     try {
-      let canIncremental =
-        force && !manual && old?.data && active(old.data) && Number.isInteger(old.data.output_seq);
-      let detailUrl = '/api/call-log/' + encodeURIComponent(id);
-      if (canIncremental) {
-        const dp = new URLSearchParams({
-          after_output_seq: String(old.data.output_seq),
-          after_event_id: String(old.data.trace?.latest_event_id || 0),
-        });
-        if (
-          Number.isInteger(old.data.output_clean_chars) &&
-          old.data.output_clean_chars > 0 &&
-          typeof old.data.output_clean_sha === 'string'
-        ) {
-          dp.set('after_output_chars', String(old.data.output_clean_chars));
-          dp.set('after_output_sha', old.data.output_clean_sha);
-        }
-        detailUrl += '?' + dp.toString();
-      }
-      const stale = () =>
-        ctrl.signal.aborted ||
+      const d = await fetchDetailData(id, { force, manual });
+      if (
+        !d ||
         session !== S.session ||
         generation !== epoch ||
         !root?.isConnected ||
         st().inspectedId !== id ||
-        cache.get(id) !== entry;
-      let fetched = await api(detailUrl, { signal: ctrl.signal });
-      if (stale()) return;
-      if (canIncremental && !active(fetched)) {
-        fetched = await api('/api/call-log/' + encodeURIComponent(id), { signal: ctrl.signal });
-        if (stale()) return;
-        canIncremental = false;
-      }
-      let d = fetched;
-      if (canIncremental && old?.data) {
-        const mergedOutput = fetched.output_unchanged
-          ? old.data.output
-          : typeof fetched.output_delta === 'string' &&
-              typeof old.data.output === 'string' &&
-              fetched.output_base_chars === old.data.output.length
-            ? old.data.output + fetched.output_delta
-            : fetched.output;
-        const prevEvents = objects(old.data.trace?.events);
-        const newEvents = objects(fetched.trace?.events);
-        const mergedTrace =
-          fetched.trace_incremental && old.data.trace
-            ? {
-                ...old.data.trace,
-                ...fetched.trace,
-                events: [...prevEvents, ...newEvents].slice(-200),
-                latest_event_id:
-                  fetched.trace?.latest_event_id ?? old.data.trace?.latest_event_id ?? 0,
-              }
-            : fetched.trace;
-        d = {
-          ...old.data,
-          ...fetched,
-          output: mergedOutput,
-          timing: fetched.trace_incremental ? old.data.timing : fetched.timing,
-          trace: mergedTrace,
-        };
-      }
-      window.CodePierOperationStore?.ingestCallLog({ operations: [d] });
-      const canonical = window.CodePierOperationStore?.get(id);
-      const localRow = st().rows.find((x) => x.id === id);
-      const newerRow =
-        canonical ||
-        (localRow && Number(localRow.updated || 0) > Number(d.updated || 0) ? localRow : null);
-      if (newerRow) {
-        d = { ...d, state: newerRow.state, updated: newerRow.updated };
-        for (const field of ['elapsed_ms', 'exit_code', 'error']) {
-          if (newerRow[field] !== undefined) d[field] = newerRow[field];
-        }
-      }
-      entry.data = d;
-      if (entryNode?.isConnected) {
-        patchVisibleRowInPlace(entryNode, d);
-      }
-      const selection = window.getSelection();
-      if (
-        force &&
-        !manual &&
-        sameDrawer &&
-        (body.contains(document.activeElement) ||
-          (selection && !selection.isCollapsed && body.contains(selection.anchorNode)))
-      ) {
-        entry.needsRender = true;
+        drawer?.dataset.inspectorId !== id
+      )
         return;
-      }
-      const focusAction = manual ? document.activeElement?.dataset.callAction : null;
-      const expanded = new Set(
-        [...body.querySelectorAll('details[open]')].map((x) => x.dataset.callSection),
-      );
-      const scrolls = new Map(
-        [...body.querySelectorAll('[data-call-section]')].map((x) => {
-          const p = x.querySelector('pre');
-          const nearBottom = p ? p.scrollHeight - p.scrollTop - p.clientHeight < 28 : false;
-          return [
-            x.dataset.callSection,
-            p ? [p.scrollTop, p.scrollLeft, nearBottom, p.scrollHeight] : [0, 0, false, 0],
-          ];
-        }),
-      );
-      const rendered = detailHTML(d);
-      const hasExistingDom = sameDrawer && !!body.querySelector('.call-facts');
-      if (!hasExistingDom || rendered !== entry.rendered) {
-        if (hasExistingDom) reconcileDetailDOM(body, rendered);
-        else {
-          body.innerHTML = rendered;
-          bindOutputScroll(body);
-        }
-        if (hasExistingDom)
-          body.querySelectorAll('details[data-call-section]').forEach((x) => {
-            x.open = expanded.has(x.dataset.callSection);
-          });
-        for (const secNode of body.querySelectorAll('[data-call-section]')) {
-          const p = secNode.querySelector('pre'),
-            savedScroll = scrolls.get(secNode.dataset.callSection);
-          if (p && savedScroll) {
-            const [top, left, nearBottom, oldHeight] = savedScroll;
-            if (
-              secNode.dataset.callSection === 'output' &&
-              nearBottom &&
-              p.scrollHeight > oldHeight
-            ) {
-              p.scrollTop = p.scrollHeight;
-              p.scrollLeft = left;
-            } else {
-              p.scrollTop = top;
-              p.scrollLeft = left;
-              if (
-                secNode.dataset.callSection === 'output' &&
-                p.scrollHeight - p.scrollTop - p.clientHeight > 40 &&
-                p.scrollHeight > oldHeight
-              ) {
-                const jumpBtn = secNode.querySelector('.call-jump-bottom');
-                if (jumpBtn) jumpBtn.hidden = false;
-              }
-            }
-          }
-        }
-        entry.rendered = rendered;
-      }
-      entry.needsRender = false;
-      if (focusAction === 'detail-refresh')
-        body.querySelector('[data-call-action="detail-refresh"]')?.focus({ preventScroll: true });
+      renderDetailInto(body, d, { force, manual, focusAction });
     } catch (e) {
       if (
         e?.name !== 'AbortError' &&
         session === S.session &&
         generation === epoch &&
         root?.isConnected &&
-        st().inspectedId === id
+        st().inspectedId === id &&
+        drawer?.dataset.inspectorId === id
       ) {
-        if (entry.data) setSync('详情更新失败，可手动重试：' + e.message, 'reconnecting');
-        else
+        if (cache.get(id)?.data) setSync('详情更新失败，可手动重试：' + e.message, 'reconnecting');
+        else {
+          delete body.dataset.detailId;
+          body._renderedHTML = '';
           body.innerHTML = `<p class="form-note" role="alert">${esc(e.message)}</p><button type="button" class="btn small" data-call-action="detail-refresh">重试详情</button>`;
+        }
       }
-    } finally {
-      if (inspectorController === ctrl) inspectorController = null;
-      entry.loading = false;
     }
   }
 
-  function stepInspector(delta) {
+  function stepInspector(delta, { syncSummaryFocus = false } = {}) {
     const ids = visibleEntryIds();
     if (!ids.length) return;
     const curIdx = ids.indexOf(st().inspectedId);
@@ -1970,8 +2109,42 @@ window.CodePierCallLog = (() => {
           ? 0
           : ids.length - 1
         : Math.max(0, Math.min(ids.length - 1, curIdx + delta));
-    if (ids[nextIdx] && ids[nextIdx] !== st().inspectedId) {
-      openInspector(ids[nextIdx]).catch(() => {});
+    const nextId = ids[nextIdx];
+    if (nextId && nextId !== st().inspectedId) {
+      openInspector(nextId).catch(() => {});
+      if (syncSummaryFocus && root?.isConnected) {
+        const sum = root.querySelector(`[data-call-id="${CSS.escape(nextId)}"] > summary`);
+        sum?.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  async function refreshPinnedOp({ force = true, manual = false } = {}) {
+    const id = st().pinnedOp?.id;
+    if (!id || !root?.isConnected) return;
+    const pinEl = root.querySelector('.call-pinned-inspector');
+    const pinBody = pinEl?.querySelector('.call-detail');
+    if (!pinBody) return;
+    const focusAction = manual ? document.activeElement?.dataset.callAction : null;
+    const session = S.session,
+      space = S.space_id,
+      generation = epoch;
+    try {
+      const d = await fetchDetailData(id, { force, manual });
+      if (
+        !d ||
+        session !== S.session ||
+        space !== S.space_id ||
+        generation !== epoch ||
+        !root?.isConnected ||
+        st().pinnedOp?.id !== id
+      )
+        return;
+      st().pinnedOp = d;
+      renderDetailInto(pinBody, d, { force, manual, focusAction });
+      syncWorkspaceSplitHeight();
+    } catch (err) {
+      if (manual) throw err;
     }
   }
 
@@ -1995,23 +2168,30 @@ window.CodePierCallLog = (() => {
       } else if (!st().cursor) {
         triggerThrottledHeadRefresh();
       }
+      if (st().pinnedOp?.id === id) {
+        refreshPinnedOp({ force: true }).catch(() => {});
+      }
       return;
     }
     if ((m.type === 'output' || m.type === 'trace') && m.data?.id) {
       const id = m.data.id;
       // AUD-03: Ignore output/trace completely when the entry is collapsed!
-      if (!opened.has(id) && st().inspectedId !== id) return;
+      if (!opened.has(id) && st().inspectedId !== id && st().pinnedOp?.id !== id) return;
       if (detailOutputTimers.has(id)) return;
       detailOutputTimers.set(
         id,
         setTimeout(() => {
           detailOutputTimers.delete(id);
-          if (st().inspectedId === id && st().live) {
+          if (!st().live) return;
+          if (st().pinnedOp?.id === id) {
+            refreshPinnedOp({ force: true }).catch(() => {});
+          }
+          if (st().inspectedId === id) {
             openInspector(id, { force: true }).catch(() => {});
             return;
           }
           const node = root?.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
-          if (node?.open && st().live) detail(node, true).catch(() => {});
+          if (node?.open) detail(node, true).catch(() => {});
         }, 400),
       );
       return;
@@ -2043,8 +2223,9 @@ window.CodePierCallLog = (() => {
     focusController = null;
   }
 
-  async function focusOperation(id, { refreshPinned = false } = {}) {
+  async function focusOperation(id, { refreshPinned = false, manual = false } = {}) {
     if (!id || !root?.isConnected) return false;
+    const prevPinnedId = st().pinnedOp?.id;
     cancelFocus();
     const request = new AbortController(),
       turn = focusTurn,
@@ -2071,10 +2252,16 @@ window.CodePierCallLog = (() => {
     }
     const existing = root.querySelector(`[data-call-id="${CSS.escape(id)}"]`);
     if (existing && !refreshPinned) {
+      if (st().pinnedOp?.id === id) {
+        st().pinnedOp = null;
+        target.querySelector('.call-pinned-inspector')?.remove();
+      }
       existing.classList.add('call-entry-highlight');
       setTimeout(() => existing.classList.remove('call-entry-highlight'), 1800);
       if (useInspectorDrawer()) {
+        ensureWorkspaceVisible();
         await openInspector(id);
+        scrollRowIntoList(existing, { center: true });
         return true;
       }
       existing.open = true;
@@ -2086,21 +2273,46 @@ window.CodePierCallLog = (() => {
       await detail(existing);
       return true;
     }
+    if (
+      refreshPinned &&
+      st().pinnedOp?.id === id &&
+      target.querySelector('.call-pinned-inspector')
+    ) {
+      try {
+        await refreshPinnedOp({ force: true, manual });
+        return true;
+      } finally {
+        if (focusController === request) focusController = null;
+      }
+    }
+    if (prevPinnedId && prevPinnedId !== id) abortDetailIfUnused(prevPinnedId);
     try {
-      const d = await api('/api/call-log/' + encodeURIComponent(id), { signal: request.signal });
-      if (!current()) return false;
+      const d = await fetchDetailData(id, {
+        force: true,
+        manual,
+        externalSignal: request.signal,
+      });
+      if (!d || !current()) return false;
       st().pinnedOp = d;
       const existingPin = target.querySelector('.call-pinned-inspector');
-      const markup = `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(d.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(d.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail">${detailHTML(d)}</div></div>`;
+      const rendered = detailHTML(d);
+      const markup = `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(d.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(d.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail" data-detail-id="${esc(d.id)}">${rendered}</div></div>`;
       if (existingPin) existingPin.outerHTML = markup;
       else target.querySelector('.call-stream-banner')?.insertAdjacentHTML('afterend', markup);
-      target.querySelector('.call-pinned-inspector')?.scrollIntoView({
+      const pinEl = target.querySelector('.call-pinned-inspector');
+      const pinBody = pinEl?.querySelector('.call-detail');
+      if (pinBody) {
+        pinBody._renderedHTML = rendered;
+        bindOutputScroll(pinBody);
+      }
+      pinEl?.scrollIntoView({
         behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
         block: 'nearest',
       });
+      syncWorkspaceSplitHeight();
       return true;
     } catch (error) {
-      if (!current() || error.name === 'AbortError') return false;
+      if (!current() || error?.name === 'AbortError') return false;
       throw error;
     } finally {
       if (focusController === request) focusController = null;
@@ -2162,13 +2374,52 @@ window.CodePierCallLog = (() => {
     });
     root.querySelectorAll('[data-call-id]').forEach((node) => {
       node.ontoggle = () => {
+        const id = node.dataset.callId;
+        if (node.open && useInspectorDrawer()) {
+          node.open = false;
+          opened.delete(id);
+          openInspector(id).catch(() => {});
+          return;
+        }
         if (node.open) {
-          opened.add(node.dataset.callId);
+          opened.add(id);
           detail(node);
-        } else opened.delete(node.dataset.callId);
+        } else {
+          opened.delete(id);
+          abortDetailIfUnused(id);
+        }
       };
-      if (node.open) detail(node);
+      if (node.open) {
+        if (useInspectorDrawer()) {
+          node.open = false;
+        } else {
+          const body = node.querySelector(':scope > .call-detail');
+          if (body?.querySelector('.call-facts')) bindOutputScroll(body);
+          detail(node);
+        }
+      }
     });
+  }
+
+  function closeFloatingMenus(exceptTarget = null) {
+    if (!root?.isConnected) return false;
+    let closedAny = false;
+    root.querySelectorAll('details.tool-menu[open]').forEach((menu) => {
+      if (!exceptTarget || !menu.contains(exceptTarget)) {
+        menu.open = false;
+        closedAny = true;
+      }
+    });
+    const more = root.querySelector('#call-more-filters[open]');
+    if (more && (!exceptTarget || !more.contains(exceptTarget))) {
+      const moreBody = more.querySelector('.call-more-body');
+      if (moreBody && getComputedStyle(moreBody).position === 'absolute') {
+        more.open = false;
+        st().moreFilters = false;
+        closedAny = true;
+      }
+    }
+    return closedAny;
   }
 
   function installKeyboardShortcuts() {
@@ -2182,10 +2433,16 @@ window.CodePierCallLog = (() => {
         return;
       }
       if (document.querySelector('dialog[open], .modal')) return;
-      if (e.key === 'Escape' && st().inspectedId) {
-        e.preventDefault();
-        closeInspector();
-        return;
+      if (e.key === 'Escape') {
+        if (closeFloatingMenus()) {
+          e.preventDefault();
+          return;
+        }
+        if (st().inspectedId) {
+          e.preventDefault();
+          closeInspector({ restoreFocus: true });
+          return;
+        }
       }
       if (e.key === '/') {
         const searchInput = root.querySelector('#audit-query');
@@ -2199,12 +2456,29 @@ window.CodePierCallLog = (() => {
         st().inspectedId &&
         useInspectorDrawer()
       ) {
+        if (
+          target?.closest?.(
+            'pre, .call-inspector-body, .call-pinned-inspector, #operation-queue, details.tool-menu, #call-more-filters',
+          )
+        )
+          return;
         e.preventDefault();
-        stepInspector(e.key === 'ArrowDown' ? 1 : -1);
+        const fromListOrBody =
+          !target ||
+          target === document.body ||
+          target === document.documentElement ||
+          !!target.closest?.('.call-log');
+        stepInspector(e.key === 'ArrowDown' ? 1 : -1, { syncSummaryFocus: fromListOrBody });
       } else if (e.key === 'j' || e.key === 'k') {
+        if (target?.closest?.('#operation-queue, details.tool-menu, #call-more-filters')) return;
         if (st().inspectedId && useInspectorDrawer()) {
           e.preventDefault();
-          stepInspector(e.key === 'j' ? 1 : -1);
+          const fromListOrBody =
+            !target ||
+            target === document.body ||
+            target === document.documentElement ||
+            !!target.closest?.('.call-log');
+          stepInspector(e.key === 'j' ? 1 : -1, { syncSummaryFocus: fromListOrBody });
           return;
         }
         const summaries = [...root.querySelectorAll('.call-log .call-entry > summary')].filter(
@@ -2221,14 +2495,18 @@ window.CodePierCallLog = (() => {
             : idx <= 0
               ? 0
               : idx - 1;
-        summaries[nextIdx]?.focus();
+        summaries[nextIdx]?.focus({ preventScroll: true });
+        const focusedEntry = summaries[nextIdx]?.closest?.('.call-entry');
+        if (focusedEntry && root.querySelector('.call-workspace.has-inspector')) {
+          scrollRowIntoList(focusedEntry);
+        }
       } else if (e.key === 'o') {
         const entry = document.activeElement?.closest?.('.call-entry[data-call-id]');
         if (entry && document.activeElement.tagName === 'SUMMARY') {
           e.preventDefault();
           if (useInspectorDrawer()) {
             const id = entry.dataset.callId;
-            if (st().inspectedId === id) closeInspector();
+            if (st().inspectedId === id) closeInspector({ restoreFocus: true });
             else openInspector(id).catch(() => {});
           } else {
             entry.open = !entry.open;
@@ -2338,6 +2616,8 @@ window.CodePierCallLog = (() => {
     }
 
     bindEntries();
+    const initialPinnedBody = root.querySelector('.call-pinned-inspector .call-detail');
+    if (initialPinnedBody) bindOutputScroll(initialPinnedBody);
 
     // Hover & keyboard focus 120ms intent prefetch on <summary>.
     const listContainer = root.querySelector('.call-log');
@@ -2347,7 +2627,7 @@ window.CodePierCallLog = (() => {
         const entryNode = sum?.parentElement;
         if (!entryNode || entryNode.open) return;
         const id = entryNode.dataset.callId;
-        if (!id || cache.has(id)) return;
+        if (!id || cache.has(id) || detailInflight.has(id)) return;
         clearTimeout(hoverTimer);
         hoverTimer = setTimeout(() => prefetchDetail(id), 120);
       };
@@ -2367,8 +2647,10 @@ window.CodePierCallLog = (() => {
       }
     };
     shell.onclick = (e) => {
+      closeFloatingMenus(e.target);
       const copyIdBtn = e.target.closest('[data-call-copy-id]');
       if (copyIdBtn) {
+        if (copyIdBtn.disabled) return;
         e.preventDefault();
         e.stopPropagation();
         const fullId = copyIdBtn.dataset.callCopyId;
@@ -2385,6 +2667,7 @@ window.CodePierCallLog = (() => {
       }
       const jumpBtn = e.target.closest('[data-call-jump]');
       if (jumpBtn) {
+        if (jumpBtn.disabled) return;
         e.preventDefault();
         e.stopPropagation();
         focusOperation(jumpBtn.dataset.callJump).catch((err) => toast(err.message, true));
@@ -2393,6 +2676,7 @@ window.CodePierCallLog = (() => {
       const b = e.target.closest('[data-call-action],[data-call-copy]');
       if (b) {
         e.preventDefault();
+        if (b.disabled || b.getAttribute('aria-disabled') === 'true') return;
         const menu = b.closest('details.tool-menu');
         if (menu) menu.open = false;
         action(b).catch((err) => toast(err.message, true));
@@ -2402,7 +2686,7 @@ window.CodePierCallLog = (() => {
       if (sum && useInspectorDrawer()) {
         e.preventDefault();
         const id = sum.parentElement.dataset.callId;
-        if (st().inspectedId === id) closeInspector();
+        if (st().inspectedId === id) closeInspector({ restoreFocus: true });
         else openInspector(id).catch((err) => toast(err.message, true));
       }
     };
@@ -2420,8 +2704,11 @@ window.CodePierCallLog = (() => {
     if (typeof matchMedia === 'function') {
       wideMql = matchMedia('(min-width: 1280px)');
       wideMqlHandler = () => syncDetailLayoutMode();
-      wideMql.addEventListener?.('change', wideMqlHandler);
+      if (wideMql.addEventListener) wideMql.addEventListener('change', wideMqlHandler);
+      else wideMql.addListener?.(wideMqlHandler);
     }
+    resizeListener = () => syncWorkspaceSplitHeight();
+    window.addEventListener('resize', resizeListener);
     installKeyboardShortcuts();
     syncLiveTicker();
     if (!shellOnly) schedule();
@@ -2431,7 +2718,7 @@ window.CodePierCallLog = (() => {
       // Consume the one-shot deep link so later renders do not re-open it.
       syncUrlHash();
       focusOperation(idToOpen).catch(() => {});
-    } else if (st().inspectedId && !shellOnly) {
+    } else if (st().inspectedId && st().rows.length) {
       syncDetailLayoutMode();
     }
   }
@@ -2453,7 +2740,7 @@ window.CodePierCallLog = (() => {
       return copy(typeof v === 'string' ? v : json(v));
     }
     if (name === 'inspector-close') {
-      closeInspector();
+      closeInspector({ restoreFocus: true });
       return;
     }
     if (name === 'inspector-prev') {
@@ -2477,22 +2764,37 @@ window.CodePierCallLog = (() => {
       return;
     }
     if (name === 'close-pinned') {
+      const prevPinId = st().pinnedOp?.id;
       cancelFocus();
       st().pinnedOp = null;
+      if (prevPinId) abortDetailIfUnused(prevPinId);
       root?.querySelector('.call-pinned-inspector')?.remove();
+      syncWorkspaceSplitHeight();
       return;
     }
     if (name === 'filter-project') {
       st().project = b.dataset.project || '';
       const sel = root?.querySelector('#call-project');
-      if (sel) sel.value = st().project;
-      return reloadList({ resetCursor: true, clearDetails: true });
+      if (sel) {
+        if (st().project && ![...sel.options].some((o) => o.value === st().project)) {
+          sel.add(new Option(st().project, st().project));
+        }
+        sel.value = st().project;
+      }
+      const keepOpen = !!b.closest('.call-inspector');
+      return reloadList({ resetCursor: true, clearDetails: !keepOpen });
     }
     if (name === 'filter-tool') {
       st().tool = b.dataset.tool || '';
       const sel = root?.querySelector('#call-tool');
-      if (sel) sel.value = st().tool;
-      return reloadList({ resetCursor: true, clearDetails: true });
+      if (sel) {
+        if (st().tool && ![...sel.options].some((o) => o.value === st().tool)) {
+          sel.add(new Option(st().tool, st().tool));
+        }
+        sel.value = st().tool;
+      }
+      const keepOpen = !!b.closest('.call-inspector');
+      return reloadList({ resetCursor: true, clearDetails: !keepOpen });
     }
     if (name === 'clear-query') {
       const qInput = root?.querySelector('#audit-query');
@@ -2540,7 +2842,7 @@ window.CodePierCallLog = (() => {
     }
     if (name === 'detail-refresh') {
       if (b.closest('.call-pinned-inspector') && st().pinnedOp)
-        return focusOperation(st().pinnedOp.id, { refreshPinned: true });
+        return focusOperation(st().pinnedOp.id, { refreshPinned: true, manual: true });
       if (b.closest('.call-inspector') && st().inspectedId)
         return openInspector(st().inspectedId, { force: true, manual: true });
       return detail(node, true, true);
@@ -2574,8 +2876,10 @@ window.CodePierCallLog = (() => {
     }
     if (name === 'refresh') return refresh(false);
     if (name === 'latest') {
-      window.scrollTo?.({ top: 0, behavior: 'smooth' });
-      return reloadList({ resetCursor: true, clearDetails: true });
+      const listEl = root?.querySelector('.call-log');
+      if (listEl) listEl.scrollTop = 0;
+      if (!st().inspectedId) window.scrollTo?.({ top: 0, behavior: 'smooth' });
+      return reloadList({ resetCursor: true, clearDetails: !st().inspectedId });
     }
     if (name === 'next' && st().next) {
       st().history.push(st().cursor);
@@ -2583,6 +2887,8 @@ window.CodePierCallLog = (() => {
     } else if (name === 'prev' && st().history.length) {
       st().cursor = st().history.pop();
     } else return;
+    const listEl = root?.querySelector('.call-log');
+    if (listEl) listEl.scrollTop = 0;
     return reloadList({ resetCursor: false, clearDetails: true });
   }
 

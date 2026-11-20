@@ -45,6 +45,7 @@ def log_page(request):
         page.expose_function('readCallLog',read)
         page.set_content('<html lang="zh-CN"><body><main id="page"></main></body></html>')
         page.add_script_tag(content=HARNESS)
+        page.add_script_tag(path=str(ROOT/'web/core/bundle.js'))
         page.add_style_tag(path=str(ROOT/'web/call-log.css'))
         page.add_script_tag(path=str(ROOT/'web/call-log.js'))
         page.evaluate('renderPage()')
@@ -193,6 +194,7 @@ def test_project_names_stay_visible_with_long_names_and_missing_metadata(log_pag
     rows[0]['alias'] = 'LongProject-' * 20 + '<img src=x onerror=alert(1)>'
     rows[1]['alias'] = None
     page.evaluate('renderPage()')
+    page.locator('[data-call-action="density"][data-density="cards"]').click()
     for width in [320, 390, 1280]:
         page.set_viewport_size({'width': width, 'height': 900})
         project = page.locator('.call-project strong').first
@@ -375,6 +377,10 @@ def test_filter_change_preserves_queue_panel_and_search_focus(log_page):
     )
     page.evaluate('renderPage()')
     page.locator('#operation-queue').wait_for()
+    # Queue sits below the primary audit list so the filter bar and call table lead the page.
+    assert page.evaluate(
+        'Boolean(document.querySelector(".call-workspace").compareDocumentPosition(document.querySelector("#operation-queue")) & Node.DOCUMENT_POSITION_FOLLOWING)'
+    )
     assert page.evaluate('window.queueFetches') == 0
     page.evaluate('window.origQueueEl = document.querySelector("#operation-queue")')
 
@@ -481,14 +487,16 @@ def test_burst_grouping_diff_waterfall_and_dense_table(log_page):
 def test_sse_terminal_frame_shows_final_duration_not_last_polled_value(log_page):
     page, rows, _, _ = log_page
     op_id = rows[0]['id']
-    assert '已历时' in page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
+    assert '1.00 秒' in page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
     # State frames carry created/updated but no elapsed_ms (hub/runtime.py).
     page.evaluate(
         f"""CodePierCallLog.onServerEvent({{type: 'operation', at: 105,
             data: {{id: '{op_id}', state: 'succeeded', created: 100, updated: 104.5}}}})"""
     )
     text = page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
-    assert '总历时 4.50 秒' in text and '1.00 秒' not in text
+    assert '4.50 秒' in text and '1.00 秒' not in text
+    page.locator('[data-call-action="density"][data-density="cards"]').click()
+    assert '总历时 4.50 秒' in page.locator(f'[data-call-id="{op_id}"] .call-state').inner_text()
 
 
 def test_incremental_detail_that_finishes_is_settled_with_full_timing(log_page):
@@ -704,8 +712,9 @@ def test_dense_table_alignment_failed_subrow_burst_and_wide_inspector(log_page):
         }
     page.set_viewport_size({'width': 1440, 'height': 900})
     page.evaluate('CodePierCallLog.clear(); renderPage()')
-    page.locator('[data-call-action="density"][data-density="table"]').click()
 
+    # Default density is dense table without clicking any toggle.
+    assert page.locator('.call-log.call-log-table').count() == 1
     # P0: Sticky table header visible; zero horizontal overflow.
     assert page.locator('.call-table-header').is_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
@@ -734,18 +743,33 @@ def test_dense_table_alignment_failed_subrow_burst_and_wide_inspector(log_page):
     burst_dur_box = page.locator('.call-burst .call-burst-meta').bounding_box()
     assert abs((burst_dur_box['x'] + burst_dur_box['width']) - (ok_dur_box['x'] + ok_dur_box['width'])) <= 4
 
-    # P2: Wide-screen (>=1280px) table click opens right-hand inspector drawer without opening <details>.
+    # P2: Wide-screen (>=1280px) table click opens locked split-pane inspector without opening <details>.
     fail_entry.locator('summary').first.click()
     drawer = page.locator('.call-inspector')
     drawer.wait_for(state='visible')
     assert page.locator('.call-workspace.has-inspector').count() == 1
     assert fail_entry.get_attribute('open') is None
     assert 'output for exec' in drawer.inner_text()
+    # Both panes share exact top edge & equal bounded height with independent scroll containment.
+    left_box = page.locator('.call-log').bounding_box()
+    right_box = drawer.bounding_box()
+    assert abs(left_box['y'] - right_box['y']) <= 2
+    assert abs(left_box['height'] - right_box['height']) <= 2
+    pane_scroll = page.evaluate("""() => {
+      const left = getComputedStyle(document.querySelector('.call-log'));
+      const right = getComputedStyle(document.querySelector('.call-inspector-body'));
+      return { lo: left.overflowY, lb: left.overscrollBehaviorY, ro: right.overflowY, rb: right.overscrollBehaviorY };
+    }""")
+    assert pane_scroll == {'lo': 'auto', 'lb': 'contain', 'ro': 'auto', 'rb': 'contain'}
 
-    # P2: Keyboard ArrowDown steps to next row (open_workspace); Escape closes drawer.
+    # P2: Keyboard ArrowDown steps to next row without shifting outer window.scrollY; Escape closes drawer.
+    drawer.locator('.call-inspector-body').evaluate('(el) => { el.scrollTop = 40; }')
+    win_y_before = page.evaluate('window.scrollY')
     page.keyboard.press('ArrowDown')
     page.wait_for_function(f'S.callLog.inspectedId === "{empty_id}"')
     assert 'open_workspace' in drawer.locator('.call-inspector-title').inner_text()
+    assert page.evaluate('window.scrollY') == win_y_before
+    assert drawer.locator('.call-inspector-body').evaluate('(el) => el.scrollTop') == 0
     page.keyboard.press('Escape')
     assert drawer.is_hidden()
     assert page.locator('.call-workspace.has-inspector').count() == 0
@@ -828,6 +852,19 @@ def test_wide_inspector_live_guard_incremental_resize_and_inline_error_patch(log
     assert run_entry.get_attribute('data-call-state') == 'failed'
     assert '退出码 2' in run_entry.locator('.call-inline-error').inner_text()
 
+    # Clicking #call-new while inspector is open keeps the active drawer open and resets left list scroll.
+    page.locator('#call-new').click()
+    page.wait_for_function('document.querySelectorAll("[data-call-id]").length === 3')
+    assert not drawer.is_hidden()
+    assert page.evaluate(f'S.callLog.inspectedId === "{run_id}"')
+    assert page.locator('.call-log').evaluate('(el) => el.scrollTop') == 0
+
+    # Clicking "筛选此工具" inside the inspector filters the list without closing the active drawer.
+    drawer.get_by_role('button', name='筛选此工具', exact=True).click()
+    page.wait_for_function('S.callLog.tool === "exec"')
+    assert not drawer.is_hidden()
+    assert page.evaluate(f'S.callLog.inspectedId === "{run_id}"')
+
     # B5: Shrinking viewport below 1280px seamlessly hands off drawer to inline <details open>,
     # and widening back restores the drawer and collapses inline <details>.
     page.set_viewport_size({'width': 1024, 'height': 900})
@@ -836,3 +873,136 @@ def test_wide_inspector_live_guard_incremental_resize_and_inline_error_patch(log
     page.set_viewport_size({'width': 1440, 'height': 900})
     drawer.wait_for(state='visible')
     assert run_entry.get_attribute('open') is None
+
+
+def test_production_bundle_reconciler_preserves_open_detail_notes_and_new_diff(log_page):
+    page, rows, details, _ = log_page
+    assert page.evaluate('typeof window.CP?.dom?.replacePage === "function"')
+    edit_id = '9' * 32
+    base = {'actor': 'mcp:g1:Claude', 'project_id': 'p1', 'device_id': 'd1', 'alias': 'MCP', 'device_name': 'Node'}
+    rows[:] = [
+        {**base, 'id': edit_id, 'tool': 'edit', 'state': 'running', 'created': 300, 'updated': 301,
+         'elapsed_ms': 400, 'summary': 'path=web/call-log.js'},
+        *[{**base, 'id': f'{i + 1:02x}' + '8' * 30, 'tool': 'read', 'state': 'succeeded',
+           'created': 260 - i, 'updated': 261 - i, 'elapsed_ms': 30, 'summary': f'path=f{i}.py'} for i in range(4)],
+    ]
+    for r in rows:
+        details[r['id']] = {
+            **r, 'attempts': 1, 'args_summary': {'path': r['summary']},
+            'output': '\n'.join(f'log {n}' for n in range(120)),
+            'display': {'truncated': True}, 'transport_error': '瞬断已恢复', 'trace_error': '部分阶段省略',
+            'timing': {'wait_ms': 10, 'execution_ms': 30}, 'trace': {'current': {'reason': '执行中'}, 'events': []},
+        }
+    page.set_viewport_size({'width': 1100, 'height': 900})
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+
+    # Expand a probe inside .call-burst, scroll its <pre>, then trigger reloadList (burst ungroups it).
+    page.locator('.call-burst > summary').click()
+    probe_id = rows[1]['id']
+    probe_entry = page.locator(f'[data-call-id="{probe_id}"]')
+    probe_entry.locator('summary').first.click()
+    probe_entry.locator('.call-facts').wait_for()
+    probe_out = probe_entry.locator('[data-call-section="output"]')
+    probe_out.locator('summary').click()
+    probe_out.locator('pre').evaluate('(el) => { window.probePre = el; el.scrollTop = 240; }')
+    page.locator('#audit-query').fill('f0.py')
+    page.wait_for_function(
+        f'S.auditQuery === "f0.py" && document.querySelector(\'[data-call-id="{probe_id}"]\').parentElement.classList.contains("call-log")'
+    )
+    assert probe_out.locator('pre').evaluate('(el) => el === window.probePre && el.scrollTop === 240')
+    probe_out.locator('pre').evaluate('(el) => { el.scrollTop = 320; el.dispatchEvent(new Event("scroll")); }')
+    assert probe_out.locator('.call-output-lines').evaluate('(el) => el.scrollTop === 320')
+
+    # Verify duplicate .form-note elements survive live reconciliation & new diff section auto-opens.
+    page.locator('[data-call-action="clear-query"]').click()
+    page.wait_for_function('S.auditQuery === ""')
+    edit_entry = page.locator(f'[data-call-id="{edit_id}"]')
+    edit_entry.locator('summary').first.click()
+    edit_entry.locator('.call-facts').wait_for()
+    assert edit_entry.locator('.call-detail > p.form-note').count() == 4
+    rows[0].update(state='succeeded', updated=310)
+    details[edit_id].update(
+        state='succeeded', updated=310,
+        result={'ok': True, 'data': {'added_lines': 5, 'removed_lines': 2, 'diff': '@@ -1 +1 @@\n+ok'}},
+    )
+    page.evaluate('document.activeElement?.blur?.(); CodePierCallLog.refresh(true)')
+    edit_entry.locator('[data-call-section="diff"]').wait_for()
+    assert edit_entry.locator('[data-call-section="diff"]').evaluate('(el) => el.open === true')
+    assert edit_entry.locator('.call-detail > p.form-note').count() == 4
+
+
+def test_split_pane_scroll_invariance_nav_focus_midflight_handoff_and_pinned_scroll(log_page):
+    page, rows, details, _ = log_page
+    page.add_style_tag(path=str(ROOT / 'web/queue.css'))
+    page.add_script_tag(path=str(ROOT / 'web/queue.js'))
+    base = {'actor': 'mcp:g1:ChatGPT', 'project_id': 'p1', 'device_id': 'd1', 'alias': 'MCP',
+            'device_name': 'Node', 'state': 'succeeded', 'elapsed_ms': 90}
+    rows[:] = [
+        {**base, 'id': f'{i + 1:02x}' + '7' * 30, 'tool': 'exec', 'created': 400 - i,
+         'summary': f'command=echo {i}'} for i in range(25)
+    ]
+    for r in rows:
+        details[r['id']] = {
+            **r, 'attempts': 1, 'args_summary': {'cmd': r['summary']},
+            'output': '\n'.join(f'out {k}' for k in range(100)),
+            'timing': {'wait_ms': 5, 'execution_ms': 85}, 'trace': {'current': {'reason': '完成'}, 'events': []},
+        }
+    page.set_viewport_size({'width': 1440, 'height': 820})
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+
+    first_id, second_id = rows[0]['id'], rows[1]['id']
+    page.locator(f'[data-call-id="{first_id}"] > summary').click()
+    drawer = page.locator('.call-inspector')
+    drawer.locator('.call-facts').wait_for()
+
+    # Outer window scroll toward #operation-queue must NOT resize --call-split-height (no rubber-banding).
+    h_before = page.locator('.call-workspace').evaluate('(el) => el.style.getPropertyValue("--call-split-height")')
+    page.evaluate('window.scrollTo(0, 140); window.dispatchEvent(new Event("scroll"))')
+    h_after = page.locator('.call-workspace').evaluate('(el) => el.style.getPropertyValue("--call-split-height")')
+    assert h_before == h_after and h_before.endswith('px')
+    page.evaluate('window.scrollTo(0, 0)')
+
+    # Clicking/focusing inspector nav buttons preserves button DOM identity & transfers focus at boundary.
+    next_btn = drawer.locator('[data-call-action="inspector-next"]')
+    prev_btn = drawer.locator('[data-call-action="inspector-prev"]')
+    next_btn.evaluate('(el) => { window.origNextBtn = el; el.focus(); }')
+    next_btn.press('Enter')
+    page.wait_for_function(f'S.callLog.inspectedId === "{second_id}"')
+    assert next_btn.evaluate('(el) => el === window.origNextBtn && el === document.activeElement')
+    prev_btn.focus()
+    prev_btn.press('Enter')
+    page.wait_for_function(f'S.callLog.inspectedId === "{first_id}"')
+    assert prev_btn.is_disabled()
+    assert next_btn.evaluate('(el) => el === document.activeElement')
+
+    # ArrowDown inside <pre> scrolls output instead of hijacking inspector row selection; Escape restores row focus.
+    out_sec = drawer.locator('[data-call-section="output"]')
+    out_sec.locator('summary').click()
+    out_sec.locator('pre').focus()
+    page.keyboard.press('ArrowDown')
+    assert page.evaluate(f'S.callLog.inspectedId === "{first_id}"')
+    page.keyboard.press('Escape')
+    assert drawer.is_hidden()
+    assert page.evaluate(f'document.activeElement === document.querySelector(\'[data-call-id="{first_id}"] > summary\')')
+
+    # Mid-flight resize handoff (1440px -> 1024px) & pinned inspector output gutter scroll sync.
+    third_id = rows[2]['id']
+    page.evaluate("""() => {
+      window.origRead = window.readCallLog;
+      window.readCallLog = (p) => p.includes('03' + '7'.repeat(30))
+        ? new Promise(r => { window.resolveThird = () => r(window.origRead(p)); })
+        : window.origRead(p);
+    }""")
+    page.locator(f'[data-call-id="{third_id}"] > summary').click()
+    page.wait_for_function('typeof window.resolveThird === "function"')
+    page.set_viewport_size({'width': 1024, 'height': 820})
+    page.evaluate('window.resolveThird(); window.readCallLog = window.origRead; void 0')
+    page.locator(f'[data-call-id="{third_id}"] .call-facts').wait_for()
+
+    pin_id = 'p' * 32
+    details[pin_id] = {**details[first_id], 'id': pin_id}
+    page.evaluate(f'CodePierCallLog.focusOperation("{pin_id}")')
+    pin_out = page.locator('.call-pinned-inspector [data-call-section="output"]')
+    pin_out.locator('summary').click()
+    pin_out.locator('pre').evaluate('(el) => { el.scrollTop = 180; el.dispatchEvent(new Event("scroll")); }')
+    assert pin_out.locator('.call-output-lines').evaluate('(el) => el.scrollTop === 180')

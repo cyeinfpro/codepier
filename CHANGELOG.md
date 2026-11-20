@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.33.34 · 2026-11-20 · 操作审计页分栏滚动优化与架构收敛
+
+- 操作审计页默认视图切换为紧凑表格（`density: 'table'`），时间列精简显示 `HH:MM:SS`，并将当前队列面板（`#operation-queue`）下移至分页栏下方、紧凑化边距与内距。
+- 宽屏（`≥ 1280px`）紧凑表格打开右侧详情抽屉时采用基于文档自然顶部偏移的固定等高分栏（`overflow-y: auto; overscroll-behavior: contain`），消除外层滚动重算导致的高度拉伸与左右不同步问题；粘性表头与日期分隔条对齐至 `30px` 无重叠。
+- 收敛列表与详情核心架构：统一 `reconcileListDOM` 跨 `call-burst` 节点池与 `<pre>` 滚动位置保护，消除生产 `CP.dom.replacePage` 分叉盲区；合并内联详情、右侧抽屉与跨页定位卡为单一 `fetchDetailData` + `renderDetailInto` + 防键碰撞 `reconcileDetailDOM` 流水线。
+- 常驻复用 `.call-inspector-head` 避免连翻丢失焦点，补齐边界按钮禁用焦点转移、`Escape` 焦点归还、`<pre>` 内方向键隔离及 URL Hash 状态完整重置；浏览器回归测试全局注入真实 `web/core/bundle.js` 并通过 Chromium + WebKit 双内核验证。
+
 ## 1.33.33 · 2026-11-20 · 操作审计页紧凑表格重构与宽屏抽屉
 
 - 操作审计页紧凑表格改用统一 6 列固定网格与粘性表头，修复失败行与空参数行的列漂移及项目/工具竖排折行问题，失败摘要改为下方全宽紧凑子行。
