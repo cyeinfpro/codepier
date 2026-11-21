@@ -1171,6 +1171,7 @@
     "tests/test_resource_pressure.py",
     "tests/test_resource_readiness.py",
     "tests/test_resource_semantics_v2.py",
+    "tests/test_review_mcp_2026_11_21.py",
     "tests/test_review_storage_optimization.py",
     "tests/test_review_store_lifecycle.py",
     "tests/test_review_tooling.py",

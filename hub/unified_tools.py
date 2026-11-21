@@ -332,13 +332,10 @@ async def _poll_wait_operation(runtime, call, principal, deadline, stop):
             break
         wait_seconds = min(10, max(1, math.ceil(remaining)))
         read = runtime.invoke("process", {**call, "wait_seconds": wait_seconds}, principal)
-        if stop is None and remaining >= 1:
-            latest = await read
-        else:
-            completed, value = await _poll_or_cancel(read, stop, remaining)
-            if not completed:
-                break
-            latest = value
+        completed, value = await _poll_or_cancel(read, stop, remaining)
+        if not completed:
+            break
+        latest = value
         rows = latest.get("operations") if isinstance(latest, dict) else None
         row = rows[0] if isinstance(rows, list) and rows else {}
         if not isinstance(row, dict) or row.get("error") or not row.get("pending"):
