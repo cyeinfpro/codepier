@@ -1586,6 +1586,8 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
 }
 .chat-outbox {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 5px;
   max-height: 94px;
   overflow: auto;

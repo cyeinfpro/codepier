@@ -270,9 +270,18 @@ window.CodePierCallLog = (() => {
       badges.push(`${editCount[1]} 处修改`);
       rest = rest.replace(/\s*\bedits=\d+\+?/, '');
     }
+    const fileCount = rest.match(/\bfiles=(\d+\+?)/);
+    if (fileCount) {
+      badges.unshift(`${fileCount[1]} 个文件`);
+      rest = rest.replace(/\s*\bfiles=\d+\+?/, '');
+    }
     rest = rest.trim();
     if (rest.startsWith('command=')) {
       return { kind: 'command', primary: rest.slice(8).trim(), dir: '', name: '', badges };
+    }
+    if (rest.startsWith('paths=')) {
+      const p = rest.slice(6).trim();
+      return { kind: 'file', primary: p, dir: '', name: p, badges };
     }
     if (rest.startsWith('path=')) {
       const p = rest.slice(5).trim();
@@ -662,13 +671,19 @@ window.CodePierCallLog = (() => {
     const execMs = Number.isFinite(t.execution_ms) ? Math.max(0, t.execution_ms) : null;
     if (waitMs === null && execMs === null) return '';
     const safeTotal = Math.max(total, (waitMs || 0) + (execMs || 0), 1);
-    const waitPct = waitMs !== null ? Math.min(100, Math.round((waitMs / safeTotal) * 100)) : 0;
+    const waitPct =
+      waitMs !== null ? Math.min(100, Number(((waitMs / safeTotal) * 100).toFixed(2))) : 0;
     const execPct =
-      execMs !== null ? Math.min(100 - waitPct, Math.round((execMs / safeTotal) * 100)) : 0;
-    const tailPct = Math.max(0, 100 - waitPct - execPct);
+      execMs !== null
+        ? Math.min(
+            Number((100 - waitPct).toFixed(2)),
+            Number(((execMs / safeTotal) * 100).toFixed(2)),
+          )
+        : 0;
+    const tailPct = Math.max(0, Number((100 - waitPct - execPct).toFixed(2)));
     // Unknown stages must not be mislabeled as measured return/persistence time.
     const tailMs = waitMs !== null && execMs !== null ? Math.max(0, total - waitMs - execMs) : null;
-    return `<div class="call-waterfall" data-detail-part="waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail" style="width:${tailPct}%" title="${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}</span></div></div>`;
+    return `<div class="call-waterfall" data-detail-part="waterfall" aria-label="耗时分布"><div class="call-waterfall-bar"><i class="cw-wait${waitMs > 0 ? ' is-nonzero' : ''}" style="width:${waitPct}%" title="排队与投递 ${duration(waitMs)}"></i><i class="cw-exec${execMs > 0 ? ' is-nonzero' : ''}" style="width:${execPct}%" title="实际执行 ${duration(execMs)}"></i><i class="cw-tail${tailMs > 0 ? ' is-nonzero' : ''}" style="width:${tailPct}%" title="${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}"></i></div><div class="call-waterfall-legend"><span><b class="cw-dot cw-wait"></b>排队等待 ${duration(waitMs)}</span><span><b class="cw-dot cw-exec"></b>实际执行 ${duration(execMs)}</span><span><b class="cw-dot cw-tail"></b>${tailMs === null ? '未记录阶段' : '回传与落盘'} ${duration(tailMs)}</span></div></div>`;
   }
 
   function section(
@@ -878,9 +893,8 @@ window.CodePierCallLog = (() => {
         .join('')}
       </select></div></details></div>` +
       `<div class="call-subtoolbar"><div class="call-presets" role="group" aria-label="快捷筛选视图">${PRESET_DEFS.map(([presetKey, label]) => `<button type="button" class="call-preset-pill${st().preset === presetKey ? ' is-active' : ''}" data-call-action="preset" data-preset="${presetKey}" aria-pressed="${st().preset === presetKey}">${esc(label)}</button>`).join('')}</div><div class="call-view-toggles"><button type="button" class="call-chip-toggle" data-call-action="toggle-burst" aria-pressed="${st().burst}"><i class="call-toggle-dot" aria-hidden="true"></i>聚合连续探查</button><span class="call-toolbar-sep" aria-hidden="true"></span><div class="call-density-switch" role="group" aria-label="列表视图密度"><button type="button" class="call-chip-toggle${st().density === 'cards' ? ' is-active' : ''}" data-call-action="density" data-density="cards" aria-pressed="${st().density === 'cards'}">卡片</button><button type="button" class="call-chip-toggle${st().density === 'table' ? ' is-active' : ''}" data-call-action="density" data-density="table" aria-pressed="${st().density === 'table'}">紧凑表格</button></div></div></div>` +
-      `<div class="call-stream-banner"><button type="button" id="call-new" class="btn small call-new-pill" data-call-action="latest" hidden>↑ 列表有更新，显示最新</button><div class="call-loading-bar" data-call-progress hidden aria-hidden="true"></div></div>` +
       pinnedMarkup +
-      `<div class="call-workspace"><section class="call-log${st().density === 'table' ? ' call-log-table' : ''}" aria-label="工具调用流水">${rowsMarkup}</section><aside class="call-inspector" aria-label="调用详情抽屉" hidden></aside></div>` +
+      `<div class="call-workspace"><div class="call-list-pane"><div class="call-stream-banner"><button type="button" id="call-new" class="btn small call-new-pill" data-call-action="latest" hidden>↑ 列表有更新，显示最新</button><div class="call-loading-bar" data-call-progress hidden aria-hidden="true"></div></div><section class="call-log${st().density === 'table' ? ' call-log-table' : ''}" aria-label="工具调用流水">${rowsMarkup}</section></div><aside class="call-inspector" aria-label="调用详情抽屉" hidden></aside></div>` +
       `<div class="pagination"><span id="call-count">${esc(countTextHTML(rowsLen))}</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${hasNext ? '' : 'disabled'}>下一页</button></div></div>` +
       (window.CodePierQueue?.placeholder() || '') +
       uiHelp(
@@ -1960,7 +1974,7 @@ window.CodePierCallLog = (() => {
   function visibleEntryIds() {
     if (!root?.isConnected) return [];
     return [...root.querySelectorAll('.call-log .call-entry[data-call-id]')]
-      .filter((n) => n.offsetParent !== null)
+      .filter((n) => n.offsetParent !== null && !n.closest('details.call-burst:not([open])'))
       .map((n) => n.dataset.callId);
   }
 
@@ -2293,7 +2307,7 @@ window.CodePierCallLog = (() => {
       const rendered = detailHTML(d);
       const markup = `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(d.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(d.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail" data-detail-id="${esc(d.id)}">${rendered}</div></div>`;
       if (existingPin) existingPin.outerHTML = markup;
-      else target.querySelector('.call-stream-banner')?.insertAdjacentHTML('afterend', markup);
+      else target.querySelector('.call-workspace')?.insertAdjacentHTML('beforebegin', markup);
       const pinEl = target.querySelector('.call-pinned-inspector');
       const pinBody = pinEl?.querySelector('.call-detail');
       if (pinBody) {
@@ -2477,7 +2491,7 @@ window.CodePierCallLog = (() => {
           return;
         }
         const summaries = [...root.querySelectorAll('.call-log .call-entry > summary')].filter(
-          (s) => s.offsetParent !== null,
+          (s) => s.offsetParent !== null && !s.closest('details.call-burst:not([open])'),
         );
         if (!summaries.length) return;
         e.preventDefault();

@@ -481,3 +481,85 @@ def test_call_export_cap_cursor_and_filter_binding(log_api):
     changed = client.get("/api/call-log-export",
                          params={"format": "ndjson", "cursor": cursor, "tool": "exec"}, headers=AUTH)
     assert changed.status_code == 400
+
+
+def test_unified_batch_read_changes_edit_and_nested_options_summaries(log_api):
+    client, store, _ = log_api
+    store.add(
+        "1" * 32,
+        created=40,
+        tool="read",
+        args={
+            "project": "卡坦岛",
+            "operation": "batch",
+            "options": {
+                "include_knowledge": False,
+                "items": [
+                    {"path": "src/scene/world.js", "offset": 750, "limit": 100},
+                    {"path": "src/ui/desktop.js", "offset": 1, "limit": 100},
+                    {"path": "src/ui/piece-drag.js", "offset": 120, "limit": 80},
+                ],
+            },
+        },
+    )
+    store.add(
+        "2" * 32,
+        created=30,
+        tool="read",
+        args={
+            "project": "卡坦岛",
+            "operation": "batch",
+            "options": {"items": [{"path": "src/scene/world.js", "offset": 750, "limit": 100}]},
+        },
+    )
+    store.add(
+        "3" * 32,
+        created=20,
+        tool="edit",
+        args={
+            "project": "MCP",
+            "operation": "file",
+            "dry_run": True,
+            "changes": [
+                {
+                    "action": "edit",
+                    "path": "web/call-log.css",
+                    "edits": [{"old_text": "a", "new_text": "b"}],
+                }
+            ],
+        },
+    )
+    store.add(
+        "4" * 32,
+        created=10,
+        tool="workspace",
+        args={
+            "project": "MCP",
+            "operation": "search",
+            "options": {"query": "display: grid", "path": "web"},
+        },
+    )
+    ops = client.get("/api/call-log", headers=AUTH).json()["operations"]
+    by_id = {row["id"]: row for row in ops}
+
+    batch_row = by_id["1" * 32]
+    assert "paths=src/scene/world.js, src/ui/desktop.js, src/ui/piece-drag.js" in batch_row["summary"]
+    assert batch_row["summary_parts"]["kind"] == "file"
+    assert "3 个文件" in batch_row["summary_parts"]["badges"]
+
+    single_batch = by_id["2" * 32]
+    assert single_batch["summary_parts"]["dir"] == "src/scene/"
+    assert single_batch["summary_parts"]["name"] == "world.js"
+    assert "L750+100" in single_batch["summary_parts"]["badges"]
+
+    dry_edit = by_id["3" * 32]
+    assert dry_edit["summary_parts"]["dir"] == "web/"
+    assert dry_edit["summary_parts"]["name"] == "call-log.css"
+    assert "1 处修改" in dry_edit["summary_parts"]["badges"]
+    assert "演练" in dry_edit["summary_parts"]["badges"]
+
+    nested_search = by_id["4" * 32]
+    assert nested_search["summary_parts"]["kind"] == "search"
+    assert nested_search["summary_parts"]["primary"] == "display: grid"
+    assert "范围 web" in nested_search["summary_parts"]["badges"]
+

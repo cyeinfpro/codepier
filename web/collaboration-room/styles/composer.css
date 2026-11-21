@@ -102,6 +102,8 @@
 
 .cr-draft-files {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 6px;
   padding: 12px 14px 0;
   max-height: 180px;

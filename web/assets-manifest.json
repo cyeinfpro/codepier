@@ -1,5 +1,5 @@
 {
-  "version": "1.33.36",
+  "version": "1.33.37",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -43,12 +43,12 @@
       "bytes": 14190
     },
     "call-log.css": {
-      "sha256": "0ff4fcc6620987a73e836389ff32c5660ec6ba48d030e2044c5220911db2627c",
-      "bytes": 33479
+      "sha256": "70bc83e440a64e47a8fd9f007b9261f031642a97069ca081ca616caba67edf06",
+      "bytes": 34649
     },
     "call-log.js": {
-      "sha256": "36e3805fff2687d9beb01f08d3c521373e4a8f84660176944b4d0361919f279f",
-      "bytes": 126114
+      "sha256": "f7868eba408eca0bbf4aadbcdcc28e0f9103531e5a5a3c9151e12134fdedce00",
+      "bytes": 126787
     },
     "chat-catalog.js": {
       "sha256": "23ff4f8c3684359b6594ac46d47ca0c2c3fac5367d531340ca5e0ab994a645ab",
@@ -71,8 +71,8 @@
       "bytes": 32626
     },
     "chat.css": {
-      "sha256": "b973ac17cf058a90353e06a3e8f5d46007cc3de3927f97f3ccbc92a08e54baae",
-      "bytes": 88647
+      "sha256": "67ee5b1415e90f7b57fe4c1398fd17537369371fb97ac72c8714bf5db3f248ca",
+      "bytes": 88702
     },
     "chat.js": {
       "sha256": "f74956957d7a63df21c128f6509782a660fe84bd5ff37891cf1f0562cd687f49",
@@ -83,8 +83,8 @@
       "bytes": 32762
     },
     "collaboration-room.css": {
-      "sha256": "24c1c1af0c6d8b77d76d607264ead3acac0446d677c7a5b98e7bd5a80e1c17fa",
-      "bytes": 55593
+      "sha256": "cc1810a7fce7203ba5affb84a4a3b6c6d31b310136b407e6b874ed4c5d02a1c6",
+      "bytes": 55721
     },
     "collaboration-room.js": {
       "sha256": "11bb80d473c373f65c48aded81cfc793a8e6b0019887f01fe3c01defa2ffa7f5",
@@ -183,8 +183,8 @@
       "bytes": 30176
     },
     "queue.css": {
-      "sha256": "107071d8fff75c1e083fa0259a295ba57e45d7df747af678124539a0daddcffa",
-      "bytes": 9978
+      "sha256": "366620a6a2b02983d47c417150cdf57c19de50649f39bbcfc3cd9c5d05a891dc",
+      "bytes": 9976
     },
     "queue.js": {
       "sha256": "54518772ff2faf4ee1b3b2a9588ea88cefe8f8a9023498a359990a9f6c562ff4",
@@ -215,12 +215,12 @@
       "bytes": 7848
     },
     "styles.css": {
-      "sha256": "043f8d2f3ad2479b67cba87447ec30ae51b0ba1deebdfdd58ca469dbf89dd2ba",
-      "bytes": 98263
+      "sha256": "9b4378dee681813420ac411561fe66d4401473e918934170845a853359a53baa",
+      "bytes": 98569
     },
     "token-usage.css": {
-      "sha256": "62e9d3159a7aa05d4a2e484fed6e668bee3fa356d56f6b6729f2e712e184b2f6",
-      "bytes": 9322
+      "sha256": "d09ba53d62db4c9da0abe29247481060a1719a54d6b25972db891dc4ab0f0e69",
+      "bytes": 9409
     },
     "token-usage.js": {
       "sha256": "9164ce20cd87fd4134296fe0926b77940280dfc7c9d4b92cab8b356812d1c458",
@@ -251,8 +251,8 @@
       "bytes": 21771
     },
     "workspace.css": {
-      "sha256": "73c918e33a4a32e646eca3e8e81c81868074384c5c63670d13327e9134b3940d",
-      "bytes": 43245
+      "sha256": "583858a195293c05f748888de9e3dc64c1225f830fd41ccf13955ce1c84c660d",
+      "bytes": 43179
     }
   },
   "template_sha256": "0526dfbaebaf965f35c0b48eefe6785b942956199c889e9105665706e741085e"

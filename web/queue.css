@@ -8,7 +8,7 @@
 }
 .queue-panel[data-stale='true'] {
   border-style: dashed;
-  border-color: var(--ui-warning, #d97706);
+  border-color: var(--ui-warning);
 }
 .queue-panel[data-stale='true'] .queue-item {
   opacity: 0.78;
@@ -89,7 +89,7 @@
   min-height: 28px;
   padding: 2px 10px;
   border: 1px solid var(--ui-line);
-  border-radius: var(--ui-radius-pill, 999px);
+  border-radius: var(--ui-radius-pill);
   background: var(--ui-side);
   color: var(--ui-muted);
   font: inherit;
@@ -373,10 +373,10 @@
   color: var(--ui-text);
 }
 .queue-diag-metric.is-warn {
-  border: 1px solid var(--ui-warning, #d97706);
+  border: 1px solid var(--ui-warning);
 }
 .queue-diag-metric.is-warn strong {
-  color: var(--ui-warning, #d97706);
+  color: var(--ui-warning);
 }
 .queue-diag-bars {
   display: grid;
@@ -390,14 +390,14 @@
 }
 .queue-diag-bar-track {
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   background: var(--ui-line);
   overflow: hidden;
 }
 .queue-diag-bar-track > i {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   background: var(--ui-accent);
 }
 .queue-diag-blockers {

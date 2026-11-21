@@ -111,6 +111,7 @@
 .cr-room {
   position: relative;
   display: flex;
+  flex-shrink: 0;
   width: 100%;
   align-items: center;
   gap: 10px;

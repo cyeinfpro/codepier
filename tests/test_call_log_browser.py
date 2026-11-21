@@ -1006,3 +1006,90 @@ def test_split_pane_scroll_invariance_nav_focus_midflight_handoff_and_pinned_scr
     pin_out.locator('summary').click()
     pin_out.locator('pre').evaluate('(el) => { el.scrollTop = 180; el.dispatchEvent(new Event("scroll")); }')
     assert pin_out.locator('.call-output-lines').evaluate('(el) => el.scrollTop === 180')
+
+
+def test_split_pane_forty_rows_never_squash_and_banner_clears_header(log_page):
+    page, rows, details, _ = log_page
+    base = {
+        'actor': 'mcp:vZyLEZzi9OtVxv7YdStfOg:Google',
+        'project_id': 'p1',
+        'device_id': 'd1',
+        'alias': '卡坦岛',
+        'device_name': 'Mac',
+        'state': 'succeeded',
+        'elapsed_ms': 501,
+    }
+    rows[:] = [
+        {
+            **base,
+            'id': f'{i + 1:02x}' + 'a' * 30,
+            'tool': 'read' if 3 <= i <= 6 else 'exec',
+            'created': 1000 - i * 5,
+            'updated': 1001 - i * 5,
+            'summary': (
+                'paths=src/scene/world.js, src/ui/desktop.js  files=3'
+                if i == 0
+                else f'path=src/file_{i}.js'
+            ),
+        }
+        for i in range(40)
+    ]
+    for r in rows:
+        details[r['id']] = {
+            **r,
+            'attempts': 1,
+            'args_summary': {'project': '卡坦岛', 'operation': 'batch'},
+            'output': 'ok',
+            'timing': {'wait_ms': 500, 'execution_ms': 1},
+            'trace': {'current': {'reason': '完成'}, 'events': []},
+        }
+    page.set_viewport_size({'width': 1440, 'height': 820})
+    page.evaluate('CodePierCallLog.clear(); renderPage()')
+
+    # Open right inspector with 40 rows (including one collapsed 4-item burst -> 37 top-level rows).
+    page.locator(f'[data-call-id="{rows[0]["id"]}"] > summary').click()
+    drawer = page.locator('.call-inspector')
+    drawer.locator('.call-facts').wait_for()
+
+    # Batch fallback summary renders file count badge cleanly.
+    assert '3 个文件' in page.locator(f'[data-call-id="{rows[0]["id"]}"] .call-arg-badge').inner_text()
+
+    # Every visible row and burst summary preserves full compact height (>= 34px) and list scrolls vertically.
+    geom = page.evaluate("""() => {
+      const list = document.querySelector('.call-log');
+      const visibleEntries = [...list.querySelectorAll(':scope > .call-entry')];
+      const burstSum = list.querySelector(':scope > .call-burst > summary');
+      const heights = visibleEntries.map((el) => el.getBoundingClientRect().height);
+      if (burstSum) heights.push(burstSum.getBoundingClientRect().height);
+      return {
+        clientHeight: list.clientHeight,
+        scrollHeight: list.scrollHeight,
+        minHeight: Math.min(...heights),
+        visibleCount: visibleEntries.length,
+      };
+    }""")
+    assert geom['visibleCount'] == 36
+    assert geom['minHeight'] >= 34, f"Rows squashed in split-pane grid: {geom}"
+    assert geom['scrollHeight'] > geom['clientHeight'] + 500
+
+    # Tiny non-zero stage (1ms out of 501ms) stays visibly >= 3.5px wide via .is-nonzero.
+    exec_bar_box = drawer.locator('.call-waterfall-bar .cw-exec').bounding_box()
+    assert exec_bar_box['width'] >= 3.5
+
+    # Closed burst children (rows[3..6]) are skipped by ArrowDown navigation.
+    for expected_idx in (1, 2, 7):
+        page.keyboard.press('ArrowDown')
+        page.wait_for_function(f'S.callLog.inspectedId === "{rows[expected_idx]["id"]}"')
+
+    # Incoming live banner stays centered inside the left pane and below the sticky table header.
+    rows.insert(0, {**rows[0], 'id': 'ff' + 'b' * 30, 'created': 2000})
+    page.evaluate('CodePierCallLog.refresh(true)')
+    pill = page.locator('#call-new')
+    pill.wait_for(state='visible')
+    pill_box = pill.bounding_box()
+    list_box = page.locator('.call-log').bounding_box()
+    header_box = page.locator('.call-table-header').bounding_box()
+    assert pill_box['x'] >= list_box['x']
+    assert pill_box['x'] + pill_box['width'] <= list_box['x'] + list_box['width']
+    assert pill_box['y'] >= header_box['y'] + header_box['height'] - 2
+

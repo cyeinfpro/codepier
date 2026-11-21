@@ -234,6 +234,7 @@ pre {
 }
 .nav {
   display: grid;
+  grid-auto-rows: max-content;
   gap: 4px;
   flex: 1;
   min-height: 0;
@@ -1520,6 +1521,8 @@ input[type='checkbox'] {
 }
 .check-list {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   max-height: 230px;
   gap: var(--ui-space-1);
   padding: 10px 13px;
@@ -2872,6 +2875,8 @@ input[type='checkbox'] {
 }
 .command-results {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   max-height: 390px;
   gap: 3px;
   overflow: auto;
@@ -2961,6 +2966,8 @@ input[type='checkbox'] {
   bottom: 22px;
   z-index: var(--ui-z-toast);
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   max-height: 45dvh;
   overflow: auto;
   overscroll-behavior: contain;
@@ -4016,6 +4023,8 @@ button.ui-busy {
 }
 .policy-rule-list {
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 6px;
   max-height: 340px;
   overflow: auto;
@@ -4643,6 +4652,8 @@ html {
   overflow: hidden;
 }
 .tool-menu-items {
+  grid-auto-rows: max-content;
+  align-content: start;
   max-width: calc(100vw - 16px);
   max-height: min(60dvh, 420px);
   overflow: auto;

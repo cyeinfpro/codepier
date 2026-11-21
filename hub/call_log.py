@@ -116,53 +116,101 @@ def _scrub_field(value, limit: int = 1600) -> tuple[object, bool, bool]:
     return clean, False, scrubbed
 
 
+def _effective_args(args: dict) -> tuple[dict, list[dict], list[dict]]:
+    options = args.get("options") if isinstance(args.get("options"), dict) else {}
+    merged = {
+        **options,
+        **{k: v for k, v in args.items() if v not in ("", [], None, {})},
+    }
+    raw_items = merged.get("items") if isinstance(merged.get("items"), list) else []
+    items = [
+        item
+        for item in raw_items
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"]
+    ]
+    raw_changes = merged.get("changes") if isinstance(merged.get("changes"), list) else []
+    changes = [
+        item
+        for item in raw_changes
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"]
+    ]
+    return merged, items, changes
+
+
+def _batch_paths(args: dict, items: list[dict], changes: list[dict]) -> list[str]:
+    paths = args.get("paths")
+    if isinstance(paths, list) and paths:
+        return [str(p)[:120] for p in paths if str(p)]
+    source = items or changes
+    return [str(item["path"])[:120] for item in source]
+
+
 def argument_summary(args: dict) -> str:
+    merged, items, changes = _effective_args(args)
     parts = []
-    for key in (
-        "path",
-        "command",
-        "task",
-        "query",
-        "cwd",
-        "start_line",
-        "max_lines",
-        "offset",
-        "timeout_seconds",
-    ):
-        value = args.get(key)
+    scalar_keys = (
+        ("path", "command", "task", "query", "cwd", "timeout_seconds")
+        if (items or changes) and not merged.get("path")
+        else (
+            "path",
+            "command",
+            "task",
+            "query",
+            "cwd",
+            "start_line",
+            "max_lines",
+            "offset",
+            "timeout_seconds",
+        )
+    )
+    for key in scalar_keys:
+        value = merged.get(key)
         if isinstance(value, (str, int, float)) and not isinstance(value, bool) and value != "":
             parts.append(f"{key}={str(value).replace(chr(10), ' ↵ ')[:600]}")
-    paths = args.get("paths")
-    if isinstance(paths, list):
-        parts.append("paths=" + ", ".join(str(p)[:120] for p in paths[:3]))
-        parts.append(f"files={len(paths)}{'+' if len(paths) >= 30 else ''}")
+    batch = _batch_paths(merged, items, changes)
+    if batch and not merged.get("path"):
+        parts.append("paths=" + ", ".join(batch[:3]))
+        parts.append(f"files={len(batch)}{'+' if len(batch) >= 30 else ''}")
     meta = args.get("_log") if isinstance(args.get("_log"), dict) else {}
     edits = meta.get("edit_count")
     if isinstance(edits, int) and edits >= 0:
         parts.append(f"edits={edits}")
-    elif isinstance(args.get("edits"), list):
-        count = len(args["edits"])
+    elif isinstance(merged.get("edits"), list) and merged["edits"]:
+        count = len(merged["edits"])
         parts.append(f"edits={count}{'+' if count >= 30 else ''}")
-    content = args.get("content")
+    content = merged.get("content")
     match = re.fullmatch(r"<(\d+) chars>", content) if isinstance(content, str) else None
     if match:
         parts.append("inputChars=" + match[1])
     chars = meta.get("command_chars")
     if isinstance(chars, int) and chars >= 0:
         parts.append(f"commandChars={chars}")
+    if not parts:
+        op = merged.get("operation")
+        if isinstance(op, str) and op not in {"", "file", "batch"}:
+            parts.append(f"operation={op[:80]}")
     return "  ".join(parts)[:1200]
 
 
 def _count_badges(args: dict) -> list[str]:
+    merged, _, changes = _effective_args(args)
     badges = []
     meta = args.get("_log") if isinstance(args.get("_log"), dict) else {}
     edits = meta.get("edit_count")
     if isinstance(edits, int) and edits > 0:
         badges.append(f"{edits} 处修改")
-    elif isinstance(args.get("edits"), list) and args["edits"]:
-        count = len(args["edits"])
+    elif isinstance(merged.get("edits"), list) and merged["edits"]:
+        count = len(merged["edits"])
         badges.append(f"{count}{'+' if count >= 30 else ''} 处修改")
-    content = args.get("content")
+    elif changes:
+        nested_edits = sum(
+            len(item["edits"]) for item in changes if isinstance(item.get("edits"), list)
+        )
+        if nested_edits > 0:
+            badges.append(f"{nested_edits} 处修改")
+    if merged.get("dry_run") is True:
+        badges.append("演练")
+    content = merged.get("content")
     match = re.fullmatch(r"<(\d+) chars>", content) if isinstance(content, str) else None
     if match:
         badges.append(_human_chars(int(match[1])))
@@ -173,7 +221,7 @@ def _count_badges(args: dict) -> list[str]:
 
 
 def _command_summary_parts(args: dict, badges: list[str]) -> dict | None:
-    raw_cmd = args.get("command") or args.get("task") or ""
+    raw_cmd = args.get("command") or args.get("task") or args.get("label") or ""
     primary = str(raw_cmd).replace("\n", " ↵ ")[:600] if raw_cmd != "" else ""
     cwd = args.get("cwd")
     if isinstance(cwd, str) and cwd not in {"", "."}:
@@ -190,22 +238,40 @@ def _command_summary_parts(args: dict, badges: list[str]) -> dict | None:
     return {"kind": "command", "primary": primary, "dir": "", "name": "", "badges": badges}
 
 
-def _file_summary_parts(args: dict, badges: list[str]) -> dict | None:
-    path_val = args.get("path")
-    paths = args.get("paths")
-    if isinstance(path_val, str) and path_val != "":
+def _line_range_badge(source: dict) -> str:
+    start = source.get("start_line") or source.get("offset")
+    limit = source.get("max_lines") or source.get("limit")
+    if isinstance(start, int) and not isinstance(start, bool) and start > 0:
+        if start == 1 and limit in (None, 2000):
+            return ""
+        return f"L{start}" + (f"+{limit}" if isinstance(limit, int) and limit > 0 else "")
+    return ""
+
+
+def _file_summary_parts(
+    merged: dict, items: list[dict], changes: list[dict], badges: list[str]
+) -> dict | None:
+    path_val = merged.get("path")
+    batch = _batch_paths(merged, items, changes)
+    line_source = merged
+    if isinstance(path_val, str) and path_val not in {"", "."}:
         directory, filename = _split_path(path_val)
         primary = directory + filename
-    elif isinstance(paths, list) and paths:
-        primary = ", ".join(str(p)[:120] for p in paths[:3])
+    elif len(batch) == 1:
+        directory, filename = _split_path(batch[0])
+        primary = directory + filename
+        if len(items) == 1:
+            line_source = items[0]
+    elif batch:
+        primary = ", ".join(batch[:3])
         directory, filename = "", primary
-        badges = [f"{len(paths)}{'+' if len(paths) >= 30 else ''} 个文件", *badges]
+        badges = [f"{len(batch)}{'+' if len(batch) >= 30 else ''} 个文件", *badges]
+    elif path_val == ".":
+        primary, directory, filename = ".", "", "."
     else:
         primary = directory = filename = ""
-    start = args.get("start_line") or args.get("offset")
-    limit = args.get("max_lines") or args.get("limit")
-    if isinstance(start, int) and not isinstance(start, bool) and start > 0:
-        line_tag = f"L{start}" + (f"+{limit}" if isinstance(limit, int) and limit > 0 else "")
+    line_tag = _line_range_badge(line_source)
+    if line_tag:
         badges = [line_tag, *badges]
     if not primary and not badges:
         return None
@@ -219,29 +285,40 @@ def _file_summary_parts(args: dict, badges: list[str]) -> dict | None:
 
 
 def structured_argument_summary(tool: str, args: dict) -> dict:
+    merged, items, changes = _effective_args(args)
     badges = _count_badges(args)
-    if tool in COMMAND_TOOLS or "command" in args or "task" in args:
-        cmd_parts = _command_summary_parts(args, badges)
+    if tool in COMMAND_TOOLS or "command" in merged or "task" in merged:
+        cmd_parts = _command_summary_parts(merged, badges)
         if cmd_parts:
             return cmd_parts
-    if tool in SEARCH_TOOLS or ("query" in args and "path" not in args):
-        query_val = str(args.get("query") or "").replace("\n", " ")[:300]
-        path_val = args.get("path")
+    is_search = (
+        tool in SEARCH_TOOLS
+        or merged.get("operation") in {"search", "search_start"}
+        or ("query" in merged and not merged.get("path"))
+    )
+    if is_search and merged.get("query"):
+        query_val = str(merged.get("query") or "").replace("\n", " ")[:300]
+        path_val = merged.get("path")
         search_badges = (
             [f"范围 {path_val[:80]}", *badges]
             if isinstance(path_val, str) and path_val not in {"", "."}
             else badges
         )
-        if query_val or search_badges:
-            return {
-                "kind": "search",
-                "primary": query_val,
-                "dir": "",
-                "name": "",
-                "badges": search_badges,
-            }
-    if tool in FILE_TOOLS or "path" in args or isinstance(args.get("paths"), list):
-        file_parts = _file_summary_parts(args, badges)
+        return {
+            "kind": "search",
+            "primary": query_val,
+            "dir": "",
+            "name": "",
+            "badges": search_badges,
+        }
+    if (
+        tool in FILE_TOOLS
+        or merged.get("path")
+        or items
+        or changes
+        or isinstance(merged.get("paths"), list)
+    ):
+        file_parts = _file_summary_parts(merged, items, changes, badges)
         if file_parts:
             return file_parts
     fallback = argument_summary(args)

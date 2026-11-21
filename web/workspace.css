@@ -1289,10 +1289,6 @@
     min-height: 0;
     max-height: none;
   }
-  #page[data-page='overview'] .workspace-recent-projects > :not(.panel-head) {
-    overflow: auto;
-    min-height: 0;
-  }
 }
 .mobile-dock button {
   white-space: nowrap;
@@ -1712,7 +1708,8 @@
 }
 /* The overview is a six-record preview. Let all preview rows determine its
    height; the page scrolls instead of cutting a row inside a fixed viewport. */
-#page[data-page='overview'] .workspace-operations {
+#page[data-page='overview'] .workspace-operations,
+#page[data-page='overview'] .workspace-recent-projects {
   flex: none;
   min-height: max-content;
 }
