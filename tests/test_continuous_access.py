@@ -66,7 +66,8 @@ def test_defaults_are_opt_in_and_never_auto_consent_or_expand_existing_grants(ap
     request_id = authorize_request(client, 'read')
     count = app.state.store.one('SELECT count(*) AS n FROM grants')['n']
     details = client.get('/api/oauth/requests/' + request_id).json()
-    assert details['access_defaults'] == {'all_projects': True, 'developer_scopes': True}
+    # Retired server-side preselection is no longer sent to the consent page.
+    assert 'access_defaults' not in details
     assert details['scopes'] == ['read']
     assert app.state.store.one('SELECT count(*) AS n FROM grants')['n'] == count
     endpoint = '/api/oauth/requests/' + request_id + '/decide'

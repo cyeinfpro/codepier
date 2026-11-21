@@ -4,12 +4,18 @@ import sqlite3
 
 import pytest
 
-from hub.operation_history import PREFIX, seal, unseal, retention_plan, rewrite_task_ciphertext
+from hub.operation_history import PREFIX, seal, unseal, retention_plan, task_rekey_session
 from hub.keyring import rotate_key
 from hub.mcp_tasks import TaskService
 from hub.runtime import Runtime
 from hub.store import Store
 from tests import test_mcp_tasks
+
+
+def rewrite_task_ciphertext(store, task_id, column, encrypted):
+    """Test probe: one authenticated pair through the production rekey session."""
+    with task_rekey_session(store) as rewrite:
+        rewrite(task_id, column, encrypted)
 
 task_runtime = test_mcp_tasks.task_runtime
 create_task = test_mcp_tasks.create_task

@@ -99,4 +99,5 @@ def run_service(base):
     sys.argv = ["agent", "--config", str(base / "config.json"), "run", "--supervised"]
     from agent.__main__ import main
 
-    main()
+    # Propagate the Agent's exit status to the scheduler instead of exiting 0.
+    raise SystemExit(main())

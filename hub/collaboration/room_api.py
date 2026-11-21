@@ -369,3 +369,110 @@ def install_routes(router, auth, runtime):
                 auth.panel(request),
             )
         )
+
+
+def install_runtime_routes(router, service, auth):
+    """Room timeline, work and channel routes.
+
+    Authentication and the operation run in ONE StoreWorker call, so a request
+    queues once and its authorization cannot change between check and use.
+    Every response is per-session data and is never cached.
+    """
+    store = service.store
+    no_store = "private, no-store"
+
+    @router.get("/rooms/{conversation_id}/messages")
+    async def messages(
+        request: Request,
+        response: Response,
+        conversation_id: str,
+        cursor: str = "",
+        limit: int = 50,
+        client_message_id: str = "",
+        message_id: str = "",
+    ):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_runtime.read(
+                conversation_id,
+                auth.admin(request, False),
+                cursor=cursor,
+                limit=limit,
+                client_message_id=client_message_id,
+                message_id=message_id,
+            )
+        )
+
+    @router.get("/rooms/{conversation_id}/work")
+    async def works(
+        request: Request,
+        response: Response,
+        conversation_id: str,
+        cursor: str = "",
+        limit: int = 50,
+    ):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_runtime.work_page(
+                conversation_id, auth.admin(request, False), cursor=cursor, limit=limit
+            )
+        )
+
+    @router.get("/work/{work_id}")
+    async def work(request: Request, response: Response, work_id: str):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_runtime.work_read(work_id, auth.admin(request, False))
+        )
+
+    @router.post("/rooms/{conversation_id}/messages")
+    async def message(request: Request, response: Response, conversation_id: str, body: dict):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_runtime.send(
+                {**body, "conversation_id": conversation_id}, auth.admin(request, True)
+            )
+        )
+
+    @router.post("/work/{work_id}/control")
+    async def control(request: Request, response: Response, work_id: str, body: dict):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_runtime.control(
+                {**body, "work_id": work_id}, auth.admin(request, True)
+            )
+        )
+
+    @router.post("/rooms/{conversation_id}/channels/weixin/connect")
+    async def connect(request: Request, response: Response, conversation_id: str, body: dict):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_channels.create(
+                {**body, "conversation_id": conversation_id}, auth.admin(request, True)
+            )
+        )
+
+    @router.post("/rooms/{conversation_id}/legacy-channels/{binding_id}/pause")
+    async def pause_legacy_channel(
+        request: Request, response: Response, conversation_id: str, binding_id: str, body: dict
+    ):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_channels.pause_legacy(
+                conversation_id, binding_id, body, auth.admin(request, True)
+            )
+        )
+
+    @router.get("/channel-connect-flows/{flow_id}")
+    async def flow(request: Request, response: Response, flow_id: str):
+        response.headers["Cache-Control"] = no_store
+        return await store.run(
+            lambda: service.room_channels.read(flow_id, auth.admin(request, False))
+        )
+
+    @router.post("/channel-connect-flows/{flow_id}/actions")
+    async def flow_action(request: Request, response: Response, flow_id: str, body: dict):
+        response.headers["Cache-Control"] = no_store
+        # The action itself awaits provider I/O outside SQLite; only authenticate here.
+        principal = await store.run(auth.admin, request, True)
+        return await service.room_channels.action({**body, "flow_id": flow_id}, principal)

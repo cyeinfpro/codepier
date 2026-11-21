@@ -97,7 +97,8 @@ def test_oauth_defaults_never_include_unrequested_scopes_or_submit_without_click
     page.on('request', lambda request: decisions.append(request.post_data_json)
             if request.method == 'POST' and '/decide' in request.url else None)
     page.evaluate('(id)=>consentModal(id)', request_id)
-    expect(page.locator('.modal [name="all_projects"]')).to_be_checked()
+    # Retired server-side defaults never preselect all projects.
+    expect(page.locator('.modal [name="all_projects"]')).not_to_be_checked()
     expect(page.locator('.modal [name="scope"]')).to_have_count(1)
     expect(page.locator('.modal [name="scope"][value="read"]')).to_be_checked()
     expect(page.locator('#allow-read')).to_be_visible()

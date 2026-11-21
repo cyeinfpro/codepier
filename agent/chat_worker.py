@@ -1120,8 +1120,9 @@ def run(directory, sid, config_path=None):
         def emit(kind, **values):
             nonlocal flush_at
             event = {"type": kind, "receipt": protocol.active if protocol else None, **values}
+            # bounded_event already caps one event at MAX_EVENT; only the quota can trip.
             data = bounded_event(event)
-            if len(data) > MAX_LINE or size + len(pending) + len(data) > SESSION_QUOTA:
+            if size + len(pending) + len(data) > SESSION_QUOTA:
                 flush()
                 raise RuntimeError("TRANSCRIPT_QUOTA")
             if not pending:

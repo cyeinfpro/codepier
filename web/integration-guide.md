@@ -156,4 +156,4 @@ python -m agent.codepier_control --descriptor "$HOME/.codepier-agent/state/integ
 - https://developers.openai.com/plugins/reference
 - https://github.com/microsoft/pyright
 
-Apps 打包使用锁定的 `@modelcontextprotocol/ext-apps` 与其依赖，许可证由构建脚本收集到 `web/mcp-apps/THIRD_PARTY_NOTICES.txt`。扩展与 Python 集成为本项目实现。不要把“零风险”、官方支持或通过全部跨平台实机验收作为没有证据的宣传。
+Apps 生产页面只打包本项目的 `host-bridge.js`；锁定的 `@modelcontextprotocol/ext-apps` 仅作为测试宿主（开发依赖）。构建脚本只为实际打入页面的包和 esbuild 运行时辅助代码收集许可证到 `web/mcp-apps/THIRD_PARTY_NOTICES.txt`。扩展与 Python 集成为本项目实现。不要把“零风险”、官方支持或通过全部跨平台实机验收作为没有证据的宣传。

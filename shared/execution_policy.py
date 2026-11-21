@@ -28,8 +28,10 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def hub_blocks_codex() -> bool:
-    # Retain the deployment switch for model/CLI invocation only.
-    return os.getenv("MCP_BLOCK_LOCAL_CODEX", "").strip().lower() in {"1", "true", "yes", "on"}
+    # Retain the deployment switch for model/CLI invocation only. Like the
+    # computer switch below, an explicit but misspelt value fails closed.
+    value = os.getenv("MCP_BLOCK_LOCAL_CODEX", "").strip().lower()
+    return bool(value) and value not in {"0", "false", "no", "off"}
 
 
 def hub_blocks_computer() -> bool:

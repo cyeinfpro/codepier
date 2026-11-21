@@ -6,8 +6,14 @@ import sys
 
 import pytest
 
-from hub.operation_history import rewrite_task_ciphertext, seal, unseal
+from hub.operation_history import seal, task_rekey_session, unseal
 from tests import test_mcp_tasks
+
+
+def rewrite_task_ciphertext(store, task_id, column, encrypted):
+    """Test probe: one authenticated pair through the production rekey session."""
+    with task_rekey_session(store) as rewrite:
+        rewrite(task_id, column, encrypted)
 
 task_runtime = test_mcp_tasks.task_runtime
 
@@ -101,7 +107,10 @@ async def test_process_crash_rolls_back_guard_exception_and_data(task_runtime):
     script = """
 import os,sys
 from hub.store import Store
-from hub.operation_history import rewrite_task_ciphertext,seal,unseal
+from hub.operation_history import seal,task_rekey_session,unseal
+def rewrite_task_ciphertext(store,task_id,column,encrypted):
+    with task_rekey_session(store) as rewrite:
+        rewrite(task_id,column,encrypted)
 s=Store(sys.argv[1])
 identifier=sys.argv[2]
 old=s.one('SELECT terminal_result FROM mcp_tasks WHERE task_id=?',(identifier,))['terminal_result']

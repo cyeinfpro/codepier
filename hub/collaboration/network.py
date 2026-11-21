@@ -7,14 +7,12 @@ while keeping the original Host and TLS server name.
 
 from __future__ import annotations
 import asyncio
-import ipaddress
 import socket
-import time
-from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import httpx
+from shared.net_address import is_public_unicast_ip, parse_retry_after
 from shared.util import DevError
 
 
@@ -27,19 +25,7 @@ class Reply:
 
 def retry_after_seconds(value, *, now=None):
     """Only the bounded Retry-After value crosses the transport boundary."""
-    if not isinstance(value, str) or not value.strip() or len(value) > 128:
-        return None
-    value = value.strip()
-    if value.isascii() and value.isdecimal():
-        return min(1800, int(value))
-    try:
-        parsed = parsedate_to_datetime(value)
-        if parsed.tzinfo is None:
-            return None
-        delay = parsed.timestamp() - (time.time() if now is None else now)
-        return max(0, min(1800, delay))
-    except (TypeError, ValueError, OverflowError, OSError):
-        return None
+    return parse_retry_after(value, max_seconds=1800, now=now)
 
 
 def callback_url(value):
@@ -80,15 +66,7 @@ async def resolve(host, port):
 
 
 def public_address(value):
-    address = ipaddress.ip_address(value)
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
-    return (
-        address.is_global
-        and not address.is_multicast
-        and not address.is_reserved
-        and not getattr(address, "is_site_local", False)
-    )
+    return is_public_unicast_ip(value)
 
 
 async def callback_destination(url):

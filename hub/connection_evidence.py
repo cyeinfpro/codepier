@@ -72,11 +72,6 @@ class ConnectionEvidence:
             detail TEXT NOT NULL,
             PRIMARY KEY(space_id,user_id,grant_id,stage,project_id,workspace_id))""")
 
-    def reset_dedup(self):
-        """Clear in-memory observation deduplication cache (for tests/admin reset)."""
-        with self._lru_lock:
-            self._observed_lru.clear()
-
     @staticmethod
     def _dedup_key(
         grant_id,

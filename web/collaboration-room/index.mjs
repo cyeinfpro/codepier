@@ -819,6 +819,7 @@ const channelReasons = {
   WEIXIN_QR_ATTENTION: '微信没有返回可用的扫码结果，请重新生成二维码。',
   WEIXIN_QR_CANCELLED: '上一次扫码已取消。',
   WEIXIN_QR_RESPONSE_UNCONFIRMED: '暂时连不上微信扫码服务，请稍后重新生成二维码。',
+  WEIXIN_QR_NETWORK_NOT_SENT: '未能连上微信扫码服务，请求没有发出，可直接重试。',
   WEIXIN_QR_RESPONSE_UNSUPPORTED: '微信返回了无法识别的扫码结果，请重新生成二维码。',
   WEIXIN_CREDENTIAL_CHANGED: '微信登录凭据已变化，请重新扫码。',
   WEIXIN_ACCOUNT_CONFLICT: '这个微信已由其他账号登记，不能在这里接入。',

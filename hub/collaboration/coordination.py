@@ -1372,7 +1372,7 @@ class CoordinationService:
                 self.admit_current_work_surface(goal)
                 item = self.lease(principal, goal, args)
                 from shared.contracts import TOOLS
-                from hub.dispatch_plan import DeferredCall
+                from hub.runtime import DeferredCall
 
                 role = args.get("operation_role", "required")
                 supersedes = args.get("supersedes_operation_id", "")

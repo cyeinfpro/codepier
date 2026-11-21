@@ -4,7 +4,37 @@ import json
 import math
 import unittest
 
-from shared.context_estimate import SCENARIOS, estimate_context, normalize, reference_cost, replay
+from decimal import ROUND_HALF_UP, Decimal
+
+from shared.context_estimate import SCENARIOS, estimate_context, normalize, replay
+
+
+# Scenario-only pricing helper (production billing uses shared.token_cost.reference_cost).
+def reference_cost(value, *, input_rate, cached_input_rate, output_rate, cache_percent=95):
+    """Injected USD/million rates. No internet, price catalog or side effects."""
+    if type(cache_percent) is not int or not 0 <= cache_percent <= 100:
+        raise ValueError("Cache percentage must be an integer from 0 to 100")
+    rates = [Decimal(str(x)) for x in (input_rate, cached_input_rate, output_rate)]
+    if any(not rate.is_finite() or rate < 0 for rate in rates):
+        raise ValueError("Rates must be nonnegative finite USD per million")
+    inputs, outputs = (Decimal(str(value[key])) for key in ("input_tokens", "output_tokens"))
+    if any(not x.is_finite() or x < 0 for x in (inputs, outputs)):
+        raise ValueError("Counts must be finite and nonnegative")
+    effective = (rates[0] * (100 - cache_percent) + rates[1] * cache_percent) / 100
+    amount = (inputs * effective + outputs * rates[2]) / 1_000_000
+    return {
+        "amount_pico_usd": int(
+            (amount * 1_000_000_000_000).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+        ),
+        "estimated_usd": float(amount),
+        "cache_read_percent": cache_percent,
+        "estimated_cached_input_tokens": float(inputs * cache_percent / 100),
+        "actual_usage": None,
+        "actual_cache_hit_rate": None,
+        "reasoning_tokens": None,
+        "cache_write_tokens": None,
+        "billing_total": None,
+    }
 
 
 def side(n):

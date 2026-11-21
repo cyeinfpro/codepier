@@ -7,10 +7,14 @@ All replacements match the original snapshot; no fuzzy substitution guesses.
 from __future__ import annotations
 
 import base64
+from agent.filesystem import MAX_TEXT_EDIT
 from shared.crypto import digest
 from shared.util import DevError
 
 OUTPUT_BYTES = 50 * 1024
+# Same bound as shared.computer_media.MAX_IMAGE_BYTES (checked by tests). Kept
+# local so importing file primitives never loads desktop media contracts.
+MAX_INLINE_IMAGE_BYTES = 3 * 1024 * 1024
 
 
 def edited_bytes(engine, before, edits):
@@ -41,9 +45,7 @@ def edited_bytes(engine, before, edits):
         raise DevError("EDIT_OVERLAP", "多处编辑在原文件中重叠，未修改")
     # Convert only replacement boundaries back to original byte-preserving
     # text positions. A CRLF contributes one extra original character.
-    growth = sum(len(new) - (end - start) for start, end, new in replacements)
-    if len(text) + growth > 1048576:
-        raise DevError("FILE_TOO_LARGE", "替换后的文件超过 1 MiB")
+    output_size = len(before)
     chunks = []
     previous = 0
     extra = 0
@@ -52,25 +54,70 @@ def edited_bytes(engine, before, edits):
         while crlf != -1 and crlf < start + extra:
             extra += 1
             crlf = original.find("\r\n", crlf + 2)
-        chunks.append(original[previous : start + extra])
+        original_start = start + extra
+        chunks.append(original[previous:original_start])
         chunks.append(replacement)
         while crlf != -1 and crlf < end + extra:
             extra += 1
             crlf = original.find("\r\n", crlf + 2)
         previous = end + extra
+        output_size += len(replacement.encode("utf-8")) - len(
+            original[original_start:previous].encode("utf-8")
+        )
+    if output_size > MAX_TEXT_EDIT:
+        raise DevError("FILE_TOO_LARGE", "替换后的文件超过 16 MiB，未修改")
     chunks.append(original[previous:])
-    return engine.encode_content("".join(chunks))
+    return engine.encode_content("".join(chunks), MAX_TEXT_EDIT)
+
+
+def _read_page_bytes(project, *, fallback):
+    budget = project.get("_response_bytes") if isinstance(project, dict) else None
+    return max(OUTPUT_BYTES, budget) if type(budget) is int else fallback
 
 
 class CoreFiles:
     def __init__(self, engine):
         self.engine = engine
+        self.output_bytes = OUTPUT_BYTES
+
+    def _large_image_metadata(self, mime, data, path, args):
+        if mime and len(data) > MAX_INLINE_IMAGE_BYTES:
+            return self.asset_metadata(path, args, "IMAGE_TOO_LARGE")
+        return None
+
+    def _read_image(self, mime, data, path, args, sha, meta):
+        # Oversized project images are ordinary assets, not desktop screenshots.
+        metadata = self._large_image_metadata(mime, data, path, args)
+        if metadata is not None:
+            return metadata
+        if args["offset"] != 1:
+            raise DevError("INVALID_OFFSET", "图片不支持文本行分页")
+        # Isolated text reads do not need desktop media or model schemas.
+        # Keep the same validation when an actual PNG/JPEG is returned.
+        from shared.computer_media import normalize_content
+
+        return {
+            **meta,
+            **normalize_content(
+                {
+                    "content": [
+                        {
+                            "type": "image",
+                            "mimeType": mime,
+                            "data": base64.b64encode(data).decode("ascii"),
+                        }
+                    ]
+                }
+            ),
+            "truncated": False,
+            "next_offset": None,
+        }
 
     def read_one(self, root, args, *, text_only=False):
         engine = self.engine
         path = engine.path(root, args["path"], False)
         try:
-            data = engine.read_bytes(path, max_bytes=16 * 1024 * 1024)
+            data = engine.read_bytes(path, max_bytes=MAX_TEXT_EDIT)
         except DevError as exc:
             if exc.code != "FILE_TOO_LARGE" or text_only:
                 raise
@@ -89,28 +136,7 @@ class CoreFiles:
         if mime and text_only:
             raise DevError("BINARY_FILE", "批量读取仅支持 UTF-8 文本；图片请单独读取")
         if mime:
-            if args["offset"] != 1:
-                raise DevError("INVALID_OFFSET", "图片不支持文本行分页")
-            # Isolated text reads do not need desktop media or model schemas.
-            # Keep the same validation when an actual PNG/JPEG is returned.
-            from shared.computer_media import normalize_content
-
-            return {
-                **meta,
-                **normalize_content(
-                    {
-                        "content": [
-                            {
-                                "type": "image",
-                                "mimeType": mime,
-                                "data": base64.b64encode(data).decode("ascii"),
-                            }
-                        ]
-                    }
-                ),
-                "truncated": False,
-                "next_offset": None,
-            }
+            return self._read_image(mime, data, path, args, sha, meta)
         try:
             lines = engine.text(data).splitlines(keepends=True)
         except DevError as exc:
@@ -123,10 +149,11 @@ class CoreFiles:
         selected, size = [], 0
         for line in lines[start : start + args["limit"]]:
             count = len(line.encode("utf-8"))
-            if size + count > OUTPUT_BYTES:
+            if size + count > self.output_bytes:
                 if not selected:
                     raise DevError(
-                        "LINE_TOO_LARGE", "此行超过 50 KiB，请用 exec 按字节截取；未返回半行"
+                        "LINE_TOO_LARGE",
+                        f"此行超过 {self.output_bytes // 1024} KiB 单次输出上限；未返回半行",
                     )
                 break
             selected.append(line)
@@ -201,6 +228,8 @@ class CoreFiles:
 
     def call(self, tool, project, args):
         engine = self.engine
+        # A larger Hub response budget raises the single-read page; never lowers it.
+        self.output_bytes = _read_page_bytes(project, fallback=self.output_bytes)
         root, _ = engine.root(project, tool != "read")
         if tool == "read":
             snapshot = args.get("options", {}).get("read_snapshot")
@@ -233,7 +262,7 @@ class CoreFiles:
         with engine.mutation_lock:
             if tool == "write":
                 after = engine.encode_content(args["content"])
-                before = engine.read_bytes(path, True)
+                before = engine.read_bytes(path, True, max_bytes=MAX_TEXT_EDIT)
                 if (digest(before) if before is not None else "new") != args["expected_sha256"]:
                     raise DevError("SHA_CONFLICT", "文件已改变，请重新读取后再修改", 409)
                 if not path.parent.is_dir():
@@ -241,8 +270,11 @@ class CoreFiles:
                         "fs_mkdir", project, {"path": path.parent.relative_to(root).as_posix()}
                     )
             else:
-                before = engine.read_bytes(path)
+                before = engine.read_bytes(path, max_bytes=MAX_TEXT_EDIT)
                 if digest(before) != args["expected_sha256"]:
                     raise DevError("SHA_CONFLICT", "文件已改变，请重新读取后再修改", 409)
                 after = edited_bytes(engine, before, args["edits"])
-            return engine.mutate(project, args["path"], args["expected_sha256"], after)
+            # Reuse the bytes already read and SHA-checked under the same lock.
+            return engine.mutate(
+                project, args["path"], args["expected_sha256"], after, verified_before=before
+            )

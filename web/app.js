@@ -2968,7 +2968,7 @@ function toolCatalogHTML(tools) {
 function permissionsHTML(
   projects,
   scopes = ['read', 'write', 'execute', 'computer'],
-  defaults = S.settings?.access_defaults || {},
+  defaults = {},
 ) {
   return (
     `<div class="field"><label>工具权限</label><div class="check-list">${scopes.map((scope) => `<label class="check"><input type="checkbox" name="scope" value="${esc(scope)}" ${scope === 'read' ? 'checked disabled' : defaults.developer_scopes && ['write', 'execute'].includes(scope) ? 'checked' : ''}>${{ read: '读取项目与文件', write: '编辑文件、恢复备份和建立检查点', execute: '运行和停止命令', computer: '读取屏幕和操作桌面应用' }[scope]}</label>`).join('')}</div></div>` +
@@ -3000,7 +3000,7 @@ async function newGrant() {
     $('.modal'),
     profiles,
     ['read', 'write', 'execute', 'computer', 'codepier.role_access'],
-    S.settings?.access_defaults || {},
+    {},
   );
   $('#create-grant').onclick = () =>
     busy($('#create-grant'), async () => {
@@ -3051,7 +3051,9 @@ async function consentModal(id) {
       remembered = JSON.parse(localStorage.getItem(choiceKey)) || {};
     } catch {}
     const defaults = {
-      all_projects: remembered.all_projects ?? r.access_defaults?.all_projects === true,
+      // Only this browser's explicit per-client choice is remembered; retired
+      // server-side defaults never preselect a wider grant.
+      all_projects: remembered.all_projects === true,
       selected_projects: Array.isArray(remembered.projects)
         ? remembered.projects
         : S.projects.map((p) => p.id),

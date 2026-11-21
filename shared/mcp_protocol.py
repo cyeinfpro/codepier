@@ -14,6 +14,29 @@ PREFIX = "io.modelcontextprotocol/"
 SERVER_INFO = {"name": "codepier-agent", "version": VERSION, "title": "CodePier Workspace"}
 MIME = "text/html;profile=mcp-app"
 TASK_METHODS = frozenset({"tasks/get", "tasks/update", "tasks/cancel"})
+# One source for hosted MCP clients: /mcp Origin defaults and OAuth redirect
+# defaults are both derived here so the two trust boundaries cannot drift.
+TRUSTED_CLIENT_HOSTS = (
+    "chatgpt.com",
+    "chat.openai.com",
+    "platform.openai.com",
+    "claude.ai",
+    "grok.com",
+    "gemini.google.com",
+    "antigravity.google",
+    "antigravity.google.com",
+)
+DEFAULT_OAUTH_REDIRECT_HOSTS = ",".join(
+    (
+        *TRUSTED_CLIENT_HOSTS,
+        "oauth-redirect.googleusercontent.com",
+        "oauth-redirect-sandbox.googleusercontent.com",
+        "oauth-redirect-test.googleusercontent.com",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    )
+)
 
 
 class ProtocolError(Exception):

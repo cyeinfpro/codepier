@@ -79,6 +79,11 @@ from shared.instance_lock import InstanceLock
 LOGGER = logging.getLogger("codepier.agent")
 
 
+def _response_page_budget(request):
+    budget = request.get("response_bytes")
+    return budget if type(budget) is int and 8 * 1024 <= budget <= 1024 * 1024 else None
+
+
 class Agent:
     def __init__(self, config_path: Path):
         self.config_path = config_path.expanduser().resolve()
@@ -1398,6 +1403,8 @@ class Agent:
             project = {
                 **project,
                 "_execution_policy": execution_policy,
+                # Hub response budget (CODEPIER_MCP_RESPONSE_BYTES); never from args.
+                "_response_bytes": _response_page_budget(request),
                 "_core_ssh": core_ssh,
                 "_bounded_execution": bounded_execution,
                 "_runtime_requirement": None,

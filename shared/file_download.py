@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 import http.client
-import ipaddress
 import socket
 import ssl
 import threading
 import time
 from urllib.parse import urlsplit, urljoin
+from shared.net_address import is_public_unicast_ip
 from shared.util import DevError
 from shared.file_sources import normalize_file_host, source_metadata, source_host_allowed
 
@@ -144,13 +144,8 @@ class PublicTLSConnection(http.client.HTTPSConnection):
         try:
             # IPv6's deprecated fec0::/10 site-local range is deliberately
             # excluded from ipaddress.is_private and can report is_global.
-            public = bool(addresses) and all(
-                (address := ipaddress.ip_address(a[4][0])).is_global
-                and not address.is_multicast
-                and not getattr(address, "is_site_local", False)
-                and "%" not in a[4][0]
-                for a in addresses
-            )
+            # Shared rule: unwraps IPv4-mapped IPv6 and rejects reserved ranges.
+            public = bool(addresses) and all(is_public_unicast_ip(a[4][0]) for a in addresses)
         except (ValueError, IndexError):
             public = False
         if not public:

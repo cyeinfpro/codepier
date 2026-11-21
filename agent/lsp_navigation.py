@@ -792,6 +792,13 @@ class LspPool:
     def _sync_loop(self):
         loop = asyncio.get_running_loop()
         if self._loop is not loop:
+            # Peers of the previous loop cannot be awaited from this one; stop
+            # their language-server processes instead of orphaning them.
+            for entry in self._entries.values():
+                process = getattr(entry.peer, "process", None)
+                if process is not None and getattr(process, "returncode", 0) is None:
+                    with contextlib.suppress(Exception):
+                        process.kill()
             self._entries.clear()
             self._reaper_task = None
             self._reaper_wake = asyncio.Event()
@@ -804,13 +811,6 @@ class LspPool:
             self._reaper_task = asyncio.create_task(self._reaper_loop())
         else:
             self._reaper_wake.set()
-
-    def resident_count(self) -> int:
-        return sum(
-            1
-            for entry in self._entries.values()
-            if entry.peer is not None and entry.peer.is_alive()
-        )
 
     async def _close_entries(self, entries):
         if entries:
@@ -867,14 +867,6 @@ class LspPool:
                     await asyncio.wait_for(self._reaper_wake.wait(), wait_seconds)
         except asyncio.CancelledError:
             raise
-
-    async def evict_idle(self) -> int:
-        self._sync_loop()
-        now = self.clock()
-        async with self._lock:
-            to_close = self._pop_expired_locked(now)
-        await self._close_entries(to_close)
-        return len(to_close)
 
     async def evict_for_memory_pressure(self, *, keep: int = 0) -> int:
         self._sync_loop()
@@ -1085,6 +1077,18 @@ def _raise_if_stopped(agent, identifier):
 _DEFAULT_POOL: LspPool | None = None
 
 
+def apply_pool_config(pool: LspPool, config) -> None:
+    """Hot-apply integrations.lsp_pool from config.json; absent keeps env/defaults."""
+    integrations = config.get("integrations") if isinstance(config, dict) else None
+    settings = integrations.get("lsp_pool") if isinstance(integrations, dict) else None
+    if not isinstance(settings, dict):
+        return
+    if type(settings.get("max_instances")) is int:
+        pool.max_instances = settings["max_instances"]
+    if type(settings.get("idle_ttl_seconds")) in (int, float):
+        pool.idle_ttl = float(settings["idle_ttl_seconds"])
+
+
 def get_pool(agent=None) -> LspPool:
     global _DEFAULT_POOL
     if agent is not None:
@@ -1092,6 +1096,7 @@ def get_pool(agent=None) -> LspPool:
         if not isinstance(pool, LspPool):
             pool = LspPool()
             agent.lsp_pool = pool
+        apply_pool_config(pool, getattr(agent, "config", None))
         return pool
     if _DEFAULT_POOL is None:
         _DEFAULT_POOL = LspPool()

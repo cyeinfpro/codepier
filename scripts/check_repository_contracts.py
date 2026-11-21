@@ -47,7 +47,40 @@ def check(root=ROOT):
         "CODEPIER_ROOM_HOST_CONNECTIONS_MODE",
         "CODEPIER_WEIXIN_APPROVED_API_BASES",
         "MCP_BLOCK_NATIVE_COMPUTER",
+        "CODEPIER_MCP_DEFAULT_VIEW",
+        "CODEPIER_MCP_STREAMS_PER_PRINCIPAL",
+        "CODEPIER_MCP_MAX_STREAMS",
+        "CODEPIER_MCP_SSE_KEEPALIVE_INTERVAL",
+        "CODEPIER_MCP_SSE_GRACE_SECONDS",
+        "CODEPIER_SQLITE_SYNCHRONOUS",
+        "CODEPIER_EVIDENCE_DEDUP_SECONDS",
     }
+    runtime_tuning = {
+        "CODEPIER_MCP_RESPONSE_BYTES",
+        "CODEPIER_MCP_DEFAULT_VIEW",
+        "CODEPIER_MCP_STREAMS_PER_PRINCIPAL",
+        "CODEPIER_MCP_MAX_STREAMS",
+        "CODEPIER_MCP_SSE_KEEPALIVE_INTERVAL",
+        "CODEPIER_MCP_SSE_GRACE_SECONDS",
+        "CODEPIER_SQLITE_SYNCHRONOUS",
+        "CODEPIER_EVIDENCE_DEDUP_SECONDS",
+    }
+    k3s = (root / "deploy/k3s/deployment.yaml").read_text()
+    configmap = set(re.findall(r"^  ([A-Z][A-Z0-9_]+):", k3s, re.M))
+    if runtime_tuning - configmap:
+        raise ValueError(
+            "k3s ConfigMap is missing settings: " + ", ".join(sorted(runtime_tuning - configmap))
+        )
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from shared.mcp_protocol import DEFAULT_OAUTH_REDIRECT_HOSTS
+
+    for name, text in (("compose.yml", compose), (".env.example", example), ("k3s", k3s)):
+        if DEFAULT_OAUTH_REDIRECT_HOSTS not in text:
+            raise ValueError("OAUTH_REDIRECT_HOSTS default drift in " + name)
+    for setting in ("CODEPIER_LOG_MAX_SIZE", "CODEPIER_LOG_MAX_FILES"):
+        if "${" + setting + ":-" not in compose:
+            raise ValueError("Compose log rotation must honor " + setting)
     for name in ("hub/config.py", "hub/oidc.py"):
         tree = ast.parse((root / name).read_text())
         expected.update(

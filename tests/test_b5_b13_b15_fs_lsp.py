@@ -20,6 +20,13 @@ from agent.filesystem import FileEngine
 from agent.runner import Agent
 from shared.util import DevError
 
+
+def resident_count(pool):
+    """Live language-server peers currently held by a pool (test diagnostic)."""
+    return sum(
+        1 for entry in pool._entries.values() if entry.peer is not None and entry.peer.is_alive()
+    )
+
 FAKE_LSP_SERVER = Path(__file__).resolve().parent / "fake_lsp_server.py"
 
 
@@ -358,7 +365,7 @@ async def test_lsp_pool_reuses_warm_server_across_queries_and_evicts_on_idle(tmp
         pid1 = m1["pid"]
         assert m1["requests"].count("initialize") == 1
         assert m1["requests"].count("textDocument/didOpen") == 1
-        assert pool.resident_count() == 1
+        assert resident_count(pool) == 1
         assert not agent.processes
 
         t0 = time.monotonic()
@@ -383,10 +390,10 @@ async def test_lsp_pool_reuses_warm_server_across_queries_and_evicts_on_idle(tmp
         m_idle = {}
         for _ in range(60):
             m_idle = json.loads(marker.read_text())
-            if pool.resident_count() == 0 and m_idle.get("state") in {"shutdown", "exited"}:
+            if resident_count(pool) == 0 and m_idle.get("state") in {"shutdown", "exited"}:
                 break
             await asyncio.sleep(0.05)
-        assert pool.resident_count() == 0
+        assert resident_count(pool) == 0
         assert m_idle["state"] in {"shutdown", "exited"}
     finally:
         await lsp_navigation.shutdown_all(agent)
@@ -483,20 +490,20 @@ async def test_lsp_pool_incremental_sync_lru_memory_pressure_and_crash_respawn(t
             projects[1],
             {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50},
         )
-        assert pool.resident_count() == 2
+        assert resident_count(pool) == 2
         await lsp_navigation.query(
             agent,
             "lru-2",
             projects[2],
             {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50},
         )
-        assert pool.resident_count() == 2
+        assert resident_count(pool) == 2
         assert not any(key[:2] == (str(roots[0].resolve()), "python") for key in pool._entries)
 
         # 4. Memory-pressure eviction hook
         evicted = await lsp_navigation.evict_for_memory_pressure(agent)
         assert evicted == 2
-        assert pool.resident_count() == 0
+        assert resident_count(pool) == 0
 
         # 5. Crash recovery + clean respawn
         await lsp_navigation.query(
@@ -546,13 +553,13 @@ async def test_lsp_pool_incremental_sync_lru_memory_pressure_and_crash_respawn(t
                         {"action": "symbols", "path": "source.py", "line": 1, "column": 1, "limit": 50},
                     )
                 assert exc_info.value.code == expected_code
-                assert bad_agent.lsp_pool.resident_count() == 0
+                assert resident_count(bad_agent.lsp_pool) == 0
             finally:
                 await lsp_navigation.shutdown_all(bad_agent)
     finally:
         closed = await lsp_navigation.shutdown_all(agent)
         assert closed >= 0
-        assert pool.resident_count() == 0
+        assert resident_count(pool) == 0
         assert not agent.processes
 
 

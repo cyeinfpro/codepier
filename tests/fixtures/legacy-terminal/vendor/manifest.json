@@ -1,0 +1,17 @@
+[
+  {
+    "package": "@xterm/addon-fit",
+    "version": "0.10.0",
+    "tarball_sha256": "917ac44972453d5eed52edc1e50260c76398ce48cf2290c2e60671102bba0b33"
+  },
+  {
+    "package": "@xterm/addon-search",
+    "version": "0.15.0",
+    "tarball_sha256": "6fe6b2c0aa5cc51dc8888352ee276a790a64cfe25246a5af72a02afc373e172f"
+  },
+  {
+    "package": "@xterm/xterm",
+    "version": "5.5.0",
+    "tarball_sha256": "bd954fa721872170188cc5d7e83e88db3c83c9a18a4e8d24c2783d26491f59d2"
+  }
+]

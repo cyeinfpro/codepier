@@ -10,13 +10,13 @@ def make_router(auth, runtime):
     router = APIRouter(prefix="/api/collaboration")
     service, store = runtime.collaboration, runtime.store
     from hub.collaboration.room_api import install_routes
-    from hub.collaboration.room_runtime_api import register as register_runtime_routes
+    from hub.collaboration.room_api import install_runtime_routes
 
     install_routes(router, auth, runtime)
     from hub.collaboration.room_attachments import install_routes as install_attachment_routes
 
     install_attachment_routes(router, service, auth)
-    register_runtime_routes(router, service, auth)
+    install_runtime_routes(router, service, auth)
 
     @router.get("/status")
     async def status(request: Request):

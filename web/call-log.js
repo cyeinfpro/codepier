@@ -148,11 +148,6 @@ window.CodePierCallLog = (() => {
     const d = new Date(n * 1000);
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
-  function timeOnly(n) {
-    if (!n) return '未记录';
-    const d = new Date(n * 1000);
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(Math.floor(n * 1000) % 1000)}`;
-  }
   function dayKey(n) {
     if (!n) return '';
     const d = new Date(n * 1000);

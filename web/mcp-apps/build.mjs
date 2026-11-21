@@ -5,8 +5,10 @@ import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 const packageMeta = JSON.parse(await readFile('package.json', 'utf8'));
-const sdkVersion = packageMeta.dependencies?.['@modelcontextprotocol/ext-apps'];
-if (!sdkVersion) throw new Error('Missing @modelcontextprotocol/ext-apps dependency');
+// The Apps SDK is only the test host harness (tests/fixtures/mcp-apps-host.js);
+// production pages bundle the local host-bridge.js, so it is a dev dependency.
+const sdkVersion = packageMeta.devDependencies?.['@modelcontextprotocol/ext-apps'];
+if (!sdkVersion) throw new Error('Missing @modelcontextprotocol/ext-apps test dependency');
 
 // Escape multiline SDK strings without altering their runtime content.
 const result = await build({
@@ -15,8 +17,17 @@ const result = await build({
   write: false,
   format: 'iife',
   platform: 'browser',
+  metafile: true,
   ...codeOptions,
 });
+// Packages whose code is actually inside the generated pages.
+const bundled = [
+  ...new Set(
+    Object.keys(result.metafile.inputs)
+      .map((input) => input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/)?.[1])
+      .filter(Boolean),
+  ),
+].sort();
 const js = result.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
 const css = await readFile('app.css', 'utf8');
 const outputs = {};
@@ -30,7 +41,15 @@ for (const kind of ['changes']) {
 }
 await writeFile(
   'manifest.json',
-  JSON.stringify({ sdk: `@modelcontextprotocol/ext-apps@${sdkVersion}`, outputs }, null, 2),
+  JSON.stringify(
+    {
+      test_sdk: `@modelcontextprotocol/ext-apps@${sdkVersion}`,
+      bundled_packages: bundled,
+      outputs,
+    },
+    null,
+    2,
+  ),
 );
 console.log(JSON.stringify(outputs));
 
@@ -53,6 +72,8 @@ async function collect(directory) {
       continue;
     }
     const key = meta.name + '@' + meta.version;
+    // Ship notices for bundled code and the esbuild runtime helpers only.
+    if (!bundled.includes(meta.name) && meta.name !== 'esbuild') continue;
     if (seen.has(key)) continue;
     seen.add(key);
     const names = (await readdir(path, { withFileTypes: true }))

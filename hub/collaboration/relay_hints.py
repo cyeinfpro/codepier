@@ -136,8 +136,10 @@ class RelayHints:
             }
 
     def subscribe(self, owner):
+        from hub.runtime import CoalescingQueue
+
         loop = asyncio.get_running_loop()
-        queue = asyncio.Queue(maxsize=1)
+        queue = CoalescingQueue(maxsize=1)
         with self._lock:
             if (
                 len(self._subscribers) >= 64

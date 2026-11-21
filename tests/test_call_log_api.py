@@ -268,9 +268,9 @@ def test_polling_skips_count_query_and_presets_and_export(log_api):
 
 def test_sse_high_frequency_output_coalesces_without_global_resync():
     import asyncio
-    from hub.runtime import Runtime
+    from hub.runtime import CoalescingQueue, Runtime
 
-    q = asyncio.Queue(maxsize=100)
+    q = CoalescingQueue(maxsize=100)
     for seq in range(250):
         Runtime._enqueue(q, {'type': 'output', 'at': float(seq), 'data': {'id': 'op-hot'}})
     assert q.qsize() == 1

@@ -43,6 +43,7 @@ from hub.core_tools import result as core_result
 from shared.mcp_presentation import present, error_view
 from shared.util import DevError, VERSION, valid_json_value
 from shared.mcp_protocol import (
+    TRUSTED_CLIENT_HOSTS,
     LEGACY,
     MODERN,
     PREFIX,
@@ -566,13 +567,7 @@ def make_router(auth: Auth, runtime: Runtime, public_url):
         allowed = {
             f"{request.url.scheme}://{request.url.netloc}",
             base,
-            "https://chatgpt.com",
-            "https://chat.openai.com",
-            "https://claude.ai",
-            "https://grok.com",
-            "https://gemini.google.com",
-            "https://antigravity.google",
-            "https://antigravity.google.com",
+            *("https://" + host for host in TRUSTED_CLIENT_HOSTS),
             *origin_env_cache["origins"],
         }
         return origin in allowed

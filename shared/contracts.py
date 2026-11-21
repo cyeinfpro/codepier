@@ -1805,6 +1805,9 @@ def project_output_schemas(definitions, schemas="full"):
 
 def tool_definitions(profile="core", authorization="fixed", schemas="full"):
     # Tool schemas are static and frozen. Callers receive a shallow list of read-only items.
+    # "full" is the historical name of the core catalog; share one cache slot.
+    if profile == "full":
+        profile = "core"
     return list(_catalog_template(profile, authorization, schemas))
 
 
@@ -1836,26 +1839,25 @@ def _catalog_template(profile, authorization, schemas):
         if name in CORE_TOOLS | QUERY_TOOLS | KNOWLEDGE_TOOLS
         or name in {"get_profile", "get_access_context"}
     ]
-    if profile in {"full", "coding", "core"}:
-        for definition in result:
-            definition["description"] = _compact_input_schema(
-                {"description": definition["description"]}
-            )["description"]
-            # Factor after annotation compaction so reference costs reflect the
-            # schema actually advertised, including tiny receipt field schemas.
-            compact_input = _compact_input_schema(definition["inputSchema"])
-            options = compact_input.get("properties", {}).get("options", {})
-            # Keep the help route once when the same tool already states it.
-            # This drops only a repeated annotation, never schema constraints.
-            if options.get("description") == "Help: project_query." and (
-                definition["name"] == "project_query"
-                or "project_query" in definition["description"]
-            ):
-                options.pop("description")
-            definition["inputSchema"] = factor(compact_input)
-            definition["outputSchema"] = factor(
-                _compact_input_schema(definition["outputSchema"], output=True)
-            )
+    # Every validated profile receives compact, factored schemas.
+    for definition in result:
+        definition["description"] = _compact_input_schema(
+            {"description": definition["description"]}
+        )["description"]
+        # Factor after annotation compaction so reference costs reflect the
+        # schema actually advertised, including tiny receipt field schemas.
+        compact_input = _compact_input_schema(definition["inputSchema"])
+        options = compact_input.get("properties", {}).get("options", {})
+        # Keep the help route once when the same tool already states it.
+        # This drops only a repeated annotation, never schema constraints.
+        if options.get("description") == "Help: project_query." and (
+            definition["name"] == "project_query" or "project_query" in definition["description"]
+        ):
+            options.pop("description")
+        definition["inputSchema"] = factor(compact_input)
+        definition["outputSchema"] = factor(
+            _compact_input_schema(definition["outputSchema"], output=True)
+        )
     for item in result:
         if item["name"] in {"workspace", "browser", "computer", "process"}:
             item["annotations"]["readOnlyHint"] = False

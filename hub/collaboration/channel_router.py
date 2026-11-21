@@ -606,7 +606,9 @@ class ChannelRouter:
             state, reason, delay = "accepted", "", 0
             if error:
                 reason = error.code if isinstance(error, DevError) else "transport_unknown"
-                if isinstance(error, DevError) and error.status == 429:
+                if isinstance(error, DevError) and (
+                    error.status == 429 or error.code == "TELEGRAM_TRANSPORT_NOT_SENT"
+                ):
                     state, delay = (
                         "queued",
                         max(1, error.details.get("retry_after_seconds", 60)),

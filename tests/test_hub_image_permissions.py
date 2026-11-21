@@ -69,7 +69,8 @@ def test_image_import_check_runs_after_switching_to_non_root():
     assert {'hub', 'shared', 'web', 'agent', 'scripts', 'deploy', '.'} <= destinations
     sources = {path for parts in copies for path in parts[:-1]}
     assert {'scripts/install_agent.py', 'scripts/agent_lifecycle.py',
-            'scripts/mcp_stdio_bridge.py', 'deploy/install-from-hub.sh',
+            'scripts/mcp_stdio_bridge.py', 'scripts/migrate_hub_data.py',
+            'scripts/file_import_client.py', 'deploy/install-from-hub.sh',
             'deploy/install-from-hub.ps1', 'requirements-agent.txt', 'LICENSE'} <= sources
     assert 'scripts' not in sources and 'deploy' not in sources
 

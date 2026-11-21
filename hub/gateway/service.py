@@ -7,7 +7,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 import uuid
 
@@ -16,6 +15,7 @@ from hub.gateway.validation import Validator
 
 from hub.gateway import catalog, policy
 from hub.gateway.remote import RemotePool
+from shared.config import env_bool
 from shared.util import DevError, valid_json_value
 
 
@@ -87,7 +87,7 @@ def result_value(raw, tool):
 class Gateway:
     def __init__(self, store, *, enabled=None, pool=None):
         self.store = store
-        self.enabled = os.getenv("CODEPIER_MCP_GATEWAY", "1") == "1" if enabled is None else enabled
+        self.enabled = env_bool("CODEPIER_MCP_GATEWAY", True) if enabled is None else enabled
         self.pool = pool or RemotePool()
         self.inflight = 0
         self.discovery_inflight = 0

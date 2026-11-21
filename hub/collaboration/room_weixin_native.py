@@ -16,6 +16,8 @@ import unicodedata
 import uuid
 from dataclasses import asdict
 
+import httpx
+
 from hub.collaboration.projection_cache import memoized
 from hub.principal import Principal, refresh_principal
 from hub.collaboration.common import canonical, digest, redact
@@ -30,6 +32,7 @@ from hub.collaboration.room_waiting_inputs import (
     route_input,
 )
 from hub.collaboration.weixin_protocol import incoming_text, incoming_items
+from shared.net_address import TransportNotSent
 from shared.util import DevError
 
 
@@ -142,9 +145,34 @@ class RoomWeixin:
             error = (
                 {"code": exc.code, "status": exc.status}
                 if isinstance(exc, DevError)
+                # Nothing reached WeChat: the same start may run again.
+                else {"code": "WEIXIN_QR_NETWORK_NOT_SENT", "not_sent": True}
+                if isinstance(exc, (TransportNotSent, httpx.ConnectError))
                 else {"code": "WEIXIN_QR_RESPONSE_UNCONFIRMED"}
             )
         return await self.store.run(self.finish_login, row["id"], claim, response, error)
+
+    def _prepare_existing_start(self, row, identifier, action, now):
+        body = json.loads(self.store.decrypt(row["payload"])) if row["payload"] else {}
+        if not (
+            row["state"] == "starting" and body.get("not_sent") is True and row["expires_at"] > now
+        ):
+            return row, None  # An unknown external start is never repeated.
+        # The previous attempt provably never left this Hub (DNS or
+        # connect failure), so re-claiming it cannot duplicate a QR.
+        body.pop("not_sent", None)
+        body.pop("reason_code", None)
+        claim = {
+            "action": action,
+            "fence": uuid.uuid4().hex,
+            "api_base": body.get("api_base", API_BASE),
+        }
+        body["fence"] = claim["fence"]
+        self.store.execute(
+            "UPDATE room_weixin_logins SET payload=?,version=version+1,updated=? WHERE id=?",
+            (self.store.encrypt(canonical(body)), now, identifier),
+        )
+        return self.store.one("SELECT * FROM room_weixin_logins WHERE id=?", (identifier,)), claim
 
     def prepare_login(self, flow, action, args, principal):
         with self.store.transaction():
@@ -160,7 +188,7 @@ class RoomWeixin:
                 identifier = "wxlogin_" + digest([flow["id"], args["idempotency_key"]])[:32]
                 row = self.store.one("SELECT * FROM room_weixin_logins WHERE id=?", (identifier,))
                 if row:
-                    return row, None  # An unknown external start is never repeated.
+                    return self._prepare_existing_start(row, identifier, action, now)
                 count = self.store.one(
                     "SELECT COUNT(*) n FROM room_weixin_logins WHERE owner_user_id=? AND space_id=? AND created>?",
                     (principal.user_id, principal.space_id, now - 3600),
@@ -237,6 +265,21 @@ class RoomWeixin:
                 "api_base": body["api_base"],
             }
 
+    @staticmethod
+    def _apply_login_error(body, state, claim, error):
+        if error.get("not_sent"):
+            # Keep the slot retryable instead of locking it as unconfirmed.
+            body["not_sent"] = True
+            body["reason_code"] = error["code"]
+        else:
+            state = (
+                "attention"
+                if claim["action"] == "start_qr" or error.get("status") in {401, 403}
+                else state
+            )
+            body["reason_code"] = error["code"]
+        return state
+
     def finish_login(self, identifier, claim, response, error):
         with self.store.transaction():
             row = self.store.one("SELECT * FROM room_weixin_logins WHERE id=?", (identifier,))
@@ -252,12 +295,7 @@ class RoomWeixin:
             state = row["state"]
             body["poll_until"] = 0
             if error:
-                state = (
-                    "attention"
-                    if claim["action"] == "start_qr" or error.get("status") in {401, 403}
-                    else state
-                )
-                body["reason_code"] = error["code"]
+                state = self._apply_login_error(body, state, claim, error)
             else:
                 try:
                     self.c.weixin.qr.provider_ok(response)

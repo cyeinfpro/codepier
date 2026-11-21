@@ -24,6 +24,12 @@ from tests.legacy_iam_fixture import seed_owner
 from tests.test_mcp_gateway import Backend, public_dns
 
 
+def _reset_dedup(evidence):
+    """Test-only: start from an empty observation de-duplication window."""
+    with evidence._lru_lock:
+        evidence._observed_lru.clear()
+
+
 CONFIG = {
     "endpoint": "https://mcp.example/mcp",
     "protocol": "auto",
@@ -171,7 +177,7 @@ async def test_collaboration_idle_poll_and_connection_evidence_throttled(tmp_pat
 
         # Part B: connection_evidence 60s LRU throttle + zero Fernet re-decrypt/SELECTs.
         evidence = runtime.diagnostics.connection
-        evidence.reset_dedup()
+        _reset_dedup(evidence)
         project = runtime.project("project", principal)
 
         decrypt_calls = []
@@ -261,9 +267,9 @@ async def test_collaboration_idle_poll_and_connection_evidence_throttled(tmp_pat
         # 1 write for "readonly" + 1 write for "call" across 20 reads within 10s.
         assert len(evidence_inserts) == 2
 
-        # Backward compatibility: single-arg and reset_dedup() still work cleanly.
+        # Backward compatibility: single-arg calls work and a cleared cache writes again.
         evidence.completed({"id": "noop", "tool": "read", "grant_id": ""})
-        evidence.reset_dedup()
+        _reset_dedup(evidence)
         evidence.completed(
             {
                 "id": "op-read-after-reset",
@@ -292,7 +298,7 @@ async def test_connection_evidence_throttles_different_tools_and_resets(tmp_path
     store, runtime, _, principal, _ = _seed_hub(tmp_path)
     try:
         evidence = runtime.diagnostics.connection
-        evidence.reset_dedup()
+        _reset_dedup(evidence)
         inserts = []
         orig_execute = store.execute
 

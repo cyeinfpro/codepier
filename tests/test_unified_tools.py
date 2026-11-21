@@ -247,16 +247,16 @@ def test_catalog_is_small_and_annotated():
 
 
 def test_discovery_follows_scopes():
-    assert ut.visible_actions('act', {'read'}) == []
+    assert list(ut.directory({'read'})['act']) == []
     assert [item['name'] for item in ut.tool_definitions({'read'})] == ['query']
-    readable = ut.visible_actions('query', {'read'})
+    readable = list(ut.directory({'read'})['query'])
     assert 'devices' not in readable and 'file' in readable and 'collab.inbox' not in readable
-    assert 'devices' in ut.visible_actions('query', {'read', 'devices.read'})
-    assert 'collab.inbox' in ut.visible_actions('query', {'read'}, collaboration=True)
-    writable = ut.visible_actions('act', {'read', 'write'})
+    assert 'devices' in list(ut.directory({'read', 'devices.read'})['query'])
+    assert 'collab.inbox' in list(ut.directory({'read'}, collaboration=True)['query'])
+    writable = list(ut.directory({'read', 'write'})['act'])
     assert 'edit' in writable and 'baseline' in writable and 'exec' not in writable
-    assert 'exec' in ut.visible_actions('act', {'read', 'execute'})
-    assert 'gui' in ut.visible_actions('act', {'read', 'computer'})
+    assert 'exec' in list(ut.directory({'read', 'execute'})['act'])
+    assert 'gui' in list(ut.directory({'read', 'computer'})['act'])
 
 
 class FakeStore:

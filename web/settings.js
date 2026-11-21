@@ -489,7 +489,7 @@ window.CodePierSettings = (() => {
       '<details id="settings-more" class="settings-section"><summary>更多设置 <span id="settings-more-count"></span></summary>' +
       '<div class="settings-grid settings-catalog">' +
       data.items
-        .filter((item) => item.id !== 'access_defaults' && !commonItems.has(item.id))
+        .filter((item) => !commonItems.has(item.id))
         .map(card)
         .join('') +
       '</div></details><p id="settings-no-results" hidden>没有匹配的设置</p>' +

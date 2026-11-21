@@ -38,3 +38,6 @@ htmlcov
 .DS_Store
 
 .codepier-updater
+# Browser-extension unit tests and MCP Apps build scripts are not runtime assets.
+web/**/*.test.mjs
+web/mcp-apps/build*.mjs

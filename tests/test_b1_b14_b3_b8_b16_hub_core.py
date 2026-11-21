@@ -335,17 +335,19 @@ def test_integrations_single_commit_batch_overlap_and_pure_cpu_capture_output(tm
         assert "WHERE id IN (" in overlap_updates[0]
         assert t4["transition"] == "overlap"
 
-        # capture_output must execute ZERO SQL and propagate dual token metrics without plaintext.
+        # Output measurement must execute ZERO SQL and propagate dual token metrics without plaintext.
         statements.clear()
         with store.lock:
             store.db.set_trace_callback(statements.append)
         secret_body = "SECRET_SOURCE_TEXT_DO_NOT_PERSIST"
-        integrations.capture_output(
+        integrations.set_output_metric(
             t4,
-            {
-                "content": [{"type": "text", "text": json.dumps({"content": secret_body})}],
-                "structuredContent": {"content": secret_body},
-            },
+            integrations.measure_output(
+                {
+                    "content": [{"type": "text", "text": json.dumps({"content": secret_body})}],
+                    "structuredContent": {"content": secret_body},
+                }
+            ),
         )
         with store.lock:
             store.db.set_trace_callback(None)

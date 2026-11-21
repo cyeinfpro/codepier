@@ -1,17 +1,8 @@
 [
   {
-    "package": "@xterm/addon-fit",
-    "version": "0.10.0",
-    "tarball_sha256": "917ac44972453d5eed52edc1e50260c76398ce48cf2290c2e60671102bba0b33"
-  },
-  {
-    "package": "@xterm/addon-search",
-    "version": "0.15.0",
-    "tarball_sha256": "6fe6b2c0aa5cc51dc8888352ee276a790a64cfe25246a5af72a02afc373e172f"
-  },
-  {
-    "package": "@xterm/xterm",
-    "version": "5.5.0",
-    "tarball_sha256": "bd954fa721872170188cc5d7e83e88db3c83c9a18a4e8d24c2783d26491f59d2"
+    "package": "js-sha256",
+    "version": "1.0.0",
+    "integrity": "sha512-Bqxf6ENUzYIMzuELCmRNrJOVbjKH1oMgbfYJBKVr/W1Xf9fazpahqCbb24v1pR7XV1isuqhM+w9KWpK7zCyUQw==",
+    "provenance": "js-sha256-1.0.0/provenance.json"
   }
 ]

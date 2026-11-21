@@ -206,14 +206,23 @@ OAUTH_GROK_DEFAULT = (
     "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,localhost,127.0.0.1,::1"
 )
 OAUTH_ANTIGRAVITY_DEFAULT = "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,antigravity.google,localhost,127.0.0.1,::1"
+OAUTH_PLATFORM_DEFAULT = (
+    "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,antigravity.google,"
+    "oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,"
+    "oauth-redirect-test.googleusercontent.com,localhost,127.0.0.1,::1"
+)
 OAUTH_LEGACY_DEFAULTS = (
     OAUTH_OLD_DEFAULT,
     OAUTH_CLAUDE_DEFAULT,
     OAUTH_GROK_DEFAULT,
     OAUTH_ANTIGRAVITY_DEFAULT,
+    OAUTH_PLATFORM_DEFAULT,
 )
+# Must equal shared.mcp_protocol.DEFAULT_OAUTH_REDIRECT_HOSTS (kept literal:
+# the host updater runs without the shared package).
 OAUTH_CURRENT_DEFAULT = (
-    "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,antigravity.google,"
+    "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,gemini.google.com,"
+    "antigravity.google,antigravity.google.com,"
     "oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,"
     "oauth-redirect-test.googleusercontent.com,localhost,127.0.0.1,::1"
 )

@@ -931,19 +931,6 @@ class ChatroomService:
 
             return self.c.mutation(principal, room, "read_cursor:" + conversation["id"], args, save)
 
-    def latest(self, room):
-        return self.store.one(
-            "SELECT COALESCE(MAX(server_sequence),0) AS n FROM collaboration_messages WHERE room_id=?",
-            (room["id"],),
-        )["n"]
-
-    def read_sequence(self, room, principal):
-        row = self.store.one(
-            "SELECT sequence FROM collaboration_read_cursors WHERE room_id=? AND user_id=?",
-            (room["id"], principal.user_id),
-        )
-        return row["sequence"] if row else room["chat_history_sequence"]
-
     def position(self, principal, room, mode, cursor, default=0):
         binding = digest([room["id"], principal.grant_id or principal.user_id, mode])
         value = read_cursor(self.c.secret, binding, cursor) if cursor else default
@@ -1085,54 +1072,9 @@ class ChatroomService:
                 "has_more": len(rows) > limit,
                 "reset_required": False,
             }
-        if args["cursor"] and args["after"]:
-            raise DevError("INVALID_CURSOR", "不能同时向前和向后分页", 400)
-        mode, params, clauses = "timeline", [room["id"]], ["room_id=?"]
-        if kind == "thread":
-            root = self.c.object("collaboration_messages", room, args["id"])["thread_root_id"]
-            clauses.append("thread_root_id=?")
-            params.append(root)
-            mode += ":thread:" + root
-        if kind == "search":
-            query = args["query"].strip()
-            if not query:
-                raise DevError("INVALID_QUERY", "请输入搜索内容", 422)
-            # JSON body is bounded text; escaping keeps wildcard input literal.
-            clauses.append("json_extract(body,'$.body_text') LIKE ? ESCAPE '\\'")
-            params.append(
-                "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            )
-            mode += ":search:" + digest(query)
-        latest = self.latest(room)
-        after = bool(args["after"])
-        position = self.position(
-            principal, room, mode, args["after"] or args["cursor"], default=latest + 1
-        )
-        clauses.append("server_sequence>?" if after else "server_sequence<?")
-        params.append(position)
-        direction = "ASC" if after else "DESC"
-        rows = self.store.all(
-            "SELECT * FROM collaboration_messages WHERE "
-            + " AND ".join(clauses)
-            + " ORDER BY server_sequence "
-            + direction
-            + " LIMIT ?",
-            (*params, limit + 1),
-        )
-        selected = rows[:limit]
-        if not after:
-            selected.reverse()
-        high = selected[-1]["server_sequence"] if selected else (position if after else latest)
-        return {
-            "items": self.views(selected, principal=principal),
-            "next_cursor": self.cursor(principal, room, mode, selected[0]["server_sequence"])
-            if not after and len(rows) > limit
-            else None,
-            "after_cursor": self.cursor(principal, room, mode, high),
-            "has_more": len(rows) > limit,
-            "latest_sequence": latest,
-            "read_sequence": self.read_sequence(room, principal),
-        }
+        # timeline/thread/search are served by conversations.read above; the
+        # public contract admits no other kind here.
+        raise DevError("INVALID_ARGUMENTS", "不支持的聊天读取类型", 422)
 
     def check_object_conversation(self, room, conversation_id, kind, identifier):
         row = self.c.object(

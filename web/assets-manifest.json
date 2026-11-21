@@ -1,5 +1,5 @@
 {
-  "version": "1.33.35",
+  "version": "1.33.36",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -27,8 +27,8 @@
       "bytes": 22291
     },
     "app.js": {
-      "sha256": "a48aed46c693ed740971f7d96e8d78ccf74dd2cff4a65f9d1337e2ee7c8ee85a",
-      "bytes": 164209
+      "sha256": "3073a821dc0343f947a50c00004bea93c4b42d48b1f60a707d3703338701a81f",
+      "bytes": 164252
     },
     "appearance.js": {
       "sha256": "4a955158dff23e08e9bf172df5839dbb9a108607674f254f87049d20d0fd13da",
@@ -47,8 +47,8 @@
       "bytes": 33479
     },
     "call-log.js": {
-      "sha256": "6ff23d063262e993625df9352986bed6bdfcd2c09eef1ea6fb979164ce9cc154",
-      "bytes": 126330
+      "sha256": "36e3805fff2687d9beb01f08d3c521373e4a8f84660176944b4d0361919f279f",
+      "bytes": 126114
     },
     "chat-catalog.js": {
       "sha256": "23ff4f8c3684359b6594ac46d47ca0c2c3fac5367d531340ca5e0ab994a645ab",
@@ -87,8 +87,8 @@
       "bytes": 55593
     },
     "collaboration-room.js": {
-      "sha256": "140b6ee39e8a27aa15ed38a3f8d0fec46fc8ac58b734e0f3fe703cb1e372bf47",
-      "bytes": 222802
+      "sha256": "11bb80d473c373f65c48aded81cfc793a8e6b0019887f01fe3c01defa2ffa7f5",
+      "bytes": 222976
     },
     "computer.css": {
       "sha256": "6a20cf9dff524f54444f4690dd5804ffb8086c5e008437979cfadab6cead066c",
@@ -127,8 +127,8 @@
       "bytes": 11254
     },
     "integration-guide.md": {
-      "sha256": "857889037cd6d2bf4bdccb8c947aa41fa8ba3e7a9edd8249f707f652b916f207",
-      "bytes": 14843
+      "sha256": "0990cf9e599fb10dbedd66dab77de872d61a789b6bd4297bff81d2650ea139c7",
+      "bytes": 14971
     },
     "integration-ui.js": {
       "sha256": "03fd0c19ea928b06308e7473cda4d4b53094716d1b3250e284e8ef9086859754",
@@ -207,8 +207,8 @@
       "bytes": 6793
     },
     "settings.js": {
-      "sha256": "1132b863da7cbd7cdfe0ec829a7d5006b25ac9d0e6c61be4ba756b911b2c462a",
-      "bytes": 31999
+      "sha256": "73ebf2ea5b646a7fc68a2df791e3d830946b850abd4c2b0f3cde14ce339e22c5",
+      "bytes": 31966
     },
     "skills.js": {
       "sha256": "b433d0ec3ec92d2c56669bb774ed36f79d24978e7153c18f271eb70b6c871f44",

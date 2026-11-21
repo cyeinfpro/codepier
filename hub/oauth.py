@@ -19,7 +19,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from hub.auth import Auth
 from hub.access_profiles import validate_profile_consent
-from hub.access import access_defaults, project_selection
+from hub.access import project_selection
+from shared.mcp_protocol import DEFAULT_OAUTH_REDIRECT_HOSTS
 from hub.runtime import Runtime
 from shared.crypto import digest, token
 from shared.util import DevError, valid_json_value
@@ -52,13 +53,7 @@ class OAuth:
         )
         oauth_lifetime.migrate_existing(self.store)
         self.redirect_hosts = {
-            host.lower()
-            for host in env_csv(
-                "OAUTH_REDIRECT_HOSTS",
-                "chatgpt.com,chat.openai.com,platform.openai.com,claude.ai,grok.com,antigravity.google,"
-                "oauth-redirect.googleusercontent.com,oauth-redirect-sandbox.googleusercontent.com,"
-                "oauth-redirect-test.googleusercontent.com,localhost,127.0.0.1,::1",
-            )
+            host.lower() for host in env_csv("OAUTH_REDIRECT_HOSTS", DEFAULT_OAUTH_REDIRECT_HOSTS)
         }
         self.router = APIRouter()
         self.routes()
@@ -437,7 +432,6 @@ class OAuth:
                 "scopes": json.loads(row["scopes"]),
                 "resource": row["resource"],
                 "expires": row["expires"],
-                "access_defaults": access_defaults(self.store, principal.user_id),
             }
 
         @router.post("/api/oauth/requests/{id}/decide")

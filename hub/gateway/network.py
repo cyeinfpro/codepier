@@ -8,6 +8,7 @@ import socket
 from urllib.parse import urlsplit
 
 import httpx
+from shared.net_address import is_public_unicast_ip
 from shared.util import DevError
 
 PRIVATE = tuple(
@@ -99,9 +100,7 @@ async def pin(value, networks, allow_http=False, resolver=resolve):
         local_ok = private_address(address) and any(
             address.version == n.version and address in n for n in approved
         )
-        public_ok = address.is_global and not (
-            address.is_multicast or address.is_reserved or getattr(address, "is_site_local", False)
-        )
+        public_ok = is_public_unicast_ip(address)
         if not (local_ok or public_ok) or (parts.scheme == "http" and not local_ok):
             raise DevError(
                 "GATEWAY_ADDRESS_DENIED", "后端解析包含未批准的私网或保留地址；未连接", 502

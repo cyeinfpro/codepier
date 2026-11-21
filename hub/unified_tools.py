@@ -69,10 +69,6 @@ def directory(scopes=None, *, collaboration=False):
     return visible
 
 
-def visible_actions(tool, scopes=None, *, collaboration=False):
-    return list(directory(scopes, collaboration=collaboration)[tool])
-
-
 def runtime_directory(runtime, scopes):
     collaboration = getattr(runtime, "collaboration", None)
     return directory(scopes, collaboration=bool(collaboration and collaboration.config.enabled))
@@ -332,6 +328,8 @@ async def _poll_wait_operation(runtime, call, principal, deadline, stop):
             break
         wait_seconds = min(10, max(1, math.ceil(remaining)))
         read = runtime.invoke("process", {**call, "wait_seconds": wait_seconds}, principal)
+        # The legacy protocol rounds waits to whole seconds. Always bound
+        # this read to the exact caller deadline, even without a cancel event.
         completed, value = await _poll_or_cancel(read, stop, remaining)
         if not completed:
             break
@@ -343,10 +341,14 @@ async def _poll_wait_operation(runtime, call, principal, deadline, stop):
     return latest
 
 
-async def _wait(runtime, plan, value, principal):
-    """Wait on the SAME operation; never restarts or replays work."""
+async def _wait(runtime, plan, value, principal, started=None):
+    """Wait on the SAME operation; never restarts or replays work.
+
+    ``started`` is when the original dispatch began, so time already spent in
+    the first synchronous round is deducted from the caller's ``wait`` budget.
+    """
     call = {"operation": "wait", "operation_ids": [value["operation_id"]]}
-    deadline = time.monotonic() + plan.wait
+    deadline = (time.monotonic() if started is None else started) + plan.wait
     from hub.mcp_streams import wait_cancelled
 
     stop = wait_cancelled.get()
@@ -376,7 +378,14 @@ async def execute(runtime, plan, principal):
     """Returns (value, legacy tool name, legacy arguments) for rendering."""
     if plan.local is not None:
         return plan.local, plan.tool, plan.args
-    value = await runtime.invoke(plan.tool, plan.args, principal)
+    from hub.runtime import call_wait_budget
+
+    started = time.monotonic()
+    token = call_wait_budget.set(float(plan.wait or 0))
+    try:
+        value = await runtime.invoke(plan.tool, plan.args, principal)
+    finally:
+        call_wait_budget.reset(token)
     if plan.collab and isinstance(value, dict):
         value = _mint(runtime, plan, value, principal)
     if (
@@ -385,5 +394,5 @@ async def execute(runtime, plan, principal):
         and value.get("pending")
         and isinstance(value.get("operation_id"), str)
     ):
-        return await _wait(runtime, plan, value, principal)
+        return await _wait(runtime, plan, value, principal, started)
     return value, plan.tool, plan.args

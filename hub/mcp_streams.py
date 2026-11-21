@@ -9,6 +9,7 @@ import os
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from shared.mcp_presentation import error_view
+from shared.config import env_float, env_int
 from shared.util import DevError
 
 wait_cancelled = ContextVar("mcp_wait_cancelled", default=None)
@@ -19,24 +20,19 @@ DEFAULT_KEEPALIVE_INTERVAL = 5.0
 DEFAULT_SSE_GRACE_SECONDS = 5.0
 
 
-def _env_int(name, default, *, minimum=1):
-    raw = os.getenv(name)
-    if raw is None or raw == "":
+def _env_int(name, default, *, minimum=1, maximum=65536):
+    # An empty Compose value means "use the default"; anything else is validated
+    # by the shared parser and an invalid value stops startup instead of being
+    # silently replaced.
+    if os.getenv(name, "").strip() == "":
         return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        return default
+    return env_int(name, default, minimum, maximum)
 
 
-def _env_float(name, default, *, minimum=0.01):
-    raw = os.getenv(name)
-    if raw is None or raw == "":
+def _env_float(name, default, *, minimum=0.01, maximum=300.0):
+    if os.getenv(name, "").strip() == "":
         return default
-    try:
-        return max(minimum, float(raw))
-    except ValueError:
-        return default
+    return env_float(name, default, minimum, maximum)
 
 
 class Streams:
@@ -71,7 +67,10 @@ class Streams:
             max(0.0, float(grace_seconds))
             if grace_seconds is not None
             else _env_float(
-                "CODEPIER_MCP_SSE_GRACE_SECONDS", DEFAULT_SSE_GRACE_SECONDS, minimum=0.0
+                "CODEPIER_MCP_SSE_GRACE_SECONDS",
+                DEFAULT_SSE_GRACE_SECONDS,
+                minimum=0.0,
+                maximum=300.0,
             )
         )
 

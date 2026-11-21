@@ -3,7 +3,10 @@
 import json
 import re
 import secrets
+
+import httpx
 from hub.collaboration.weixin_protocol import public_transport, safe_filename, upload_timeout
+from shared.net_address import TransportNotSent
 from shared.util import DevError
 
 API_BASE = "https://api.telegram.org"
@@ -62,6 +65,15 @@ class TelegramAdapter:
                 else 40,
                 maximum=2 * 1024 * 1024,
             )
+        except (TransportNotSent, httpx.ConnectError):
+            # DNS/connect failed before any byte left: safe to retry the same part.
+            raise DevError(
+                "TELEGRAM_TRANSPORT_NOT_SENT",
+                "Telegram 请求未发出（网络暂不可用）；稍后自动重试原分项",
+                503,
+                retry_after_seconds=5,
+                request_sent=False,
+            ) from None
         except Exception:
             raise DevError(
                 "TELEGRAM_TRANSPORT_UNKNOWN",

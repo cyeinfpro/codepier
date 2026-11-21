@@ -1,5 +1,6 @@
 {
-  "sdk": "@modelcontextprotocol/ext-apps@2.0.4",
+  "test_sdk": "@modelcontextprotocol/ext-apps@2.0.4",
+  "bundled_packages": [],
   "outputs": {
     "changes-v1.html": {
       "bytes": 17628,

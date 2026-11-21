@@ -3,4 +3,4 @@
 from agent.codepier_browser_host import *
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

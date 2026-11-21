@@ -11,13 +11,13 @@ import contextlib
 from dataclasses import asdict
 import json
 import logging
-import os
 import time
 import uuid
 
 from cryptography.fernet import InvalidToken
 
 from hub.principal import Principal, refresh_principal
+from shared.config import env_bool
 from shared.crypto import digest
 from shared.util import DevError
 
@@ -67,7 +67,7 @@ class KnowledgeMaintenance:
         self.runtime = runtime
         self.store = runtime.store
         self.task = None
-        self.auto_enroll = os.getenv("CODEPIER_KNOWLEDGE_AUTO_ENROLL", "1") != "0"
+        self.auto_enroll = env_bool("CODEPIER_KNOWLEDGE_AUTO_ENROLL", True)
 
     def exists(self):
         return bool(

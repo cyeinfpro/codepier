@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import copy
+import inspect
 import json
 import sqlite3
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass
 import weakref
+from contextvars import ContextVar
 from hub.access_profiles import (
     effective_grant,
     refresh_profile_principal,
@@ -18,9 +22,9 @@ from hub.access_profiles import (
 from hub.roles import require_role, role_project_scopes
 from hub import iam
 from hub.principal import Principal, refresh_principal
-from hub.dispatch_plan import DeferredCall
 from hub.queue_contention import baseline_admission_detail, baseline_completion_detail
 from shared.config import RuntimeConfig
+from shared.core_contracts import READ_BATCH_PAYLOAD_BYTES
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -131,6 +135,12 @@ _CONTROL_FRAME_TYPES = frozenset(
 )
 _SEND_QUEUE_LIMIT = 512
 _REPLY_ENQUEUE_TIMEOUT_SECONDS = 45.0
+
+
+# Caller-owned synchronous wait budget (seconds) for the first dispatch round.
+# ``None`` keeps the legacy HUB_CALL_WAIT_SECONDS behavior; the unified
+# query/act entry point sets it so one call never waits longer than ``wait``.
+call_wait_budget: ContextVar[float | None] = ContextVar("codepier_call_wait_budget", default=None)
 
 
 class _OutboundFrame:
@@ -430,9 +440,66 @@ class Connection:
             await asyncio.wait_for(future, wait_seconds)
 
 
+async def _flush_control(connection, wait_seconds: float = 1.0) -> None:
+    """Best-effort ACK drain before a writer task is cancelled."""
+    flush = getattr(connection, "flush_control", None)
+    if not callable(flush):
+        return
+    with contextlib.suppress(Exception):
+        result = flush(wait_seconds=wait_seconds)
+        if inspect.isawaitable(result):
+            await result
+
+
+@dataclass(frozen=True)
+class DeferredCall:
+    """Loop-side continuation produced by synchronous, worker-owned validation."""
+
+    action: str
+    arguments: dict
+    project: dict | None = None
+
+
+class CoalescingQueue(asyncio.Queue):
+    """Bounded subscriber queue that replaces a still-pending frame in place.
+
+    It owns its storage through asyncio.Queue's subclass hooks
+    (``_init``/``_put``/``_get``) instead of Runtime reaching into a plain
+    queue's private deque, so high-frequency output updates keep one slot per
+    operation.
+    """
+
+    def _init(self, maxsize):
+        # The storage this subclass creates through the documented hook (the
+        # same way stdlib LifoQueue/PriorityQueue do), not another object's.
+        self._queue = collections.deque()
+
+    def _put(self, item):
+        self._queue.append(item)
+
+    def _get(self):
+        return self._queue.popleft()
+
+    @staticmethod
+    def _key(item):
+        if not isinstance(item, dict) or item.get("type") not in {"output", "trace"}:
+            return None
+        return item["type"], (item.get("data") or {}).get("id")
+
+    def replace_pending(self, key, message) -> bool:
+        for index, existing in enumerate(self._queue):
+            if self._key(existing) == key:
+                self._queue[index] = message
+                return True
+        return False
+
+
 class Runtime:
     def __init__(self, store: Store, *, collaboration_config=None):
         self.store = store
+        # Lazily created by hub.token_dashboard; declared here so its lifecycle
+        # is explicit instead of being added and deleted from outside.
+        self._token_dashboard_service = None
         from hub.operation_output import OperationOutput
 
         self.outputs = OperationOutput(store)
@@ -556,15 +623,9 @@ class Runtime:
     def _enqueue(q, message):
         kind = message.get("type") if isinstance(message, dict) else None
         op_id = (message.get("data") or {}).get("id") if kind in {"output", "trace"} else None
-        if op_id:
-            for idx, existing in enumerate(q._queue):
-                if (
-                    isinstance(existing, dict)
-                    and existing.get("type") == kind
-                    and (existing.get("data") or {}).get("id") == op_id
-                ):
-                    q._queue[idx] = message
-                    return
+        replace = getattr(q, "replace_pending", None)
+        if op_id and callable(replace) and replace((kind, op_id), message):
+            return
         if q.full():
             while not q.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
@@ -839,6 +900,9 @@ class Runtime:
     async def disconnect_device(self, device_id, reason):
         connection = self.connections.get(device_id)
         if connection:
+            # Committed results already have queued ACKs; write them before the
+            # writer task is cancelled so the Agent does not replay its Outbox.
+            await _flush_control(connection)
             # Fence admission and late events before awaiting the close handshake.
             await self.detach(device_id, connection)
             with contextlib.suppress(Exception):
@@ -2245,8 +2309,15 @@ class Runtime:
         # Offline and long task submissions return a durable receipt immediately.
         if not background and await self.store.run_read(self.online, project["device_id"]):
             try:
-                result = await asyncio.wait_for(asyncio.shield(future), timeout=self.wait_seconds)
-                return await self.store.run_read(self.authorized_result, id, result, principal)
+                first_wait = self.wait_seconds
+                budget = call_wait_budget.get()
+                if budget is not None:
+                    first_wait = min(first_wait, max(0.0, budget))
+                if first_wait > 0 or future.done():
+                    result = await asyncio.wait_for(
+                        asyncio.shield(future), timeout=first_wait or None
+                    )
+                    return await self.store.run_read(self.authorized_result, id, result, principal)
             except asyncio.TimeoutError:
                 pass
         return await self.store.run(self._pending_receipt, id, principal)
@@ -3154,6 +3225,7 @@ class Runtime:
 
             prepare_view_packet(self, packet, principal, con)
             packet["execution_policy"] = hub_execution_policy(panel=panel)
+            packet["response_bytes"] = READ_BATCH_PAYLOAD_BYTES
             packet["not_after"] = op["deadline"]
             self.diagnostics.record(identifier, "dispatched")
             return True
@@ -3299,7 +3371,10 @@ class Runtime:
                     )
                 except DevError as exc:
                     denied = exc.message
-            request["execution_policy"] = hub_execution_policy(panel=panel)
+            request.update(
+                execution_policy=hub_execution_policy(panel=panel),
+                response_bytes=READ_BATCH_PAYLOAD_BYTES,
+            )
             policy_denied = None
             if not op["accepted_at"]:
                 policy_code = "CODEX_REMOTE_DISABLED"
@@ -4308,6 +4383,8 @@ class Runtime:
                 await self.worker
 
         async def close_connection(c):
+            # Drain ACKs queued during the shutdown HTTP drain window.
+            await _flush_control(c)
             if hasattr(c, "close"):
                 c.close()
             else:

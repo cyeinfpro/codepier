@@ -679,6 +679,6 @@ async def aclose_token_dashboard(runtime):
                 cancelled = True
         closing.result()
         if getattr(runtime, "_token_dashboard_service", None) is service:
-            del runtime._token_dashboard_service
+            runtime._token_dashboard_service = None
         if cancelled:
             raise asyncio.CancelledError

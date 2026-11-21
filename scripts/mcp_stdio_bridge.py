@@ -23,16 +23,33 @@ import httpx
 from shared.util import normalize_url, valid_json_value
 from shared.contracts import TOOLS
 from shared.mcp_protocol import is_modern, request_headers
+from shared.unified_contracts import (
+    ACTIONS as UNIFIED_ACTIONS,
+    DEFAULT_WAIT_SECONDS,
+    MAX_WAIT_SECONDS,
+    NO_WAIT_ACTIONS,
+)
 
 MAX_LINE = 6 * 1024 * 1024
 VERSIONS = {"2025-03-26", "2025-06-18", "2025-11-25"}
 RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 # Derive capabilities from the same registry as Hub validation and MCP schemas.
 # Some Hub-local tools mutate progress, so local does NOT imply keyless/read-only.
-REMOTE_TOOLS = {name for name, tool in TOOLS.items() if not tool.local}
 IDEMPOTENT_TOOLS = {
     name for name, tool in TOOLS.items() if "idempotency_key" in tool.model.model_fields
 }
+# Unified ``act`` actions whose every legacy route accepts a stable key. Pure
+# reads (lsp) and cancellation keep the caller's arguments unchanged.
+UNIFIED_KEYED_ACTS = frozenset(
+    action
+    for action, views in UNIFIED_ACTIONS["act"].items()
+    if not action.startswith("collab.")
+    and action not in {"cancel", "lsp"}
+    and all(
+        legacy in TOOLS and "idempotency_key" in TOOLS[legacy].model.model_fields
+        for legacy, _ in views.values()
+    )
+)
 
 
 def token_from_file(path: Path) -> str:
@@ -129,7 +146,12 @@ def prepare_request(request):
         prepared.get("method") == "tools/call"
         and isinstance(params, dict)
         and isinstance(params.get("name"), str)
-        and params["name"] in IDEMPOTENT_TOOLS
+        and (
+            params["name"] in IDEMPOTENT_TOOLS
+            or params["name"] == "act"
+            and isinstance(params.get("arguments"), dict)
+            and params["arguments"].get("action") in UNIFIED_KEYED_ACTS
+        )
     ):
         args = params.setdefault("arguments", {})
         if (
@@ -146,6 +168,42 @@ def prepare_request(request):
         ):
             args["idempotency_key"] = "bridge-" + uuid.uuid4().hex
     return prepared
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def expected_wait(name, arguments, profile):
+    """Mirror the Hub's wait budget so transport timeouts never undercut it."""
+    if not isinstance(arguments, dict):
+        return 0
+    if profile == "unified" and name in {"query", "act"}:
+        requested = arguments.get("wait")
+        if requested is None:
+            action = arguments.get("action")
+            if (
+                not isinstance(action, str)
+                or action in NO_WAIT_ACTIONS
+                or action.startswith("collab.")
+            ):
+                return 0
+            requested = DEFAULT_WAIT_SECONDS
+    else:
+        requested = arguments.get("wait", arguments.get("wait_seconds", 0))
+    return min(MAX_WAIT_SECONDS, max(0, requested)) if _number(requested) else 0
+
+
+def recovery_hint(profile, params, arguments):
+    """Name a recovery call that exists in the active catalog."""
+    name = params.get("name") if isinstance(params, dict) else None
+    workflow_id = arguments.get("workflow_id") if isinstance(arguments, dict) else None
+    if profile == "unified":
+        return 'query(action="job")', None
+    workflow_call = isinstance(name, str) and name.startswith("workflows_")
+    if workflow_call:
+        return ("workflows_get" if workflow_id else "workflows_list"), workflow_id
+    return "operations_list", None
 
 
 def forward(
@@ -169,13 +227,11 @@ def forward(
     # The HTTP default catalog is unified; preserve the bridge's core default
     # and every explicitly selected legacy profile across all request attempts.
     endpoint = base + "/mcp?profile=" + profile
-    arguments = request.get("params", {}).get("arguments", {})
-    requested_wait = (
-        arguments.get("wait", arguments.get("wait_seconds", 0))
-        if isinstance(arguments, dict)
-        else 0
+    params = request.get("params", {})
+    arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
+    wait = expected_wait(
+        params.get("name") if isinstance(params, dict) else None, arguments, profile
     )
-    wait = min(60, max(0, requested_wait)) if type(requested_wait) is int else 0
     if profile == "unified" and wait > 10:
         endpoint += "&stream=1"
     attempt_timeout = max(20, wait + 5)
@@ -499,15 +555,8 @@ def main():
                 params = request.get("params", {}) if isinstance(request, dict) else {}
                 arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
                 key = arguments.get("idempotency_key") if isinstance(arguments, dict) else None
-                workflow_id = arguments.get("workflow_id") if isinstance(arguments, dict) else None
-                workflow_call = isinstance(params.get("name"), str) and params["name"].startswith(
-                    "workflows_"
-                )
-                recovery_tool = (
-                    ("workflows_get" if workflow_id else "workflows_list")
-                    if workflow_call
-                    else "operations_list"
-                )
+                recovery_tool, workflow_id = recovery_hint(profile, params, arguments)
+                workflow_call = workflow_id is not None
                 message = (
                     "Hub authorization rejected; renew the bridge PAT"
                     if status in (401, 403)

@@ -852,6 +852,20 @@ class Store:
 
         return CipherSuite(self.state_directory, private_read(key_path).strip())
 
+    def _migrate_login_admission(self):
+        # Additive login-admission indexes; the legacy two-column IP table and
+        # its login_attempts_ip_time index are created with the base schema.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS login_account_attempts (username_hash TEXT NOT NULL, at REAL NOT NULL)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS login_account_attempts_subject ON login_account_attempts(username_hash,at)"
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS login_account_attempts_expiry ON login_account_attempts(at)"
+        )
+        self.db.execute("CREATE INDEX IF NOT EXISTS login_attempts_expiry ON login_attempts(at)")
+
     def _migrate(self):
         # Execute DDL within the caller's transaction; executescript would
         # implicitly commit it before applying the schema.
@@ -935,9 +949,7 @@ class Store:
         from hub.collaboration.schema import migrate as migrate_collaboration
 
         migrate_collaboration(self.db)
-        from hub.auth_schema import migrate as migrate_auth
-
-        migrate_auth(self.db)
+        self._migrate_login_admission()
         from hub.operation_output import migrate as migrate_output
 
         migrate_output(self.db)
@@ -986,9 +998,6 @@ class Store:
         with self.lock:
             row = self.db.execute("SELECT value FROM meta WHERE key='security_epoch'").fetchone()
         return int(row[0]) if row else 0
-
-    async def async_security_epoch(self) -> int:
-        return await self.run_hint_read(self.security_epoch)
 
     def epoch_stamp(self) -> tuple[int, int]:
         return (self.security_epoch(), self.session_revision)

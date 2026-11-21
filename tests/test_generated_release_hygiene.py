@@ -11,16 +11,20 @@ def test_mcp_apps_generated_metadata_matches_declared_dependency():
     directory = ROOT / 'web/mcp-apps'
     package = json.loads((directory / 'package.json').read_text())
     manifest = json.loads((directory / 'manifest.json').read_text())
-    version = package['dependencies']['@modelcontextprotocol/ext-apps']
-    assert manifest['sdk'] == f'@modelcontextprotocol/ext-apps@{version}'
+    # The Apps SDK is the test host harness only; production pages bundle the
+    # local host bridge, so it must not be a production dependency.
+    assert '@modelcontextprotocol/ext-apps' not in package.get('dependencies', {})
+    version = package['devDependencies']['@modelcontextprotocol/ext-apps']
+    assert manifest['test_sdk'] == f'@modelcontextprotocol/ext-apps@{version}'
     notices = (directory / 'THIRD_PARTY_NOTICES.txt').read_text()
     assert notices.endswith('\n') and not notices.endswith('\n\n')
     lock = json.loads((directory / 'package-lock.json').read_text())
-    for name in ('client', 'core'):
-        package = '@modelcontextprotocol/' + name
-        selected = lock['packages']['node_modules/' + package]['version']
-        declarations = [line for line in notices.splitlines() if line.startswith(package + '@')]
-        assert declarations == [package + '@' + selected], 'Rebuild Apps after changing the SDK lock'
+    declared = {line for line in notices.splitlines() if '@' in line[1:] and ' ' not in line}
+    expected = set()
+    for name in [*manifest['bundled_packages'], 'esbuild']:
+        selected = lock['packages']['node_modules/' + name]['version']
+        expected.add(name + '@' + selected)
+    assert declared == expected, 'Rebuild Apps after changing the bundled packages or lock'
 
 
 def test_template_lowering_preserves_runtime_string_bytes():

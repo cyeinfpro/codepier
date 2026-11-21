@@ -17,7 +17,7 @@ def items(response):
 def test_catalog_is_descriptive_copy_and_has_all_groups():
     first = settings_catalog()
     assert len(first["groups"]) == 8
-    assert len(first["items"]) >= 40
+    assert len(first["items"]) >= 39  # access_defaults card retired
     assert len({item["id"] for item in first["items"]}) == len(first["items"])
     first["items"][0]["title"] = "changed"
     assert settings_catalog()["items"][0]["title"] != "changed"
@@ -82,7 +82,7 @@ def test_personal_settings_available_without_instance_admin(api):
     app.state.store.execute("UPDATE iam_users SET instance_admin=0 WHERE user_id='owner'")
     response = client.get("/api/settings/catalog")
     rows = items(response)
-    assert rows["access_defaults"]["editable_here"] is True
+    assert "access_defaults" not in rows  # Retired card: no hidden count or empty search hit.
     assert rows["appearance"]["editable_here"] is True
     assert rows["public_url"]["editable_here"] is False
     assert rows["hub_process"]["effective_value"] is None
@@ -92,8 +92,7 @@ def test_personal_settings_available_without_instance_admin(api):
     saved = client.put("/api/settings/access", json={"all_projects": False, "developer_scopes": True,
         "expected_defaults": {"all_projects": False, "developer_scopes": False}})
     assert saved.status_code == 200, saved.text
-    assert items(client.get("/api/settings/catalog"))["access_defaults"]["effective_value"] == {
-        "all_projects": False, "developer_scopes": True}
+    assert "access_defaults" not in items(client.get("/api/settings/catalog"))
 
 
 def test_missing_scope_is_404_and_unselected_or_offline_is_unknown(api):

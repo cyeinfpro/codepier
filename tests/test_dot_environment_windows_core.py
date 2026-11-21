@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent import project_runtime as runtime
-from agent.project_index import project_index
+from agent.context import project_index
 from shared.util import DevError
 
 

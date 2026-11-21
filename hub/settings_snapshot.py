@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import time
 
-from hub.access import access_defaults
 from hub.file_import_settings import snapshot as file_import_snapshot
 from shared.settings_catalog import settings_catalog
 from shared.util import DevError
@@ -69,17 +68,7 @@ def snapshot(context, principal, project_id=""):
         else "default",
         configured=row["value"] if row else None,
     )
-    defaults_row = store.one(
-        "SELECT value FROM meta WHERE key=?", ("mcp_access_defaults:" + principal.user_id,)
-    )
-    defaults = access_defaults(store, principal.user_id)
-    value(
-        "access_defaults",
-        defaults,
-        "database" if defaults_row else "default",
-        configured=defaults if defaults_row else None,
-    )
-    for key in ("appearance", "access_defaults", "public_url"):
+    for key in ("appearance", "public_url"):
         editable = key != "public_url" or principal.instance_admin
         rows[key].update(
             can_edit=editable,

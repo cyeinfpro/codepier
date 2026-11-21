@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from agent.ssh import prepare_ssh, ssh_error
 from shared.contracts import SSHExec, tool_definitions
 from shared.contracts import ShellExec, _compact_input_schema
-from shared.secret_output import SecretOutput
+from shared.secret_output import SecretOutputs
 from shared.util import DevError, atomic_json, safe_summary
 from tests.test_shell import shell_agent  # noqa: F401
 from tests.support import wait_for
@@ -80,7 +80,7 @@ def test_ssh_hosts_and_credential_repr(host):
 def test_stream_redaction_all_split_positions(secret):
     value = 'before:' + secret + ':between:' + secret + ':after'
     for split in range(len(value) + 1):
-        redactor = SecretOutput(secret)
+        redactor = SecretOutputs([secret])
         first = redactor.feed(value[:split])
         second = redactor.feed(value[split:])
         output = first + second + redactor.feed('', final=True)

@@ -63,6 +63,26 @@ def file_import_streaming_enabled(config):
     return isinstance(config, dict) and config.get("file_import_streaming", True) is True
 
 
+def _validate_lsp_pool(c):
+    if "lsp_pool" in c:
+        pool = c["lsp_pool"]
+        if not isinstance(pool, dict) or set(pool) - {"max_instances", "idle_ttl_seconds"}:
+            raise ValueError("lsp_pool 只接受 max_instances / idle_ttl_seconds")
+        instances = pool.get("max_instances", 3)
+        if type(instances) is not int or not 1 <= instances <= 32:
+            raise ValueError("lsp_pool.max_instances 必须为 1–32")
+        ttl = pool.get("idle_ttl_seconds", 300)
+        if type(ttl) not in (int, float) or not 0.01 <= ttl <= 86400:
+            raise ValueError("lsp_pool.idle_ttl_seconds 必须为 0.01–86400 秒")
+
+
+def _validate_resource_settings(c):
+    _validate_lsp_pool(c)
+    limit = c.setdefault("max_import_bytes", DEFAULT_MAX_IMPORT_BYTES)
+    if type(limit) is not int or not 1 <= limit <= MAX_IMPORT_BYTES:
+        raise ValueError("max_import_bytes 必须为 1–512 MiB 内的字节数")
+
+
 def validate_integrations(raw):
     if raw is None:
         raw = {}
@@ -79,11 +99,10 @@ def validate_integrations(raw):
         "language_servers",
         "browser",
         "local_control",
+        "lsp_pool",
     }:
         raise ValueError("integrations 包含未知配置项")
-    limit = c.setdefault("max_import_bytes", DEFAULT_MAX_IMPORT_BYTES)
-    if type(limit) is not int or not 1 <= limit <= MAX_IMPORT_BYTES:
-        raise ValueError("max_import_bytes 必须为 1–512 MiB 内的字节数")
+    _validate_resource_settings(c)
     # Do not persist today's defaults as an explicit owner restriction.
     # Absent lists must continue to follow the versioned registry on upgrades.
     for key in ("file_hosts", "extra_file_hosts"):

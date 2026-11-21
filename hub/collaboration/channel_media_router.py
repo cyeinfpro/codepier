@@ -107,14 +107,6 @@ class ChannelMediaRouter:
         )
         return aid
 
-    def cache_usage(self, exclude_chunks=None, *, space_id=None, owner_user_id=None):
-        return media_cache.usage(
-            self.store,
-            exclude_chunks=exclude_chunks,
-            space_id=space_id,
-            owner_user_id=owner_user_id,
-        )
-
     def claim(self, aid):
         with self.store.transaction():
             row = self.store.one(

@@ -186,6 +186,10 @@ jobs:
           [[ "$(docker exec candidate id -u)" == 10001 ]] || { echo '::error::Hub is not running as UID 10001'; exit 1; }
           echo "config=$(docker image inspect --format '{{.Id}}' codepier:candidate)" >> "$GITHUB_OUTPUT"
 
+      - name: Candidate must pass the isolated install probe and data-volume migration rehearsal
+        if: steps.reuse.outputs.reused != 'true'
+        run: python3 scripts/check_codepier_migration_docker.py --image codepier:candidate --output dist/image/migration-rehearsal.json
+
       - name: Candidate logs and cleanup
         if: always() && steps.reuse.outputs.reused != 'true'
         shell: bash

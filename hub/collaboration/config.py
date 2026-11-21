@@ -51,7 +51,9 @@ class CollaborationConfig:
                 result.events_enabled,
                 result.collector_enabled,
                 result.analysis_dispatch_enabled,
-                result.weixin_enabled,
+                # Weixin is deliberately absent: it defaults on and Compose always
+                # passes it, so it is already folded into the master gate above
+                # (enabled and weixin_enabled) instead of being a startup error.
                 result.telegram_enabled,
             )
         ):

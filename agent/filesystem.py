@@ -34,6 +34,9 @@ def search_context(lines, line, radius):
 
 
 MAX_FILE = 1024 * 1024
+# Text files readable through ``read`` (16 MiB) stay editable and shrinkable.
+MAX_TEXT_EDIT = 16 * 1024 * 1024
+_UNREAD = object()
 MAX_DIFF = 100000
 MAX_DIFF_CHANGED_LINES = 4000
 MAX_SCAN_ENTRIES = 100000
@@ -391,7 +394,7 @@ class FileEngine:
                 raise DevError("HARDLINK_BLOCKED", "不读写有多个硬链接的文件", 403)
             if s.st_size > max_bytes:
                 raise DevError(
-                    "FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；请用 exec 拆分读取"
+                    "FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；未读取或修改此文件"
                 )
             chunks, size = [], 0
             while size <= max_bytes:
@@ -440,13 +443,13 @@ class FileEngine:
             raise DevError("ENCODING", "当前只编辑 UTF-8 文件，未改动文件编码") from exc
 
     @staticmethod
-    def encode_content(content: str) -> bytes:
+    def encode_content(content: str, limit: int = MAX_FILE) -> bytes:
         try:
             data = content.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise DevError("INVALID_CONTENT", "内容必须是有效的 UTF-8 文本") from exc
-        if len(data) > MAX_FILE:
-            raise DevError("FILE_TOO_LARGE", "UTF-8 编码后的内容超过 1 MiB")
+        if len(data) > limit:
+            raise DevError("FILE_TOO_LARGE", f"UTF-8 编码后的内容超过 {limit // 1048576} MiB")
         if b"\x00" in data:
             raise DevError("INVALID_CONTENT", "源码文本不能包含 NUL 字符")
         return data
@@ -1220,7 +1223,11 @@ class FileEngine:
         *,
         restore_mode: int | None = None,
         prepared_backup=None,
+        verified_before=_UNREAD,
     ):
+        """``verified_before`` lets a caller that already read and SHA-checked
+        the file under ``mutation_lock`` skip a duplicate full read; the
+        pre-publication re-check below always reads the file again."""
         with self.mutation_lock:
             return self._mutate(
                 project,
@@ -1229,6 +1236,7 @@ class FileEngine:
                 after,
                 restore_mode=restore_mode,
                 prepared_backup=prepared_backup,
+                verified_before=verified_before,
             )
 
     def _mutate(
@@ -1240,12 +1248,17 @@ class FileEngine:
         *,
         restore_mode: int | None = None,
         prepared_backup=None,
+        verified_before=_UNREAD,
     ):
         root, _ = self.root(project, True)
         p = self.path(root, path, False)
         self.check_local_write(p)
         try:
-            before = self.read_bytes(p, True)
+            before = (
+                self.read_bytes(p, True, max_bytes=MAX_TEXT_EDIT)
+                if verified_before is _UNREAD
+                else verified_before
+            )
             if before is not None:
                 self.text(before)
         except DevError as exc:
@@ -1260,8 +1273,8 @@ class FileEngine:
                 "SHA_CONFLICT", f"文件已改变：当前 SHA 为 {actual}。请重新读取后再修改。", 409
             )
         before_mode = stat.S_IMODE(p.stat().st_mode) if before is not None else None
-        if after is not None and (len(after) > MAX_FILE or b"\x00" in after):
-            raise DevError("INVALID_CONTENT", "内容必须是不超过 1 MiB 的 UTF-8 文本")
+        if after is not None and (len(after) > MAX_TEXT_EDIT or b"\x00" in after):
+            raise DevError("INVALID_CONTENT", "内容必须是不超过 16 MiB 的 UTF-8 文本")
         if after is not None:
             self.text(after)
         if before == after and (
@@ -1294,7 +1307,7 @@ class FileEngine:
                 raise DevError("SHA_CONFLICT", "文件路径或权限在批量预检后发生变化", 409)
         # Re-check immediately before replacement. This is not an OS sandbox against hostile local processes.
         self.path(root, path, False)
-        again = self.read_bytes(p, True)
+        again = self.read_bytes(p, True, max_bytes=MAX_TEXT_EDIT)
         if (digest(again) if again is not None else "new") != expected:
             raise DevError("SHA_CONFLICT", "文件在保存期间变化，未覆盖", 409)
         publication_atomic = True
@@ -1320,7 +1333,7 @@ class FileEngine:
                 self.path(root, path, False)
                 # Recheck after the temporary file has been flushed, not before:
                 # a local editor may save while a slow disk is writing the temp file.
-                latest = self.read_bytes(p, True)
+                latest = self.read_bytes(p, True, max_bytes=MAX_TEXT_EDIT)
                 if (digest(latest) if latest is not None else "new") != expected:
                     raise DevError("SHA_CONFLICT", "写入临时文件期间本机文件已改变，未覆盖", 409)
                 if before is None:
@@ -1378,7 +1391,9 @@ class FileEngine:
         # the mutation has happened and must remain reviewable with its backup.
         try:
             self.path(root, path, False)
-            verified = self.read_bytes(p, missing=after is None, verify_path=True)
+            verified = self.read_bytes(
+                p, missing=after is None, verify_path=True, max_bytes=MAX_TEXT_EDIT
+            )
             if verified != after:
                 raise DevError("FILE_CHANGED", "保存后文件内容与预期不一致", 409)
         except (OSError, DevError) as exc:
@@ -1410,7 +1425,7 @@ class FileEngine:
 
     def edit(self, project, args):
         root, _ = self.root(project, True)
-        before = self.read_bytes(self.path(root, args["path"], False))
+        before = self.read_bytes(self.path(root, args["path"], False), max_bytes=MAX_TEXT_EDIT)
         if digest(before) != args["expected_sha256"]:
             raise DevError("SHA_CONFLICT", "源文件已改变，请重新读取", 409)
         content = self.text(before)
@@ -1424,13 +1439,17 @@ class FileEngine:
             resulting_size = len(content.encode("utf-8")) + replacements * (
                 len(new_bytes) - len(old_bytes)
             )
-            if resulting_size > MAX_FILE:
-                raise DevError("FILE_TOO_LARGE", "替换后的 UTF-8 内容超过 1 MiB，未修改文件")
+            if resulting_size > MAX_TEXT_EDIT:
+                raise DevError("FILE_TOO_LARGE", "替换后的 UTF-8 内容超过 16 MiB，未修改文件")
             content = content.replace(
                 edit["old_text"], edit["new_text"], -1 if edit["replace_all"] else 1
             )
         return self.mutate(
-            project, args["path"], args["expected_sha256"], self.encode_content(content)
+            project,
+            args["path"],
+            args["expected_sha256"],
+            self.encode_content(content, MAX_TEXT_EDIT),
+            verified_before=before,
         )
 
     def move(self, project, args):

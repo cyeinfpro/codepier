@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 import agent.filesystem as filesystem
-from agent.filesystem import FileEngine, MAX_FILE
+from agent.filesystem import FileEngine, MAX_FILE, MAX_TEXT_EDIT
 from agent.journal import Journal
 from shared.contracts import TOOLS
 from shared.crypto import digest
@@ -53,7 +53,7 @@ def test_replace_all_rejects_allocation_before_building_oversized_result(engine,
             pytest.fail("replacement allocation happened before its byte budget check")
 
     monkeypatch.setattr(e, "text", lambda data: NeverAllocateReplacement(data.decode()))
-    with pytest.raises(DevError, match="1 MiB"):
+    with pytest.raises(DevError, match="16 MiB"):
         e.edit(project, {"path": "src/app.py", "expected_sha256": digest(original),
                          "edits": [{"old_text": "a", "new_text": "b" * MAX_FILE, "replace_all": True}]})
     assert (root / "src/app.py").read_bytes() == original
@@ -62,9 +62,10 @@ def test_replace_all_rejects_allocation_before_building_oversized_result(engine,
 
 def test_edit_counts_utf8_bytes_before_replacement(engine):
     e, project, root = engine
-    original = b"a" * (MAX_FILE // 2)
+    # Readable text up to 16 MiB stays editable; the UTF-8 result is what is bounded.
+    original = b"a" * (MAX_TEXT_EDIT // 2)
     (root / "src/app.py").write_bytes(original)
-    with pytest.raises(DevError, match="1 MiB"):
+    with pytest.raises(DevError, match="16 MiB"):
         e.edit(project, {"path": "src/app.py", "expected_sha256": digest(original),
                          "edits": [{"old_text": "a", "new_text": "中", "replace_all": True}]})
     assert (root / "src/app.py").read_bytes() == original

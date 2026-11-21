@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from hub.collaboration.network import callback_destination
+from shared.net_address import DEFAULT_RETRY_AFTER_MAX, TransportNotSent
 from shared.util import DevError, valid_json_value
 
 SOURCE_COMMIT = "c6643f6f0ac03574eb126f2d69569ea4267cc3c6"
@@ -229,8 +230,16 @@ async def public_transport(
     async with asyncio.timeout(timeout):
         # DNS and overall deadline exhaustion are transport failures, not proof
         # of an idle read. Keep them distinct from httpx.ReadTimeout below.
-        async with asyncio.timeout(phase_timeout):
-            pinned, host, hostname = await callback_destination(url)
+        try:
+            async with asyncio.timeout(phase_timeout):
+                pinned, host, hostname = await callback_destination(url)
+        except TimeoutError:
+            # Keep the existing timeout classification (getUpdates relies on it).
+            raise
+        except OSError as exc:  # DNS resolution failed: nothing was sent.
+            raise TransportNotSent("DNS resolution failed before sending") from exc
+        # httpx.ConnectError (TCP/TLS establishment) keeps its type; callers that
+        # must prove nothing was sent treat it like TransportNotSent.
         async with httpx.AsyncClient(
             follow_redirects=False, trust_env=False, timeout=limits
         ) as client:
@@ -297,11 +306,11 @@ def retry_after(value):
     if not isinstance(value, str) or len(value) > 128:
         return 60
     if re.fullmatch(r"[0-9]{1,9}", value):
-        return int(value)
+        return min(DEFAULT_RETRY_AFTER_MAX, int(value))
     try:
         parsed = parsedate_to_datetime(value)
         if parsed.tzinfo is not None:
-            return max(0, int(parsed.timestamp() - time.time() + 1))
+            return max(0, min(DEFAULT_RETRY_AFTER_MAX, int(parsed.timestamp() - time.time() + 1)))
     except (TypeError, ValueError, OverflowError, OSError):
         pass
     return 60

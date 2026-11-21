@@ -22,7 +22,7 @@ from agent.journal import Journal
 from agent.runner import Agent
 from hub.runtime import Runtime, Principal
 from hub.store import Store, SCHEMA
-from scripts.mcp_stdio_bridge import forward, prepare_request, REMOTE_TOOLS
+from scripts.mcp_stdio_bridge import forward, prepare_request
 from shared.contracts import TOOLS
 from shared.crypto import digest, token
 from shared.util import atomic_json, DevError
@@ -90,10 +90,6 @@ def test_task_read_concurrency_flag_is_boolean(local_agent):
     assert validate_config(config, a.config_path)["tasks"]["check"]["allow_read_concurrency"] is True
     config["tasks"]["check"]["allow_read_concurrency"] = "yes"
     with pytest.raises(ValueError): validate_config(config, a.config_path)
-
-
-def test_bridge_covers_exact_remote_catalog():
-    assert REMOTE_TOOLS == {name for name,t in TOOLS.items() if not t.local}
 
 
 @pytest.mark.parametrize('fault',['connect','timeout',408,429,500,502,503,504,'garbled'])

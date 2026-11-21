@@ -3,4 +3,4 @@
 from agent.codepier_control import *
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

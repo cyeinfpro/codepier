@@ -66,7 +66,9 @@ def principal_record(principal):
 class WeixinService:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
-        bases = (API_BASE, *os.environ.get("CODEPIER_WEIXIN_APPROVED_API_BASES", "").split())
+        # Accept the repository-wide comma list as well as legacy whitespace lists.
+        raw = os.environ.get("CODEPIER_WEIXIN_APPROVED_API_BASES", "").replace(",", " ")
+        bases = (API_BASE, *raw.split())
         self.allowed_api_bases = tuple(
             dict.fromkeys(approved_url(v, bases=(v,), exact_base=True) for v in bases)
         )

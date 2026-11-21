@@ -6,7 +6,6 @@ pytest-asyncio==1.4.1
 httpx2==2.13.1
 # macOS default headless-shell stalls RAF; tests/browser_launch.py selects full Chromium.
 playwright==1.65.1
-jsonschema==4.26.0
 -r requirements-tools.in
 pytest-cov==7.1.0
 mypy==2.4.0

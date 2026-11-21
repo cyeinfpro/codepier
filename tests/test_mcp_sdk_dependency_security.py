@@ -32,7 +32,9 @@ def test_apps_peer_ranges_and_root_lock_remain_consistent():
     manifest = json.loads((ROOT / 'web/mcp-apps/package.json').read_text())
     lock = json.loads((ROOT / 'web/mcp-apps/package-lock.json').read_text())
     for group in ('dependencies', 'devDependencies'):
-        assert lock['packages'][''][group] == manifest[group]
+        assert lock['packages'][''].get(group) == manifest.get(group)
+    # The Apps SDK only hosts tests; production pages bundle the local bridge.
+    assert '@modelcontextprotocol/ext-apps' in manifest['devDependencies']
     # Existing Apps SDK peers permit this minor security update. It does not
     # introduce an OAuth credential provider or change the app's direct imports.
     peers = lock['packages']['node_modules/@modelcontextprotocol/ext-apps']['peerDependencies']

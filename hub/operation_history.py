@@ -375,8 +375,3 @@ def task_rekey_session(store):
             store.execute("DROP TRIGGER " + immutable_trigger_name(column))
             store.execute(immutable_trigger_sql(column))
         store.execute("DROP TABLE mcp_task_rekey_allowlist")
-
-
-def rewrite_task_ciphertext(store, task_id, column, encrypted):
-    with task_rekey_session(store) as rewrite:
-        rewrite(task_id, column, encrypted)

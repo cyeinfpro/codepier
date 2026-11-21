@@ -3,12 +3,11 @@ import json
 
 import httpx
 import pytest
-from scripts.mcp_stdio_bridge import IDEMPOTENT_TOOLS, REMOTE_TOOLS, forward, prepare_request
+from scripts.mcp_stdio_bridge import IDEMPOTENT_TOOLS, forward, prepare_request
 from shared.contracts import TOOLS
 
 
 def test_bridge_catalog_is_derived_not_duplicated():
-    assert REMOTE_TOOLS == {n for n,t in TOOLS.items() if not t.local}
     assert IDEMPOTENT_TOOLS == {n for n,t in TOOLS.items() if 'idempotency_key' in t.model.model_fields}
 
 

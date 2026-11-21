@@ -217,6 +217,12 @@ def audit_rows(
     return rows
 
 
+def _activity_queue():
+    from hub.runtime import CoalescingQueue
+
+    return CoalescingQueue(maxsize=100)
+
+
 def make_activity_router(context: HubContext):
     router = APIRouter()
     store, runtime, auth = context.store, context.runtime, context.auth
@@ -352,7 +358,7 @@ def make_activity_router(context: HubContext):
             or sum(getattr(q, "_stream_owner", None) == owner for q in runtime.watchers) >= 4
         ):
             raise DevError("TOO_MANY_STREAMS", "实时连接过多", 429)
-        q = asyncio.Queue(maxsize=100)
+        q = _activity_queue()
         q._stream_owner = owner
         runtime.watchers.add(q)
 

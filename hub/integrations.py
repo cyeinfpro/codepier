@@ -382,13 +382,6 @@ class HubIntegrations:
         for key in ("wire_tokens_est", "semantic_tokens_est", "mirror_overhead_ratio"):
             metrics[key] = output.get(key)
 
-    def capture_output(self, trace, result):
-        if trace:
-            try:
-                self.set_output_metric(trace, self.measure_output(result))
-            except Exception:
-                self.write_errors += 1
-
     def finish(self, trace, *, status=None):
         if not trace or trace["finished"]:
             return
