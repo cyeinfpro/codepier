@@ -22,7 +22,227 @@ function vpsIntent() {
 function vpsEndpoint(v) {
   return `${v.host.includes(':') ? '[' + v.host + ']' : v.host}:${v.port}`;
 }
+// Session choices are private to this login/Space and this page lifetime.
+// They contain only connection IDs, never tickets, credentials or output.
+let vpsTerminalOwner = null;
+const vpsTerminalChoices = new Map();
+function vpsTerminalIdentity() {
+  if (!S.session?.user_id || !S.space_id) return null;
+  return JSON.stringify([S.session.user_id, S.space_id]);
+}
+function vpsTerminalForget() {
+  vpsTerminalOwner = null;
+  vpsTerminalChoices.clear();
+}
+function vpsTerminalNavigate(id, { terminal = false } = {}) {
+  if (!S.session || S.page !== 'vps') return;
+  const destination = id
+    ? 'vps?view=terminal&session=' + encodeURIComponent(id)
+    : terminal
+      ? 'vps?view=terminal'
+      : 'vps';
+  if (location.hash !== '#' + destination) void navigate(destination);
+}
+async function vpsTerminalModule() {
+  const owner = vpsTerminalIdentity();
+  if (!owner) throw new Error('请先登录并选择空间');
+  await window.CodePierAssets.load('vps-terminal');
+  if (owner !== vpsTerminalIdentity()) throw sessionChanged();
+  if (vpsTerminalOwner !== owner) {
+    vpsTerminalChoices.clear();
+    vpsTerminalOwner = owner;
+  }
+  const terminal = window.CodePierVpsTerminal;
+  if (!terminal) throw new Error('终端资源未能加载，请重试');
+  terminal.configure({
+    api,
+    getIdentity: vpsTerminalIdentity,
+    onNavigate: vpsTerminalNavigate,
+    onCountChange: () => {
+      const count = terminal.count();
+      $$('[data-vps-terminal-count]').forEach((node) => {
+        node.textContent = count ? `终端会话 · ${count}` : '终端会话';
+      });
+    },
+    onEditVps: (id) => vpsEdit(id),
+  });
+  return terminal;
+}
+async function vpsTerminalPage(seq) {
+  const owner = vpsTerminalIdentity(),
+    query = new URLSearchParams(parseHashRoute().query),
+    current = () => seq === S.renderSeq && S.page === 'vps' && owner === vpsTerminalIdentity();
+  const terminal = await vpsTerminalModule();
+  if (!current()) return;
+  const page = $('#page');
+  let host = $('#vps-terminal-host', page);
+  if (!host) {
+    terminal.hide();
+    host = document.createElement('div');
+    host.id = 'vps-terminal-host';
+    page.replaceChildren(host);
+  }
+  uiPageReady(false);
+  await terminal.mount(host, { sessionId: query.get('session') || undefined });
+}
+function vpsTerminalProjects(v) {
+  return (v.projects || [])
+    .filter((p) => p.mode === 'write' && p.allow_tasks && p.enabled !== false)
+    .sort((a, b) => Number(!!b.online) - Number(!!a.online));
+}
+function vpsActionsHTML(v) {
+  const projects = vpsTerminalProjects(v),
+    reason = !v.enabled
+      ? '连接已停用，启用后可打开终端。'
+      : !v.project_ids.length
+        ? '先分配一个允许执行命令的项目。'
+        : !projects.length
+          ? '连接项目需要写入和执行命令权限。'
+          : '',
+    count =
+      window.CodePierVpsTerminal?.list().filter(
+        (item) =>
+          item.vps_id === v.id && !['closed', 'exited', 'failed', 'revoked'].includes(item.state),
+      ).length || 0;
+  return `<footer><button class="btn ghost small" data-vps-action="edit" data-id="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}">${icon('edit')}编辑</button><button class="btn ghost small" data-vps-action="check" data-id="${esc(v.id)}" ${!v.enabled ? 'disabled title="已停用，启用后可检查"' : !v.project_ids.length ? 'disabled title="先分配项目再检查连接"' : ''}>检查连接</button><button class="btn primary small" data-vps-action="terminal" data-id="${esc(v.id)}" ${reason ? `disabled aria-describedby="vps-terminal-hint-${esc(v.id)}"` : ''}>${icon('terminal')}${count ? '返回终端' : '打开终端'}</button></footer>${reason ? `<p class="vps-terminal-hint" id="vps-terminal-hint-${esc(v.id)}">${esc(reason)}${v.enabled && v.project_ids.length && !projects.length ? `<button class="btn ghost small" data-action="edit-project" data-id="${esc(v.project_ids[0])}">项目权限</button>` : ''}</p>` : ''}<div class="vps-terminal-inline" data-vps-terminal-inline hidden></div>`;
+}
+function vpsTerminalInline(id) {
+  const card = $$('[data-vps-card]').find((node) => node.dataset.vpsCard === id);
+  return card?.querySelector('[data-vps-terminal-inline]') || null;
+}
+function vpsTerminalMessage(id, message, { error = false, action } = {}) {
+  const root = vpsTerminalInline(id);
+  if (!root) return;
+  root.hidden = false;
+  root.replaceChildren();
+  const text = document.createElement('p');
+  text.textContent = message;
+  text.setAttribute('role', error ? 'alert' : 'status');
+  root.append(text);
+  if (action) {
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'btn small';
+    link.textContent = action.label;
+    link.addEventListener('click', action.run);
+    root.append(link);
+  }
+}
+function vpsTerminalChoose(v, projects) {
+  const root = vpsTerminalInline(v.id);
+  if (!root) return;
+  root.hidden = false;
+  root.replaceChildren();
+  const title = document.createElement('p');
+  title.textContent = '通过哪个项目连接？';
+  const note = document.createElement('p');
+  note.className = 'muted tiny';
+  note.textContent = '连接由项目所在电脑发起，本次登录会记住选择。';
+  const form = document.createElement('form'),
+    label = document.createElement('label'),
+    select = document.createElement('select');
+  label.textContent = '连接项目';
+  select.setAttribute('aria-label', '连接项目');
+  for (const project of projects) {
+    const option = document.createElement('option');
+    option.value = project.id;
+    option.textContent = `${project.alias} · ${project.device_name} · ${project.online ? '在线' : '离线'}`;
+    option.disabled = !project.online;
+    select.append(option);
+  }
+  const available = projects.find((project) => project.online);
+  if (available) select.value = available.id;
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'btn primary small';
+  submit.textContent = available ? '连接' : '等待电脑上线';
+  submit.disabled = !available;
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn ghost small';
+  cancel.textContent = '取消';
+  cancel.onclick = () => {
+    root.hidden = true;
+    root.replaceChildren();
+  };
+  label.append(select);
+  form.append(label, submit, cancel);
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    void vpsOpenTerminal(v.id, submit, select.value);
+  };
+  root.append(title, note, form);
+  select.focus({ preventScroll: true });
+}
+async function vpsOpenTerminal(id, button, projectId) {
+  const current = vpsIntent();
+  if (button) {
+    button.disabled = true;
+    button.dataset.vpsOpening = 'true';
+  }
+  try {
+    const v = await api('/api/vps/' + encodeURIComponent(id));
+    if (!current()) return;
+    if (!v.enabled) throw new Error('连接已停用，请先编辑并启用 VPS');
+    const projects = vpsTerminalProjects(v);
+    if (!projects.length) throw new Error('请分配一个具有写入和执行命令权限的项目');
+    const owner = vpsTerminalIdentity();
+    if (owner !== vpsTerminalOwner) {
+      vpsTerminalChoices.clear();
+      vpsTerminalOwner = owner;
+    }
+    const preferred = projectId || vpsTerminalChoices.get(id),
+      project =
+        projects.find((item) => item.id === preferred && item.online) ||
+        (!projectId && projects.length === 1 && projects[0].online ? projects[0] : null);
+    if (!project) {
+      if (projectId) throw new Error('所选项目当前不可用，请刷新后重试');
+      vpsTerminalChoose(v, projects);
+      return;
+    }
+    vpsTerminalMessage(id, `正在通过 ${project.alias} · ${project.device_name} 连接…`);
+    const terminal = await vpsTerminalModule();
+    if (!current()) return;
+    await terminal.open({ vps: v, project, isCurrent: current });
+    if (owner === vpsTerminalIdentity()) vpsTerminalChoices.set(id, project.id);
+  } catch (error) {
+    if (!current()) return;
+    const code = error.code || error.detail?.code || error.reason_code;
+    const upgrade = [
+        'AGENT_UPGRADE_REQUIRED',
+        'PROTOCOL_MISMATCH',
+        'SSH_DEPENDENCY_MISSING',
+      ].includes(code),
+      offline = ['AGENT_OFFLINE', 'NODE_OFFLINE'].includes(code),
+      forbidden = ['FORBIDDEN', 'SSH_TERMINAL_FORBIDDEN'].includes(code);
+    vpsTerminalMessage(
+      id,
+      upgrade
+        ? '连接电脑需要更新才能使用 Web SSH。前往电脑管理，更新后重试。'
+        : offline
+          ? '连接电脑暂时离线。电脑恢复在线后可以重试。'
+          : forbidden
+            ? '你没有此项目的终端执行权限，请联系空间管理员。'
+            : error.message || '终端暂时无法连接，请重试',
+      {
+        error: true,
+        action:
+          upgrade || offline
+            ? { label: '查看连接电脑', run: () => navigate('devices') }
+            : undefined,
+      },
+    );
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.removeAttribute('data-vps-opening');
+    }
+  }
+}
 function vpsReplacePage(html) {
+  // The workspace lives outside the replaceable inventory, even if this
+  // function is called directly by a background refresh.
+  window.CodePierVpsTerminal?.hide();
   const page = $('#page'),
     next = document.createElement('template');
   next.innerHTML = html;
@@ -36,7 +256,8 @@ function vpsReplacePage(html) {
   let cursor = grid.firstElementChild;
   for (const card of [...freshGrid.children]) {
     const previous = existing.get(card.dataset.vpsCard);
-    const node = previous && previous.outerHTML === card.outerHTML ? previous : card;
+    const node =
+      previous && vpsComparableCard(previous) === vpsComparableCard(card) ? previous : card;
     if (node === cursor) cursor = cursor.nextElementSibling;
     else if (cursor?.dataset.vpsCard === card.dataset.vpsCard) {
       const following = cursor.nextElementSibling;
@@ -55,6 +276,22 @@ function vpsReplacePage(html) {
   grid.before(...nodes.slice(0, index));
   grid.after(...nodes.slice(index + 1));
 }
+function vpsComparableCard(card) {
+  const copy = card.cloneNode(true),
+    inline = copy.querySelector('[data-vps-terminal-inline]');
+  // Metadata refreshes must not wipe an open project picker, its keyboard
+  // focus, or the explanation of a failed connection.
+  if (inline) {
+    inline.hidden = true;
+    inline.replaceChildren();
+  }
+  for (const button of copy.querySelectorAll('[data-vps-opening]')) {
+    button.disabled = false;
+    button.removeAttribute('data-vps-opening');
+  }
+  copy.hidden = false;
+  return copy.outerHTML;
+}
 async function vpsHTML(seq) {
   const [items] = await Promise.all([vpsInventory(), loadBasics()]);
   if (seq !== S.renderSeq) return '';
@@ -64,10 +301,10 @@ async function vpsHTML(seq) {
       'VPS',
       '',
       '',
-      `<button class="btn primary" data-vps-action="add">${icon('plus')}添加 VPS</button>`,
+      `<button class="btn" data-vps-action="sessions">${icon('terminal')}<span data-vps-terminal-count>终端会话${window.CodePierVpsTerminal?.count() ? ' · ' + window.CodePierVpsTerminal.count() : ''}</span></button><button class="btn primary" data-vps-action="add">${icon('plus')}添加 VPS</button>`,
     ) +
     `<div class="vps-filters"><label class="vps-search">${icon('search')}<input id="vps-query" type="search" placeholder="搜索名称、IP、服务商、地区" aria-label="搜索 VPS" value="${esc(S.vpsQuery || '')}"></label><select id="vps-project-filter" aria-label="按项目筛选"><option value="">全部项目</option><option value="__unassigned__" ${S.vpsProject === '__unassigned__' ? 'selected' : ''}>未分配</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${S.vpsProject === p.id ? 'selected' : ''}>${esc(p.alias)}</option>`).join('')}</select><span class="muted tiny" id="vps-count" role="status"></span></div>
-    <section class="vps-grid">${items.map((v) => `<article class="panel vps-card" data-vps-card="${esc(v.id)}"><header><span class="vps-symbol">${icon('cloud')}</span><div><h2>${esc(v.name)}</h2><p>${esc([v.provider, v.region].filter(Boolean).join(' · ') || '未填写服务商 / 地区')}</p></div><span class="badge ${v.enabled ? 'neutral' : 'offline'}">${v.enabled ? '已启用' : '已停用'}</span></header><div class="vps-address"><code>${esc(vpsEndpoint(v))}</code><button class="icon-btn" data-vps-action="copy" data-id="${esc(v.id)}" aria-label="复制 ${esc(v.name)} 的地址">${icon('copy')}</button></div><dl class="vps-facts"><div><dt>SSH 账号</dt><dd>${esc(v.username)}</dd></div><div><dt>系统</dt><dd>${esc(v.system || '未填写')}</dd></div><div><dt>主机密钥</dt><dd>${v.host_key_policy === 'strict' ? '严格验证' : '信任首次连接'}</dd></div></dl><div class="vps-projects" aria-label="已分配项目">${v.projects.map((p) => `<span class="badge neutral">${icon('folder')}${esc(p.alias)}</span>`).join('') || '<span class="muted tiny">尚未分配项目</span>'}</div>${v.notes ? `<p class="vps-notes">${esc(v.notes)}</p>` : ''}<footer><button class="btn ghost small" data-vps-action="edit" data-id="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}">${icon('edit')}编辑</button><button class="btn small" data-vps-action="check" data-id="${esc(v.id)}" ${!v.enabled ? 'disabled title="已停用，启用后可检查"' : !v.project_ids.length ? 'disabled title="先分配项目再检查连接"' : ''}>${icon('terminal')}检查连接</button></footer></article>`).join('')}</section>
+    <section class="vps-grid">${items.map((v) => `<article class="panel vps-card" data-vps-card="${esc(v.id)}"><header><span class="vps-symbol">${icon('cloud')}</span><div><h2>${esc(v.name)}</h2><p>${esc([v.provider, v.region].filter(Boolean).join(' · ') || '未填写服务商 / 地区')}</p></div><span class="badge ${v.enabled ? 'neutral' : 'offline'}">${v.enabled ? '已启用' : '已停用'}</span></header><div class="vps-address"><code>${esc(vpsEndpoint(v))}</code><button class="icon-btn" data-vps-action="copy" data-id="${esc(v.id)}" aria-label="复制 ${esc(v.name)} 的地址">${icon('copy')}</button></div><dl class="vps-facts"><div><dt>SSH 账号</dt><dd>${esc(v.username)}</dd></div><div><dt>系统</dt><dd>${esc(v.system || '未填写')}</dd></div><div><dt>主机密钥</dt><dd>${v.host_key_policy === 'strict' ? '严格验证' : '信任首次连接'}</dd></div></dl><div class="vps-projects" aria-label="已分配项目">${v.projects.map((p) => `<span class="badge neutral">${icon('folder')}${esc(p.alias)}</span>`).join('') || '<span class="muted tiny">尚未分配项目</span>'}</div>${v.notes ? `<p class="vps-notes">${esc(v.notes)}</p>` : ''}${vpsActionsHTML(v)}</article>`).join('')}</section>
     <div id="vps-empty" class="empty panel" hidden><p>${items.length ? '没有匹配的 VPS' : '还没有保存服务器连接'}</p>${items.length ? '' : '<button class="btn primary" data-vps-action="add">添加第一台 VPS</button>'}</div>
     <p class="form-note">在 ChatGPT 里说“SSH 到服务器名称，检查磁盘”。</p>`
   );
@@ -95,8 +332,8 @@ function vpsFilter() {
   if ($('#vps-empty')) $('#vps-empty').hidden = count > 0;
 }
 function bindVps() {
-  $('#vps-query').oninput = vpsFilter;
-  $('#vps-project-filter').onchange = vpsFilter;
+  if ($('#vps-query')) $('#vps-query').oninput = vpsFilter;
+  if ($('#vps-project-filter')) $('#vps-project-filter').onchange = vpsFilter;
   vpsFilter();
 }
 function vpsProjectChoices(selected = []) {
@@ -330,6 +567,12 @@ document.addEventListener('click', async (e) => {
   if (!button || button.disabled) return;
   try {
     switch (button.dataset.vpsAction) {
+      case 'terminal':
+        await vpsOpenTerminal(button.dataset.id, button);
+        break;
+      case 'sessions':
+        await navigate('vps?view=terminal');
+        break;
       case 'add':
         await vpsEdit();
         break;

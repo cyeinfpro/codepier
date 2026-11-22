@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 from urllib.parse import quote
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
 from hub.workflows import encode_cursor, decode_cursor
@@ -47,6 +48,26 @@ class ArtifactService:
         self.runtime = runtime
         self.pending = {}
         self.active_downloads = 0
+
+    def _registration_binding(self, op):
+        # Only the request admitted by the Hub ties a receipt to its root and
+        # source operation. A project may have been remapped in the meantime.
+        if not isinstance(op["payload"], str):
+            return None
+        try:
+            request = json.loads(self.runtime.store.decrypt(op["payload"]))
+            root = request["project"]["root"]
+            source = request["args"].get("source_operation_id", "")
+            if isinstance(root, str) and root and isinstance(source, str):
+                return {"project": {"root": root}, "args": {"source_operation_id": source}}
+        except (InvalidToken, ValueError, TypeError, KeyError, AttributeError):
+            pass
+        return None
+
+    def pending_binding(self, op):
+        # Keep no executable request, file path, credentials or principal context.
+        binding = self._registration_binding(op)
+        return self.runtime.store.encrypt(json.dumps(binding)) if binding else None
 
     def register_result(self, op, data):
         """Called before the operation payload is cleared; failed DB writes replay safely."""
@@ -86,7 +107,18 @@ class ArtifactService:
         lifetime = expires - created
         created = time.time()
         expires = min(expires, created + min(lifetime, 7 * 86400))
-        payload = json.loads(self.runtime.store.decrypt(op["payload"]))
+        binding = self._registration_binding(op)
+        if binding is None:
+            # Older Hubs erased the request on needs_review. Persist only
+            # validated receipt metadata, without publishing a download.
+            raise DevError(
+                "ARTIFACT_BINDING_UNAVAILABLE",
+                "设备已返回产物，但原登记绑定不可用；请核查原操作",
+                artifact_receipt={
+                    key: data[key]
+                    for key in ("artifact_id", "name", "bytes", "sha256", "created", "expires")
+                },
+            )
         self.runtime.store.execute(
             "INSERT INTO artifacts(id,project_id,device_id,grant_id,actor,root,name,bytes,sha256,created,expires,source_operation_id,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -95,13 +127,13 @@ class ArtifactService:
                 op["device_id"],
                 op["grant_id"],
                 op["actor"],
-                payload["project"]["root"],
+                binding["project"]["root"],
                 name,
                 size,
                 sha,
                 created,
                 expires,
-                payload["args"].get("source_operation_id", ""),
+                binding["args"]["source_operation_id"],
                 op["space_id"],
                 op["owner_user_id"],
             ),

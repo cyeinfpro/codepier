@@ -27,6 +27,7 @@ def serve_hub(args, parser):
     import uvicorn
 
     from hub.app import create_app
+    from hub.ssh_terminal.server_protocol import TerminalAwareWebSocketProtocol
 
     runtime = None
 
@@ -51,6 +52,7 @@ def serve_hub(args, parser):
             workers=1,
             log_level=config.log_level,
             ws_max_size=16 * 1024 * 1024,
+            ws=TerminalAwareWebSocketProtocol,
             proxy_headers=True,
             forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
             access_log=False,

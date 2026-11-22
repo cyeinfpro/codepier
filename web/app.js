@@ -174,6 +174,8 @@ function discardLocalWork(owner = sessionOwner(S.session) || S.suspendedUser) {
   taskSessionValue('codepier-task-submission', null, owner);
 }
 function clearSpaceSnapshots() {
+  window.CodePierVpsTerminal?.reset();
+  if (typeof vpsTerminalForget === 'function') vpsTerminalForget();
   window.CodePierTokenUsage?.resetDashboard(true);
   window.CodePierCallLog?.clear();
   clearTimeout(S.activityTimer);
@@ -996,6 +998,7 @@ async function navigate(pageInput) {
     if (S.page === 'native') context.native = true;
   }
   S.page = page;
+  S.vpsRouteQuery = page === 'vps' ? parsed.query : '';
   location.hash = page + (parsed.query ? '?' + parsed.query : '');
   const parentGroup = tabParent[page];
   const groupTitle =
@@ -1015,6 +1018,13 @@ async function navigate(pageInput) {
   }
 }
 async function renderPage(showLoading = true) {
+  const route = parseHashRoute();
+  const terminalRoute =
+    S.page === 'vps' &&
+    route.page === 'vps' &&
+    new URLSearchParams(route.query).get('view') === 'terminal';
+  if (!S.session) window.CodePierVpsTerminal?.reset();
+  else if (!terminalRoute) window.CodePierVpsTerminal?.hide();
   window.CodePierProjectMap?.detach();
   window.CodePierConnectionSetup?.detach();
   window.CodePierSettings?.detach();
@@ -1044,6 +1054,29 @@ async function renderPage(showLoading = true) {
     return;
   }
   if (typeof chatDetach === 'function') chatDetach();
+  // A terminal owns its DOM across route changes and background refreshes.
+  // It must bypass the inventory's loading shell and HTML replacement path.
+  if (terminalRoute) {
+    const seq = ++S.renderSeq,
+      login = S.session,
+      space = S.space_id;
+    S.vpsRouteQuery = route.query;
+    if (!$('#vps-terminal-host')) {
+      $('#page').setAttribute('aria-busy', 'true');
+      $('#page').innerHTML = '<section class="panel"><p role="status">正在打开终端…</p></section>';
+    }
+    try {
+      await window.CodePierAssets.load('vps');
+      if (seq !== S.renderSeq || login !== S.session || space !== S.space_id) return;
+      await vpsTerminalPage(seq);
+    } catch (error) {
+      if (seq === S.renderSeq && login === S.session && space === S.space_id) {
+        window.CodePierVpsTerminal?.hide();
+        uiPageError(error.message, 'vps');
+      }
+    }
+    return;
+  }
   const seq = ++S.renderSeq;
   const page = S.page;
   const tokenOwner = S.session,
@@ -3644,7 +3677,10 @@ window.addEventListener('beforeunload', (e) => {
 });
 window.addEventListener('hashchange', () => {
   const { page, query } = parseHashRoute(location.hash);
-  if (page !== S.page && nav.some((n) => n[0] === page))
+  if (
+    (page !== S.page || (page === 'vps' && query !== (S.vpsRouteQuery || ''))) &&
+    nav.some((n) => n[0] === page)
+  )
     navigate(page + (query ? '?' + query : ''));
 });
 (async () => {

@@ -40,6 +40,8 @@ from hub.incoming_files import make_incoming_file_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
 from hub.vps import make_vps_router
+from hub.ssh_terminal.api import make_terminal_router
+from hub.ssh_terminal.service import TerminalService
 from hub.panel_update import make_panel_update_router
 from hub.integrations import CallTimingMiddleware
 from hub.mcp_request_audit import MCPRequestAuditMiddleware
@@ -78,6 +80,7 @@ def create_app(data_dir: str | None = None):
         )
         initialize_file_import_settings(store)
         runtime, auth = Runtime(store, collaboration_config=collaboration_config), Auth(store)
+        runtime.ssh_terminal = TerminalService(runtime, auth)
         runtime.collaboration.loops.host_backfill_pending = host_backfill_pending
         runtime.gateway = Gateway(store)
 
@@ -103,6 +106,7 @@ def create_app(data_dir: str | None = None):
         async def lifespan(app):
             try:
                 await runtime.start()
+                await runtime.ssh_terminal.start()
                 await runtime.panel_agent_rollouts.start()
                 await oidc.start()
                 await runtime.collaboration.loops.start()
@@ -121,7 +125,10 @@ def create_app(data_dir: str | None = None):
                             finally:
                                 await runtime.gateway.close()
                         finally:
-                            await runtime.stop()
+                            try:
+                                await runtime.ssh_terminal.stop()
+                            finally:
+                                await runtime.stop()
                 finally:
                     try:
                         await store.aclose()
@@ -177,6 +184,7 @@ def create_app(data_dir: str | None = None):
             make_access_router,
             make_native_router,
             make_vps_router,
+            make_terminal_router,
             make_panel_update_router,
         ):
             app.include_router(make(auth, runtime))

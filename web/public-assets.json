@@ -12,6 +12,7 @@
       "collaboration-room.js"
     ],
     "vps": ["vps.css", "vps.js"],
+    "vps-terminal": ["vps-terminal.css", "vps-terminal.js"],
     "mcp-gateway": ["mcp-gateway.css", "mcp-gateway.js"],
     "project-map": ["project-map.css", "project-map.js"]
   },

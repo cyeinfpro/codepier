@@ -166,7 +166,7 @@
 .vps-card footer {
   display: flex;
   gap: 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   margin-top: auto;
   padding-top: 12px;
@@ -174,6 +174,49 @@
 }
 .vps-card footer > :last-child {
   margin-left: auto;
+}
+.vps-terminal-hint {
+  margin: 0;
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.vps-terminal-hint button {
+  margin-left: 4px;
+}
+.vps-terminal-inline {
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-line);
+  font-size: var(--ui-text-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.vps-terminal-inline[hidden] {
+  display: none;
+}
+.vps-terminal-inline p {
+  margin: 0 0 8px;
+}
+.vps-terminal-inline form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.vps-terminal-inline label {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.vps-terminal-inline select {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+#vps-terminal-host {
+  min-width: 0;
 }
 .vps-check-list {
   max-height: 250px;

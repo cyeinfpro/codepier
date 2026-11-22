@@ -2,7 +2,7 @@
 
 通过 ChatGPT、Gemini、Antigravity、Claude 或 Grok，在已授权的电脑和服务器上读代码、改文件、跑测试，并核对执行结果。
 
-[![Version](https://img.shields.io/badge/version-1.33.37-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.34.1-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是自托管的 MCP 服务和开发面板。**Hub** 负责接入与管理，**Agent** 在 macOS、Windows 或 Linux 上运行本机工具。你也可以在网页里继续 Pi、Codex、Claude Code 会话，管理多台电脑和服务器。
@@ -79,7 +79,7 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ### 最近版本变化
 
-当前源码为 **v1.33.37**，修复操作审计宽屏双栏列表行高压缩与悬浮提示条遮挡表头问题，补齐统一工具批量读取与多文件修改摘要展示，并加固全站有界滚动容器与设计系统门禁。完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
+当前源码为 **v1.34.1**，新增 VPS 浏览器 SSH 终端，支持多标签、分屏、搜索、粘贴预览和 tmux 持久会话。终端通过所属项目的 Agent 连接，沿用现有执行授权与主机信任，提供有界流控、断线恢复和安全诊断。使用与升级要求见 [Web SSH 运维手册](docs/WEB_SSH_OPERATIONS.md)，完整变更见 [CHANGELOG.md](CHANGELOG.md)，已发布安装包见 [Releases](https://github.com/cyeinfpro/codepier/releases/latest)。
 
 ## 使用示例
 
@@ -130,9 +130,9 @@ CodePier **不提供模型服务**。只使用 MCP 文件与命令工具，不�
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.33.37 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
+当前仓库的 `RELEASE.json` 标记为 **1.34.1 / prepared / source-and-image**；可下载版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，`main` 可能包含尚未发布的改动。
 
-- **Version:** 1.33.37
+- **Version:** 1.34.1
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

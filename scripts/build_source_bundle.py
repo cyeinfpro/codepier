@@ -297,6 +297,7 @@ PUBLIC_DOCS = {
     "docs/SECURITY.md",
     "docs/START-HERE.md",
     "docs/VPS.md",
+    "docs/WEB_SSH_OPERATIONS.md",
 }
 
 

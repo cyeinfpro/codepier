@@ -2998,7 +2998,10 @@ class Runtime:
                     for device, task in list(active_devices.items()):
                         if task.done():
                             active_devices.pop(device)
-                            task.result()
+                            # Detaching a socket may cancel its in-flight send.
+                            # Only external cancellation should stop this loop.
+                            if not task.cancelled():
+                                task.result()
                     # A stale candidate is harmless. Preparation rechecks it on
                     # the writer. Selection never retries against that writer.
                     started = time.monotonic()
@@ -3629,7 +3632,7 @@ class Runtime:
             try:
                 self.artifacts.register_result(op, result.get("data") or {})
             except DevError as exc:
-                result = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+                result = {"ok": False, "error": {"code": exc.code, "message": exc.message, **exc.details}}
         self.diagnostics.ingest(op["id"], result.get("trace"))
         encoded = json.dumps(result, ensure_ascii=False)
         from hub.operation_history import seal, unseal
@@ -3645,6 +3648,7 @@ class Runtime:
         error = result.get("error") or {}
         state = "succeeded" if result["ok"] else "failed"
         if error.get("code") in {
+            "ARTIFACT_BINDING_UNAVAILABLE",
             "INTERRUPTED",
             "JOURNAL_CHANGED",
             "RECOVERY_DATA_INVALID",
@@ -3716,8 +3720,13 @@ class Runtime:
                 return
             previous, _ = self.outputs.read(current)
             output = str(data.get("output", previous))[-131072:]
+            pending_binding = (
+                self.artifacts.pending_binding(op)
+                if state == "needs_review" and op["tool"] == "artifacts_register"
+                else None
+            )
             changed = self.store.execute(
-                "UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=NULL,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
+                "UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=?,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
                 (
                     state,
                     seal(self.store, encoded),
@@ -3726,6 +3735,7 @@ class Runtime:
                     time.time(),
                     int(output != previous),
                     media_expiry,
+                    pending_binding,
                     op["id"],
                 ),
             )

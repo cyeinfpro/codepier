@@ -1,5 +1,5 @@
 {
-  "version": "1.33.37",
+  "version": "1.34.1",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -27,8 +27,8 @@
       "bytes": 22291
     },
     "app.js": {
-      "sha256": "3073a821dc0343f947a50c00004bea93c4b42d48b1f60a707d3703338701a81f",
-      "bytes": 164252
+      "sha256": "3fd01f55a327aa2fe682b71d727d01f22f049e2789fd477be12fc508b91e5887",
+      "bytes": 165670
     },
     "appearance.js": {
       "sha256": "4a955158dff23e08e9bf172df5839dbb9a108607674f254f87049d20d0fd13da",
@@ -238,13 +238,21 @@
       "sha256": "a050d794e170699bd1a69d33908d0942c68901cb88347016064b60b240f0067e",
       "bytes": 8156
     },
+    "vps-terminal.css": {
+      "sha256": "e9146f4d990130d9be21d97a0f0f9797be7585413bd8bf0c7c2878f12dd197e1",
+      "bytes": 17474
+    },
+    "vps-terminal.js": {
+      "sha256": "ea2383836bb00bcfedc99931a4aa8f0fedc106778151122b93c154bd02016f59",
+      "bytes": 589227
+    },
     "vps.css": {
-      "sha256": "8ed92fd70e076d745428ead6e38c46010f173391012194882e97033489900548",
-      "bytes": 4583
+      "sha256": "54a91671b99a3152b0ecd845a7383710c8954505f003d653b45d5d39e9fea784",
+      "bytes": 5346
     },
     "vps.js": {
-      "sha256": "9bcce9080d75408fa7d4afe807a11c677705a3e3136f9f99d5356e6f3c2a5520",
-      "bytes": 19536
+      "sha256": "1de4d55158934f31e4c7adbe0a533d01bb5eda38d2dc87c6525ab9eb12dbf5a4",
+      "bytes": 29420
     },
     "workflows.js": {
       "sha256": "681001d14df5b01d99548a282ced85d12f3211cf37cc8af713b5c24897d55d19",

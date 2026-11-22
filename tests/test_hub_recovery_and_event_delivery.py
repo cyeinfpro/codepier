@@ -209,3 +209,113 @@ def test_ambiguous_legacy_envelopes_fail_closed_but_new_writes_are_unambiguous(s
     sealed = operation_history.seal(store, value)
     assert sealed != value
     assert operation_history.unseal(store, sealed) == value
+
+
+@pytest.mark.asyncio
+async def test_cancelled_device_send_does_not_cancel_delivery_loop():
+    from hub.delivery_metrics import DeliveryMetrics
+    runtime = Runtime.__new__(Runtime)
+    runtime.stopping = False
+    runtime.wake = asyncio.Event()
+    runtime.delivery_metrics = DeliveryMetrics()
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+    second_stopped, blocker = asyncio.Event(), asyncio.Event()
+    device_tasks = {}
+    selected = set()
+
+    async def run(call, *args):
+        return call(*args)
+
+    runtime.store = SimpleNamespace(run_hint_read=run)
+
+    def candidates(active):
+        device = "first" if "first" not in selected else "second"
+        if device in selected:
+            return []
+        selected.add(device)
+        return [{"id": device + "-operation", "device_id": device}]
+
+    async def deliver(ids, *, device_id, selected):
+        device_tasks[device_id] = asyncio.current_task()
+        (first_started if device_id == "first" else second_started).set()
+        try:
+            await blocker.wait()
+        finally:
+            if device_id == "second":
+                second_stopped.set()
+
+    runtime._delivery_candidates = candidates
+    runtime.deliver_device = deliver
+    worker = asyncio.create_task(runtime.delivery_loop())
+    try:
+        await asyncio.wait_for(first_started.wait(), 2)
+        device_tasks["first"].cancel()  # An actual child task is cancelled by a detach.
+        await asyncio.gather(device_tasks["first"], return_exceptions=True)
+        await asyncio.wait_for(second_started.wait(), 2)
+        assert not worker.done()
+        # Cancelling the shared worker itself must still propagate and drain children.
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+        assert second_stopped.is_set() and device_tasks["second"].cancelled()
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+def artifact_completion_fixture(store):
+    store.execute("INSERT INTO users VALUES ('owner','owner','unused',1)")
+    store.execute("INSERT INTO devices(id,name,secret,created) VALUES ('device','fixture','unused',1)")
+    store.execute("INSERT INTO projects(id,alias,alias_key,device_id,root,created) VALUES ('project','fixture','fixture','device','/original-root',1)")
+    request = {
+        "project": {"root": "/original-root", "private_context": "synthetic-context"},
+        "args": {"path": "private-file.txt", "source_operation_id": "original-source"},
+        "tool": "artifacts_register", "credential": "synthetic-must-not-be-retained",
+    }
+    now = time.time()
+    store.execute("""INSERT INTO operations
+        (id,project_id,device_id,actor,tool,args_summary,fingerprint,state,created,updated,payload,space_id,owner_user_id)
+        VALUES ('late-artifact','project','device','fixture','artifacts_register','{}','fixture','running',?,?,?,'legacy','owner')""",
+        (now, now, store.encrypt(json.dumps(request))))
+    op = store.one("SELECT * FROM operations WHERE id='late-artifact'")
+    receipt = {"artifact_id": op["id"], "name": "fixture.txt", "bytes": 1,
+               "sha256": "a" * 64, "created": now, "expires": now + 86400}
+    return Runtime(store), op, receipt
+
+
+def test_late_artifact_receipt_keeps_original_binding_after_review_and_project_remap(store):
+    runtime, original, receipt = artifact_completion_fixture(store)
+    runtime.complete(original, {"ok": False, "error": {
+        "code": "JOURNAL_CHANGED", "message": "synthetic receipt awaiting reconciliation"}})
+    pending = store.one("SELECT * FROM operations WHERE id=?", (original["id"],))
+    assert pending["state"] == "needs_review" and isinstance(pending["payload"], str)
+    assert json.loads(store.decrypt(pending["payload"])) == {
+        "project": {"root": "/original-root"},
+        "args": {"source_operation_id": "original-source"},
+    }
+    store.execute("UPDATE projects SET root='/remapped-root' WHERE id='project'")
+    runtime.complete(original, {"ok": True, "data": receipt})  # Deliberately stale caller row.
+    completed = store.one("SELECT * FROM operations WHERE id=?", (original["id"],))
+    saved = store.one("SELECT * FROM artifacts WHERE id=?", (original["id"],))
+    assert completed["state"] == "succeeded" and completed["payload"] is None
+    assert saved["root"] == "/original-root" and saved["source_operation_id"] == "original-source"
+    runtime.complete(original, {"ok": True, "data": receipt})
+    assert store.one("SELECT count(*) AS n FROM artifacts")["n"] == 1
+
+
+@pytest.mark.parametrize("binding", ["missing", "corrupt", "malformed"])
+def test_artifact_without_original_binding_keeps_safe_receipt_without_publishing(store, binding):
+    runtime, original, receipt = artifact_completion_fixture(store)
+    payload = {"missing": None, "corrupt": "gAAAA-corrupt",
+               "malformed": store.encrypt(json.dumps({"project": {"root": ""}, "args": {}}))}[binding]
+    store.execute("UPDATE operations SET state='needs_review',payload=? WHERE id=?",
+                  (payload, original["id"]))
+    runtime.complete(original, {"ok": True, "data": {**receipt, "private_extra": "not-a-public-receipt"}})
+    saved = store.one("SELECT * FROM operations WHERE id=?", (original["id"],))
+    result = json.loads(operation_history.unseal(store, saved["result"]))
+    assert saved["state"] == "needs_review" and saved["payload"] is None
+    assert result["error"]["code"] == "ARTIFACT_BINDING_UNAVAILABLE"
+    assert result["error"]["artifact_receipt"] == receipt
+    assert store.one("SELECT count(*) AS n FROM artifacts")["n"] == 0
+    runtime.complete(original, {"ok": True, "data": receipt})
+    assert store.one("SELECT count(*) AS n FROM operations")["n"] == 1

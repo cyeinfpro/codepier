@@ -44,6 +44,7 @@
 - [长任务与回执恢复](LONG_OPERATIONS.md)
 - [操作历史隐私与保留边界](OPERATION_HISTORY_PRIVACY.md)
 - [VPS 连接](VPS.md)
+- [Web SSH 运维与故障处理](WEB_SSH_OPERATIONS.md)：浏览器终端、断线恢复、持久会话、容量与升级门禁
 
 - [委托接入与恢复](DELEGATION_CONSUMER_RECOVERY.md)
 - [微信本人任务与长期连接](WEIXIN_OWNER_TASKS.md)
@@ -66,6 +67,8 @@
 
 ## 其他专题与方案
 
+- VPS Web SSH 设计与实施方案：项目内文件 `WEB_SSH_DESIGN_IMPLEMENTATION_20261122.md`，不随公开源码包分发。
+- VPS Web SSH 实现与验收记录：项目内文件 `WEB_SSH_IMPLEMENTATION_20261122.md`，不随公开源码包分发。
 - [AGENT_LIFECYCLE](AGENT_LIFECYCLE.md)
 - [ARCHITECTURE](ARCHITECTURE.md)
 - [CALL_LOG](CALL_LOG.md)

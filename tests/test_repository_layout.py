@@ -53,7 +53,7 @@ def test_lock_generator_resolves_new_inputs_and_keeps_root_outputs(monkeypatch, 
     monkeypatch.setattr(locks, "INPUTS", inputs)
     monkeypatch.setattr(locks.shutil, "which", lambda name: "/reviewed/uv")
     monkeypatch.setattr(locks.subprocess, "run", reviewed_resolver)
-    monkeypatch.setattr(sys, "argv", ["lock_requirements.py", "--check"])
+    monkeypatch.setattr(sys, "argv", ["lock_requirements.py", "--check", "--exclude-newer", "2026-09-24"])
     assert locks.main() == 0
     assert calls == [name + ".in" for name in locks.NAMES]
 

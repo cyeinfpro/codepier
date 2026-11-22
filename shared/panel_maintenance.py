@@ -41,7 +41,9 @@ class PanelMaintenance:
             else 0
         )
         native = len(getattr(getattr(self.runtime, "native", None), "pending", {}))
-        drain_ready = active and not (self.inflight or operations or native)
+        terminals = getattr(self.runtime, "ssh_terminal", None)
+        terminal_busy = active and terminals is not None and terminals.maintenance_busy()
+        drain_ready = active and not (self.inflight or operations or native or terminal_busy)
         return {
             "drain_ready": drain_ready,
             "ready_semantics": "maintenance_drain_only",

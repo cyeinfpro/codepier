@@ -1,0 +1,44 @@
+{
+  "protocol_version": 1,
+  "packages": [
+    {
+      "name": "@xterm/xterm",
+      "version": "6.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@xterm/addon-fit",
+      "version": "0.11.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@xterm/addon-search",
+      "version": "0.16.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@xterm/addon-web-links",
+      "version": "0.12.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@xterm/addon-webgl",
+      "version": "0.19.0",
+      "license": "MIT"
+    }
+  ],
+  "outputs": {
+    "vps-terminal.js": {
+      "bytes": 589227,
+      "sha256": "ea2383836bb00bcfedc99931a4aa8f0fedc106778151122b93c154bd02016f59"
+    },
+    "vps-terminal.css": {
+      "bytes": 17474,
+      "sha256": "e9146f4d990130d9be21d97a0f0f9797be7585413bd8bf0c7c2878f12dd197e1"
+    },
+    "vps-terminal/THIRD_PARTY_NOTICES.txt": {
+      "bytes": 6308,
+      "sha256": "78863e7c92bcf7419d2827a4233c753627ddac455aa6390e4217c8ab8f8efcc0"
+    }
+  }
+}

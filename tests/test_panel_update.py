@@ -309,6 +309,34 @@ def test_failure_boundaries_and_no_stale_data_rollback(tmp_path, monkeypatch, fa
         assert (tmp_path / '.codepier-install.lock').exists()
 
 
+def test_terminal_drain_timeout_keeps_hub_running_and_removes_maintenance_gate(tmp_path, monkeypatch):
+    from scripts import panel_update_runtime as runtime_module
+
+    manager, release = manager_fixture(tmp_path, monkeypatch)
+    runtime = DockerRuntime(tmp_path, manager.runtime.home, {})
+    ticks = iter((0.0, 0.0, 30.0))
+    sleeps = []
+    monkeypatch.setattr(runtime_module, 'time', SimpleNamespace(
+        monotonic=lambda: next(ticks), sleep=sleeps.append, time=lambda: 1000.0,
+    ))
+    monkeypatch.setattr(runtime, 'command', lambda *args, **kwargs: json.dumps({
+        'status': 'ok', 'panel_update': {'ready': False, 'phase': 'draining'},
+    }))
+
+    def quiesce(job):
+        manager.runtime.action('quiesce')
+        runtime.quiesce({**job, 'old_container': 'fixture-running-hub'})
+
+    monkeypatch.setattr(manager.runtime, 'quiesce', quiesce)
+    job = perform(manager, release)
+    assert job['state'] == 'failed' and job['error']['code'] == 'HUB_BUSY'
+    assert sleeps == [1]
+    assert not {'stop', 'copy_data', 'start_target', 'rollback'} & set(manager.runtime.calls)
+    assert manager.runtime.calls[-1] == 'clear_gate'
+    assert not manager.runtime.gate.exists()
+    assert not (tmp_path / '.codepier-install.lock').exists()
+
+
 @pytest.mark.parametrize('phase', ['queued','downloading','building','quiescing','stopping','copying','starting','verifying','committing','committed'])
 def test_restart_does_not_replay_and_preserves_commit_decision(tmp_path, phase):
     manager, release = manager_fixture(tmp_path)
@@ -462,6 +490,53 @@ def test_production_hub_maintenance_and_health(tmp_path,monkeypatch):
         app.state.runtime.panel_maintenance.inflight=0
         (gate_dir/'maintenance.json').unlink()
         assert client.get('/healthz').json()['panel_update']['maintenance'] is False
+
+
+def test_production_health_waits_for_persisted_terminal_outcomes_in_both_db_contexts(tmp_path, monkeypatch):
+    from hub.app import create_app
+
+    gate_dir = tmp_path / 'run'
+    gate_dir.mkdir()
+    monkeypatch.setenv('HUB_PANEL_UPDATE_SOCKET', str(gate_dir / 'updater.sock'))
+    app = create_app(str(tmp_path / 'terminal-hub'))
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        service = runtime.ssh_terminal
+        sid = '11' * 16
+        record = {
+            'id': sid, 'space_id': 'fixture-space', 'owner_user_id': 'fixture-owner',
+            'project_id': 'fixture-project', 'device_id': 'fixture-agent', 'vps_id': 'fixture-vps',
+            'connection_revision': 1, 'binding_id': 'fixture-binding', 'request_id': '22' * 16,
+            'request_fingerprint': 'fixture-fingerprint', 'project_root': '/fixture/project',
+            'runtime_generation': '33' * 16, 'requested_mode': 'tmux', 'mode': 'tmux',
+            'state': 'detached', 'reason_code': None, 'writer_epoch': '1', 'stream_epoch': '1',
+            'cols': 100, 'rows': 30, 'created': 1000.0, 'updated': 1000.0,
+            'metadata': json.dumps({'remote_session_state': 'unknown'}),
+        }
+        client.portal.call(runtime.store.run, service.repository.insert, record)
+        assert not service.sessions  # the restart/eviction path must not depend on Python objects
+        (gate_dir / 'maintenance.json').write_text('{}')
+        for state, remote, expected_ready in (
+            ('detached', 'unknown', False),
+            ('creating', 'unknown', False),
+            ('close_unknown', 'unknown', False),
+            ('failed', 'running', False),
+            ('exited', 'ended', True),
+            ('failed', 'missing', True),
+        ):
+            client.portal.call(runtime.store.run, service.repository.update, sid, {
+                'state': state, 'remote_session_state': remote,
+            })
+            health = client.get('/healthz')
+            assert health.status_code == 200
+            status = health.json()['panel_update']
+            assert status['ready'] is expected_ready
+            assert status['drain_ready'] is expected_ready
+            assert set(status) == {'maintenance', 'ready', 'drain_ready', 'phase', 'ready_semantics'}
+            for worker in (runtime.store.run, runtime.store.run_read):
+                observed = client.portal.call(worker, runtime.panel_maintenance.status)
+                assert observed == status
+        (gate_dir / 'maintenance.json').unlink()
 
 
 @pytest.mark.parametrize('choice',[None,False,True])

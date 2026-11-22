@@ -128,6 +128,9 @@ class Agent:
         self.scheduler_revision = ""
         self.scheduler_error = ""
         self.stop_event = asyncio.Event()
+        from agent.ssh_terminal_link import AgentTerminalLink
+
+        self.ssh_terminal = AgentTerminalLink(self)
         self.connection_number = 0
         self.pending_output: dict[str, dict] = {}
         self.output_wake = asyncio.Event()
@@ -173,6 +176,9 @@ class Agent:
     def check_maintenance_idle(self, operation_id):
         if getattr(self.computer, "session", None):
             raise DevError("COMPUTER_BUSY", "请先结束桌面控制会话，再维护 Agent", 409)
+        terminal = getattr(getattr(self, "ssh_terminal", None), "manager", None)
+        if terminal is not None and terminal.maintenance_busy():
+            raise DevError("AGENT_BUSY", "请先结束 Web SSH 会话并确认远端已结束；仅关闭终端标签不能开始维护", 409)
         busy = [key for key, task in self.jobs.items() if key != operation_id and not task.done()]
         if (
             busy
@@ -688,6 +694,7 @@ class Agent:
                         "native_security_protocol": 1,
                         "native_protocol": 1,
                         "native_chat_protocol": 3,
+                        "ssh_terminal": self.ssh_terminal.capabilities(),
                         **advertisement(self.build.catalog_sha256),
                     },
                 )
@@ -716,6 +723,7 @@ class Agent:
             # so result ACKs are processed during backlog recovery.
             heartbeat = asyncio.create_task(self.heartbeat())
             native_sync = asyncio.create_task(self.native.sync())
+            terminal_link = asyncio.create_task(self.ssh_terminal.run(config, socket))
             try:
                 async for packet in socket:
                     data = await unpack_channel(channel, packet)
@@ -778,6 +786,8 @@ class Agent:
                         await self._cancel_pending_frame(id)
             finally:
                 self.computer_approvals.cancel()
+                terminal_link.cancel()
+                await asyncio.gather(terminal_link, return_exceptions=True)
                 native_sync.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await native_sync
@@ -3056,6 +3066,7 @@ class Agent:
                     pass
         finally:
             self.stop_event.set()
+            await self.ssh_terminal.close()
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()

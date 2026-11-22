@@ -32,7 +32,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--exclude-newer",
-        default="2026-10-24",
+        default="2026-11-22",
         help="PyPI upload-date cutoff, updated explicitly with reviewed pins",
     )
     parser.add_argument(

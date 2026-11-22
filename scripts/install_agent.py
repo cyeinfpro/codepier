@@ -1258,6 +1258,64 @@ def _maintenance_active_count(database, query, state_name):
         ) from error
 
 
+class WebSSHMaintenanceLock:
+    """Exclude live Web SSH across the complete local install transaction.
+
+    This installer is also shipped alone and run with ``python -I`` before the
+    runtime exists. Keep the same stdlib-only file-lock protocol as
+    shared.instance_lock.InstanceLock, without importing an installed package.
+    The stable file must never be unlinked: that would create competing inodes.
+    """
+
+    def __init__(self, base, current):
+        state = Path(current.get("state_dir") or base / "state").expanduser()
+        state.mkdir(parents=True, exist_ok=True)
+        path = state / ".ssh-terminal-activity.lock"
+        self.file = path.open("a+b")
+        try:
+            os.chmod(path, 0o600)
+            if os.name == "nt":
+                import msvcrt
+
+                self.file.seek(0)
+                self.file.write(b"0")
+                self.file.flush()
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self.file.close()
+            raise ValueError(
+                "WEB_SSH_BUSY: Could not acquire the Web SSH maintenance lock. "
+                "Explicitly end Web SSH sessions and confirm remote termination before retrying; "
+                "closing a browser tab does not end a persistent session."
+            ) from exc
+
+    def close(self):
+        if not self.file.closed:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    self.file.seek(0)
+                    msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+            finally:
+                self.file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+
 def require_idle(base, current, *, recover_stale_operations=False):
     """Never infer dead Agent == dead child. Recovery needs explicit local review."""
     import sqlite3
@@ -2359,12 +2417,19 @@ def main():
     config = base / "config.json"
     python = runtime / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     created = False
+    terminal_maintenance = None
     try:
         if current:
             # Recheck after acquiring the install lock; configuration can change
             # between the early preflight and maintenance admission.
             current = read_installed_config(base)
             check_existing_panel_target(current, args.expected_device, args.hub)
+        lock_config = current or (read_installed_config(base) if config.is_file() else {})
+        terminal_maintenance = WebSSHMaintenanceLock(base, lock_config)
+        # Hold through synchronous lifecycle-helper verification/rollback and
+        # Windows service repair. The new Agent starts without taking this
+        # activity lock; only new terminals compete for it. If this process is
+        # killed, the existing .install.lock continues to fence new terminals.
         if args.source:
             install_source(
                 base,
@@ -2656,13 +2721,17 @@ def main():
         else:
             print("Autostart configured. Check the node online state in the panel.")
     finally:
-        # A failed dependency download or expired ticket must remain retryable.
-        if created and not config.exists():
-            shutil.rmtree(runtime)
         try:
-            lock.rmdir()
-        except FileNotFoundError:
-            pass
+            # A failed dependency download or expired ticket must remain retryable.
+            if created and not config.exists():
+                shutil.rmtree(runtime)
+            try:
+                lock.rmdir()
+            except FileNotFoundError:
+                pass
+        finally:
+            if terminal_maintenance is not None:
+                terminal_maintenance.close()
 
 
 if __name__ == "__main__":
