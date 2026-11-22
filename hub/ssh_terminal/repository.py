@@ -46,15 +46,38 @@ CREATE INDEX IF NOT EXISTS vps_terminal_device
 """
 
 TERMINAL_STATES = frozenset({"exited", "failed", "close_unknown"})
-SAFE_METADATA = frozenset({
-    "vps_name", "project_alias", "device_name", "username", "host", "port",
-    "bytes_in", "bytes_out", "exit_status", "attachment_exit_status",
-    "remote_session_state", "output_complete", "recoverability", "tmux_ref", "state_revision", "ssh_connected",
-})
-UPDATE_FIELDS = frozenset({
-    "state", "reason_code", "mode", "runtime_generation", "stream_epoch",
-    "writer_epoch", "cols", "rows",
-})
+SAFE_METADATA = frozenset(
+    {
+        "vps_name",
+        "project_alias",
+        "device_name",
+        "username",
+        "host",
+        "port",
+        "bytes_in",
+        "bytes_out",
+        "exit_status",
+        "attachment_exit_status",
+        "remote_session_state",
+        "output_complete",
+        "recoverability",
+        "tmux_ref",
+        "state_revision",
+        "ssh_connected",
+    }
+)
+UPDATE_FIELDS = frozenset(
+    {
+        "state",
+        "reason_code",
+        "mode",
+        "runtime_generation",
+        "stream_epoch",
+        "writer_epoch",
+        "cols",
+        "rows",
+    }
+)
 
 
 class TerminalRepository:
@@ -96,18 +119,24 @@ class TerminalRepository:
                 if not allow_generation_change:
                     return row
                 metadata["state_revision"] = "0"
-            elif "state_revision" in changes and int(changes["state_revision"]) <= int(metadata.get("state_revision", "0")):
+            elif "state_revision" in changes and int(changes["state_revision"]) <= int(
+                metadata.get("state_revision", "0")
+            ):
                 return row
             values = {key: value for key, value in changes.items() if key in UPDATE_FIELDS}
             metadata.update({key: value for key, value in changes.items() if key in SAFE_METADATA})
             diagnostic = safe_metadata(changes)
             if "stage_timings_ms" in diagnostic:
-                diagnostic["stage_timings_ms"] = {**safe_metadata(metadata).get("stage_timings_ms", {}),
-                                                  **diagnostic["stage_timings_ms"]}
+                diagnostic["stage_timings_ms"] = {
+                    **safe_metadata(metadata).get("stage_timings_ms", {}),
+                    **diagnostic["stage_timings_ms"],
+                }
             metadata.update(diagnostic)
             values.update(metadata=json.dumps(metadata, ensure_ascii=False), updated=time.time())
             self.store.db.execute(
-                "UPDATE vps_terminal_sessions SET " + ",".join(key + "=?" for key in values) + " WHERE id=?",
+                "UPDATE vps_terminal_sessions SET "
+                + ",".join(key + "=?" for key in values)
+                + " WHERE id=?",
                 (*values.values(), sid),
             )
         return self.get(sid)
@@ -122,8 +151,11 @@ class TerminalRepository:
         rows = self.store.all(
             "SELECT space_id,owner_user_id,device_id FROM vps_terminal_sessions WHERE state NOT IN ('exited','failed','close_unknown')"
         )
-        return (len(rows), sum(r["space_id"] == space and r["owner_user_id"] == owner for r in rows),
-                sum(r["device_id"] == device for r in rows))
+        return (
+            len(rows),
+            sum(r["space_id"] == space and r["owner_user_id"] == owner for r in rows),
+            sum(r["device_id"] == device for r in rows),
+        )
 
     def active_device_count(self):
         return self.store.one(
@@ -133,11 +165,26 @@ class TerminalRepository:
 
     @staticmethod
     def public(row):
-        result = {key: row[key] for key in (
-            "id", "project_id", "device_id", "vps_id", "runtime_generation",
-            "requested_mode", "mode", "state", "reason_code", "writer_epoch",
-            "stream_epoch", "cols", "rows", "created", "updated",
-        )}
+        result = {
+            key: row[key]
+            for key in (
+                "id",
+                "project_id",
+                "device_id",
+                "vps_id",
+                "runtime_generation",
+                "requested_mode",
+                "mode",
+                "state",
+                "reason_code",
+                "writer_epoch",
+                "stream_epoch",
+                "cols",
+                "rows",
+                "created",
+                "updated",
+            )
+        }
         result.update(json.loads(row["metadata"]))
         result["session_id"] = row["id"]
         return result

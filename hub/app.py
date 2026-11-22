@@ -54,6 +54,43 @@ from shared.util import VERSION, normalize_url
 BASE = Path(__file__).resolve().parent.parent
 
 
+def _make_lifespan(runtime, oidc, store, instance_lock):
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            await runtime.start()
+            await runtime.ssh_terminal.start()
+            await runtime.panel_agent_rollouts.start()
+            await oidc.start()
+            await runtime.collaboration.loops.start()
+            yield
+        finally:
+            try:
+                try:
+                    try:
+                        await runtime.panel_agent_rollouts.stop()
+                    finally:
+                        await oidc.stop()
+                finally:
+                    try:
+                        try:
+                            await runtime.collaboration.loops.stop()
+                        finally:
+                            await runtime.gateway.close()
+                    finally:
+                        try:
+                            await runtime.ssh_terminal.stop()
+                        finally:
+                            await runtime.stop()
+            finally:
+                try:
+                    await store.aclose()
+                finally:
+                    instance_lock.close()
+
+    return lifespan
+
+
 def create_app(data_dir: str | None = None):
     from hub.collaboration.config import CollaborationConfig
     from hub.collaboration.room_host_rollout import resolve_startup_mode
@@ -102,43 +139,10 @@ def create_app(data_dir: str | None = None):
             legacy_public_url=public_url,
         )
 
-        @asynccontextmanager
-        async def lifespan(app):
-            try:
-                await runtime.start()
-                await runtime.ssh_terminal.start()
-                await runtime.panel_agent_rollouts.start()
-                await oidc.start()
-                await runtime.collaboration.loops.start()
-                yield
-            finally:
-                try:
-                    try:
-                        try:
-                            await runtime.panel_agent_rollouts.stop()
-                        finally:
-                            await oidc.stop()
-                    finally:
-                        try:
-                            try:
-                                await runtime.collaboration.loops.stop()
-                            finally:
-                                await runtime.gateway.close()
-                        finally:
-                            try:
-                                await runtime.ssh_terminal.stop()
-                            finally:
-                                await runtime.stop()
-                finally:
-                    try:
-                        await store.aclose()
-                    finally:
-                        instance_lock.close()
-
         app = FastAPI(
             title="CodePier Hub",
             version=VERSION,
-            lifespan=lifespan,
+            lifespan=_make_lifespan(runtime, oidc, store, instance_lock),
             docs_url=None,
             redoc_url=None,
             openapi_url=None,

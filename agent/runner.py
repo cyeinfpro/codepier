@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 import websockets
 from agent.async_work import disk_call
+from agent.communication import MetadataSampler
+from agent.connection_diagnostics import safe_connection_error
 from agent.filesystem import FileEngine
 from agent.core_files import CoreFiles
 from agent import workspace_probe
@@ -77,6 +79,9 @@ from shared.instance_lock import InstanceLock
 
 
 LOGGER = logging.getLogger("codepier.agent")
+HEARTBEAT_INTERVAL_SECONDS = 12.0
+OUTBOX_INTERVAL_SECONDS = 12.0
+PACK_TIMEOUT_SECONDS = 10.0
 
 
 def _response_page_budget(request):
@@ -121,12 +126,7 @@ class Agent:
         self.active_roots: set[Path] = set()
         self._active_slots: dict[object, tuple[Path, bool]] = {}
         self._waiting_writes: list[tuple[object, Path]] = []
-        self.resources = ResourceQueue()
-        self.scheduler = ProjectScheduler(self.config.get("scheduler"), resources=self.resources)
-        self.resource_sampler = ResourceSampler()
-        self.scheduler_requested = {}
-        self.scheduler_revision = ""
-        self.scheduler_error = ""
+        self._initialize_scheduler_state()
         self.stop_event = asyncio.Event()
         from agent.ssh_terminal_link import AgentTerminalLink
 
@@ -146,6 +146,10 @@ class Agent:
         self._queued_ack_ids: set[str] = set()
         self._ack_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
+        self.metadata = MetadataSampler(self.build, self.lifecycle)
+        self._metadata_task = None
+        self._outbox_task = None
+        self._outbox_wake = asyncio.Event()
         self.lifecycle.activity_check = self.check_maintenance_idle
 
     def _initialize_services(self):
@@ -178,7 +182,11 @@ class Agent:
             raise DevError("COMPUTER_BUSY", "请先结束桌面控制会话，再维护 Agent", 409)
         terminal = getattr(getattr(self, "ssh_terminal", None), "manager", None)
         if terminal is not None and terminal.maintenance_busy():
-            raise DevError("AGENT_BUSY", "请先结束 Web SSH 会话并确认远端已结束；仅关闭终端标签不能开始维护", 409)
+            raise DevError(
+                "AGENT_BUSY",
+                "请先结束 Web SSH 会话并确认远端已结束；仅关闭终端标签不能开始维护",
+                409,
+            )
         busy = [key for key, task in self.jobs.items() if key != operation_id and not task.done()]
         if (
             busy
@@ -199,15 +207,21 @@ class Agent:
         except DevError as exc:
             raise ValueError("Agent 配置读取期间发生变化，保留原运行配置") from exc
 
-    async def send(self, body: dict):
+    async def send(self, body: dict, *, expected_socket=None):
         from agent.send_priority import is_bulk
 
         async with self.send_lock.hold(is_bulk(body)):
             socket, channel = self.socket, self.channel
+            if expected_socket is not None and socket is not expected_socket:
+                return False
             if not socket or not channel:
                 return False
             try:
-                packed = await pack_channel(channel, body)
+                # Large envelopes use the default worker pool. A stalled
+                # worker must not hold this socket's priority gate indefinitely.
+                # Timeout discards this captured channel; a late pure-crypto
+                # result is never sent or reused by the replacement connection.
+                packed = await asyncio.wait_for(pack_channel(channel, body), PACK_TIMEOUT_SECONDS)
                 payload_bytes = len(packed) if isinstance(packed, (str, bytes)) else 0
                 send_timeout = max(10.0, 10.0 + (payload_bytes / (1024 * 1024)) * 2.0)
                 await asyncio.wait_for(socket.send(packed), send_timeout)
@@ -415,35 +429,65 @@ class Agent:
             }
             self.output_wake.set()
 
-    async def report_outbox(self):
+    async def report_outbox(self, *, expected_socket=None):
         for item in await self.disk_call(self.journal.outbox):
-            if not await self.send({"type": "result", **item}):
-                break
+            if expected_socket is not None:
+                if self.socket is not expected_socket:
+                    return False
+                sent = await self.send({"type": "result", **item}, expected_socket=expected_socket)
+            else:
+                sent = await self.send({"type": "result", **item})
+            if not sent:
+                return False
+        return True
+
+    async def outbox_sender(self):
+        """One receipt-recovery task for the process, independent of heartbeats."""
+        while not self.stop_event.is_set():
+            self._outbox_wake.clear()
+            socket = self.socket
+            if socket is not None:
+                try:
+                    await self.report_outbox(expected_socket=socket)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.warning("结果补发异常（%s）；保留原回执等待恢复", type(exc).__name__)
+                    # A late worker failure belongs to the captured connection,
+                    # never a replacement authenticated socket.
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(socket.close(), 1)
+                if self.socket is not socket:
+                    continue  # Re-read durable ACK state on the current channel.
+            try:
+                await asyncio.wait_for(self._outbox_wake.wait(), OUTBOX_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
 
     async def heartbeat(self):
         socket = self.socket
         try:
             while not self.stop_event.is_set():
-                await self.send(
-                    {
-                        "type": "heartbeat",
-                        "at": time.time(),
-                        "running": len(self.jobs),
-                        "build": self.build.describe(),
-                        "management": self.lifecycle.describe(),
-                        **self.job_counts(),
-                        "scheduler": self.scheduler.snapshot(),
-                        "admission": self.scheduler.admission_snapshot(),
-                        "scheduler_revision": self.scheduler_revision,
-                        "scheduler_error": self.scheduler_error,
-                        "device_actions": self.lifecycle.actions(),
-                    }
-                )
-                await self.report_outbox()
-                await asyncio.sleep(12)
+                if socket is not None and self.socket is not socket:
+                    return
+                body = {
+                    "type": "heartbeat",
+                    "at": time.time(),
+                    "running": len(self.jobs),
+                    **self.metadata.snapshot(),
+                    **self.job_counts(),
+                    "scheduler": self.scheduler.snapshot(),
+                    "admission": self.scheduler.admission_snapshot(),
+                    "scheduler_revision": self.scheduler_revision,
+                    "scheduler_error": self.scheduler_error,
+                }
+                if socket is None:
+                    await self.send(body)
+                elif not await self.send(body, expected_socket=socket):
+                    return
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
         except Exception:
-            # End the reader too, so a failed outbox task cannot silently leave
-            # an apparently connected Agent that no longer reports results.
+            # Only this heartbeat's captured reader is ended on failure.
             if socket is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(socket.close(), 1)
@@ -634,6 +678,26 @@ class Agent:
             self.transfer_tasks.add(task)
             task.add_done_callback(self.transfer_done)
 
+    def _initialize_scheduler_state(self) -> None:
+        self.resources = ResourceQueue()
+        self.scheduler = ProjectScheduler(self.config.get("scheduler"), resources=self.resources)
+        self.resource_sampler = ResourceSampler()
+        self.scheduler_requested = {}
+        self.scheduler_revision = ""
+        self.scheduler_error = ""
+
+    def _activate_hub_connection(self, socket, channel) -> None:
+        self.socket, self.channel = socket, channel
+        self.runtime_reload_pending = False
+        self.connection_number += 1
+        LOGGER.info(
+            "已连接面板；设备 %s；授权目录 %s 个。",
+            self.config["device_id"],
+            len(self.config["allowed_roots"]),
+        )
+
+        self.output_wake.set()
+
     async def connect_once(self):
         from agent.project_runtime import advertised_profiles
 
@@ -672,15 +736,13 @@ class Agent:
                         "channel_binding": binding,
                         "name": config.get("name", platform.node()),
                         "version": VERSION,
-                        "build": self.build.describe(),
+                        **self.metadata.snapshot(),
                         "platform": platform.system(),
                         "hostname": platform.node(),
                         "python": platform.python_version(),
                         "roots": config["allowed_roots"],
                         "capabilities": list(TOOLS),
                         "computer_enabled": config.get("computer", {}).get("enabled") is True,
-                        "management": self.lifecycle.describe(),
-                        "device_actions": self.lifecycle.actions(),
                         "scheduler_protocol": 1,
                         "resource_semantics_protocol": 2,
                         "queue_deadline_protocol": 1,
@@ -710,17 +772,10 @@ class Agent:
             )
             if self.stop_event.is_set() or self.config is not config:
                 return
-            self.socket, self.channel = socket, channel
-            self.runtime_reload_pending = False
-            self.connection_number += 1
-            LOGGER.info(
-                "已连接面板；设备 %s；授权目录 %s 个。",
-                self.config["device_id"],
-                len(self.config["allowed_roots"]),
-            )
-            self.output_wake.set()
-            # heartbeat sends the outbox concurrently with the socket reader,
-            # so result ACKs are processed during backlog recovery.
+            self._activate_hub_connection(socket, channel)
+            self._outbox_wake.set()
+            # Process-owned outbox recovery continues independently while this
+            # connection reads ACKs. Its old pages are fenced from replacements.
             heartbeat = asyncio.create_task(self.heartbeat())
             native_sync = asyncio.create_task(self.native.sync())
             terminal_link = asyncio.create_task(self.ssh_terminal.run(config, socket))
@@ -1323,6 +1378,19 @@ class Agent:
             ],
         }
 
+    async def _execution_metadata(self, tool, project, spec, root):
+        if tool != "agent_diagnostics":
+            return execution_info(self.config, project, spec, root)
+        observed = await self.metadata.refresh()
+        return {
+            "build": observed["build"],
+            "metadata_observation": self.metadata.observation(),
+            **self.job_counts(),
+            "scheduler": self.scheduler.snapshot(project.get("id") or canonical_path(root)),
+            "telemetry_errors": self.telemetry.errors,
+            "telemetry_dropped": getattr(self.telemetry, "dropped", 0),
+        }
+
     async def handle(self, request):
         id = request["id"]
         not_after = request.get("not_after")
@@ -1540,21 +1608,9 @@ class Agent:
                 result = await self._committed_io(runtime_settings_call, self, tool, project, args)
             elif tool in {"execution_info", "agent_diagnostics"}:
                 TOOLS[tool].model.model_validate(args)
-                root, spec = self.engine.root(project)
+                root, spec = await self.disk_call(self.engine.root, project)
                 await self._begin_operation(id, tool, args, deadline=not_after)
-                result = (
-                    {
-                        "build": self.build.describe(),
-                        **self.job_counts(),
-                        "scheduler": self.scheduler.snapshot(
-                            project.get("id") or canonical_path(root)
-                        ),
-                        "telemetry_errors": self.telemetry.errors,
-                        "telemetry_dropped": getattr(self.telemetry, "dropped", 0),
-                    }
-                    if tool == "agent_diagnostics"
-                    else execution_info(self.config, project, spec, root)
-                )
+                result = await self._execution_metadata(tool, project, spec, root)
             elif tool in COMPUTER_TOOLS:
                 args = TOOLS[tool].model.model_validate(args).model_dump()
                 self.engine.root(project, tool in MUTATING and tool != "computer_session_close")
@@ -3027,15 +3083,29 @@ class Agent:
             with contextlib.suppress(Exception):
                 await self._journal_persist_task
 
-    async def run(self):
-        await self.integrations.start()
-        self.computer.start_guard()
-        self._read_pool = workspace_probe.ReadPool(scheduler=self.scheduler)
+    async def _stop_terminal_service(self) -> None:
+        self.stop_event.set()
+        await self.ssh_terminal.close()
+
+    def _start_periodic_observers(self):
         watcher = asyncio.create_task(self.watch_config())
         sender = asyncio.create_task(self.output_sender())
         scheduler_monitor = asyncio.create_task(self.watch_scheduler())
         journal_maintenance = asyncio.create_task(self.maintain_journal())
         run_cleanup = asyncio.create_task(self.maintain_run_directories())
+        self._metadata_task = asyncio.create_task(
+            self.metadata.run(self.stop_event), name="agent-metadata"
+        )
+        self._outbox_task = asyncio.create_task(self.outbox_sender(), name="agent-outbox")
+        return watcher, sender, scheduler_monitor, journal_maintenance, run_cleanup
+
+    async def run(self):
+        await self.integrations.start()
+        self.computer.start_guard()
+        self._read_pool = workspace_probe.ReadPool(scheduler=self.scheduler)
+        watcher, sender, scheduler_monitor, journal_maintenance, run_cleanup = (
+            self._start_periodic_observers()
+        )
         stopping = asyncio.create_task(self.stop_event.wait())
         from agent.brand_upgrade import watch as watch_brand_upgrade
 
@@ -3058,15 +3128,16 @@ class Agent:
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    LOGGER.warning("连接断开（%s）；将按原连接退避策略恢复", type(exc).__name__)
+                    LOGGER.warning(
+                        "连接断开；安全诊断 %s；将按原连接退避策略恢复", safe_connection_error(exc)
+                    )
                 delay, reconnect_after = self._reconnect_delay(delay, before)
                 try:
                     await asyncio.wait_for(self.stop_event.wait(), reconnect_after)
                 except asyncio.TimeoutError:
                     pass
         finally:
-            self.stop_event.set()
-            await self.ssh_terminal.close()
+            await self._stop_terminal_service()
             await self.scheduler.close()
             await self.computer.close()
             await self.integrations.close()
@@ -3083,12 +3154,17 @@ class Agent:
                 review_cleanup,
                 journal_maintenance,
                 run_cleanup,
+                self._metadata_task,
+                self._outbox_task,
             ] + ([connection] if connection else [])
             for task in background:
                 task.cancel()
             await asyncio.gather(*background, return_exceptions=True)
             try:
-                await self._finish_shutdown_jobs()
+                try:
+                    await self.metadata.close()
+                finally:
+                    await self._finish_shutdown_jobs()
             finally:
                 await self._close_run_state()
 

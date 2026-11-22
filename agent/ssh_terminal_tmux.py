@@ -24,7 +24,9 @@ class TmuxReference:
         return cls("codepier_" + ident, "cp_" + ident)
 
     def prefix(self):
-        if not re.fullmatch(r"codepier_[0-9a-f]{32}", self.socket) or not re.fullmatch(r"cp_[0-9a-f]{32}", self.session):
+        if not re.fullmatch(r"codepier_[0-9a-f]{32}", self.socket) or not re.fullmatch(
+            r"cp_[0-9a-f]{32}", self.session
+        ):
             raise SSHTransportError("INVALID_TMUX_REFERENCE", "持久会话引用无效")
         return "tmux -u -L " + shlex.quote(self.socket) + " -f /dev/null"
 
@@ -61,10 +63,16 @@ class TmuxController:
         )
         if status == 0:
             return True
-        missing = any(marker in output.lower() for marker in (
-            b"no such file or directory", b"no server running", b"can't find session",
-            b"cannot find session", b"session not found",
-        ))
+        missing = any(
+            marker in output.lower()
+            for marker in (
+                b"no such file or directory",
+                b"no server running",
+                b"can't find session",
+                b"cannot find session",
+                b"session not found",
+            )
+        )
         if status == 1 and missing:
             return False
         raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "无法确认持久会话状态")
@@ -73,9 +81,12 @@ class TmuxController:
         if await self.exists():
             raise SSHTransportError("REMOTE_SESSION_EXISTS", "该持久会话已经存在，请恢复原会话")
         command = (
-            self.reference.prefix() + " start-server"
-            + " \\; set-option -g history-limit " + str(self.config.tmux_history_lines)
-            + " \\; new-session -d -s " + shlex.quote(self.reference.session)
+            self.reference.prefix()
+            + " start-server"
+            + " \\; set-option -g history-limit "
+            + str(self.config.tmux_history_lines)
+            + " \\; new-session -d -s "
+            + shlex.quote(self.reference.session)
             + f" -x {int(cols)} -y {int(rows)}"
             + " \\; set-option -g destroy-unattached off"
             + " \\; set-option -s exit-empty on"
@@ -98,7 +109,9 @@ class TmuxController:
     def attach_command(self):
         # -d only detaches clients of this randomly named dedicated session.
         # There is deliberately no `new-session -A` recovery path.
-        return self.reference.prefix() + " attach-session -d -t " + shlex.quote(self.reference.session)
+        return (
+            self.reference.prefix() + " attach-session -d -t " + shlex.quote(self.reference.session)
+        )
 
     async def close(self):
         if not await self.exists():

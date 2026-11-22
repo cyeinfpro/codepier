@@ -313,6 +313,25 @@ sqlite3 -readonly /path/to/actual-hub-state/hub.sqlite3 \
 
 实际状态目录可能由 `HUB_STATE_DIR` 与稳定文件目录分离，按 [状态布局实现](../hub/state_layout.py) 核对。不要直接修改 writer/stream epoch、目标修订号、状态字段或删除运行中的会话来解除限制；这会破坏恢复与控制权校验。诊断截图、数据库摘录和日志按项目既有私有证据规范保存。
 
+### 8.1 主通道心跳与磁盘延迟
+
+Web SSH 的独立通道仍依赖主 Agent 连接的授权身份。排查间歇离线时，应同时记录主通道连接事件与终端会话状态；相同的最后上报版本或进程实例号不能单独证明此刻本机进程仍存活。需要结合实际进程与当前在线时间核对。
+
+从 1.34.2 起，主通道心跳与 hello 仅使用内存元数据快照。源码指纹、受管安装信息由单个受控子进程读取，主事件循环只使用有时效的快照，默认每轮完成后等待 12 秒；一次观察自开始超过 36 秒后不再视为新鲜。快照的 `build.observation_state` 为 `pending`、`fresh`、`stale` 或 `failed`，其中 `pending`、`stale`、`failed` 均设置 `source_verified=false` 并撤下管理动作广告。`restart_required` 保留最后实际比对结论，过期本身不表示必须重启。显式 `agent_diagnostics` 另返回采样时间、年龄与进行中状态；这些递增数值不进入周期心跳的持久 build 字段。[采样实现](../agent/communication.py)、[心跳与恢复](../agent/runner.py)
+
+结果补发使用另一个进程级单任务；心跳不等待它，主连接清理也不等待其磁盘读取。旧连接读到的结果页不能发送到替换连接；新连接重新读取持久确认状态，未确认结果仍沿用原操作 ID。加密打包另有 10 秒超时，线程池拥塞时丢弃原通道并释放发送锁，迟到的加密结果不发送到替换连接。该设计保留既有命令幂等语义。关停会取消元数据采样并回收它所属的子进程；这不意味着任意任务或结果补发的底层 I/O 都可被强制中断。
+
+主通道断开日志只增加异常类型、实际收发关闭代码和 `keepalive_timeout`、`timeout`、`no_close_frame`、`closed`、`other` 五种原因分类，不记录任意关闭原因文本。分类是排查信号，不能单独证明网络或磁盘根因。不要开启 WebSocket TRACE 作为常规诊断方式，TRACE 可能暴露业务帧内容。[安全日志字段](../agent/connection_diagnostics.py)
+
+以下回归采用临时身份和真实回环 WebSocket，验证有界读取延迟期间的心跳与重连，不代替生产故障根因分析或真实目标 VPS 验收：
+
+```bash
+.venv-web-ssh/bin/python -m pytest -q \
+  tests/test_agent_communication_resilience.py \
+  tests/test_agent_connection_diagnostics.py \
+  tests/test_agent_heartbeat_transport_real.py
+```
+
 ## 9. 回归命令与验收边界
 
 遵循 [开发与验证](DEVELOPMENT.md)、[验证工具索引](VERIFICATION_TOOLS.md) 和 [review-and-verify](../skills/review-and-verify/SKILL.md)。使用 Python 3.13、前端构建 Node.js 24，以及本次代码对应的哈希锁。新环境示例：
@@ -366,12 +385,12 @@ webssh_browser_dir="$(mktemp -d /tmp/codepier-webssh-browser.XXXXXX)"
   tests/test_ssh_terminal_agent.py -k tmux_create_recover_close_never_creates_during_recovery
 ```
 
-面板终端测试对 Chromium 和 WebKit 分别运行，使用真实 app 路由和 xterm、浏览器本地 HTTP/WS 夹具，覆盖懒加载、桌面/手机布局、底部辅助键实际命中、分屏重挂载、DOM 保留、关闭标签、Space 清理、诊断快照、项目选择与升级提示。现有 VPS UI 测试覆盖 Chromium/WebKit 基础管理回归。独立 `tests/vps_terminal_browser_smoke.mjs` 另覆盖真实 xterm 的输入、Ctrl-C、中文文本插入、搜索、粘贴预览、认证清空、诊断与手机辅助键；它要求测试环境中可解析与浏览器缓存匹配的 Node `playwright` 包，Python Playwright 安装不会自动提供这个 Node 包。Python 与 Node 的包版本号相同也不保证内置浏览器 revision 相同，分别使用各自安装的官方 CLI 准备浏览器；缺少指定 revision 时不要通过重命名缓存或软链接伪装匹配。中文文本插入不等同于真实系统 IME 验收，窄屏桌面浏览器不等同于移动真机。
+面板终端测试对 Chromium 和 WebKit 分别运行，使用真实 app 路由和 xterm、浏览器本地 HTTP/WS 夹具，覆盖懒加载、桌面/手机布局、底部辅助键实际命中、分屏重挂载、DOM 保留、关闭标签、Space 清理、诊断快照、项目选择与升级提示。现有 VPS UI 测试覆盖 Chromium/WebKit 基础管理回归。独立 `tests/browser_smoke/vps_terminal_browser_smoke.mjs` 另覆盖真实 xterm 的输入、Ctrl-C、中文文本插入、搜索、粘贴预览、认证清空、诊断与手机辅助键；它要求测试环境中可解析与浏览器缓存匹配的 Node `playwright` 包，Python Playwright 安装不会自动提供这个 Node 包。Python 与 Node 的包版本号相同也不保证内置浏览器 revision 相同，分别使用各自安装的官方 CLI 准备浏览器；缺少指定 revision 时不要通过重命名缓存或软链接伪装匹配。中文文本插入不等同于真实系统 IME 验收，窄屏桌面浏览器不等同于移动真机。
 
 ```bash
 # 仅在已准备 Node Playwright 及其浏览器的隔离测试环境运行。
-CODEPIER_BROWSER_ENGINE=chromium node tests/vps_terminal_browser_smoke.mjs
-CODEPIER_BROWSER_ENGINE=webkit node tests/vps_terminal_browser_smoke.mjs
+CODEPIER_BROWSER_ENGINE=chromium node tests/browser_smoke/vps_terminal_browser_smoke.mjs
+CODEPIER_BROWSER_ENGINE=webkit node tests/browser_smoke/vps_terminal_browser_smoke.mjs
 ```
 
 将 `CODEPIER_BROWSER_EVIDENCE_DIR` 设置为本轮私有证据目录，例如 `.work/webssh-validation/screenshots`，可分别保存各引擎的布局和诊断截图。Chromium smoke 使用获准的真实浏览器剪贴板；WebKit 使用合成剪贴板事件检验实际 DOM 粘贴处理器，不把该结果算作操作系统剪贴板权限验证。全部 HTTP/WS 夹具测试仍不能代替真实浏览器与目标 VPS 联合验收。

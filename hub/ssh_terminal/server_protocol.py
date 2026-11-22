@@ -62,8 +62,11 @@ class TerminalAwareWebSocketProtocol(WebSocketsSansIOProtocol):
                 # Repeated selection in handle_connect must keep the same queue.
                 self.queue = _TerminalReceiveQueue()
             limits = TerminalConfig.from_env()
-            maximum = (max(limits.control_bytes, limits.input_frame_bytes + HEADER_SIZE)
-                       if browser else 192 * 1024)
+            maximum = (
+                max(limits.control_bytes, limits.input_frame_bytes + HEADER_SIZE)
+                if browser
+                else 192 * 1024
+            )
             # websockets 17 splits the constructor's max_size into two
             # parser limits. Setting an unused max_size attribute is unsafe.
             self.conn.max_message_size = self.conn.max_fragment_size = maximum
@@ -116,8 +119,10 @@ class TerminalAwareWebSocketProtocol(WebSocketsSansIOProtocol):
         # TCP may deliver many small messages in one read before pause_reading
         # takes effect. Bound their ASGI queue too, not only each message size.
         over_count = self.queue.qsize() >= self.terminal_queue_messages
-        over_bytes = (isinstance(self.queue, _TerminalReceiveQueue)
-                      and self.queue.payload_bytes + sum(map(len, self.frames)) > self.agent_queue_bytes)
+        over_bytes = (
+            isinstance(self.queue, _TerminalReceiveQueue)
+            and self.queue.payload_bytes + sum(map(len, self.frames)) > self.agent_queue_bytes
+        )
         if self.terminal_connection and not self.close_sent and (over_count or over_bytes):
             self.frames = []
             if self.conn.state is not State.OPEN:

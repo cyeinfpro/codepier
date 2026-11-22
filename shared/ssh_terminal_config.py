@@ -54,39 +54,67 @@ class TerminalConfig:
     tmux_history_lines: int = 10000
 
     ENV_PREFIX: ClassVar[str] = "CODEPIER_SSH_TERMINAL_"
-    _TIME_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "heartbeat_seconds", "ssh_keepalive_interval", "ticket_ttl_seconds",
-        "auth_timeout_seconds", "lease_seconds", "lease_renew_seconds",
-        "direct_detach_seconds", "attachment_grace_seconds", "connect_timeout",
-        "login_timeout", "write_timeout", "shutdown_timeout",
-    })
+    _TIME_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "heartbeat_seconds",
+            "ssh_keepalive_interval",
+            "ticket_ttl_seconds",
+            "auth_timeout_seconds",
+            "lease_seconds",
+            "lease_renew_seconds",
+            "direct_detach_seconds",
+            "attachment_grace_seconds",
+            "connect_timeout",
+            "login_timeout",
+            "write_timeout",
+            "shutdown_timeout",
+        }
+    )
     _RANGES: ClassVar[dict[str, tuple[float, float]]] = {
-        "frame_bytes": (256, 65536), "input_frame_bytes": (256, 65536),
-        "control_bytes": (1024, 65536), "ring_bytes": (65536, 64 * 1024 * 1024),
+        "frame_bytes": (256, 65536),
+        "input_frame_bytes": (256, 65536),
+        "control_bytes": (1024, 65536),
+        "ring_bytes": (65536, 64 * 1024 * 1024),
         "output_high_water_bytes": (4096, 4 * 1024 * 1024),
         "output_low_water_bytes": (0, 4 * 1024 * 1024),
         "hub_relay_bytes": (8192, 16 * 1024 * 1024),
         "ssh_window_bytes": (4096, 4 * 1024 * 1024),
         "pending_input_bytes": (4096, 1024 * 1024),
         "paste_bytes": (4096, 4 * 1024 * 1024),
-        "resize_coalesce_ms": (0, 1000), "heartbeat_seconds": (1, 120),
-        "ssh_keepalive_interval": (1, 120), "ssh_keepalive_count": (1, 10),
-        "ticket_ttl_seconds": (5, 120), "auth_timeout_seconds": (1, 30),
-        "lease_seconds": (5, 120), "lease_renew_seconds": (1, 60),
-        "direct_detach_seconds": (0, 3600), "attachment_grace_seconds": (0, 120),
-        "connect_timeout": (1, 120), "login_timeout": (1, 120),
-        "write_timeout": (0.1, 30), "shutdown_timeout": (0.1, 30),
-        "max_sessions_per_user": (1, 128), "max_sessions_per_agent": (1, 256),
+        "resize_coalesce_ms": (0, 1000),
+        "heartbeat_seconds": (1, 120),
+        "ssh_keepalive_interval": (1, 120),
+        "ssh_keepalive_count": (1, 10),
+        "ticket_ttl_seconds": (5, 120),
+        "auth_timeout_seconds": (1, 30),
+        "lease_seconds": (5, 120),
+        "lease_renew_seconds": (1, 60),
+        "direct_detach_seconds": (0, 3600),
+        "attachment_grace_seconds": (0, 120),
+        "connect_timeout": (1, 120),
+        "login_timeout": (1, 120),
+        "write_timeout": (0.1, 30),
+        "shutdown_timeout": (0.1, 30),
+        "max_sessions_per_user": (1, 128),
+        "max_sessions_per_agent": (1, 256),
         "max_sessions_per_hub": (1, 1024),
         "agent_buffer_bytes": (1024 * 1024, 2 * 1024 * 1024 * 1024),
         "hub_buffer_bytes": (1024 * 1024, 2 * 1024 * 1024 * 1024),
-        "min_cols": (1, 1000), "max_cols": (1, 1000),
-        "min_rows": (1, 500), "max_rows": (1, 500),
-        "input_receipts": (1, 8192), "scrollback_lines": (0, 100000),
+        "min_cols": (1, 1000),
+        "max_cols": (1, 1000),
+        "min_rows": (1, 500),
+        "max_rows": (1, 500),
+        "input_receipts": (1, 8192),
+        "scrollback_lines": (0, 100000),
         "tmux_history_lines": (0, 100000),
     }
 
     def __post_init__(self) -> None:
+        self._check_numeric_fields()
+        self._check_flow_limits()
+        self._check_session_limits()
+
+    def _check_numeric_fields(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
             expected = (int, float) if field.name in self._TIME_FIELDS else (int,)
@@ -95,6 +123,8 @@ class TerminalConfig:
             low, high = self._RANGES[field.name]
             if not low <= value <= high or not math.isfinite(value):
                 raise ValueError(f"{field.name} must be between {low:g} and {high:g}")
+
+    def _check_flow_limits(self) -> None:
         if not self.output_low_water_bytes < self.output_high_water_bytes:
             raise ValueError("output low water must be below high water")
         if self.frame_bytes > self.output_high_water_bytes:
@@ -107,6 +137,8 @@ class TerminalConfig:
             raise ValueError("pending input budget must fit an input frame")
         if self.paste_bytes < self.input_frame_bytes:
             raise ValueError("paste limit must fit an input frame")
+
+    def _check_session_limits(self) -> None:
         if self.lease_renew_seconds >= self.lease_seconds:
             raise ValueError("authority lease must outlive its renewal interval")
         if self.auth_timeout_seconds > self.ticket_ttl_seconds:
@@ -142,19 +174,31 @@ class TerminalConfig:
     def public_limits(self) -> dict[str, int | float]:
         """Non-secret browser limits, using the same snake_case wire names."""
         names = (
-            "frame_bytes", "input_frame_bytes", "control_bytes",
-            "output_high_water_bytes", "output_low_water_bytes", "pending_input_bytes",
-            "paste_bytes", "resize_coalesce_ms", "heartbeat_seconds",
-            "auth_timeout_seconds", "min_cols", "max_cols", "min_rows", "max_rows",
+            "frame_bytes",
+            "input_frame_bytes",
+            "control_bytes",
+            "output_high_water_bytes",
+            "output_low_water_bytes",
+            "pending_input_bytes",
+            "paste_bytes",
+            "resize_coalesce_ms",
+            "heartbeat_seconds",
+            "auth_timeout_seconds",
+            "min_cols",
+            "max_cols",
+            "min_rows",
+            "max_rows",
             "scrollback_lines",
         )
         result = {name: getattr(self, name) for name in names}
-        result.update({
-            "output_pending_bytes": self.output_high_water_bytes + self.frame_bytes,
-            "heartbeat_timeout_seconds": self.heartbeat_seconds * 3,
-            "reconnect_max_ms": 8000,
-            "max_user_sessions": self.max_sessions_per_user,
-        })
+        result.update(
+            {
+                "output_pending_bytes": self.output_high_water_bytes + self.frame_bytes,
+                "heartbeat_timeout_seconds": self.heartbeat_seconds * 3,
+                "reconnect_max_ms": 8000,
+                "max_user_sessions": self.max_sessions_per_user,
+            }
+        )
         return result
 
 

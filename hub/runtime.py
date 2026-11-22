@@ -3632,7 +3632,10 @@ class Runtime:
             try:
                 self.artifacts.register_result(op, result.get("data") or {})
             except DevError as exc:
-                result = {"ok": False, "error": {"code": exc.code, "message": exc.message, **exc.details}}
+                result = {
+                    "ok": False,
+                    "error": {"code": exc.code, "message": exc.message, **exc.details},
+                }
         self.diagnostics.ingest(op["id"], result.get("trace"))
         encoded = json.dumps(result, ensure_ascii=False)
         from hub.operation_history import seal, unseal
@@ -3746,6 +3749,9 @@ class Runtime:
             # Completion must still commit; configured adapters retain the atomic outbox.
             if self.collaboration.events is not None:
                 self.collaboration.events.operation_completed(op["id"])
+        self._finalize_completion(op, result, state, error, data)
+
+    def _finalize_completion(self, op, result, state, error, data):
         # Capture only non-secret completion evidence from the old in-memory
         # request. The durable encrypted payload was already cleared above.
         ctx = self._evidence_contexts.pop(op["id"], None)

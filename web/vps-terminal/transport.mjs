@@ -95,7 +95,9 @@ export class TerminalTransport {
   }
 
   async connect({ manual = false } = {}) {
-    if (this.disposed || this.connecting || (this.isOpen() && this.attachment)) return;
+    // The socket owns the connection intent from construction onward,
+    // including the unauthenticated and OTP windows before an attachment.
+    if (this.disposed || this.connecting || this.socket) return;
     if (manual) {
       this.retryAttempts = 0;
       this.pauseReconnect = false;

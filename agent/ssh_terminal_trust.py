@@ -26,10 +26,17 @@ class HostTrustError(Exception):
 _LOCK = threading.RLock()
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _MAX_CONFIG_FILES = 32
-_TRUST_DIRECTIVES = frozenset({
-    "userknownhostsfile", "globalknownhostsfile", "hostkeyalias",
-    "knownhostscommand", "verifyhostkeydns", "revokedhostkeys", "checkhostip",
-})
+_TRUST_DIRECTIVES = frozenset(
+    {
+        "userknownhostsfile",
+        "globalknownhostsfile",
+        "hostkeyalias",
+        "knownhostscommand",
+        "verifyhostkeydns",
+        "revokedhostkeys",
+        "checkhostip",
+    }
+)
 
 
 def default_sources(home: Path | None = None) -> tuple[Path, ...]:
@@ -39,9 +46,59 @@ def default_sources(home: Path | None = None) -> tuple[Path, ...]:
     else:
         system = Path("/etc/ssh")
     return (
-        home / ".ssh/known_hosts", home / ".ssh/known_hosts2",
-        system / "ssh_known_hosts", system / "ssh_known_hosts2",
+        home / ".ssh/known_hosts",
+        home / ".ssh/known_hosts2",
+        system / "ssh_known_hosts",
+        system / "ssh_known_hosts2",
     )
+
+
+def _trust_config_lines(path):
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise HostTrustError("HOST_TRUST_CONFIGURATION", "无法读取 Agent 的 SSH 信任配置") from exc
+
+
+def _include_arguments(words):
+    arguments = words[1:]
+    if "=" in words[0]:
+        value = words[0].split("=", 1)[1]
+        arguments = ([value] if value else []) + arguments
+    if arguments and arguments[0].startswith("="):
+        value = arguments[0][1:]
+        arguments = ([value] if value else []) + arguments[1:]
+    if not arguments:
+        raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH Include 配置缺少路径")
+    return arguments
+
+
+def _include_paths(words, base):
+    for pattern in _include_arguments(words):
+        if not pattern or "%" in pattern or "$" in pattern:
+            raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH Include 路径需要单独核验")
+        expanded = Path(pattern).expanduser()
+        if not expanded.is_absolute():
+            expanded = base / expanded
+        yield from ((Path(item), base) for item in glob.glob(str(expanded)))
+
+
+def _trust_config_includes(lines, base):
+    for line in lines:
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError as exc:
+            raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH 配置语法无法安全解析") from exc
+        if not words:
+            continue
+        directive = words[0].split("=", 1)[0].lower()
+        if directive in _TRUST_DIRECTIVES:
+            raise HostTrustError(
+                "HOST_TRUST_CONFIGURATION",
+                "Agent 使用自定义 SSH 信任设置；请先配置并核验终端的共享信任来源",
+            )
+        if directive == "include":
+            yield from _include_paths(words, base)
 
 
 def check_native_trust_configuration(home: Path | None = None) -> None:
@@ -52,8 +109,11 @@ def check_native_trust_configuration(home: Path | None = None) -> None:
     check after their configuration has been reviewed by the operator.
     """
     home = home or Path.home()
-    system = (Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "ssh"
-              if os.name == "nt" else Path("/etc/ssh"))
+    system = (
+        Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "ssh"
+        if os.name == "nt"
+        else Path("/etc/ssh")
+    )
     pending = [(home / ".ssh/config", home / ".ssh"), (system / "ssh_config", system)]
     seen: set[Path] = set()
     while pending:
@@ -63,40 +123,7 @@ def check_native_trust_configuration(home: Path | None = None) -> None:
         seen.add(path)
         if len(seen) > _MAX_CONFIG_FILES or path.stat().st_size > _MAX_FILE_BYTES:
             raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH 信任配置超出可核验范围")
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise HostTrustError("HOST_TRUST_CONFIGURATION", "无法读取 Agent 的 SSH 信任配置") from exc
-        for line in lines:
-            try:
-                words = shlex.split(line, comments=True)
-            except ValueError as exc:
-                raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH 配置语法无法安全解析") from exc
-            if not words:
-                continue
-            directive = words[0].split("=", 1)[0].lower()
-            if directive in _TRUST_DIRECTIVES:
-                raise HostTrustError(
-                    "HOST_TRUST_CONFIGURATION",
-                    "Agent 使用自定义 SSH 信任设置；请先配置并核验终端的共享信任来源",
-                )
-            if directive == "include":
-                arguments = words[1:]
-                if "=" in words[0]:
-                    value = words[0].split("=", 1)[1]
-                    arguments = ([value] if value else []) + arguments
-                if arguments and arguments[0].startswith("="):
-                    value = arguments[0][1:]
-                    arguments = ([value] if value else []) + arguments[1:]
-                if not arguments:
-                    raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH Include 配置缺少路径")
-                for pattern in arguments:
-                    if not pattern or "%" in pattern or "$" in pattern:
-                        raise HostTrustError("HOST_TRUST_CONFIGURATION", "SSH Include 路径需要单独核验")
-                    expanded = Path(pattern).expanduser()
-                    if not expanded.is_absolute():
-                        expanded = base / expanded
-                    pending.extend((Path(item), base) for item in glob.glob(str(expanded)))
+        pending.extend(_trust_config_includes(_trust_config_lines(path), base))
 
 
 def _read(path: Path) -> str:
@@ -165,6 +192,7 @@ def _file_lock(path: Path):
             raise HostTrustError("HOST_TRUST_CONFIGURATION", "信任锁文件类型无效")
         if os.name == "nt":
             import msvcrt
+
             if os.fstat(fd).st_size == 0:
                 os.write(fd, b"0")
             os.lseek(fd, 0, os.SEEK_SET)
@@ -174,6 +202,7 @@ def _file_lock(path: Path):
                 raise HostTrustError("HOST_TRUST_BUSY", "主机信任记录正在更新，请重试") from exc
         else:
             import fcntl
+
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
@@ -217,7 +246,9 @@ class HostKeyPolicy:
             try:
                 self.ssh.import_public_key(" ".join(parts[1:3]))
             except Exception as exc:
-                raise HostTrustError("HOST_TRUST_CONFIGURATION", "可信主机记录含当前 SSH 引擎不支持的公钥") from exc
+                raise HostTrustError(
+                    "HOST_TRUST_CONFIGURATION", "可信主机记录含当前 SSH 引擎不支持的公钥"
+                ) from exc
         try:
             return self.ssh.import_known_hosts(text)
         except Exception as exc:
@@ -271,8 +302,10 @@ class HostKeyPolicy:
                 exported = key.export_public_key("openssh").decode("ascii").strip()
                 label = host if port == 22 else f"[{host}]:{port}"
                 old = _read(self.write_path)
-                line = (("\n" if old and not old.endswith("\n") else "") +
-                        f"{label} {exported} CodePier-Web-SSH\n").encode("utf-8")
+                line = (
+                    ("\n" if old and not old.endswith("\n") else "")
+                    + f"{label} {exported} CodePier-Web-SSH\n"
+                ).encode("utf-8")
                 if len(old.encode("utf-8")) + len(line) > _MAX_FILE_BYTES:
                     raise HostTrustError("HOST_TRUST_CONFIGURATION", "可信主机记录已达到大小上限")
                 flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)

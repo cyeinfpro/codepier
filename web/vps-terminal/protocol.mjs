@@ -269,14 +269,25 @@ const REASONS = {
   AUTH_CHALLENGE_EXPIRED: '认证问题已过期，请重新连接',
   PERSISTENCE_UNAVAILABLE: '此 VPS 暂不支持持久会话',
   SSH_CONNECTION_FAILED: 'SSH 连接失败，请检查服务器和网络',
+  SSH_CONNECT_FAILED: '面板未能启动 SSH 会话，请打开连接诊断',
+  SSH_TERMINAL_FORBIDDEN: '连接电脑未授权此项目运行终端',
+  HOST_KEY_REVOKED: '主机指纹已被撤销，请通过可信渠道核验',
+  HOST_TRUST_CONFIGURATION: '连接电脑的 SSH 信任配置无法用于网页终端',
+  HOST_TRUST_UNAVAILABLE: '连接电脑无法读取或更新 SSH 信任记录',
+  HOST_TRUST_BUSY: '连接电脑正在更新 SSH 信任记录，请稍后重试',
+  PERSISTENCE_PROBE_FAILED: '无法确认远端会话恢复能力，请查看连接诊断',
+  TERMINAL_CONFIG_MISMATCH: '面板与连接电脑的终端配置不匹配',
+  VPS_CREDENTIAL_UNAVAILABLE: '面板无法读取已保存的连接凭据，请检查 VPS 连接设置',
+  PANEL_UPDATING: '面板正在维护，请等待更新完成后重试',
+  AGENT_MAINTENANCE: '连接电脑正在维护，请等待更新完成后重试',
 };
 
 export function reasonText(code, fallback = '') {
-  return (
-    REASONS[code] ||
-    (typeof fallback === 'string' && fallback.length <= 240 ? fallback : '') ||
-    '终端连接暂不可用'
-  );
+  if (Object.hasOwn(REASONS, code)) return REASONS[code];
+  if (typeof fallback === 'string' && fallback.length > 0 && fallback.length <= 240)
+    return fallback;
+  const publicCode = typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code);
+  return publicCode ? `终端连接暂不可用（${code}）` : '终端连接暂不可用';
 }
 
 export function errorCode(error) {

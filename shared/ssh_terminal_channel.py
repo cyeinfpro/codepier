@@ -53,21 +53,32 @@ class TerminalSendQueue:
     """
 
     def __init__(
-        self, config: TerminalConfig | None = None, *, max_bytes: int | None = None,
-        max_items: int = 256, max_control_items: int = 64, control_burst: int = 8,
+        self,
+        config: TerminalConfig | None = None,
+        *,
+        max_bytes: int | None = None,
+        max_items: int = 256,
+        max_control_items: int = 64,
+        control_burst: int = 8,
         max_waiters: int = 128,
     ):
         self.config = config or DEFAULT_CONFIG
-        self.max_bytes = _integer(self.config.hub_relay_bytes if max_bytes is None else max_bytes, "max_bytes", 512)
+        self.max_bytes = _integer(
+            self.config.hub_relay_bytes if max_bytes is None else max_bytes, "max_bytes", 512
+        )
         self.max_items = _integer(max_items, "max_items", 2)
-        self.max_control_items = min(_integer(max_control_items, "max_control_items"), self.max_items)
+        self.max_control_items = min(
+            _integer(max_control_items, "max_control_items"), self.max_items
+        )
         self.control_burst = _integer(control_burst, "control_burst")
         self.max_waiters = _integer(max_waiters, "max_waiters")
         if self.max_bytes > 64 * 1024 * 1024 or self.max_items > 4096 or self.max_waiters > 4096:
             raise ValueError("Terminal queue bounds exceed their supported limits")
         self._control_reserve = min(self.max_bytes // 4, self.config.control_bytes * 4)
         self._data_capacity = self.max_bytes - self._control_reserve
-        self._data_item_limit = self.max_items - min(self.max_control_items, max(1, self.max_items // 4))
+        self._data_item_limit = self.max_items - min(
+            self.max_control_items, max(1, self.max_items // 4)
+        )
         self._control: deque[_Record] = deque()
         self._output: dict[str, deque[_Record]] = {}
         self._round_robin: deque[str] = deque()
@@ -117,27 +128,45 @@ class TerminalSendQueue:
 
     def _record(self, message: dict[str, Any], payload_bytes: int, *, control: bool) -> _Record:
         if not isinstance(message, dict) or not 0 < len(message) <= 32:
-            raise TerminalProtocolError("INVALID_ENVELOPE", "Terminal envelope must be a bounded object")
+            raise TerminalProtocolError(
+                "INVALID_ENVELOPE", "Terminal envelope must be a bounded object"
+            )
         try:
             encoded = json.dumps(message, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError, RecursionError) as exc:
-            raise TerminalProtocolError("INVALID_ENVELOPE", "Terminal envelope is not bounded JSON") from exc
+            raise TerminalProtocolError(
+                "INVALID_ENVELOPE", "Terminal envelope is not bounded JSON"
+            ) from exc
         encoded_bytes = len(encoded.encode("utf-8"))
-        limit = self.config.control_bytes if control else self.config.frame_bytes * 2 + self.config.control_bytes
+        limit = (
+            self.config.control_bytes
+            if control
+            else self.config.frame_bytes * 2 + self.config.control_bytes
+        )
         if encoded_bytes > limit:
-            raise TerminalProtocolError("FRAME_TOO_LARGE", "Terminal envelope exceeds its size limit")
+            raise TerminalProtocolError(
+                "FRAME_TOO_LARGE", "Terminal envelope exceeds its size limit"
+            )
         cost = encoded_bytes + payload_bytes + _RECORD_OVERHEAD
         capacity = self.max_bytes if control else self._data_capacity
         if cost > capacity:
-            raise TerminalProtocolError("FRAME_TOO_LARGE", "Terminal envelope cannot fit the queue budget")
+            raise TerminalProtocolError(
+                "FRAME_TOO_LARGE", "Terminal envelope cannot fit the queue budget"
+            )
         return _Record(encoded, cost)
 
     def _fits(self, record: _Record, *, control: bool) -> bool:
-        if self._queued_bytes + record.cost > self.max_bytes or self._queued_items >= self.max_items:
+        if (
+            self._queued_bytes + record.cost > self.max_bytes
+            or self._queued_items >= self.max_items
+        ):
             return False
         if control:
             return len(self._control) < self.max_control_items
-        return self._data_bytes + record.cost <= self._data_capacity and self._data_items < self._data_item_limit
+        return (
+            self._data_bytes + record.cost <= self._data_capacity
+            and self._data_items < self._data_item_limit
+        )
 
     def _append(self, record: _Record, session_id: str | None) -> None:
         """Commit one already admitted record without yielding the event loop."""
@@ -168,8 +197,14 @@ class TerminalSendQueue:
         try:
             while not self._fits(record, control=control):
                 if not waiting:
-                    if self._put_waiters >= self.max_waiters or self._waiting_bytes + record.cost > self.max_bytes:
-                        raise TerminalProtocolError("TERMINAL_QUEUE_SATURATED", "Too many terminal send producers are waiting")
+                    if (
+                        self._put_waiters >= self.max_waiters
+                        or self._waiting_bytes + record.cost > self.max_bytes
+                    ):
+                        raise TerminalProtocolError(
+                            "TERMINAL_QUEUE_SATURATED",
+                            "Too many terminal send producers are waiting",
+                        )
                     self._put_waiters += 1
                     self._waiting_bytes += record.cost
                     waiting = True
@@ -200,7 +235,9 @@ class TerminalSendQueue:
     def _output_record(self, message: dict[str, Any], payload_bytes: int) -> tuple[_Record, str]:
         _integer(payload_bytes, "payload_bytes")
         if payload_bytes > self.config.frame_bytes:
-            raise TerminalProtocolError("FRAME_TOO_LARGE", "Terminal payload exceeds its frame limit")
+            raise TerminalProtocolError(
+                "FRAME_TOO_LARGE", "Terminal payload exceeds its frame limit"
+            )
         if not isinstance(message, dict):
             raise TerminalProtocolError("INVALID_ENVELOPE", "Terminal envelope must be an object")
         session_id = canonical_uuid(message.get("session_id"))
@@ -221,7 +258,9 @@ class TerminalSendQueue:
         session_id = canonical_uuid(message.get("session_id"))
         record = self._record(message, 0, control=True)
         if record.cost > self._data_capacity:
-            raise TerminalProtocolError("FRAME_TOO_LARGE", "Terminal barrier cannot fit the session queue budget")
+            raise TerminalProtocolError(
+                "FRAME_TOO_LARGE", "Terminal barrier cannot fit the session queue budget"
+            )
         return record, session_id
 
     async def put_barrier(self, message: dict[str, Any]) -> None:
@@ -246,7 +285,10 @@ class TerminalSendQueue:
             while not self._queued_items:
                 if not waiting:
                     if self._get_waiters >= self.max_waiters:
-                        raise TerminalProtocolError("TERMINAL_QUEUE_SATURATED", "Too many terminal send consumers are waiting")
+                        raise TerminalProtocolError(
+                            "TERMINAL_QUEUE_SATURATED",
+                            "Too many terminal send consumers are waiting",
+                        )
                     self._get_waiters += 1
                     waiting = True
                 changed = self._changed

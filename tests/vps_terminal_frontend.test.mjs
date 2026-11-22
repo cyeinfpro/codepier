@@ -806,3 +806,18 @@ test('paste handles Unicode boundaries, byte limits and cancellation without app
   assert.equal(result.cancelled, true);
   assert.equal(result.sent, 4);
 });
+
+test('shows actionable Web SSH failures and a bounded unknown reason code', () => {
+  assert.match(reasonText('SSH_CONNECT_FAILED'), /面板未能启动 SSH 会话/);
+  assert.match(reasonText('SSH_CONNECTION_FAILED'), /检查服务器和网络/);
+  assert.match(reasonText('HOST_TRUST_CONFIGURATION'), /SSH 信任配置/);
+  assert.match(reasonText('HOST_KEY_REVOKED'), /可信渠道/);
+  assert.match(reasonText('PERSISTENCE_PROBE_FAILED'), /恢复能力/);
+  assert.match(reasonText('VPS_CREDENTIAL_UNAVAILABLE'), /连接设置/);
+  assert.equal(reasonText('UNMAPPED_PUBLIC_CODE'), '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）');
+  assert.equal(reasonText('UNMAPPED_PUBLIC_CODE', '允许的说明'), '允许的说明');
+  assert.equal(reasonText('UNMAPPED_PUBLIC_CODE', 'x'.repeat(241)), '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）');
+  assert.equal(reasonText('plain text <not a code>'), '终端连接暂不可用');
+  assert.equal(reasonText('toString'), '终端连接暂不可用');
+  assert.equal(reasonText('__proto__'), '终端连接暂不可用');
+});

@@ -72,28 +72,34 @@ class ByteRingBuffer:
         tail = view[-retained:]
         index = (end - retained) % self.capacity_bytes
         first = min(retained, self.capacity_bytes - index)
-        self._storage[index:index + first] = tail[:first]
+        self._storage[index : index + first] = tail[:first]
         if first < retained:
-            self._storage[:retained - first] = tail[first:]
+            self._storage[: retained - first] = tail[first:]
         self.end_offset = end
         self.start_offset = max(self.start_offset, end - self.capacity_bytes)
         return start, end
 
     def read(self, offset: int, max_bytes: int | None = None) -> bytes:
         offset = checked_uint64(offset)
-        limit = self.capacity_bytes if max_bytes is None else _positive_size(max_bytes, "max_bytes", allow_zero=True)
+        limit = (
+            self.capacity_bytes
+            if max_bytes is None
+            else _positive_size(max_bytes, "max_bytes", allow_zero=True)
+        )
         if offset < self.start_offset:
             raise HistoryGap(offset, self.start_offset, self.end_offset)
         if offset > self.end_offset:
-            raise TerminalProtocolError("OUTPUT_OFFSET_AHEAD", "Requested offset is ahead of received output")
+            raise TerminalProtocolError(
+                "OUTPUT_OFFSET_AHEAD", "Requested offset is ahead of received output"
+            )
         length = min(limit, self.end_offset - offset)
         if length == 0:
             return b""
         index = offset % self.capacity_bytes
         first = min(length, self.capacity_bytes - index)
-        result = bytes(self._storage[index:index + first])
+        result = bytes(self._storage[index : index + first])
         if first < length:
-            result += bytes(self._storage[:length - first])
+            result += bytes(self._storage[: length - first])
         return result
 
     def clear(self) -> None:
@@ -110,8 +116,12 @@ class OutputCreditWindow:
     """
 
     def __init__(
-        self, attachment_id: str, render_epoch: int, stream_epoch: int,
-        start_offset: int = 0, high_water_bytes: int = 256 * 1024,
+        self,
+        attachment_id: str,
+        render_epoch: int,
+        stream_epoch: int,
+        start_offset: int = 0,
+        high_water_bytes: int = 256 * 1024,
         low_water_bytes: int = 64 * 1024,
     ):
         self.attachment_id = canonical_uuid(attachment_id)
@@ -150,21 +160,32 @@ class OutputCreditWindow:
         _positive_size(count, "count")
         end = checked_uint64(offset + count)
         if offset != self.sent_offset:
-            raise TerminalProtocolError("OUTPUT_GAP_OR_OVERLAP", "Output send offsets must be contiguous")
+            raise TerminalProtocolError(
+                "OUTPUT_GAP_OR_OVERLAP", "Output send offsets must be contiguous"
+            )
         if count > self.available_bytes:
-            raise TerminalProtocolError("OUTPUT_BACKPRESSURE", "Output exceeds the available consumption credit")
+            raise TerminalProtocolError(
+                "OUTPUT_BACKPRESSURE", "Output exceeds the available consumption credit"
+            )
         self.sent_offset = end
         if self.in_flight >= self.high_water_bytes:
             self._paused = True
 
     def acknowledge(
-        self, offset: int, *, attachment_id: str, render_epoch: int, stream_epoch: int,
+        self,
+        offset: int,
+        *,
+        attachment_id: str,
+        render_epoch: int,
+        stream_epoch: int,
     ) -> bool:
         attachment_id = canonical_uuid(attachment_id)
         checked_uint64(render_epoch)
         checked_uint64(stream_epoch)
         if (attachment_id, render_epoch, stream_epoch) != (
-            self.attachment_id, self.render_epoch, self.stream_epoch,
+            self.attachment_id,
+            self.render_epoch,
+            self.stream_epoch,
         ):
             return False
         offset = checked_uint64(offset)
@@ -195,7 +216,10 @@ class InputSequenceTracker:
     """
 
     def __init__(
-        self, runtime_generation: str, stream_epoch: int, writer_epoch: int,
+        self,
+        runtime_generation: str,
+        stream_epoch: int,
+        writer_epoch: int,
         receipt_limit: int = 256,
     ):
         self.runtime_generation = canonical_uuid(runtime_generation)
@@ -218,21 +242,30 @@ class InputSequenceTracker:
 
     def _require_binding(self, generation: str, stream_epoch: int, writer_epoch: int) -> None:
         if canonical_uuid(generation) != self.runtime_generation:
-            raise TerminalProtocolError("STALE_GENERATION", "Input belongs to another Agent generation")
+            raise TerminalProtocolError(
+                "STALE_GENERATION", "Input belongs to another Agent generation"
+            )
         if checked_uint64(stream_epoch) != self.stream_epoch:
             raise TerminalProtocolError("STALE_STREAM", "Input belongs to another terminal stream")
         if checked_uint64(writer_epoch) != self.writer_epoch:
             raise TerminalProtocolError("STALE_WRITER", "Input belongs to another writer")
 
     def claim(
-        self, sequence: int, *, runtime_generation: str, stream_epoch: int, writer_epoch: int,
+        self,
+        sequence: int,
+        *,
+        runtime_generation: str,
+        stream_epoch: int,
+        writer_epoch: int,
     ) -> InputReceipt:
         self._require_binding(runtime_generation, stream_epoch, writer_epoch)
         sequence = checked_uint64(sequence, positive=True)
         if sequence <= self.last_claimed_input_seq:
             return InputReceipt(sequence, self._receipts.get(sequence, "already_claimed"))
         if self.frozen:
-            raise TerminalProtocolError("INPUT_UNCERTAIN", "New input is frozen after an uncertain write")
+            raise TerminalProtocolError(
+                "INPUT_UNCERTAIN", "New input is frozen after an uncertain write"
+            )
         if sequence != self.last_claimed_input_seq + 1:
             raise TerminalProtocolError("INPUT_GAP", "Input sequence contains a gap")
         self.last_claimed_input_seq = sequence
@@ -244,16 +277,22 @@ class InputSequenceTracker:
     def mark_forwarded(self, sequence: int) -> InputReceipt:
         sequence = checked_uint64(sequence, positive=True)
         if sequence not in self._receipts:
-            raise TerminalProtocolError("INPUT_RECEIPT_MISSING", "Input has no retained claim receipt")
+            raise TerminalProtocolError(
+                "INPUT_RECEIPT_MISSING", "Input has no retained claim receipt"
+            )
         if self._receipts[sequence] == "uncertain":
-            raise TerminalProtocolError("INPUT_UNCERTAIN", "An uncertain input cannot be silently marked forwarded")
+            raise TerminalProtocolError(
+                "INPUT_UNCERTAIN", "An uncertain input cannot be silently marked forwarded"
+            )
         self._receipts[sequence] = "forwarded"
         return InputReceipt(sequence, "forwarded")
 
     def mark_uncertain(self, sequence: int) -> InputReceipt:
         sequence = checked_uint64(sequence, positive=True)
         if sequence not in self._receipts:
-            raise TerminalProtocolError("INPUT_RECEIPT_MISSING", "Input has no retained claim receipt")
+            raise TerminalProtocolError(
+                "INPUT_RECEIPT_MISSING", "Input has no retained claim receipt"
+            )
         self._receipts[sequence] = "uncertain"
         self.frozen = True
         return InputReceipt(sequence, "uncertain")
@@ -282,7 +321,9 @@ class ByteBudget:
     def release(self, count: int) -> None:
         _positive_size(count, "count", allow_zero=True)
         if count > self.used_bytes:
-            raise TerminalProtocolError("BUFFER_ACCOUNTING", "Terminal buffer release exceeds its reservation")
+            raise TerminalProtocolError(
+                "BUFFER_ACCOUNTING", "Terminal buffer release exceeds its reservation"
+            )
         self.used_bytes -= count
 
 
@@ -294,7 +335,10 @@ class AuthorityLease:
     """
 
     def __init__(
-        self, authority_revision: str, *, max_ttl_seconds: float = 30.0,
+        self,
+        authority_revision: str,
+        *,
+        max_ttl_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ):
         if not isinstance(authority_revision, str) or not 0 < len(authority_revision) <= 256:
@@ -310,19 +354,30 @@ class AuthorityLease:
 
     @staticmethod
     def _validate_duration(value: float) -> None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 120 or not math.isfinite(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 < value <= 120
+            or not math.isfinite(value)
+        ):
             raise ValueError("Lease duration must be finite and between zero and 120 seconds")
 
     def _now(self, now: float | None) -> float:
         value = self._clock() if now is None else now
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
             raise ValueError("A finite monotonic clock value is required")
         return value
 
     def renew(self, ttl_seconds: float, authority_revision: str, now: float | None = None) -> None:
         self._validate_duration(ttl_seconds)
         if ttl_seconds > self.max_ttl_seconds:
-            raise TerminalProtocolError("LEASE_TOO_LONG", "Authority lease exceeds its negotiated lifetime")
+            raise TerminalProtocolError(
+                "LEASE_TOO_LONG", "Authority lease exceeds its negotiated lifetime"
+            )
         if authority_revision != self.authority_revision:
             raise TerminalProtocolError("AUTHORITY_CHANGED", "Authority revision no longer matches")
         if self.revoked:
@@ -332,7 +387,12 @@ class AuthorityLease:
         self.frozen = False
 
     def valid(self, now: float | None = None) -> bool:
-        return self._started and not self.revoked and not self.frozen and self._now(now) < self.expires_at
+        return (
+            self._started
+            and not self.revoked
+            and not self.frozen
+            and self._now(now) < self.expires_at
+        )
 
     def require_valid(self, now: float | None = None) -> None:
         if not self.valid(now):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from starlette.responses import JSONResponse
 from shared.util import DevError
@@ -78,7 +79,15 @@ class PanelMaintenanceMiddleware:
                 or path.startswith("/static/")
             )
         )
-        if not safe and self.gate.active():
+        # Let an existing terminal drain, not admit work. The normal route
+        # still verifies session authentication, CSRF, ownership and current
+        # project/VPS authority. Count this write in the inflight barrier.
+        drain_close = (
+            scope["type"] == "http"
+            and scope.get("method") == "POST"
+            and re.fullmatch(r"/api/vps-terminal/sessions/[0-9a-f]{32}/close", path) is not None
+        )
+        if not safe and not drain_close and self.gate.active():
             if scope["type"] == "websocket":
                 return await send({"type": "websocket.close", "code": 1013})
             return await JSONResponse(

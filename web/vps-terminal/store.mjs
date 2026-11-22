@@ -28,7 +28,6 @@ export class TerminalStore {
     this.remoteSessions = [];
     this.activeId = null;
     this.secondaryId = null;
-    this.limits = { ...DEFAULT_LIMITS };
     this.version = 0;
     this.disposed = false;
   }
@@ -106,15 +105,24 @@ export class TerminalStore {
     }
   }
 
-  async create({ vps, project, key, version, split, isCurrent }) {
+  async capability(vpsId, projectId) {
+    if (!vpsId || !projectId)
+      throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
+        code: 'PROTOCOL_MISMATCH',
+      });
     const capability = await this.api(
-      `/api/vps-terminal/capabilities?vps_id=${encodeURIComponent(vps.id)}&project_id=${encodeURIComponent(project.id)}`,
+      `/api/vps-terminal/capabilities?vps_id=${encodeURIComponent(vpsId)}&project_id=${encodeURIComponent(projectId)}`,
     );
-    if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
     if (capability.protocol_version !== undefined && capability.protocol_version !== 1)
       throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
         code: 'PROTOCOL_MISMATCH',
       });
+    return capability;
+  }
+
+  async create({ vps, project, key, version, split, isCurrent }) {
+    const capability = await this.capability(vps.id, project.id);
+    if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
     if (
       capability.available === false ||
       capability.supported === false ||
@@ -127,8 +135,8 @@ export class TerminalStore {
         { code: capability.reason_code || 'AGENT_UPGRADE_REQUIRED' },
       );
     }
-    this.limits = limitsFrom(capability.limits);
-    if (this.count() >= this.limits.max_user_sessions)
+    const limits = limitsFrom(capability.limits);
+    if (this.count() >= limits.max_user_sessions)
       throw Object.assign(new Error(reasonText('SESSION_LIMIT')), { code: 'SESSION_LIMIT' });
     // Keep this request id across a lost POST response. A retry reconciles the
     // original create on the server instead of launching another shell.
@@ -156,12 +164,12 @@ export class TerminalStore {
     session.username ||= vps.username;
     session.vps_id ||= vps.id;
     session.project_id ||= project.id;
-    const record = this.adopt(session, { vps, project });
+    const record = this.adopt(session, { vps, project, limits });
     if (isCurrent()) this.activate(record.id, { split });
     return session;
   }
 
-  adopt(session, { vps, project } = {}) {
+  adopt(session, { vps, project, limits = DEFAULT_LIMITS } = {}) {
     const id = normalizeUuid(session.session_id || session.id);
     const existing = this.records.get(id);
     if (existing) {
@@ -180,7 +188,7 @@ export class TerminalStore {
     const transport = (record.transport = new TerminalTransport({
       session: record.session,
       api: this.api,
-      limits: this.limits,
+      limits,
       callbacks: {
         onOutput: (bytes) => record.view.write(bytes),
         onAttached: (message) => record.view.attached(message),
@@ -236,8 +244,9 @@ export class TerminalStore {
     this.changed(); // Layout mounts a real renderer before socket output can arrive.
     record.view.show();
     if (
-      ['idle', 'connecting', 'detached'].includes(record.transport.state) ||
-      (!record.transport.socket && !record.transport.pauseReconnect)
+      !ENDED.has(record.state) &&
+      (['idle', 'connecting', 'detached'].includes(record.transport.state) ||
+        (!record.transport.socket && !record.transport.pauseReconnect))
     )
       record.transport.connect();
     record.view.focus();
@@ -250,7 +259,15 @@ export class TerminalStore {
       const version = this.version;
       const session = await this.api(`/api/vps-terminal/sessions/${id}`);
       if (this.disposed || version !== this.version || !isCurrent()) return;
-      record = this.adopt(session);
+      // Limits are scoped to the server-authorized target. Never borrow them
+      // from a different session, identity, or Space.
+      let limits;
+      if (!ENDED.has(session.state)) {
+        const capability = await this.capability(session.vps_id, session.project_id);
+        if (this.disposed || version !== this.version || !isCurrent()) return;
+        limits = limitsFrom(capability.limits);
+      }
+      record = this.adopt(session, { limits });
     }
     if (isCurrent()) this.activate(id, { split });
     return record.session;

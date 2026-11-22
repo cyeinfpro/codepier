@@ -19,7 +19,7 @@ const engine = process.env.CODEPIER_BROWSER_ENGINE || 'chromium';
 if (!['chromium', 'webkit'].includes(engine)) throw new Error('Unsupported browser engine');
 const evidenceDirectory = process.env.CODEPIER_BROWSER_EVIDENCE_DIR;
 if (evidenceDirectory) await mkdir(evidenceDirectory, { recursive: true });
-const web = resolve(dirname(fileURLToPath(import.meta.url)), '../web');
+const web = resolve(dirname(fileURLToPath(import.meta.url)), '../../web');
 const fixture = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CodePier terminal QA</title><link rel="stylesheet" href="/tokens.css"><link rel="stylesheet" href="/vps-terminal.css"><style>body{margin:0;padding:20px;background:var(--ui-bg);color:var(--ui-text);font-family:var(--ui-font)}#mount{max-width:1500px;margin:auto}*{box-sizing:border-box}</style><body><main id="mount"></main><script>
 window.sockets=[];window.inputs=[];window.sessions=new Map();window.fixtureErrors=[];let serial=0;
 function fixtureFailure(message){fixtureErrors.push(message);throw Error(message)}
