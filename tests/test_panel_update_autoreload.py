@@ -144,3 +144,84 @@ def test_already_current_document_does_not_reload_for_historic_success(update_br
         assert not calls and not errors, errors
     finally:
         page.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "running", "committed", "target", "waiting"),
+    [
+        ("apply", "1.34.1", "1.34.1", "1.33.36", False),
+        ("apply", "1.10.0", "1.10.0", "1.9.9", False),
+        ("apply", "1.34.1", "1.33.36", "1.33.36", True),
+        ("apply", "1.34.1", None, "1.33.36", True),
+        ("apply", "1.34.1", "1.34.1", "1.34.2", True),
+        ("apply", "1.34.1-dev", "1.34.1-dev", "1.33.36", True),
+        ("rollback", "1.34.1", "1.34.1", "1.33.36", True),
+    ],
+)
+def test_superseded_apply_releases_only_verified_version_gate(
+    update_browser, stack, kind, running, committed, target, waiting
+):
+    browser, _ = update_browser
+    state = ready()
+    state["candidate"]["version"] = "1.34.3"
+    state.update(
+        running_version=running,
+        current_version=committed,
+        operation={
+            "id": "f" * 32,
+            "kind": kind,
+            "state": "succeeded",
+            "target_version": target,
+            "message": "更新成功",
+            "events": [],
+        },
+    )
+    page, calls, errors = open_settings(browser, stack, state)
+    try:
+        show_update_controls(page)
+        expect(page.locator("#panel-update-state")).to_contain_text("更新成功")
+        if waiting:
+            expect(page.locator("#panel-update-note")).to_contain_text("等待目标版本")
+            expect(page.locator("#panel-update-check")).to_be_disabled()
+            expect(page.locator("#panel-update-apply")).to_be_disabled()
+        else:
+            expect(page.locator("#panel-update-note")).not_to_contain_text("等待目标版本")
+            expect(page.locator("#panel-update-check")).to_be_enabled()
+            expect(page.locator("#panel-update-apply")).to_be_enabled()
+        assert "_codepier_updated=" not in page.url
+        assert not calls and not errors, errors
+    finally:
+        page.close()
+
+
+def test_wait_hint_clears_when_old_success_becomes_verified_history(update_browser, stack):
+    browser, _ = update_browser
+    state = ready()
+    state["candidate"]["version"] = "1.34.3"
+    state.update(
+        running_version="1.33.35",
+        current_version="1.33.35",
+        operation={
+            "id": "f" * 32,
+            "kind": "apply",
+            "state": "succeeded",
+            "target_version": "1.33.36",
+            "message": "更新成功",
+            "events": [],
+        },
+    )
+    page, calls, errors = open_settings(browser, stack, state)
+    try:
+        show_update_controls(page)
+        note = page.locator("#panel-update-note")
+        check = page.locator("#panel-update-check")
+        expect(note).to_contain_text("等待目标版本")
+        expect(check).to_be_disabled()
+        state.update(running_version="1.34.2", current_version="1.34.2")
+        page.evaluate("CodePierPanelUpdate.resume()")
+        expect(check).to_be_enabled()
+        expect(note).not_to_contain_text("等待目标版本")
+        assert "_codepier_updated=" not in page.url
+        assert not calls and not errors, errors
+    finally:
+        page.close()

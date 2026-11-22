@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 import uuid
 from pathlib import Path
 from shared.crypto import digest
@@ -12,6 +13,16 @@ from shared.util import DevError, fsync_directory
 
 MAX_INTERRUPTED_READS = 3
 TERMINAL_CACHE_LIMIT = 2048
+OUTPUT_BUSY_TIMEOUT_MS = 200
+
+
+def output_journal_busy(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+class OutputJournalLockBusy(sqlite3.OperationalError):
+    sqlite_errorcode = sqlite3.SQLITE_BUSY
 
 
 class Journal:
@@ -343,9 +354,26 @@ class Journal:
             row = self.db.execute("SELECT status FROM calls WHERE id=?", (id,)).fetchone()
         return row["status"] if row else "missing"
 
+    @contextmanager
+    def _output_transaction(self):
+        # Progress snapshots must not hold subprocess draining behind the
+        # ordinary 30-second write-ahead/terminal-result durability timeout.
+        if not self.lock.acquire(timeout=OUTPUT_BUSY_TIMEOUT_MS / 1000):
+            raise OutputJournalLockBusy("output journal is busy")
+        try:
+            previous = self.db.execute("PRAGMA busy_timeout").fetchone()[0]
+            self.db.execute(f"PRAGMA busy_timeout={OUTPUT_BUSY_TIMEOUT_MS}")
+            try:
+                with self.db:
+                    yield
+            finally:
+                self.db.execute(f"PRAGMA busy_timeout={previous}")
+        finally:
+            self.lock.release()
+
     def update_output(self, id, output, seq):
         trimmed = output[-131072:]
-        with self.lock, self.db:
+        with self._output_transaction():
             self.db.execute(
                 "UPDATE calls SET output=?,output_seq=? WHERE id=? AND output_seq<?",
                 (trimmed, seq, id, seq),

@@ -43,7 +43,7 @@ from shared.scheduler_config import (
     is_read_only_exec,
 )
 from shared.core_contracts import CORE_REMOTE
-from agent.journal import Journal
+from agent.journal import Journal, output_journal_busy
 from agent.telemetry import AgentTelemetry
 from agent.artifacts import Artifacts
 from agent.searches import Searches
@@ -82,6 +82,27 @@ LOGGER = logging.getLogger("codepier.agent")
 HEARTBEAT_INTERVAL_SECONDS = 12.0
 OUTBOX_INTERVAL_SECONDS = 12.0
 PACK_TIMEOUT_SECONDS = 10.0
+
+
+async def _persist_output_snapshot(agent, identifier, output, sequence, persisted, *, final):
+    delays = (0.0, 0.05, 0.1, 0.2) if final else (0.0,)
+    for delay in delays:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await agent.disk_call(agent.journal.update_output, identifier, output, sequence)
+            return sequence
+        except sqlite3.OperationalError as exc:
+            if not output_journal_busy(exc):
+                raise
+            if final and (agent.journal.is_cancelled(identifier) or agent.stop_event.is_set()):
+                return persisted
+    if final:
+        raise DevError(
+            "JOURNAL_OUTPUT_BUSY",
+            "命令可能已经执行，输出记录暂不可写；请核对原操作和本机结果，不要重跑",
+        )
+    return persisted
 
 
 def _response_page_budget(request):
@@ -2813,10 +2834,10 @@ class Agent:
                 }
                 self.output_wake.set()
             if seq != persisted_seq and (force or now - last_persist >= 2.0):
-                # Keep FULL durability. Disk latency must not block heartbeats,
-                # and final output/error handling must await the actual write.
-                await self.disk_call(self.journal.update_output, id, decoded_output, seq)
-                persisted_seq, last_persist = seq, now
+                last_persist = now
+                persisted_seq = await _persist_output_snapshot(
+                    self, id, decoded_output, seq, persisted_seq, final=force
+                )
 
         async def append_output(text):
             nonlocal decoded_output, output_truncated
@@ -2839,7 +2860,6 @@ class Agent:
                     log = getattr(self, "_execution_logs", {}).get(id)
                     if log is not None:
                         log.finish()
-                    await snapshot(True)
                     return
                 # Fingerprint received pipe bytes before decoding/redaction/tail
                 # limits. No raw log or credential-bearing byte buffer is kept.
@@ -2912,6 +2932,9 @@ class Agent:
                     *(t for t in (reader, waiter) if t is not None), return_exceptions=True
                 )
                 self.processes.pop(id, None)
+        # Final persistence has its own bounded retry. Do not let the pipe
+        # drain's one-second cleanup window cancel a write after the child ran.
+        await snapshot(True)
         return {
             "exit_code": process.returncode,
             "output": decoded_output,

@@ -164,13 +164,36 @@ window.CodePierPanelUpdate = (() => {
       data?.update_available && age >= 0 && age < 900000 && sameCandidate(intent, data.candidate)
     );
   }
+  const releaseVersion = /^(?:0|[1-9]\d{0,5})\.(?:0|[1-9]\d{0,5})\.(?:0|[1-9]\d{0,5})$/;
+  function isSupersededApply(job) {
+    // A separately deployed release can leave an older success atop the journal.
+    // Trust it as historical only when the host commit and live Hub agree.
+    if (
+      pending ||
+      job?.kind !== 'apply' ||
+      job.state !== 'succeeded' ||
+      typeof data.running_version !== 'string' ||
+      typeof job.target_version !== 'string' ||
+      data.current_version !== data.running_version ||
+      !releaseVersion.test(data.running_version) ||
+      !releaseVersion.test(job.target_version)
+    )
+      return false;
+    const live = data.running_version.split('.').map(Number);
+    const target = job.target_version.split('.').map(Number);
+    for (let i = 0; i < live.length; i++) {
+      if (live[i] !== target[i]) return live[i] > target[i];
+    }
+    return false;
+  }
   function awaitingVersion() {
     const job = data?.operation;
     return (
       ['apply', 'rollback'].includes(job?.kind) &&
       job.state === 'succeeded' &&
       /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(job.target_version || '') &&
-      data.running_version !== job.target_version
+      data.running_version !== job.target_version &&
+      !isSupersededApply(job)
     );
   }
   function canApply() {
@@ -516,6 +539,7 @@ window.CodePierPanelUpdate = (() => {
     )
       return false;
     if (data.running_version !== job.target_version) {
+      if (!awaitingVersion()) return false;
       note = '更新记录已完成，正在等待目标版本恢复服务；不会提前刷新或再次提交。';
       return true;
     }

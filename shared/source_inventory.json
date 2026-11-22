@@ -692,6 +692,7 @@
     "tests/test_agent_lifecycle.py",
     "tests/test_agent_lifecycle_ui_recovery.py",
     "tests/test_agent_maintenance_admission.py",
+    "tests/test_agent_output_contention.py",
     "tests/test_agent_parser_resilience.py",
     "tests/test_agent_report_assets.py",
     "tests/test_agent_roots_browser.py",
