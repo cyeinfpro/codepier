@@ -32,6 +32,7 @@ function fixture(api) {
     },
   });
   vm.runInContext(source, ctx);
+  vm.runInContext('vpsReadinessBackfill = { available: true, owner: vpsTerminalIdentity() }', ctx);
   ctx.vpsReadinessDelay = async () => true;
   return { ctx, requests, S, status, button, document, more, card, query };
 }
@@ -119,28 +120,85 @@ test("API job envelope feeds the existing individual readiness display", async (
   assert.equal(f.S.vps[0].readiness.id, "job-fixture");
 });
 
-test("fleet controls require explicit admin availability and show authoritative activation", () => {
+test("fleet actions require exact negotiated capability", () => {
   const f = fixture(() => assert.fail("unexpected network operation"));
   assert.equal(f.ctx.vpsReadinessBackfillHTML({ available: false }), "");
-  assert.match(f.ctx.vpsReadinessBackfillHTML({ available: true }), /检查全部环境/);
-  assert.match(f.ctx.vpsReadinessBackfillHTML({ available: true, enabled: true }), /disabled>已开启/);
+  const html = f.ctx.vpsReadinessBackfillHTML({ available: true });
+  assert.match(html, /扫描全部 SSH/);
+  assert.match(html, /disabled>一键安装/);
+  vm.runInContext("vpsReadinessBackfill = null", f.ctx);
+  assert.equal(f.ctx.vpsReadinessHTML({ id: "saved", readiness_available: true }), "");
   assert.equal(f.requests.length, 0);
 });
 
-test("fleet submits once per activation, reports only scoped queued count and performs no polling", async () => {
+test("fleet scan posts once without enabling or initiating installation", async () => {
   let deliver;
   const f = fixture(() => new Promise((resolve) => { deliver = resolve; }));
   const state = seedBackfill(f);
   const first = f.ctx.vpsReadinessBackfillStart();
   await f.ctx.vpsReadinessBackfillStart();
+  await f.ctx.vpsReadinessBackfillStart(true);
   assert.equal(state.pending, true);
-  assert.deepEqual(f.requests.map(({ url, method }) => [url, method]), [["/api/vps/readiness/backfill", "POST"]]);
-  deliver({ enabled: true, queued_count: 7 });
+  assert.deepEqual(f.requests.map(({ url, method }) => [url, method]), [["/api/vps/readiness/scan", "POST"]]);
+  deliver({ queued_count: 7 });
   await first;
-  assert.match(state.message, /7 台加入后台检查/);
-  assert.equal(state.enabled, true);
-  await f.ctx.vpsReadinessBackfillStart();
+  assert.match(state.message, /7 台加入只读扫描队列/);
+  assert.equal(state.awaiting, true);
   assert.equal(f.requests.length, 1);
+});
+
+test("fleet install is a separate request and disabled until missing is confirmed", async () => {
+  const f = fixture(() => ({ queued_count: 1 }));
+  const state = seedBackfill(f, { result: { eligible: 0, staleMissing: 1 } });
+  await f.ctx.vpsReadinessBackfillStart(true);
+  assert.equal(f.requests.length, 0);
+  state.result.eligible = 1;
+  await f.ctx.vpsReadinessBackfillStart(true);
+  assert.deepEqual(f.requests.map(({ url, method }) => [url, method]), [["/api/vps/readiness/install", "POST"]]);
+  assert.match(state.message, /1 台加入安装队列/);
+});
+
+test("summary separates positive missing from failed trust and shows each phase", () => {
+  const { ctx } = fixture(() => assert.fail("unexpected request"));
+  const j = (state, reason_code, intent) => ({
+    enabled: true, readiness_available: true, readiness: job(state, { reason_code, intent, install_eligible: state === "missing" }),
+  });
+  const result = ctx.vpsFleetResult([
+    j("ready"), j("missing", "TMUX_MISSING", "scan"), j("queued"),
+    j("running", undefined, "scan"), j("running", undefined, "install"),
+    j("failed", "HUB_SSH_TRUST_MIGRATION_REQUIRED"), j("failed", "HUB_SSH_TRUST_MIGRATION_REQUIRED"),
+    { enabled: true, readiness_available: true },
+    { enabled: false, readiness_available: true, readiness: job("ready") },
+  ]);
+  assert.equal(result.counts, "就绪 1 · 缺少 1 · 排队 1 · 扫描中 1 · 安装中 1 · 失败 2 · 未检查 1");
+  assert.equal(result.reasons, "2 台：面板尚未核验主机指纹；未安装");
+  assert.equal(result.eligible, 1);
+  assert.equal(result.staleMissing, 0);
+  assert.equal(result.active, true);
+});
+
+test("known stale missing remains visible but cannot initiate installation", () => {
+  const { ctx } = fixture(() => assert.fail("unexpected request"));
+  const result = ctx.vpsFleetResult([{ enabled: true, readiness_available: true, readiness: job("missing", { install_eligible: false }) }]);
+  assert.equal(result.eligible, 0);
+  assert.equal(result.staleMissing, 1);
+  assert.match(ctx.vpsReadinessBackfillHTML({ available: true, result }), /1 台的缺失结果已过期或不可安装/);
+  assert.equal(ctx.vpsFleetButtons({ result }).installDisabled, true);
+});
+
+test("fleet watcher follows inventory GETs, settles missing, and never installs", async () => {
+  const missing = { id: "saved", enabled: true, readiness_available: true, readiness: job("missing", { install_eligible: true }) };
+  const f = fixture(() => ({
+    readiness_manual_actions: true, vps: [missing], next_offset: null,
+  }));
+  const state = seedBackfill(f, { awaiting: true });
+  const counts = { textContent: "" };
+  f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? counts : null;
+  await f.ctx.vpsObserveFleet(state);
+  assert.deepEqual(f.requests.map(({ url, method }) => [url, method]), [["/api/vps?limit=200&offset=0", "GET"]]);
+  assert.equal(state.awaiting, false);
+  assert.equal(state.result.eligible, 1);
+  assert.match(counts.textContent, /缺少 1/);
 });
 
 test("fleet drops a result from another Space or unknown submission outcome", async () => {
@@ -150,9 +208,9 @@ test("fleet drops a result from another Space or unknown submission outcome", as
   const first = f.ctx.vpsReadinessBackfillStart();
   f.S.space_id = "new-space";
   const current = seedBackfill(f);
-  deliver({ enabled: true, queued_count: 12 });
+  deliver({ queued_count: 12 });
   await first;
-  assert.equal(previous.enabled, undefined);
+  assert.equal(previous.awaiting, undefined);
   assert.equal(current.message, undefined);
 
   const uncertain = fixture(() => { throw new Error("connection interrupted"); });
@@ -198,4 +256,49 @@ test("a stale observation cannot paint the replacement inventory record", async 
   assert.equal(old.readiness, undefined);
   assert.equal(f.status.textContent, "新连接");
   assert.equal(f.S.vps[0].readiness.connection_revision, 4);
+});
+
+
+test("an uncertain POST reconciles a newer job with GET only", async () => {
+  let release;
+  const f = fixture(({method}) => {
+    if (method === "POST") throw new Error("receipt lost");
+    return new Promise((resolve) => { release = resolve; });
+  });
+  const state = seedBackfill(f, { result: f.ctx.vpsFleetResult([]) });
+  const counts = {textContent: ""};
+  f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? counts : null;
+  await f.ctx.vpsReadinessBackfillStart();
+  assert.equal(state.uncertain, true);
+  await new Promise(setImmediate);
+  release({
+    readiness_manual_actions: true, next_offset: null,
+    vps: [{id: "saved", enabled: true, readiness_available: true, readiness: job("ready", { updated: 7 })}],
+  });
+  await new Promise(setImmediate);
+  assert.deepEqual(f.requests.map(({method}) => method), ["POST", "GET"]);
+  assert.equal(state.uncertain, false);
+  assert.match(counts.textContent, /就绪 1/);
+});
+
+test("ambiguous submission with unchanged inventory remains unknown after four GETs", async () => {
+  const f = fixture(() => ({readiness_manual_actions: true, next_offset: null, vps: []}));
+  const state = seedBackfill(f, { uncertain: true, ambiguityBaseline: "" });
+  f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? {textContent: ""} : null;
+  await f.ctx.vpsObserveFleet(state);
+  assert.equal(state.uncertain, true);
+  assert.match(state.message, /尚无新的任务记录/);
+  assert.deepEqual(f.requests.map(({method}) => method), ["GET", "GET", "GET", "GET"]);
+});
+
+test("fleet polling tolerates a bounded transient inventory read failure", async () => {
+  const f = fixture(() => {
+    if (f.requests.length === 1) throw new Error("temporary network issue");
+    return {readiness_manual_actions: true, next_offset: null, vps: []};
+  });
+  const state = seedBackfill(f, { awaiting: true });
+  f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? {textContent: ""} : null;
+  await f.ctx.vpsObserveFleet(state);
+  assert.equal(state.awaiting, false);
+  assert.deepEqual(f.requests.map(({method}) => method), ["GET", "GET"]);
 });

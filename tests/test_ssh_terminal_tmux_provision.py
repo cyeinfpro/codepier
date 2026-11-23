@@ -269,3 +269,41 @@ async def test_probe_does_not_execute_unapproved_paths_or_treat_corruption_as_ab
     with pytest.raises(SSHTransportError) as malformed:
         await controller(Peer([reply])).probe()
     assert malformed.value.code == "PERSISTENCE_PROBE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_ready_readonly_probe_reconciles_only_exact_verified_install_identity():
+    from agent.ssh_terminal_tmux import probe_tmux
+
+    host, port, username = "uncertain-proof.invalid", 22, "fixture"
+    endpoint = (host, port, username)
+    exact = (host, port, "SHA256:" + "A" * 43)
+    other = (host, port, "SHA256:" + "B" * 42 + "E")
+    ready = (0, b"/usr/bin/tmux\ntmux 3.3a\n")
+    first = Peer([MISSING, SSHTransportError("SSH_CONTROL_UNCERTAIN", "fixture interrupted")])
+    first.verified_tmux_endpoint = exact
+    with pytest.raises(SSHTransportError) as response:
+        await provision_tmux(first, endpoint, authorize=lambda: True)
+    assert response.value.code == "TMUX_INSTALL_UNCERTAIN"
+
+    wrong = Peer([ready])
+    wrong.verified_tmux_endpoint = other
+    assert (await probe_tmux(wrong))["available"] is True
+    assert (await probe_tmux(Peer([ready])))["available"] is True
+    same_missing = Peer([MISSING])
+    same_missing.verified_tmux_endpoint = exact
+    assert (await probe_tmux(same_missing))["available"] is False
+    blocked = Peer([MISSING])
+    blocked.verified_tmux_endpoint = exact
+    with pytest.raises(SSHTransportError) as response:
+        await provision_tmux(blocked, endpoint, authorize=lambda: True)
+    assert response.value.code == "TMUX_INSTALL_UNCERTAIN"
+
+    reconciled = Peer([ready])
+    reconciled.verified_tmux_endpoint = exact
+    assert (await probe_tmux(reconciled))["available"] is True
+    removed_later = Peer([MISSING, (0, b""), ready])
+    removed_later.verified_tmux_endpoint = exact
+    assert (await provision_tmux(removed_later, endpoint, authorize=lambda: True))[
+        "available"
+    ] is True

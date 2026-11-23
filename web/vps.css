@@ -226,6 +226,20 @@
   width: fit-content;
   max-width: 100%;
 }
+/* Keep the six counter statuses readable when the compact header wraps. */
+.vps-backfill > summary {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  text-align: start;
+  white-space: normal;
+  max-width: 100%;
+}
+[data-vps-fleet-counts],
+[data-vps-fleet-reasons] {
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  overflow-wrap: anywhere;
+}
 .vps-backfill > .vps-readiness {
   padding: 4px 4px 8px;
 }

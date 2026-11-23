@@ -11,6 +11,7 @@ import time
 import uuid
 from weakref import WeakValueDictionary
 
+from shared.ssh_host_pin import normalize_host_pin
 from shared.ssh_terminal_config import TMUX_PROVISION_TIMEOUT_SECONDS
 
 from .ssh_terminal_transport import SSHTransportError
@@ -98,14 +99,47 @@ async def _probe_tmux(transport):
     return {"available": True, "version": f"{version[0]}.{version[1]}"}, binary
 
 
+def _normalize_endpoint(host, port):
+    return host.strip().strip("[]").rstrip(".").casefold(), port
+
+
+def _verified_endpoint(transport):
+    identity = getattr(transport, "verified_tmux_endpoint", None)
+    if not isinstance(identity, tuple) or len(identity) != 3:
+        return None
+    host, port, fingerprint = identity
+    if not isinstance(host, str) or type(port) is not int or not 1 <= port <= 65535:
+        return None
+    try:
+        return (*_normalize_endpoint(host, port), normalize_host_pin(fingerprint))
+    except (TypeError, ValueError):
+        return None
+
+
+def _endpoint_lock(endpoint):
+    hold = _HOLDS.get(endpoint)
+    if hold is None:
+        hold = _HOLDS[endpoint] = asyncio.Lock()
+    return hold
+
+
 async def probe_tmux(transport):
-    """Report a usable installed binary without opening a terminal or writing."""
-    capability, _binary = await _probe_tmux(transport)
-    return capability
+    """Probe only; a ready result may reconcile only the exact verified peer."""
+    identity = _verified_endpoint(transport)
+    if identity is None:
+        capability, _binary = await _probe_tmux(transport)
+        return capability
+    # A ready probe must not clear a fence concurrently with an install that
+    # started after the probe's SSH command.
+    async with _endpoint_lock(identity[:2]):
+        capability, _binary = await _probe_tmux(transport)
+        if capability["available"]:
+            _UNCERTAIN.discard(identity)
+        return capability
 
 
-def _check_install_budget(endpoint):
-    if endpoint in _UNCERTAIN or len(_UNCERTAIN) >= _MAX_UNCERTAIN_ENDPOINTS:
+def _check_install_budget(endpoint, identity):
+    if identity in _UNCERTAIN or len(_UNCERTAIN) >= _MAX_UNCERTAIN_ENDPOINTS:
         raise SSHTransportError(*_INSTALL_UNCERTAIN)
     now = time.monotonic()
     for key, (expires, _) in list(_RECENT_FAILURES.items()):
@@ -127,10 +161,10 @@ async def _authorize_install(authorize):
         raise SSHTransportError("AUTH_REVOKED", "tmux 安装授权已失效")
 
 
-async def _run_install(transport, endpoint):
+async def _run_install(transport, endpoint, identity):
     # Register before the remote request: cancellation or response loss
     # cannot turn an ambiguous mutation into an automatic retry.
-    _UNCERTAIN.add(endpoint)
+    _UNCERTAIN.add(identity)
     try:
         status, _ = await transport.run_control(
             _INSTALL, wait_seconds=TMUX_PROVISION_TIMEOUT_SECONDS, max_bytes=1024
@@ -145,43 +179,43 @@ async def _run_install(transport, endpoint):
         # The manager may have modified the host before reporting error.
         raise SSHTransportError(*_INSTALL_FAILED)
     if status != 0:
-        _UNCERTAIN.discard(endpoint)
+        _UNCERTAIN.discard(identity)
         failure = _INSTALL_FAILURES.get(status, _INSTALL_FAILED)
         _RECENT_FAILURES[endpoint] = (time.monotonic() + _FAILURE_COOLDOWN_SECONDS, failure)
         raise SSHTransportError(*failure)
 
 
-async def _confirm_install(transport, endpoint):
+async def _confirm_install(transport, identity):
     try:
         capability, _binary = await _probe_tmux(transport)
     except Exception as exc:
         raise SSHTransportError(*_INSTALL_UNCERTAIN) from exc
     if not capability["available"]:
         raise SSHTransportError(*_INSTALL_UNCERTAIN)
-    _UNCERTAIN.discard(endpoint)
+    _UNCERTAIN.discard(identity)
     return capability
 
 
 async def provision_tmux(transport, endpoint_key, *, authorize):
     """Check/provision a target through an authorized SSH control connection, no PTY."""
     host, port, _username = endpoint_key
-    endpoint = (host.strip().strip("[]").rstrip(".").casefold(), port)
-    # Lock across SSH users of the same machine, not per browser/session.
-    hold = _HOLDS.get(endpoint)
-    if hold is None:
-        hold = _HOLDS[endpoint] = asyncio.Lock()
+    endpoint = _normalize_endpoint(host, port)
+    verified = _verified_endpoint(transport)
+    identity = verified if verified is not None and verified[:2] == endpoint else endpoint
+    # Lock across SSH users and host keys of the same machine, not per browser/session.
+    hold = _endpoint_lock(endpoint)
     async with hold:
         capability, _binary = await _probe_tmux(transport)
         if capability["available"]:
-            _UNCERTAIN.discard(endpoint)
+            _UNCERTAIN.discard(identity)
             _RECENT_FAILURES.pop(endpoint, None)
             return capability
         if capability["reason"] != "TMUX_NOT_INSTALLED":
             return capability
-        _check_install_budget(endpoint)
+        _check_install_budget(endpoint, identity)
         await _authorize_install(authorize)
-        await _run_install(transport, endpoint)
-        return await _confirm_install(transport, endpoint)
+        await _run_install(transport, endpoint, identity)
+        return await _confirm_install(transport, identity)
 
 
 @dataclass(frozen=True)

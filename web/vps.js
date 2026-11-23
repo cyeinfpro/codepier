@@ -2,11 +2,11 @@
 // Saved connection management. Passwords stay in the active form only; neither
 // metadata state nor browser storage ever receives a saved credential.
 const VPS_TERMINAL_ENDED = ['closed', 'exited', 'failed', 'revoked'];
-async function vpsInventory(observeFirstPage) {
+async function vpsInventory(observeFirstPage, signal) {
   const items = [];
   let offset = 0;
   do {
-    const r = await api('/api/vps?limit=200&offset=' + offset);
+    const r = await api('/api/vps?limit=200&offset=' + offset, signal ? { signal } : undefined);
     if (offset === 0) observeFirstPage?.(r);
     items.push(...r.vps);
     offset = r.next_offset;
@@ -123,6 +123,7 @@ function vpsTerminalForget() {
   vpsPresenceRequest = null;
   for (const watch of vpsReadinessWatches.values()) watch.controller.abort();
   vpsReadinessWatches.clear();
+  vpsFleetWatch?.controller.abort();
   vpsReadinessBackfill = null;
 }
 function vpsActiveSessions(vpsId = null) {
@@ -349,8 +350,10 @@ function vpsReadinessJob(payload) {
 }
 function vpsReadinessText(job) {
   if (!job) return '尚未检查';
+  if (job.state === 'missing') return '已确认缺少 tmux；未安装';
   const code = job.reason_code || job.reason;
   const messages = {
+    TMUX_MISSING: '已确认缺少 tmux；未安装',
     ALREADY_INSTALLED: 'tmux 已就绪',
     TMUX_ALREADY_INSTALLED: 'tmux 已就绪',
     INSTALLED: 'tmux 已安装并验证',
@@ -365,6 +368,7 @@ function vpsReadinessText(job) {
     INSTALL_OUTCOME_UNCONFIRMED: '安装结果未确认，请再次检查实际环境',
     HOST_KEY_UNKNOWN: '主机指纹未核验；未安装',
     HOST_KEY_CHANGED: '主机指纹已变化；未安装',
+    SSH_AUTH_FAILED: 'SSH 登录失败，请检查保存的凭据；未安装',
     HOST_KEY_REVOKED: '主机指纹已撤销；未安装',
     HOST_KEY_UNVERIFIED: '主机指纹未核验；未安装',
     HUB_SSH_TRUST_MIGRATION_REQUIRED: '面板尚未核验主机指纹；未安装',
@@ -381,8 +385,15 @@ function vpsReadinessText(job) {
         : '已排队，稍后自动检查',
     checking: '正在检查环境…',
     running: '正在检查环境…',
-    installing: '正在准备终端环境…',
+    installing: '正在安装 tmux…',
   };
+  if (
+    job.state === 'queued' &&
+    job.intent === 'install' &&
+    code !== 'VPS_OFFLINE' &&
+    code !== 'OFFLINE'
+  )
+    return '已加入安装队列';
   let message = Object.hasOwn(active, job.state)
     ? active[job.state]
     : Object.hasOwn(messages, code)
@@ -395,7 +406,7 @@ function vpsReadinessText(job) {
     : message;
 }
 function vpsReadinessHTML(v) {
-  if (!vpsReadinessEnabled(v)) return '';
+  if (!vpsReadinessEnabled(v) || !vpsReadinessBackfill?.available) return '';
   const job = vpsReadinessJob(v.readiness);
   return `<div class="vps-readiness"><button class="btn ghost small" type="button" data-vps-action="readiness" data-id="${esc(v.id)}">${icon('check')}检查环境</button><small data-vps-env-status role="status" aria-live="polite">${esc(vpsReadinessText(job))}</small></div>`;
 }
@@ -441,7 +452,13 @@ async function vpsReadinessWatch(id, submit = false) {
   const v = S.vps?.find((item) => item.id === id);
   const owner = vpsTerminalIdentity();
   const card = vpsReadinessCard(id);
-  if (!owner || !vpsReadinessEnabled(v) || !vpsReadinessVisible(id)) return;
+  if (
+    !owner ||
+    !vpsReadinessBackfill?.available ||
+    !vpsReadinessEnabled(v) ||
+    !vpsReadinessVisible(id)
+  )
+    return;
   const running = vpsReadinessWatches.get(id);
   if (running && !running.controller.signal.aborted) return;
   const controller = new AbortController();
@@ -531,8 +548,7 @@ function vpsBindReadiness() {
       vpsReadinessCancelInvisible();
       if (more.open) void vpsReadinessWatch(id);
     };
-    // A reused open card will not dispatch a fresh toggle after inventory
-    // replaces its model. Restart only stale or still-active observation.
+    // An open, reused card will not dispatch a new toggle after refresh.
     if (!more.open || card.hidden || document.hidden || S.page !== 'vps') continue;
     const oldWatch = vpsReadinessWatches.get(id);
     const job = vpsReadinessJob(S.vps?.find((item) => item.id === id)?.readiness);
@@ -542,7 +558,11 @@ function vpsBindReadiness() {
 }
 document.addEventListener('visibilitychange', () => {
   vpsReadinessCancelInvisible();
-  if (document.hidden || S.page !== 'vps') return;
+  if (document.hidden || S.page !== 'vps') {
+    vpsFleetWatch?.controller.abort();
+    return;
+  }
+  void vpsObserveFleet();
   for (const card of $$('[data-vps-card]'))
     if (vpsReadinessVisible(card.dataset.vpsCard)) void vpsReadinessWatch(card.dataset.vpsCard);
 });
@@ -551,6 +571,7 @@ if (typeof window !== 'undefined')
     // The route may change before its replacement view has been rendered.
     if (parseHashRoute().page === 'vps' && !new URLSearchParams(parseHashRoute().query).has('view'))
       return;
+    vpsFleetWatch?.controller.abort();
     for (const watch of vpsReadinessWatches.values()) watch.controller.abort();
   });
 
@@ -716,6 +737,9 @@ function vpsReplacePage(html) {
     cursor.remove();
     cursor = following;
   }
+  const previousBackfill = $('.vps-backfill', page),
+    nextBackfill = $('.vps-backfill', next.content);
+  if (previousBackfill && nextBackfill) nextBackfill.open = previousBackfill.open;
   const nodes = [...next.content.childNodes],
     index = nodes.indexOf(freshGrid);
   for (const node of [...page.childNodes]) if (node !== grid) node.remove();
@@ -735,8 +759,7 @@ function vpsComparableCard(card) {
     button.removeAttribute('data-vps-opening');
   }
   copy.querySelector('.vps-card-more')?.removeAttribute('open');
-  // Observation mutates status and disabled in place. They are not a
-  // structural change and must not replace sibling controls mid-interaction.
+  // Observation status is transient, not a structural card change.
   copy.querySelector('[data-vps-env-status]')?.replaceChildren();
   copy.querySelector('[data-vps-action="readiness"]')?.removeAttribute('disabled');
   copy.hidden = false;
@@ -762,67 +785,205 @@ function vpsCardHTML(v, _sessions, pinned = false, pinEnabled = Boolean(vpsPinKe
 }
 let vpsReadinessBackfill = null;
 
+function vpsFleetResult(items) {
+  const result = {
+    ready: 0,
+    missing: 0,
+    eligible: 0,
+    queued: 0,
+    scanning: 0,
+    installing: 0,
+    failed: 0,
+    unchecked: 0,
+  };
+  const reasons = new Map();
+  const revisions = [];
+  for (const item of items) {
+    if (!vpsReadinessEnabled(item)) continue;
+    const job = vpsReadinessJob(item.readiness);
+    if (job) revisions.push(JSON.stringify([item.id, job.id, job.state, job.intent, job.updated]));
+    if (!job) result.unchecked++;
+    else if (job.state === 'ready') result.ready++;
+    else if (job.state === 'missing') {
+      result.missing++;
+      if (job.install_eligible === true) result.eligible++;
+    } else if (job.state === 'queued') result.queued++;
+    else if (VPS_READINESS_ACTIVE.has(job.state)) {
+      if (job.intent === 'install' || job.state === 'installing') result.installing++;
+      else result.scanning++;
+    } else {
+      result.failed++;
+      const label = vpsReadinessText(job);
+      reasons.set(label, (reasons.get(label) || 0) + 1);
+    }
+  }
+  return {
+    counts: `就绪 ${result.ready} · 缺少 ${result.missing} · 排队 ${result.queued} · 扫描中 ${result.scanning} · 安装中 ${result.installing} · 失败 ${result.failed} · 未检查 ${result.unchecked}`,
+    reasons: [...reasons]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => `${count} 台：${label}`)
+      .join('；'),
+    active: result.queued + result.scanning + result.installing > 0,
+    eligible: result.eligible,
+    staleMissing: result.missing - result.eligible,
+    revision: revisions.sort().join('\n'),
+  };
+}
+function vpsFleetButtons(view) {
+  const busy = Boolean(view.pending || view.awaiting || view.result?.active || view.uncertain);
+  return { scanDisabled: busy, installDisabled: busy || !(view.result?.eligible > 0) };
+}
+function vpsFleetMessage(view) {
+  if (view.message) return view.message;
+  const help = '扫描只检查 SSH 和 tmux，不会安装。一键安装只处理最近扫描确认缺少 tmux 的服务器。';
+  return view.result?.staleMissing
+    ? help + ' ' + view.result.staleMissing + ' 台的缺失结果已过期或不可安装，请重新扫描。'
+    : help;
+}
 function vpsReadinessBackfillHTML(view) {
   if (!view?.available) return '';
-  const active = view.enabled || view.pending || view.uncertain;
-  const label =
-    view.message ||
-    (view.enabled
-      ? '已开启，新添加的服务器也会自动检查。'
-      : '检查当前空间所有已启用的服务器。有授权才会安装；以后新增的服务器也会自动检查。');
-  return `<details class="panel vps-backfill"><summary class="btn ghost small">批量环境检查</summary><div class="vps-readiness"><button class="btn small" type="button" data-vps-action="readiness-backfill" ${active ? 'disabled' : ''}>${view.enabled ? '已开启' : '检查全部环境'}</button><small data-vps-backfill-status role="status">${esc(label)}</small></div></details>`;
+  const { scanDisabled, installDisabled } = vpsFleetButtons(view);
+  return `<details class="panel vps-backfill"><summary class="btn ghost small">批量终端环境 <small data-vps-fleet-counts role="status">${esc(view.result?.counts || '')}</small></summary><div class="vps-readiness"><button class="btn small" type="button" data-vps-action="readiness-backfill" ${scanDisabled ? 'disabled' : ''}>扫描全部 SSH</button><button class="btn small" type="button" data-vps-action="readiness-backfill-install" ${installDisabled ? 'disabled' : ''}>一键安装</button><small data-vps-backfill-status role="status">${esc(vpsFleetMessage(view))}</small></div><small data-vps-fleet-reasons ${view.result?.reasons ? '' : 'hidden'}>${esc(view.result?.reasons || '')}</small></details>`;
 }
 function vpsReadinessBackfillPaint(view) {
   if (S.page !== 'vps' || view !== vpsReadinessBackfill) return;
-  const button = $('[data-vps-action="readiness-backfill"]');
+  const { scanDisabled, installDisabled } = vpsFleetButtons(view);
+  const scan = $('[data-vps-action="readiness-backfill"]');
+  const install = $('[data-vps-action="readiness-backfill-install"]');
   const status = $('[data-vps-backfill-status]');
-  if (button) {
-    button.disabled = view.enabled || view.pending || view.uncertain;
-    button.textContent = view.enabled ? '已开启' : '检查全部环境';
+  const counts = $('[data-vps-fleet-counts]');
+  const reasons = $('[data-vps-fleet-reasons]');
+  if (scan) scan.disabled = scanDisabled;
+  if (install) install.disabled = installDisabled;
+  if (status && status.textContent !== vpsFleetMessage(view))
+    status.textContent = vpsFleetMessage(view);
+  if (counts && counts.textContent !== view.result?.counts)
+    counts.textContent = view.result?.counts || '';
+  if (reasons) {
+    const next = view.result?.reasons || '';
+    reasons.hidden = !next;
+    if (reasons.textContent !== next) reasons.textContent = next;
   }
-  if (status && view.message) status.textContent = view.message;
 }
-async function vpsReadinessBackfillStart() {
-  const view = vpsReadinessBackfill;
+let vpsFleetWatch = null;
+async function vpsObserveFleet(view = vpsReadinessBackfill) {
   if (
     !view?.available ||
-    view.owner !== vpsTerminalIdentity() ||
-    S.page !== 'vps' ||
-    view.enabled ||
-    view.pending ||
-    view.uncertain
+    (!view.awaiting && !view.uncertain && !view.result?.active) ||
+    !vpsFleetVisible(view)
   )
     return;
+  const existing = vpsFleetWatch;
+  if (existing?.view === view && !existing.controller.signal.aborted) return;
+  existing?.controller.abort();
+  const controller = new AbortController();
+  const watch = { view, controller };
+  vpsFleetWatch = watch;
+  const session = S.session;
+  const current = () =>
+    vpsFleetWatch === watch &&
+    session === S.session &&
+    !controller.signal.aborted &&
+    vpsFleetVisible(view);
+  const deadline = setTimeout(() => {
+    if (current()) {
+      view.message = '后台任务仍可能继续；刷新页面查看最新进度。';
+      vpsReadinessBackfillPaint(view);
+    }
+    controller.abort();
+  }, VPS_READINESS_BUDGET_MS);
+  try {
+    let delay = 1600;
+    let failures = 0;
+    let uncertainReads = 0;
+    while (current()) {
+      if (!(await vpsReadinessDelay(delay, controller.signal)) || !current()) break;
+      delay = Math.min(7000, delay * 2);
+      let available = false;
+      let items;
+      try {
+        items = await vpsInventory((first) => {
+          available = first.readiness_manual_actions === true;
+        }, controller.signal);
+      } catch (error) {
+        if (!current()) break;
+        if ([401, 403].includes(error?.status) || ++failures >= 3) throw error;
+        continue;
+      }
+      if (!current() || !available) break;
+      failures = 0;
+      const next = vpsFleetResult(items);
+      view.result = next;
+      if (view.uncertain && next.revision === view.ambiguityBaseline && !next.active) {
+        if (++uncertainReads >= 4) {
+          view.message = '已核对，尚无新的任务记录；无法确认提交结果，请刷新页面后再操作。';
+          vpsReadinessBackfillPaint(view);
+          break;
+        }
+        vpsReadinessBackfillPaint(view);
+        continue;
+      }
+      view.awaiting = false;
+      view.uncertain = false;
+      if (!next.active) view.message = '';
+      vpsReadinessBackfillPaint(view);
+      if (!next.active) break;
+    }
+  } catch {
+    if (current()) {
+      view.message = '暂时无法刷新进度；后台任务仍可能继续。请刷新页面查看结果。';
+      vpsReadinessBackfillPaint(view);
+    }
+  } finally {
+    clearTimeout(deadline);
+    if (vpsFleetWatch === watch) vpsFleetWatch = null;
+  }
+}
+function vpsFleetVisible(view) {
+  return (
+    !document.hidden &&
+    S.page === 'vps' &&
+    view === vpsReadinessBackfill &&
+    view.owner === vpsTerminalIdentity() &&
+    Boolean($('[data-vps-fleet-counts]'))
+  );
+}
+async function vpsReadinessBackfillStart(install = false) {
+  const view = vpsReadinessBackfill;
+  if (!view?.available || view.owner !== vpsTerminalIdentity() || S.page !== 'vps') return;
+  const buttons = vpsFleetButtons(view);
+  if (install ? buttons.installDisabled : buttons.scanDisabled) return;
   const session = S.session;
   const current = () =>
     vpsReadinessBackfill === view && session === S.session && view.owner === vpsTerminalIdentity();
   view.pending = true;
-  view.message = '正在提交当前空间的检查…';
+  view.ambiguityBaseline = view.result?.revision ?? '';
+  view.message = install ? '正在提交安装…' : '正在提交只读扫描…';
   vpsReadinessBackfillPaint(view);
   try {
-    const result = await api('/api/vps/readiness/backfill', { method: 'POST' });
+    const endpoint = install ? '/api/vps/readiness/install' : '/api/vps/readiness/scan';
+    const result = await api(endpoint, { method: 'POST' });
     if (!current()) return;
-    if (
-      result?.enabled !== true ||
-      !Number.isSafeInteger(result.queued_count) ||
-      result.queued_count < 0
-    )
+    if (!Number.isSafeInteger(result?.queued_count) || result.queued_count < 0)
       throw new Error('READINESS_BACKFILL_UNKNOWN');
-    view.enabled = true;
+    view.awaiting = result.queued_count > 0;
     view.message = result.queued_count
-      ? `已将 ${result.queued_count} 台加入后台检查；以后新增的服务器也会自动检查。`
-      : '已开启自动检查；暂时没有新的服务器需要排队。';
+      ? `已将 ${result.queued_count} 台加入${install ? '安装队列' : '只读扫描队列'}。`
+      : install
+        ? '没有符合安装条件的服务器。'
+        : '没有新的服务器需要扫描。';
   } catch (error) {
     if (!current()) return;
-    view.uncertain = true;
+    view.uncertain = error?.status !== 403;
     view.message =
       error?.status === 403
-        ? '没有当前空间的批量检查权限。'
+        ? '没有当前空间的批量操作权限。'
         : '提交结果待确认。刷新页面查看状态，无需重复提交。';
   } finally {
     if (current()) {
       view.pending = false;
       vpsReadinessBackfillPaint(view);
+      void vpsObserveFleet(view);
     }
   }
 }
@@ -835,8 +996,7 @@ async function vpsHTML(seq) {
     vpsInventory((first) => {
       backfill = {
         owner,
-        available: first.readiness_backfill_available === true,
-        enabled: first.readiness_backfill_enabled === true,
+        available: first.readiness_manual_actions === true,
       };
     }),
     loadBasics(),
@@ -845,13 +1005,12 @@ async function vpsHTML(seq) {
   S.vps = items;
   if (owner && backfill?.available) {
     const previous = vpsReadinessBackfill;
-    if (previous?.owner === owner && previous.pending) previous.enabled ||= backfill.enabled;
-    else
-      vpsReadinessBackfill = {
-        ...backfill,
-        enabled: backfill.enabled || (previous?.owner === owner && previous.enabled === true),
-        message: previous?.owner === owner && previous.enabled ? previous.message : undefined,
-      };
+    const result = vpsFleetResult(items);
+    if (previous?.owner === owner) {
+      previous.result = result;
+    } else {
+      vpsReadinessBackfill = { ...backfill, result };
+    }
   } else {
     vpsReadinessBackfill = null;
   }
@@ -929,6 +1088,7 @@ function bindVps() {
   if ($('#vps-status-filter')) $('#vps-status-filter').onchange = vpsFilter;
   vpsFilter();
   vpsBindReadiness();
+  void vpsObserveFleet();
 }
 function vpsProjectChoices(selected = []) {
   return `<div class="check-list vps-check-list">${
@@ -1291,6 +1451,9 @@ document.addEventListener('click', async (e) => {
         break;
       case 'readiness-backfill':
         await vpsReadinessBackfillStart();
+        break;
+      case 'readiness-backfill-install':
+        await vpsReadinessBackfillStart(true);
         break;
       case 'readiness':
         await vpsReadinessWatch(button.dataset.id, true);

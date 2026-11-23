@@ -386,7 +386,10 @@ def test_background_refresh_preserves_held_click_target(browser, ui_stack):
         page.fill("#vps-query", v["name"])
         open_details(page)
         button = page.locator('[data-vps-card]:visible [data-vps-action="edit"]')
-        page.evaluate("""() => {document.addEventListener('pointerdown',event=>{
+        page.evaluate("""async () => {
+          // Keep the real first-page capabilities in the same-data refresh.
+          const firstPage = await api('/api/vps?limit=200&offset=0');
+          document.addEventListener('pointerdown',event=>{
           const button=event.target.closest('[data-vps-action="edit"]');
           if(!button)return;
           window.heldVpsButton=button;
@@ -396,7 +399,7 @@ def test_background_refresh_preserves_held_click_target(browser, ui_stack):
             if(records.some(record=>[...record.removedNodes].some(node=>node===card||node.contains?.(card))))
               window.heldVpsDetachCount++;
           }).observe(document.querySelector('#page'),{childList:true,subtree:true});
-          vpsInventory=async()=>S.vps;
+          vpsInventory=async(observe)=>{observe?.(firstPage);return S.vps;};
           loadBasics=async()=>{};
           const original=uiWaitForPagePointer;
           uiWaitForPagePointer=()=>{

@@ -73,8 +73,9 @@ class _PinnedClient:
 class ReadinessSSH:
     """One authenticated connection. No interactive shell, PTY, or forwarding API."""
 
-    def __init__(self, connection, ssh, config):
+    def __init__(self, connection, ssh, config, verified_tmux_endpoint):
         self._connection, self._ssh, self._config = connection, ssh, config
+        self.verified_tmux_endpoint = verified_tmux_endpoint
 
     async def __aenter__(self):
         return self
@@ -200,7 +201,7 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
         )
         # Covers a successful SSH "none" user-auth without loading a password.
         client.prove_authenticated_peer()
-        result = ReadinessSSH(connection, ssh, config)
+        result = ReadinessSSH(connection, ssh, config, (target.host, target.port, pin))
         connection = None
         return result
     except asyncio.CancelledError:

@@ -18,12 +18,15 @@ _GRANTS = """CREATE TABLE IF NOT EXISTS vps_readiness_grants (
     identity_id TEXT,
     vps_id TEXT,
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+    intent TEXT NOT NULL DEFAULT 'scan' CHECK(intent IN ('scan','install')),
     created REAL NOT NULL
 )"""
-_SPACE_GRANT_INDEX = """CREATE UNIQUE INDEX IF NOT EXISTS vps_readiness_one_space_grant
-ON vps_readiness_grants(space_id) WHERE vps_id IS NULL AND active=1"""
-_LIVE_SPACE_GRANT = """
-SELECT * FROM vps_readiness_grants WHERE space_id=? AND vps_id IS NULL AND active=1
+_ACTOR_GRANT_INDEX = """CREATE UNIQUE INDEX IF NOT EXISTS vps_readiness_one_actor_grant
+ON vps_readiness_grants(space_id,ifnull(vps_id,''),authorized_user_id,ifnull(identity_id,''),intent)
+WHERE active=1"""
+_LIVE_SPACE_SCAN_GRANT = """
+SELECT * FROM vps_readiness_grants WHERE space_id=? AND authorized_user_id=?
+AND identity_id IS ? AND vps_id IS NULL AND active=1 AND intent='scan'
 """
 _CURRENT_JOB = """
 SELECT q.* FROM vps_readiness_jobs q JOIN vps_connections v ON v.id=q.vps_id
@@ -55,7 +58,15 @@ class VPSReadinessWiring:
 
     def _initialize(self):
         self.store.execute(_GRANTS)
-        self.store.execute(_SPACE_GRANT_INDEX)
+        with self.store.transaction() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(vps_readiness_grants)")}
+            if "intent" not in columns:
+                db.execute(
+                    "ALTER TABLE vps_readiness_grants ADD COLUMN intent TEXT NOT NULL "
+                    "DEFAULT 'scan' CHECK(intent IN ('scan','install'))"
+                )
+            db.execute("DROP INDEX IF EXISTS vps_readiness_one_space_grant")
+            db.execute(_ACTOR_GRANT_INDEX)
 
     async def start(self):
         if self.queue is None or self.started:
@@ -63,12 +74,6 @@ class VPSReadinessWiring:
         await self.store.run(self._initialize)
         await self.queue.start()
         self.started = True
-        for grant_row in await self.store.run(self._startup_grants):
-            await self.queue.backfill(
-                grant_row["space_id"],
-                grant_row["id"],
-                authorized_user_id=grant_row["authorized_user_id"],
-            )
 
     async def stop(self):
         self.started = False
@@ -100,15 +105,6 @@ class VPSReadinessWiring:
         except DevError:
             return False
 
-    def _startup_grants(self):
-        return [
-            row
-            for row in self.store.all(
-                "SELECT * FROM vps_readiness_grants WHERE active=1 AND vps_id IS NULL"
-            )
-            if self._valid_grant(row)
-        ]
-
     def _current_vps(self, space_id, vps_id):
         return self.store.one(
             """SELECT id,space_id,owner_user_id,connection_revision,enabled,host,port,
@@ -117,7 +113,9 @@ class VPSReadinessWiring:
             (vps_id, space_id),
         )
 
-    def _bound_target(self, target):
+    def _bound_target(self, target, action="inspect"):
+        if action not in ("inspect", "install"):
+            return None
         grant = self.store.one(
             "SELECT * FROM vps_readiness_grants WHERE id=? AND space_id=?",
             (target.grant_id, target.space_id),
@@ -126,6 +124,7 @@ class VPSReadinessWiring:
             not grant
             or grant["authorized_user_id"] != target.authorized_user_id
             or grant["vps_id"] not in (None, target.vps_id)
+            or (action == "install" and grant["intent"] != "install")
             or not self._valid_grant(grant)
         ):
             return None
@@ -139,8 +138,8 @@ class VPSReadinessWiring:
             return None
         return row
 
-    async def authorize(self, target, _action):
-        return bool(await self.store.run(self._bound_target, target))
+    async def authorize(self, target, action):
+        return bool(await self.store.run(self._bound_target, target, action))
 
     async def _inspect(self, target):
         row = await self.store.run(self._bound_target, target)
@@ -150,11 +149,11 @@ class VPSReadinessWiring:
             return "trust_missing"
         return await self.executor.inspect(target)
 
-    async def resolve_target(self, target, _action):
+    async def resolve_target(self, target, action):
         # Transport imports are unnecessary when no native executor is mounted.
         from hub.vps_readiness_native import NativeSSHTarget
 
-        row = await self.store.run(self._bound_target, target)
+        row = await self.store.run(self._bound_target, target, action)
         if not row:
             return None
         return NativeSSHTarget(
@@ -203,32 +202,30 @@ class VPSReadinessWiring:
     async def secret(self, native):
         return await self.store.run(self._secret, native)
 
-    def _grant_for(self, principal, vps_id=None):
-        """Create explicit authority or reuse it for the same actor and scope."""
+    def _grant_for(self, principal, vps_id=None, intent="scan"):
+        """Reuse only the exact actor, identity, scope and purpose."""
+        if intent not in ("scan", "install"):
+            raise ValueError("Unknown readiness grant intent")
         with self.store.transaction() as db:
             principal = self._admin(principal)
+            identity_id = getattr(principal, "identity_id", None)
+            scope = (principal.space_id, vps_id, principal.user_id, identity_id, intent)
             row = self.store.one(
                 """SELECT * FROM vps_readiness_grants
-                   WHERE space_id=? AND vps_id IS ? AND authorized_user_id=? AND active=1
+                   WHERE space_id=? AND vps_id IS ? AND authorized_user_id=?
+                     AND identity_id IS ? AND intent=? AND active=1
                    ORDER BY created DESC LIMIT 1""",
-                (principal.space_id, vps_id, principal.user_id),
+                scope,
             )
-            identity_id = getattr(principal, "identity_id", None)
-            if self._valid_grant(row) and row["identity_id"] == identity_id:
+            if self._valid_grant(row):
                 return row["id"]
-            # A new active Space administrative opt-in supersedes previous
-            # Space grants only; scoped manual grants can't seize that scope.
-            db.execute(
-                """UPDATE vps_readiness_grants SET active=0
-                   WHERE space_id=? AND vps_id IS ? AND active=1
-                     AND (vps_id IS NULL OR authorized_user_id=?)""",
-                (principal.space_id, vps_id, principal.user_id),
-            )
+            if row:
+                db.execute("UPDATE vps_readiness_grants SET active=0 WHERE id=?", (row["id"],))
             grant = uuid4().hex
             db.execute(
                 """INSERT INTO vps_readiness_grants
-                   (id,space_id,authorized_user_id,user_epoch,identity_id,vps_id,created)
-                   VALUES (?,?,?,?,?,?,?)""",
+                   (id,space_id,authorized_user_id,user_epoch,identity_id,vps_id,intent,created)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     grant,
                     principal.space_id,
@@ -236,6 +233,7 @@ class VPSReadinessWiring:
                     principal.user_epoch,
                     identity_id,
                     vps_id,
+                    intent,
                     time.time(),
                 ),
             )
@@ -248,10 +246,18 @@ class VPSReadinessWiring:
         available = self.available and bool(
             principal.admin and principal.session_hash and not principal.grant_id
         )
-        grant = self.store.one(_LIVE_SPACE_GRANT, (principal.space_id,)) if available else None
+        grant = (
+            self.store.one(
+                _LIVE_SPACE_SCAN_GRANT,
+                (principal.space_id, principal.user_id, getattr(principal, "identity_id", None)),
+            )
+            if available
+            else None
+        )
         return {
             "readiness_backfill_available": available,
             "readiness_backfill_enabled": self._valid_grant(grant),
+            "readiness_manual_actions": available,
         }
 
     def summary(self, principal, vps_id, enabled):
@@ -305,27 +311,22 @@ class VPSReadinessWiring:
             principal.space_id,
             grant,
             authorized_user_id=principal.user_id,
+            refresh=True,
         )
         return {"enabled": True, "queued_count": count}
+
+    async def install_space(self, principal):
+        principal = await self.store.run(self._admin, principal)
+        self._require_available()
+        grant = await self.store.run(self._grant_for, principal, None, "install")
+        count = await self.queue.install_missing(
+            principal.space_id, grant, authorized_user_id=principal.user_id
+        )
+        return {"queued_count": count}
 
     def _require_available(self):
         if not self.available:
             raise DevError("VPS_READINESS_UNAVAILABLE", "Hub 直连检查环境未配置", 503)
-
-    def enqueue_after_save(self, principal, vps_id, revision):
-        """Post-commit, local database-only hook; worker polling wakes asynchronously."""
-        if not self.available:
-            return None
-        try:
-            principal = self._admin(principal)
-        except DevError:
-            return None
-        grant = self.store.one(_LIVE_SPACE_GRANT, (principal.space_id,))
-        if self._valid_grant(grant):
-            grant_id, actor = grant["id"], grant["authorized_user_id"]
-        else:
-            grant_id, actor = self._grant_for(principal, vps_id), principal.user_id
-        return self.queue._enqueue(principal.space_id, vps_id, grant_id, actor, revision, False)
 
 
 def native_readiness_from_env(wiring):

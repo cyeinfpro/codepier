@@ -99,6 +99,12 @@ Agent 的数值配置应放在实际启动 Agent 的服务环境中。`CODEPIER_
 
 每个持久会话使用独立的 tmux socket `codepier_<session_uuid>` 和会话名 `cp_<session_uuid>`，并使用 `-f /dev/null` 避免继承远端 tmux 用户配置。显式结束只针对该生成的会话，不调用共享 `kill-server`。默认 tmux history-limit 为 10,000 行。远端 shell/进程退出、tmux 被移除或远端主机重启后，不能通过浏览器重新创建来冒充原会话恢复。[tmux 控制器](../agent/ssh_terminal_tmux.py)、[生命周期与租约](../agent/ssh_terminal_manager.py)
 
+### 3.1 批量检查与安装 tmux
+
+空间管理员在 VPS 面板先选择「扫描全部 SSH」。这一步只核验连接与 tmux 状态，不安装软件。之后选择「一键安装 tmux」，只处理最近 30 分钟内确认缺少 tmux、且连接配置未变的启用服务器。保存服务器不会自动安装。刷新页面不取消后台任务；安装结果不明时只会复查，不会自动重发。
+
+批量环境检查由 Hub 执行，和浏览器终端使用的通道不同。仍要先核验目标主机身份，之后才使用已保存的密码。旧 Agent 能连接，不代表 Hub 也已有信任证据。主机身份未核验、无法连接或无安装权限的服务器不会安装；可在面板查看失败原因。
+
 ## 4. 密码、验证码与主机信任
 
 ### 4.1 密码与 keyboard-interactive

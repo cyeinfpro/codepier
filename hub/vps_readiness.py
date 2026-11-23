@@ -1,8 +1,9 @@
 """Durable coordination for authorized, Hub-native VPS readiness.
 
 This queue stores operation identity, never SSH parameters, output, or credentials.
-Its executor must check the live grant and target revision immediately before any
-network action. There is intentionally no Agent fallback or terminal-create hook.
+A default scan is read-only. Only explicit installation of a current, positively
+missing target can enter the install path. Its executor rechecks live authority
+and revision immediately before any network action.
 """
 
 from __future__ import annotations
@@ -11,6 +12,9 @@ import asyncio
 import time
 from dataclasses import dataclass
 from uuid import uuid4
+
+
+_INSTALL_ELIGIBILITY_SECONDS = 30 * 60
 
 
 _SCHEMA = """
@@ -23,6 +27,7 @@ CREATE TABLE IF NOT EXISTS vps_readiness_jobs (
     connection_revision INTEGER NOT NULL,
     grant_id TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('queued','running','installing','ready','failed')),
+    intent TEXT NOT NULL DEFAULT 'scan' CHECK(intent IN ('scan','install')),
     reason_code TEXT,
     verify_only INTEGER NOT NULL DEFAULT 0 CHECK(verify_only IN (0,1)),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -105,7 +110,22 @@ class VPSReadiness:
 
     def _initialize(self):
         self.store.execute(_SCHEMA)
+        with self.store.transaction() as db:
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(vps_readiness_jobs)")}
+            if "intent" not in columns:
+                # Existing work carries no explicit install authorization. Map
+                # it to scan, preserving verify_only and all historical results.
+                db.execute(
+                    "ALTER TABLE vps_readiness_jobs ADD COLUMN intent TEXT NOT NULL "
+                    "DEFAULT 'scan' CHECK(intent IN ('scan','install'))"
+                )
         self.store.execute(_DUE_INDEX)
+        # Earlier versions set the fence even on independently verified
+        # ready results. Resolve those historical rows without changing age.
+        self.store.execute(
+            "UPDATE vps_readiness_jobs SET verify_only=0 "
+            "WHERE state='ready' AND reason_code IS NULL AND verify_only=1"
+        )
         # Hub instance lock prevents another live Hub sharing this database.
         # An interrupted installation is never replayed, only re-inspected.
         self.store.execute(
@@ -142,15 +162,26 @@ class VPSReadiness:
             raise ValueError("The authorizing Space administrator is required")
 
     @staticmethod
-    def _public(row):
-        return (
-            {
-                key: row[key]
-                for key in ("id", "state", "reason_code", "connection_revision", "updated")
-            }
-            if row
-            else None
+    def _public(row, *, now=None):
+        if not row:
+            return None
+        public = {
+            key: row[key]
+            for key in ("id", "state", "reason_code", "connection_revision", "updated", "intent")
+        }
+        # Expose missing independently of failed, without rebuilding the
+        # existing SQLite CHECK-constrained table on upgraded servers.
+        if public["state"] == "failed" and public["reason_code"] == "TMUX_MISSING":
+            public["state"] = "missing"
+        if now is None:
+            now = time.time()
+        public["install_eligible"] = (
+            public["state"] == "missing"
+            and public["intent"] == "scan"
+            and not row["verify_only"]
+            and 0 <= now - public["updated"] <= _INSTALL_ELIGIBILITY_SECONDS
         )
+        return public
 
     def _enqueue(self, space_id, vps_id, grant_id, authorized_user_id, expected_revision, refresh):
         with self.store.transaction() as db:
@@ -183,7 +214,7 @@ class VPSReadiness:
                 # request. Never transfer an active job or clear verify_only.
                 db.execute(
                     """UPDATE vps_readiness_jobs
-                       SET state='queued',reason_code=NULL,attempts=0,next_attempt=?,updated=?,
+                       SET state='queued',intent='scan',reason_code=NULL,attempts=0,next_attempt=?,updated=?,
                            authorized_user_id=?,grant_id=?
                        WHERE space_id=? AND vps_id=? AND connection_revision=?
                          AND owner_user_id IS ?
@@ -204,7 +235,7 @@ class VPSReadiness:
                    AND connection_revision=? AND owner_user_id IS ?""",
                 (space_id, vps_id, expected_revision, target["owner_user_id"]),
             ).fetchone()
-            return self._public(row)
+            return self._public(row, now=self.clock())
 
     async def enqueue(
         self, space_id, vps_id, grant_id, *, authorized_user_id, expected_revision, refresh=False
@@ -224,24 +255,92 @@ class VPSReadiness:
             self._wake.set()
         return row
 
-    def _backfill(self, space_id, grant_id, authorized_user_id):
+    def _backfill(self, space_id, grant_id, authorized_user_id, refresh):
         now = self.clock()
         with self.store.transaction() as db:
-            return db.execute(
-                """INSERT OR IGNORE INTO vps_readiness_jobs
+            if refresh:
+                db.execute(
+                    f"""UPDATE vps_readiness_jobs
+                        SET state='queued',intent='scan',reason_code=NULL,attempts=0,
+                            next_attempt=?,updated=?,authorized_user_id=?,grant_id=?
+                        WHERE space_id=? AND state IN ('ready','failed') AND {_CURRENT_TARGET}""",
+                    (now, now, authorized_user_id, grant_id, space_id),
+                )
+                refreshed = db.execute("SELECT changes()").fetchone()[0]
+            else:
+                refreshed = 0
+            return (
+                refreshed
+                + db.execute(
+                    """INSERT OR IGNORE INTO vps_readiness_jobs
                    (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,grant_id,state,next_attempt,updated)
                    SELECT lower(hex(randomblob(16))),space_id,id,owner_user_id,?,connection_revision,
                           ?,'queued',?,?
                    FROM vps_connections WHERE space_id=? AND enabled=1""",
-                (authorized_user_id, grant_id, now, now, space_id),
-            ).rowcount
+                    (authorized_user_id, grant_id, now, now, space_id),
+                ).rowcount
+            )
 
-    async def backfill(self, space_id, grant_id, *, authorized_user_id):
-        """Enumerate target identifiers only in an already-authorized Space."""
+    async def backfill(self, space_id, grant_id, *, authorized_user_id, refresh=False):
+        """Queue read-only scans only in an already-authorized Space."""
         self._grant(grant_id, authorized_user_id)
         if not space_id:
             raise ValueError("An explicitly authorized Space is required")
-        count = await self.store.run(self._backfill, space_id, grant_id, authorized_user_id)
+        count = await self.store.run(
+            self._backfill, space_id, grant_id, authorized_user_id, refresh
+        )
+        if count:
+            self._wake.set()
+        return count
+
+    def _install_missing(self, space_id, grant_id, authorized_user_id, vps_id, expected_revision):
+        now = self.clock()
+        with self.store.transaction() as db:
+            # Avoid a SELECT/UPDATE gap: rebind only an exact, latest positive
+            # scan result. Active and uncertain jobs are never overwritten.
+            return db.execute(
+                f"""UPDATE vps_readiness_jobs
+                    SET state='queued',intent='install',reason_code=NULL,attempts=0,
+                        next_attempt=?,updated=?,authorized_user_id=?,grant_id=?
+                    WHERE space_id=? AND state='failed' AND intent='scan'
+                      AND reason_code='TMUX_MISSING' AND verify_only=0
+                      AND updated BETWEEN ? AND ?
+                      AND (? IS NULL OR vps_id=?) AND (? IS NULL OR connection_revision=?)
+                      AND {_CURRENT_TARGET}""",
+                (
+                    now,
+                    now,
+                    authorized_user_id,
+                    grant_id,
+                    space_id,
+                    now - _INSTALL_ELIGIBILITY_SECONDS,
+                    now,
+                    vps_id,
+                    vps_id,
+                    expected_revision,
+                    expected_revision,
+                ),
+            ).rowcount
+
+    async def install_missing(
+        self, space_id, grant_id, *, authorized_user_id, vps_id=None, expected_revision=None
+    ):
+        """Promote only current, conclusively missing rows after explicit authorization."""
+        self._grant(grant_id, authorized_user_id)
+        if not space_id:
+            raise ValueError("An explicitly authorized Space is required")
+        if vps_id is not None and (
+            not isinstance(vps_id, str)
+            or not vps_id
+            or type(expected_revision) is not int
+            or expected_revision < 1
+        ):
+            raise ValueError("A single target install requires its exact revision")
+        if vps_id is None and expected_revision is not None:
+            raise ValueError("A revision requires a single target")
+        count = await self.store.run(
+            self._install_missing, space_id, grant_id, authorized_user_id, vps_id, expected_revision
+        )
         if count:
             self._wake.set()
         return count
@@ -252,7 +351,7 @@ class VPSReadiness:
             f"""SELECT * FROM vps_readiness_jobs WHERE space_id=? AND vps_id=? AND {_CURRENT_TARGET}""",
             (space_id, vps_id),
         )
-        return self._public(row)
+        return self._public(row, now=self.clock())
 
     def _claim(self):
         now = self.clock()
@@ -285,7 +384,8 @@ class VPSReadiness:
         return (
             self.store.execute(
                 f"""UPDATE vps_readiness_jobs SET state='installing',verify_only=1,updated=?
-                WHERE id=? AND state='running' AND verify_only=0 AND {_CURRENT_TARGET}""",
+                WHERE id=? AND state='running' AND intent='install'
+                  AND verify_only=0 AND {_CURRENT_TARGET}""",
                 (self.clock(), identifier),
             ).rowcount
             == 1
@@ -325,7 +425,9 @@ class VPSReadiness:
         if not await self.store.run(self._current, target.id):
             return await self._finish(target, "failed", "TARGET_CHANGED")
         if result == "ready":
-            return await self._finish(target, "ready")
+            # A successful authorized probe resolves an earlier interrupted or
+            # completed install. Retain the fence only while the outcome is unknown.
+            return await self._finish(target, "ready", clear_install_fence=verify_only)
         if result == "offline" and attempts <= len(self.retry_delays):
             return await self._finish(
                 target, "queued", "VPS_OFFLINE", self.retry_delays[attempts - 1]
@@ -334,10 +436,15 @@ class VPSReadiness:
             return await self._finish(target, "failed", "INSTALL_OUTCOME_UNCONFIRMED")
         codes = {
             "offline": "VPS_OFFLINE",
+            "missing": "TMUX_MISSING",
             "unsupported": "VPS_ENV_UNSUPPORTED",
             "denied": "VPS_PRIVILEGE_REQUIRED",
             "failed": "ENV_CHECK_FAILED",
             "trust_missing": "HUB_SSH_TRUST_MIGRATION_REQUIRED",
+            "host_key_unknown": "HOST_KEY_UNKNOWN",
+            "host_key_changed": "HOST_KEY_CHANGED",
+            "host_key_revoked": "HOST_KEY_REVOKED",
+            "ssh_auth_failed": "SSH_AUTH_FAILED",
             "authorization_changed": "TARGET_OR_GRANT_CHANGED",
         }
         return await self._finish(target, "failed", codes.get(result, "ENV_CHECK_FAILED"))
@@ -347,10 +454,13 @@ class VPSReadiness:
         if not await self._dispatch_allowed(target, "inspect"):
             return await self._finish(target, "failed", "TARGET_OR_GRANT_CHANGED")
         result = await self._probe(target)
-        if result != "missing" or row["verify_only"]:
+        if result != "missing" or row["verify_only"] or row["intent"] != "install":
             return await self._resolve_probe(
                 target, result, row["attempts"], verify_only=bool(row["verify_only"])
             )
+        await self._install_after_probe(target, row["attempts"])
+
+    async def _install_after_probe(self, target, attempts):
         if not await self._dispatch_allowed(target, "install"):
             return await self._finish(target, "failed", "TARGET_OR_GRANT_CHANGED")
         if not await self.store.run(self._begin_install, target.id):
@@ -374,9 +484,6 @@ class VPSReadiness:
                 "TARGET_OR_GRANT_CHANGED",
                 clear_install_fence=bool(no_install_reason),
             )
-        return await self._verify_install(target, outcome, no_install_reason, row["attempts"])
-
-    async def _verify_install(self, target, outcome, no_install_reason, attempts):
         verified = await self._probe(target)
         if no_install_reason:
             # Only explicit no-write receipts may clear the fence. Finish rather
@@ -386,7 +493,15 @@ class VPSReadiness:
             if verified == "ready":
                 return await self._finish(target, "ready", clear_install_fence=True)
             return await self._finish(target, "failed", no_install_reason, clear_install_fence=True)
-        if verified == "missing" and outcome in ("denied", "unsupported", "failed"):
+        if verified == "missing" and outcome in (
+            "denied",
+            "unsupported",
+            "failed",
+            "host_key_unknown",
+            "host_key_changed",
+            "host_key_revoked",
+            "ssh_auth_failed",
+        ):
             verified = outcome
         return await self._resolve_probe(target, verified, attempts, verify_only=True)
 

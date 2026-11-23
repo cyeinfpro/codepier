@@ -349,13 +349,17 @@ class NativeVPSReadiness:
     @staticmethod
     def _transport_status(error):
         code = getattr(error, "code", "")
-        if code in {
-            "SSH_AUTH_FAILED",
-            "HOST_KEY_UNKNOWN",
-            "HOST_KEY_CHANGED",
-            "TMUX_INSTALL_PERMISSION",
-            "AUTH_REVOKED",
-        }:
+        terminal_failures = {
+            "SSH_AUTH_FAILED": "ssh_auth_failed",
+            "HOST_KEY_UNKNOWN": "host_key_unknown",
+            "HOST_KEY_CHANGED": "host_key_changed",
+            "HOST_KEY_REVOKED": "host_key_revoked",
+            "HOST_TRUST_CONFIGURATION": "host_key_unknown",
+            "AUTH_REVOKED": "authorization_changed",
+        }
+        if code in terminal_failures:
+            return terminal_failures[code]
+        if code == "TMUX_INSTALL_PERMISSION":
             return "denied"
         if code in {"SSH_DEPENDENCY_MISSING", "TMUX_INSTALL_UNAVAILABLE"}:
             return "unsupported"

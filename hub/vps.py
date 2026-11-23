@@ -524,9 +524,6 @@ class VPSService:
             },
         )
         self.runtime.publish("vps", {"id": identifier})
-        readiness = getattr(self.runtime, "vps_readiness", None)
-        if readiness is not None and body.enabled and (not existing_id or connection_changed):
-            readiness.enqueue_after_save(principal, identifier, revision)
         return self.get(identifier, principal)
 
     def assign(self, identifier, body, principal):
@@ -931,10 +928,16 @@ class VPSService:
 
 
 def _add_readiness_routes(router, auth, runtime):
+    @router.post("/api/vps/readiness/scan")
     @router.post("/api/vps/readiness/backfill")
-    async def backfill_readiness(request: Request):
+    async def scan_readiness(request: Request):
         principal = await runtime.store.run(auth.panel, request, True)
         return await runtime.vps_readiness.activate_space(principal)
+
+    @router.post("/api/vps/readiness/install")
+    async def install_readiness(request: Request):
+        principal = await runtime.store.run(auth.panel, request, True)
+        return await runtime.vps_readiness.install_space(principal)
 
     @router.get("/api/vps/{identifier}/readiness")
     async def get_readiness(identifier: str, request: Request):

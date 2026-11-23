@@ -51,7 +51,7 @@ def service(store, steps, *, allowed=None, **settings):
 
     async def probe(target):
         steps.append(("probe", target.id))
-        return "missing" if len([key for key, _ in steps if key == "install"]) == 0 else "ready"
+        return "ready" if ("install", target.id) in steps else "missing"
 
     async def provision(target):
         steps.append(("install", target.id))
@@ -64,7 +64,7 @@ def service(store, steps, *, allowed=None, **settings):
 
 
 @pytest.mark.asyncio
-async def test_backfill_is_space_scoped_enabled_and_manual_recheck_never_reinstalls():
+async def test_backfill_is_read_only_and_install_requires_its_current_positive_result():
     store, steps = FakeStore(), []
     store.target("target")
     store.target("unrelated", space="other")
@@ -83,11 +83,24 @@ async def test_backfill_is_space_scoped_enabled_and_manual_recheck_never_reinsta
     assert not await queue.enqueue(
         "space", "target", "scope-grant", authorized_user_id="administrator", expected_revision=2
     )
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
+    assert await queue.run_one()
+    observed = await queue.status("space", "target")
+    assert observed["state"] == "missing"
+    assert observed["reason_code"] == "TMUX_MISSING"
+    assert observed["intent"] == "scan"
+    assert observed["install_eligible"] is True
+    assert steps == [("inspect:authorize", first["id"]), ("probe", first["id"])]
+    assert await queue.install_missing("other", "install", authorized_user_id="administrator") == 0
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
     assert await queue.run_one()
     assert (await queue.status("space", "target"))["state"] == "ready"
     assert steps == [
         (kind, first["id"])
         for kind in (
+            "inspect:authorize",
+            "probe",
             "inspect:authorize",
             "probe",
             "install:authorize",
@@ -133,10 +146,12 @@ async def test_target_or_grant_change_between_inspection_and_install_is_blocked(
             store.execute(f"UPDATE vps_connections SET {column}=? WHERE id='target'", (value,))
         return await unmodified(target)
 
-    queue.inspect = race
     job = await queue.enqueue(
         "space", "target", "grant", authorized_user_id="administrator", expected_revision=1
     )
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    queue.inspect = race
     assert await queue.run_one()
     receipt = store.one("SELECT state,reason_code FROM vps_readiness_jobs WHERE id=?", (job["id"],))
     assert receipt == {"state": "failed", "reason_code": "TARGET_OR_GRANT_CHANGED"}
@@ -158,6 +173,8 @@ async def test_interrupted_install_persists_checkpoint_and_restart_only_rechecks
     job = await queue.enqueue(
         "space", "target", "grant", authorized_user_id="administrator", expected_revision=1
     )
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
     worker = asyncio.create_task(queue.run_one())
     await asyncio.wait_for(reached.wait(), 1)
     assert (await queue.status("space", "target"))["state"] == "installing"
@@ -181,6 +198,9 @@ async def test_interrupted_install_persists_checkpoint_and_restart_only_rechecks
         refresh=True,
     )
     assert await restarted.run_one()
+    assert (
+        await restarted.install_missing("space", "install", authorized_user_id="administrator") == 0
+    )
     assert sum(key == "install" for key, _ in steps) == 0
 
 
@@ -196,7 +216,7 @@ async def test_definite_no_install_receipt_allows_manual_recheck_only(outcome, v
     store, steps = FakeStore(), []
     store.target("target")
     queue = service(store, steps)
-    probes = iter(("missing", verified, "missing", "ready"))
+    probes = iter(("missing", "missing", verified, "missing", "missing", "ready"))
     provisions = iter((outcome, "ok"))
 
     async def inspect(_target):
@@ -211,11 +231,17 @@ async def test_definite_no_install_receipt_allows_manual_recheck_only(outcome, v
     kwargs = dict(authorized_user_id="administrator", expected_revision=1)
     job = await queue.enqueue("space", "target", "grant", **kwargs)
     assert await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
     after_first = await queue.status("space", "target")
     assert after_first["state"] == "failed"
     assert after_first["reason_code"] == reason
     assert not await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
     await queue.enqueue("space", "target", "grant", refresh=True, **kwargs)
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["state"] == "missing"
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
     assert await queue.run_one()
     assert (await queue.status("space", "target"))["state"] == "ready"
     assert [entry for entry in steps if entry[0] == "install"] == [("install", job["id"])] * 2
@@ -265,6 +291,8 @@ async def test_two_workers_deduplicate_same_target_while_other_target_can_progre
     job = await queue.enqueue(
         "space", "first", "grant", authorized_user_id="administrator", expected_revision=1
     )
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
     task = asyncio.create_task(queue.run_one())
     await asyncio.wait_for(hit.wait(), 1)
     dupe = await queue.enqueue(
@@ -277,12 +305,193 @@ async def test_two_workers_deduplicate_same_target_while_other_target_can_progre
     )
     assert dupe["id"] == job["id"]
     assert dupe["state"] == "installing"
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
     assert not await queue.run_one()
     await queue.enqueue(
         "space", "second", "grant", authorized_user_id="administrator", expected_revision=1
     )
     assert await queue.run_one()
+    assert (await queue.status("space", "second"))["state"] == "missing"
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
     assert (await queue.status("space", "second"))["state"] == "ready"
     unblock.set()
     assert await asyncio.wait_for(task, 1)
     assert sum(key == "install" and value == job["id"] for key, value in steps) == 1
+
+
+@pytest.mark.asyncio
+async def test_fleet_install_skips_stale_and_non_missing_and_continues_after_failure():
+    store, steps = FakeStore(), []
+    for name in ("bad", "good", "changed", "has-tmux", "unknown"):
+        store.target(name)
+    queue = service(store, steps)
+    previous = queue.inspect
+
+    async def inspect(target):
+        if target.vps_id == "has-tmux":
+            return "ready"
+        if target.vps_id == "unknown":
+            return "trust_missing"
+        return await previous(target)
+
+    async def provision(target):
+        if target.vps_id == "bad":
+            raise RuntimeError("no receipt")
+        steps.append(("install", target.id))
+        return "ok"
+
+    queue.inspect = inspect
+    queue.provision = provision
+    assert await queue.backfill("space", "scan", authorized_user_id="administrator") == 5
+    for _ in range(5):
+        assert await queue.run_one()
+    store.execute("UPDATE vps_connections SET connection_revision=2 WHERE id='changed'")
+    assert (
+        await queue.install_missing(
+            "space",
+            "install",
+            authorized_user_id="administrator",
+            vps_id="good",
+            expected_revision=2,
+        )
+        == 0
+    )
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 2
+    assert await queue.run_one()
+    assert await queue.run_one()
+    assert not await queue.run_one()
+    assert (await queue.status("space", "bad"))["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
+    assert (await queue.status("space", "good"))["state"] == "ready"
+    assert (await queue.status("space", "has-tmux"))["state"] == "ready"
+    assert (await queue.status("space", "unknown"))[
+        "reason_code"
+    ] == "HUB_SSH_TRUST_MIGRATION_REQUIRED"
+    assert await queue.status("space", "changed") is None
+    assert (
+        await queue.backfill("space", "scan", authorized_user_id="administrator", refresh=True) == 5
+    )
+
+
+@pytest.mark.asyncio
+async def test_upgrade_defaults_legacy_queued_job_to_scan_and_never_replays_old_install():
+    from hub.vps_readiness import _SCHEMA
+
+    store, steps = FakeStore(), []
+    for name in ("legacy", "running-install"):
+        store.target(name)
+    store.execute("\n".join(line for line in _SCHEMA.splitlines() if "intent TEXT" not in line))
+    for name, state, held in (("legacy", "queued", 0), ("running-install", "installing", 1)):
+        store.execute(
+            """INSERT INTO vps_readiness_jobs
+                (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,grant_id,
+                 state,verify_only,next_attempt,updated)
+                VALUES(?,?,?,'owner','administrator',1,'old-grant',?,?,0,0)
+            """,
+            (name, "space", name, state, held),
+        )
+    queue = service(store, steps)
+    assert await queue.run_one()
+    assert await queue.run_one()
+    assert (await queue.status("space", "legacy"))["state"] == "missing"
+    old = await queue.status("space", "running-install")
+    assert old["intent"] == "scan"
+    assert old["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
+    assert not any(kind == "install" for kind, _ in steps)
+
+
+@pytest.mark.asyncio
+async def test_expired_and_future_scan_evidence_needs_a_fresh_probe():
+    store, steps, now = FakeStore(), [], [100.0]
+    store.target("target")
+    queue = service(store, steps, clock=lambda: now[0])
+    assert await queue.backfill("space", "scan", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["install_eligible"] is True
+    now[0] += 1_801
+    stale = await queue.status("space", "target")
+    assert stale["state"] == "missing" and stale["install_eligible"] is False
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
+    now[0] = 90
+    assert (await queue.status("space", "target"))["install_eligible"] is False
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 0
+    assert (
+        await queue.backfill("space", "scan", authorized_user_id="administrator", refresh=True) == 1
+    )
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["install_eligible"] is True
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["install_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_verified_install_does_not_prevent_reinstall_after_later_removal():
+    store, steps = FakeStore(), []
+    store.target("target")
+    queue = service(store, steps)
+    opts = dict(authorized_user_id="administrator", expected_revision=1, refresh=True)
+    first = await queue.enqueue("space", "target", "scan", **opts)
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["state"] == "ready"
+    assert steps.count(("install", first["id"])) == 1
+
+    # The remote host uninstalls tmux later without editing the saved connection.
+    steps.clear()
+    await queue.enqueue("space", "target", "scan", **opts)
+    assert await queue.run_one()
+    result = await queue.status("space", "target")
+    assert result["state"] == "missing", result
+    assert result["install_eligible"]
+    assert await queue.install_missing("space", "install", authorized_user_id="administrator") == 1
+    assert await queue.run_one()
+    assert steps.count(("install", first["id"])) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,code",
+    [
+        ("host_key_unknown", "HOST_KEY_UNKNOWN"),
+        ("host_key_changed", "HOST_KEY_CHANGED"),
+        ("host_key_revoked", "HOST_KEY_REVOKED"),
+        ("ssh_auth_failed", "SSH_AUTH_FAILED"),
+    ],
+)
+async def test_probe_keeps_specific_connection_failure_ineligible_for_install(outcome, code):
+    db, steps = FakeStore(), []
+    db.target("target")
+    queue = service(db, steps)
+
+    async def inspect(_target):
+        return outcome
+
+    queue.inspect = inspect
+    await queue.enqueue(
+        "space", "target", "scan", authorized_user_id="administrator", expected_revision=1
+    )
+    assert await queue.run_one()
+    job = await queue.status("space", "target")
+    assert job["state"] == "failed"
+    assert job["reason_code"] == code
+    assert not job["install_eligible"]
+
+
+@pytest.mark.asyncio
+async def test_upgrade_clears_only_definitively_ready_historical_fences():
+    store, steps = FakeStore(), []
+    for name in ("verified", "uncertain", "installing"):
+        store.target(name)
+    queue = service(store, steps)
+    await queue.backfill("space", "scope", authorized_user_id="administrator")
+    store.execute(
+        """UPDATE vps_readiness_jobs SET verify_only=1,
+                 state=CASE vps_id WHEN 'verified' THEN 'ready' WHEN 'installing' THEN 'installing' ELSE 'failed' END,
+                 reason_code=CASE WHEN vps_id='uncertain' THEN 'INSTALL_OUTCOME_UNCONFIRMED' ELSE NULL END"""
+    )
+    queue._initialize()
+    for name, expected in (("verified", 0), ("uncertain", 1), ("installing", 1)):
+        row = store.one("SELECT verify_only FROM vps_readiness_jobs WHERE vps_id=?", (name,))
+        assert row["verify_only"] == expected
