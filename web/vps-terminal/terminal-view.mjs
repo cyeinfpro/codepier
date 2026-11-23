@@ -80,6 +80,12 @@ function button(label, action, className = '') {
   return node;
 }
 
+function formatEndpoint(session) {
+  const user = session?.username ? `${session.username}@` : '';
+  if (session?.host) return `${user}${session.host}:${session.port || 22}`;
+  return session?.username || '';
+}
+
 export class TerminalView {
   constructor({
     session,
@@ -111,10 +117,28 @@ export class TerminalView {
     this.root.addEventListener('focusin', () => onFocus?.());
     this.header = el('div', 'vt-pane-heading');
     this.identity = el('span', 'vt-pane-identity', session.vps_name || session.name || 'VPS');
+    this.endpoint = el('span', 'vt-pane-endpoint');
+    this.modeBadge = el('span', 'vt-pane-pill');
+    this.rttBadge = el('span', 'vt-pane-meta');
+    this.rttBadge.hidden = true;
+    this.rttBadge.title = '终端连接往返延迟';
+    this.sizeBadge = el('span', 'vt-pane-meta');
+    this.sizeBadge.hidden = true;
+    this.sizeBadge.title = '终端网格尺寸';
     this.status = el('span', 'vt-state', '正在连接');
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
-    this.header.append(this.identity, this.status);
+    this.header.append(
+      this.identity,
+      this.endpoint,
+      this.modeBadge,
+      this.rttBadge,
+      this.sizeBadge,
+      this.status,
+    );
+    this.progressBar = el('div', 'vt-progress');
+    this.progressBar.setAttribute('aria-hidden', 'true');
+    this.syncSession(session);
     this.searchBar = this.makeSearch();
     this.notice = el('div', 'vt-notice');
     this.notice.hidden = true;
@@ -147,12 +171,13 @@ export class TerminalView {
     this.mobileKeys = this.makeMobileKeys();
     this.root.append(
       this.header,
+      this.progressBar,
       this.searchBar,
       this.notice,
       this.authBox,
       this.diagnostics.root,
-      this.canvas,
       this.pasteBox,
+      this.canvas,
       this.bottom,
       this.mobileKeys,
     );
@@ -179,7 +204,10 @@ export class TerminalView {
       event.stopImmediatePropagation();
     };
     for (const type of BLOCKED_EVENTS) {
-      this.canvas.addEventListener(type, gate, { capture: true, passive: false });
+      this.canvas.addEventListener(type, gate, {
+        capture: true,
+        passive: false,
+      });
       this.disposers.push(() => this.canvas.removeEventListener(type, gate, { capture: true }));
     }
     const paste = (event) => {
@@ -211,9 +239,13 @@ export class TerminalView {
       this.clearModifiers();
       this.sendKey(data);
     };
-    this.canvas.addEventListener('beforeinput', mobileModifier, { capture: true });
+    this.canvas.addEventListener('beforeinput', mobileModifier, {
+      capture: true,
+    });
     this.disposers.push(() =>
-      this.canvas.removeEventListener('beforeinput', mobileModifier, { capture: true }),
+      this.canvas.removeEventListener('beforeinput', mobileModifier, {
+        capture: true,
+      }),
     );
   }
 
@@ -265,7 +297,12 @@ export class TerminalView {
     this.disposers.push(
       terminal.onBinary((data) => this.transport.sendBytes(binaryInput(data), { automatic: true })),
     );
-    this.disposers.push(terminal.onResize(({ cols, rows }) => this.transport.resize(cols, rows)));
+    this.disposers.push(
+      terminal.onResize(({ cols, rows }) => {
+        this.updateSize(cols, rows);
+        this.transport.resize(cols, rows);
+      }),
+    );
     this.disposers.push(
       terminal.onScroll(() => {
         this.bottom.hidden = terminal.buffer.active.viewportY >= terminal.buffer.active.baseY;
@@ -335,7 +372,31 @@ export class TerminalView {
       attributeFilter: ['data-appearance'],
     });
     this.applyTheme();
+    this.updateSize(terminal.cols, terminal.rows);
     this.fit();
+  }
+
+  syncSession(session = this.session) {
+    this.session = session;
+    const name = session.vps_name || session.name || 'VPS';
+    this.identity.textContent = name;
+    this.root.setAttribute('aria-label', `${name} SSH 终端`);
+    const endpoint = formatEndpoint(session);
+    this.endpoint.textContent = endpoint;
+    this.endpoint.hidden = !endpoint;
+    const isTmux = session.mode === 'tmux';
+    this.modeBadge.textContent = isTmux ? 'tmux 持久' : '直连';
+    this.modeBadge.dataset.mode = isTmux ? 'tmux' : 'direct';
+  }
+  setRtt(rtt) {
+    if (!Number.isFinite(rtt) || rtt < 0) return;
+    this.rttBadge.textContent = `${Math.round(rtt)} ms`;
+    this.rttBadge.hidden = false;
+  }
+  updateSize(cols, rows) {
+    if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 1 || rows < 1) return;
+    this.sizeBadge.textContent = `${cols}×${rows}`;
+    this.sizeBadge.hidden = false;
   }
 
   theme() {
@@ -379,6 +440,7 @@ export class TerminalView {
         return;
       try {
         this.fitAddon.fit();
+        this.updateSize(this.terminal.cols, this.terminal.rows);
       } catch {
         /* Hidden/transitioning layout has no reliable size yet. */
       }
@@ -405,20 +467,19 @@ export class TerminalView {
   }
   attached(message) {
     this.ensureTerminal();
+    this.syncSession(this.session);
     this.replayingHistory = message.resume_strategy === 'history_replay';
     if (!message.preserve) this.terminal?.reset();
-    if (
-      this.replayingHistory &&
-      Number.isSafeInteger(message.cols) &&
-      Number.isSafeInteger(message.rows)
-    ) {
-      this.terminal?.resize(message.cols, message.rows);
+    if (Number.isSafeInteger(message.cols) && Number.isSafeInteger(message.rows)) {
+      if (this.replayingHistory) this.terminal?.resize(message.cols, message.rows);
+      this.updateSize(message.cols, message.rows);
     }
     this.blockUserInput = true;
     this.clearAuth();
     this.fit();
   }
   stateChanged(details) {
+    this.syncSession(this.session);
     if (details.state === 'ready' && this.replayingHistory) {
       this.replayingHistory = false;
       this.fit();
@@ -444,19 +505,29 @@ export class TerminalView {
     };
     this.status.textContent = labels[details.state] || '正在连接';
     this.root.dataset.state = details.state;
+    this.progressBar.hidden = ![
+      'creating',
+      'connecting',
+      'authenticating',
+      'restoring',
+      'reconnecting',
+    ].includes(details.state);
+    if (['disconnected', 'exited', 'closed', 'failed', 'revoked'].includes(details.state))
+      this.rttBadge.hidden = true;
     this.status.title = [
-      this.session.username,
+      formatEndpoint(this.session),
       this.session.device_name && `经由 ${this.session.device_name}`,
-      this.session.mode === 'tmux' ? '会话可在 SSH 断开后恢复' : '普通 SSH，会话依赖当前连接',
+      this.session.mode === 'tmux' ? '会话可在 SSH 断开后恢复' : '直连 SSH，会话依赖当前连接',
     ]
       .filter(Boolean)
       .join(' · ');
-    if (details.reason_code || details.message)
-      this.showNotice(details.reason_code, details.message, details.state);
+    if (details.reason_code || details.message || details.state === 'reconnecting')
+      this.showNotice(details.reason_code, details.message, details.state, details);
     else if (details.state === 'ready') {
       if (details.input_uncertain) this.showNotice('INPUT_UNCERTAIN');
       else {
         this.notice.hidden = true;
+        delete this.notice.dataset.severity;
         this.actions.replaceChildren();
       }
     }
@@ -468,11 +539,28 @@ export class TerminalView {
     }
     this.onState?.(details);
   }
-  showNotice(code, fallback, state) {
+  showNotice(code, fallback, state, details = {}) {
     this.notice.hidden = false;
-    this.statusText.textContent = reasonText(code, fallback);
+    if (['HOST_KEY_CHANGED', 'AUTH_REVOKED'].includes(code)) {
+      this.notice.dataset.severity = 'danger';
+    } else {
+      delete this.notice.dataset.severity;
+    }
+    const baseText = reasonText(
+      code,
+      fallback || (state === 'reconnecting' ? '网络连接中断，正在恢复连接' : ''),
+    );
+    const retryText =
+      state === 'reconnecting' && details?.retry_attempt
+        ? `（第 ${details.retry_attempt}/${details.max_retries || 8} 次重试）`
+        : '';
+    this.statusText.textContent = `${baseText}${retryText}`;
     this.actions.replaceChildren();
-    if (['WRITER_CONFLICT', 'WRITER_REPLACED', 'STALE_WRITER'].includes(code))
+    if (state === 'reconnecting') {
+      this.actions.append(
+        button('立即重连', () => this.transport.connect({ manual: true }), 'vt-primary'),
+      );
+    } else if (['WRITER_CONFLICT', 'WRITER_REPLACED', 'STALE_WRITER'].includes(code))
       this.actions.append(button('接管', () => this.onTakeover?.()));
     else if (
       [
@@ -491,6 +579,8 @@ export class TerminalView {
         'SESSION_CLOSED',
         'SESSION_ENDED',
         'SESSION_NOT_RECOVERABLE',
+        'VPS_AUTHORIZATION_CHANGED',
+        'VPS_CONFIGURATION_CHANGED',
       ].includes(code)
     )
       this.actions.append(button('新建终端', () => this.onNewSession?.()));
@@ -603,11 +693,18 @@ export class TerminalView {
     }
     this.pasteBox.replaceChildren();
     this.pasteBox.hidden = false;
-    const heading = el(
-      'div',
-      'vt-paste-heading',
-      `粘贴 ${summary.lines} 行 · ${summary.bytes.toLocaleString()} 字节`,
-    );
+    const describe = (value) => {
+      const current = pasteSummary(value, this.transport.limits.paste_bytes);
+      if (current.tooLarge) return '内容过大，请缩短后粘贴';
+      const multiline = /[\r\n]/.test(value);
+      return multiline
+        ? `粘贴 ${current.lines} 行（含换行，粘贴后可能立即执行） · ${current.bytes.toLocaleString()} 字节`
+        : `粘贴 ${current.lines} 行 · ${current.bytes.toLocaleString()} 字节`;
+    };
+    const headingRow = el('div', 'vt-paste-header');
+    const heading = el('div', 'vt-paste-heading', describe(text));
+    const shortcutHint = el('span', 'vt-muted', 'Ctrl/⌘ + Enter 确认 · Esc 取消');
+    headingRow.append(heading, shortcutHint);
     const input = el('textarea');
     input.value = text;
     input.rows = Math.min(6, Math.max(3, summary.lines));
@@ -622,23 +719,35 @@ export class TerminalView {
       this.pasteBox.hidden = true;
       this.focus();
     };
-    controls.append(
-      button('取消', clear),
-      button(
-        '粘贴',
-        () => {
-          const edited = input.value;
-          if (pasteSummary(edited, this.transport.limits.paste_bytes).tooLarge) {
-            heading.textContent = '内容过大，请缩短后粘贴';
-            return;
-          }
-          clear();
-          this.runPaste(edited);
-        },
-        'vt-primary',
-      ),
-    );
-    this.pasteBox.append(heading, input, controls);
+    const confirmPaste = () => {
+      const edited = input.value;
+      if (!edited) {
+        clear();
+        return;
+      }
+      if (pasteSummary(edited, this.transport.limits.paste_bytes).tooLarge) {
+        heading.textContent = '内容过大，请缩短后粘贴';
+        return;
+      }
+      clear();
+      this.runPaste(edited);
+    };
+    input.addEventListener('input', () => {
+      heading.textContent = describe(input.value);
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        clear();
+      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        confirmPaste();
+      }
+    });
+    controls.append(button('取消', clear), button('粘贴', confirmPaste, 'vt-primary'));
+    this.pasteBox.append(headingRow, input, controls);
     input.focus();
   }
   async runPaste(text) {
@@ -716,6 +825,23 @@ export class TerminalView {
       key.addEventListener('pointerdown', (event) => event.preventDefault());
     bar.insertBefore(this.ctrlButton, bar.children[2]);
     bar.insertBefore(this.altButton, bar.children[3]);
+    const pasteKey = button('粘贴', () => this.clipboardPaste());
+    pasteKey.addEventListener('pointerdown', (event) => event.preventDefault());
+    bar.append(pasteKey);
+    for (const [label, value] of [
+      ['/', '/'],
+      ['-', '-'],
+      ['|', '|'],
+      ['~', '~'],
+      ['Ctrl-D', '\x04'],
+      ['Ctrl-L', '\x0c'],
+      ['PgUp', '\x1b[5~'],
+      ['PgDn', '\x1b[6~'],
+    ]) {
+      const key = button(label, () => this.sendKey(value));
+      key.addEventListener('pointerdown', (event) => event.preventDefault());
+      bar.append(key);
+    }
     return bar;
   }
   clearModifiers() {
@@ -736,9 +862,14 @@ export class TerminalView {
     if (!Array.isArray(message.prompts) || message.prompts.length > 8 || !message.challenge_id)
       return;
     this.authBox.hidden = false;
+    const totalSeconds = Math.min(180, Math.max(1, Math.floor(message.deadline_seconds || 60)));
+    let remaining = totalSeconds;
     const form = el('form', 'vt-auth-form');
     form.autocomplete = 'off';
-    form.append(el('strong', '', 'SSH 需要进一步认证'));
+    const header = el('div', 'vt-auth-header');
+    const countdown = el('span', 'vt-auth-countdown', `剩余 ${remaining} 秒`);
+    header.append(el('strong', '', 'SSH 需要进一步认证'), countdown);
+    form.append(header);
     const inputs = [];
     for (const prompt of message.prompts) {
       const label = el('label', 'vt-auth-field'),
@@ -773,17 +904,20 @@ export class TerminalView {
       this.clearAuth();
       if (!sent) this.showNotice('', '认证未发送，请重新连接');
     });
-    this.authTimer = setTimeout(
-      () => {
-        this.clearAuth();
-        this.showNotice('', '认证已超时，请重新连接');
-      },
-      Math.min(180, Math.max(1, message.deadline_seconds || 60)) * 1000,
-    );
+    this.authCountdownTimer = setInterval(() => {
+      remaining = Math.max(0, remaining - 1);
+      countdown.textContent = `剩余 ${remaining} 秒`;
+    }, 1000);
+    this.authTimer = setTimeout(() => {
+      this.clearAuth();
+      this.showNotice('', '认证已超时，请重新连接');
+    }, totalSeconds * 1000);
     inputs[0]?.focus();
   }
   clearAuth() {
     clearTimeout(this.authTimer);
+    clearInterval(this.authCountdownTimer);
+    this.authCountdownTimer = null;
     for (const input of this.authBox.querySelectorAll('input')) input.value = '';
     this.authBox.replaceChildren();
     this.authBox.hidden = true;

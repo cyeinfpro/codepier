@@ -105,14 +105,29 @@ class PanelFixture:
         elif path == "/api/vps-terminal/capabilities":
             route.fulfill(json=self.capability)
         elif path == "/api/vps-terminal/sessions" and method == "POST":
-            body = route.request.post_data_json
+            body = route.request.post_data_json or {}
             self.creates.append(body)
             identifier = uuid.uuid4().hex
-            project = next(item for item in self.projects if item["id"] == body["project_id"])
-            session = {"session_id": identifier, "vps_id": self.vps["id"],
-                       "project_id": project["id"], "vps_name": self.vps["name"],
-                       "project_alias": project["alias"], "device_name": project["device_name"],
-                       "username": "fixture", "mode": "tmux", "state": "ready"}
+            project_id = body.get("project_id")
+            project = (
+                next((item for item in self.projects if item["id"] == project_id), None)
+                if project_id
+                else (self.projects[0] if self.projects else None)
+            )
+            session = {
+                "session_id": identifier,
+                "vps_id": self.vps["id"],
+                "project_id": project["id"] if project else "",
+                "vps_name": self.vps["name"],
+                "host": self.vps["host"],
+                "port": self.vps["port"],
+                "project_alias": project["alias"] if project else "",
+                "device_name": project["device_name"] if project else "Fixture Agent",
+                "username": self.vps["username"],
+                "mode": "tmux",
+                "direct_vps": not bool(project_id),
+                "state": "ready",
+            }
             self.sessions[identifier] = session
             route.fulfill(json=session)
         elif path == "/api/vps-terminal/sessions":
@@ -233,18 +248,51 @@ def test_project_picker_survives_refresh_and_old_agents_show_an_actionable_reaso
         try:
             login_panel(page, stack, "vps")
             page.locator('[data-vps-action="terminal"]').click()
-            picker = page.get_by_role("combobox", name="连接项目", exact=True)
-            expect(picker).to_be_visible()
-            picker.select_option(fixture.projects[-1]["id"])
-            page.evaluate("window.firstPicker = document.querySelector('.vps-terminal-inline select')")
-            page.evaluate("renderPage(false)")
-            assert page.evaluate("document.querySelector('.vps-terminal-inline select') === firstPicker")
-            expect(picker).to_have_value(fixture.projects[-1]["id"])
-            page.locator(".vps-terminal-inline").get_by_role("button", name="连接", exact=True).click()
-            expect(page.locator('.vps-terminal-inline [role="alert"]')).to_contain_text("需要更新")
+            expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
+            alert = page.locator('.vps-terminal-inline [role="alert"]')
+            expect(alert).to_contain_text("更新")
             expect(page.get_by_role("button", name="查看连接电脑", exact=True)).to_be_visible()
             assert not fixture.creates
+            page.evaluate(
+                "window.firstUpgradeAlert = document.querySelector('.vps-terminal-inline [role=\"alert\"]')"
+            )
+            page.evaluate("renderPage(false)")
+            assert page.evaluate(
+                "document.querySelector('.vps-terminal-inline [role=\"alert\"]') === window.firstUpgradeAlert"
+            )
             capture_evidence(page, f"terminal-project-upgrade-{engine}.png")
+
+            # Multi-project VPS connects directly without showing a project picker.
+            fixture.capability = {"available": True, "protocol_version": 1, "limits": {}}
+            page.locator('[data-vps-action="terminal"]').click()
+            expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
+            expect(page.locator(".vt-state")).to_have_text("已连接")
+            assert len(fixture.creates) == 1
+            assert not fixture.creates[-1].get("project_id")
+            while page.locator(".vt-tab-close").count():
+                page.locator(".vt-tab-close").last.click()
+            page.evaluate("location.hash = 'vps'")
+            expect(page.locator("#vps-query")).to_be_visible()
+
+            # Unassigned VPS also connects directly without showing a project picker.
+            saved_projects = list(fixture.projects)
+            fixture.vps["project_ids"] = []
+            fixture.vps["projects"] = []
+            page.evaluate("renderPage(false)")
+            expect(page.locator('[data-vps-action="terminal"]')).to_be_enabled()
+            page.locator('[data-vps-action="terminal"]').click()
+            expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
+            expect(page.locator(".vt-state")).to_have_text("已连接")
+            assert len(fixture.creates) == 2
+            assert not fixture.creates[-1].get("project_id")
+            while page.locator(".vt-tab-close").count():
+                page.locator(".vt-tab-close").last.click()
+            page.evaluate("location.hash = 'vps'")
+            expect(page.locator("#vps-query")).to_be_visible()
+
+            # Bound projects without write + execute task permissions disable terminal launch.
+            fixture.vps["projects"] = saved_projects
+            fixture.vps["project_ids"] = [project["id"] for project in saved_projects]
             for project in fixture.projects:
                 project["allow_tasks"] = False
             page.evaluate("renderPage(false)")

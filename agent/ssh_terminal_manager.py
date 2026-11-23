@@ -27,6 +27,7 @@ from .ssh_terminal_tmux import TmuxController, TmuxReference
 
 
 _DIAGNOSTIC_LIMIT = (1 << 31) - 1
+_PROBE_COMMAND = "printf 'CODEPIER_VPS_OK\\n'; hostname; id -un; uname -sr; df -h /"
 
 
 def _elapsed_ms(started, now):
@@ -296,20 +297,33 @@ class TerminalSessionManager:
             task.exception()
         self._release_activity_if_idle()
 
-    def _authorize(self, project):
-        if not isinstance(project, dict):
-            raise TerminalProtocolError("AUTH_REVOKED", "缺少可信项目授权")
+    def _authorize_execution(self, project):
+        direct = project.get("_direct_vps") is True
+        if direct and (
+            project.get("id") not in {None, ""} or project.get("root") not in {None, ""}
+        ):
+            raise TerminalProtocolError("AUTH_REVOKED", "直连终端不能携带项目路径映射")
         if self._authorize_callback is not None:
             self._authorize_callback(project)
-        elif self.agent is not None:
+            return
+        if self.agent is None:
+            raise TerminalProtocolError("AUTH_REVOKED", "Agent 执行授权尚未初始化")
+        if direct:
+            from agent.shell import direct_vps_denial
+
+            denial = direct_vps_denial(getattr(self.agent, "config", None))
+        else:
             from agent.shell import shell_denial
 
             _, spec = self.agent.engine.root(project, write=True)
             denial = shell_denial(self.agent.config, project, spec)
-            if denial:
-                raise TerminalProtocolError(*denial)
-        else:
-            raise TerminalProtocolError("AUTH_REVOKED", "Agent 执行授权尚未初始化")
+        if denial:
+            raise TerminalProtocolError(*denial)
+
+    def _authorize(self, project):
+        if not isinstance(project, dict):
+            raise TerminalProtocolError("AUTH_REVOKED", "缺少可信项目授权")
+        self._authorize_execution(project)
         owner = project.get("_terminal_owner")
         space = project.get("_terminal_space")
         if not isinstance(owner, str) or not owner.startswith("user:") or len(owner) <= 5:
@@ -322,11 +336,10 @@ class TerminalSessionManager:
         session = self.sessions.get(_id(payload.get("session_id")))
         if session is None:
             raise TerminalProtocolError("SESSION_NOT_FOUND", "Agent 上没有该终端会话")
-        if (owner, space, project.get("id"), project.get("root")) != (
-            session.owner,
-            session.space,
-            session.project.get("id"),
-            session.project.get("root"),
+        if bool(project.get("_direct_vps")) != bool(
+            session.project.get("_direct_vps")
+        ) or self._scope(owner, space, project) != self._scope(
+            session.owner, session.space, session.project
         ):
             raise TerminalProtocolError("SESSION_NOT_FOUND", "会话不属于当前身份或项目映射")
         if payload.get("runtime_generation", self.generation) != self.generation:
@@ -341,6 +354,8 @@ class TerminalSessionManager:
 
     @staticmethod
     def _scope(owner, space, project):
+        if project.get("_direct_vps") is True:
+            return owner, space, "", ""
         return owner, space, project.get("id"), project.get("root")
 
     def _target_identity(self, payload):
@@ -476,7 +491,8 @@ class TerminalSessionManager:
         items = [
             item
             for item in reversed(tuple(self.sessions.values()))
-            if self._scope(item.owner, item.space, item.project)
+            if bool(item.project.get("_direct_vps")) == bool(project.get("_direct_vps"))
+            and self._scope(item.owner, item.space, item.project)
             == self._scope(owner, space, project)
         ]
         cursor = payload.get("cursor")
@@ -575,8 +591,87 @@ class TerminalSessionManager:
             )
             session.output_paused_at = None
 
+    def _probe_target(self, payload):
+        host = _text(payload.get("host"), "host", 253)
+        username = _text(payload.get("username"), "username", 128)
+        if (
+            any(ch in host for ch in " /\\\t\r\n")
+            or host.startswith("-")
+            or username.startswith("-")
+        ):
+            raise TerminalProtocolError("INVALID_ARGUMENT", "SSH 地址或账号格式无效")
+        policy = payload.get("host_key_policy", "strict")
+        if policy not in {"strict", "accept-new"}:
+            raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
+        timeout = min(
+            60, max(5, _integer(payload.get("timeout_seconds", 30), "timeout_seconds", 1, 86400))
+        )
+        return {
+            "host": host,
+            "port": _integer(payload.get("port", 22), "port", 1, 65535),
+            "username": username,
+            "host_key_policy": policy,
+        }, timeout
+
+    @staticmethod
+    def _redact_secret(text, secret):
+        if not text or not secret:
+            return text or ""
+        return text.replace(secret, "<redacted>")
+
+    async def _probe(self, payload, project):
+        self._authorize(project)
+        self._check_maintenance()
+        target, wait_seconds = self._probe_target(payload)
+        password = self._password(payload)
+        payload.pop("password", None)
+        transport = self.connector()
+        try:
+            await transport.connect(target, password, challenge=None)
+            exit_code, raw = await transport.run_control(
+                _PROBE_COMMAND,
+                wait_seconds=wait_seconds,
+                max_bytes=16384,
+            )
+            text = (
+                raw.decode("utf-8", "replace")
+                if isinstance(raw, (bytes, bytearray))
+                else str(raw or "")
+            )
+            output = self._redact_secret(text, password)
+            return {
+                "ok": exit_code == 0,
+                "state": "succeeded" if exit_code == 0 else "failed",
+                "pending": False,
+                "exit_code": exit_code,
+                "output": output,
+                "error": None,
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure = (
+                exc
+                if isinstance(exc, TerminalProtocolError)
+                else classify_error(exc, getattr(transport, "trust", None))
+            )
+            message = self._redact_secret(getattr(failure, "message", "SSH 连接检查失败"), password)
+            return {
+                "ok": False,
+                "state": "failed",
+                "pending": False,
+                "exit_code": None,
+                "output": "",
+                "error": {"code": failure.code, "message": message},
+            }
+        finally:
+            password = None
+            await transport.close()
+
     async def control(self, action, payload, project):
         self._check_control(action, payload)
+        if action == "probe":
+            return await self._probe(payload, project)
         if action == "reserve_create":
             return self._reserve_create(payload, project)
         if action == "create":

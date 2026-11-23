@@ -86,6 +86,15 @@ def shell_denial(config, project, spec):
     return None
 
 
+def direct_vps_denial(config):
+    shell = (config or {}).get("shell") or {}
+    if not shell.get("enabled", False):
+        return "SHELL_DISABLED", "请在本机 Agent 配置中开启 shell.enabled 执行权限"
+    if "*" not in shell.get("projects", []):
+        return "SHELL_NOT_ALLOWED", "无项目直连 VPS 需要本机 shell.projects 包含 * 授权"
+    return None
+
+
 def prepare_shell(config, project, spec, root, args):
     denial = shell_denial(config, project, spec)
     if denial:

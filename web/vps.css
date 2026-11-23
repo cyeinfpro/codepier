@@ -1,57 +1,111 @@
-/* VPS inventory uses the existing neutral panel and button tokens. */
+/* VPS inventory, compact list inspection, and modal layout using shared UI tokens. */
 .vps-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
   align-items: center;
-  gap: 32px;
-  flex-wrap: wrap;
-  margin: 0 0 24px;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--ui-line);
+  margin: 0 0 16px;
+  padding: 16px var(--ui-panel-inset);
 }
-.vps-summary > div {
+.vps-stat {
   display: flex;
   gap: 10px;
   align-items: baseline;
+  min-width: 0;
+}
+.vps-stat + .vps-stat {
+  padding-left: 16px;
+  border-left: 1px solid var(--ui-line);
 }
 .vps-summary strong {
-  font-size: var(--ui-page-title);
+  font-size: var(--ui-text-h2);
   font-weight: var(--ui-weight-semibold);
   font-variant-numeric: tabular-nums;
 }
 .vps-summary span {
   font-size: var(--ui-text-sm);
   color: var(--ui-muted);
+  overflow-wrap: anywhere;
 }
-.vps-summary p {
+.vps-active-sessions {
   display: flex;
-  gap: 8px;
   align-items: center;
-  margin: 0 0 0 auto;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+  padding: 12px var(--ui-panel-inset);
+}
+.vps-active-sessions[hidden] {
+  display: none;
+}
+.vps-active-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ui-text-sm);
+  white-space: nowrap;
+}
+.vps-active-head strong {
+  font-weight: var(--ui-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.vps-session-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.vps-session-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+.vps-session-pill strong {
+  font-weight: var(--ui-weight-semibold);
+  overflow-wrap: anywhere;
+}
+.vps-session-pill code {
   font-size: var(--ui-text-xs);
   color: var(--ui-muted);
+  overflow-wrap: anywhere;
+}
+.vps-sessions-enter {
+  margin-left: auto;
+  flex: none;
 }
 .vps-filters {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 10px;
+  margin-bottom: 18px;
   flex-wrap: wrap;
 }
 .vps-search {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex: 1;
-  min-width: 220px;
+  flex: 1 1 240px;
+  min-width: 0;
 }
 .vps-search input {
   width: 100%;
+  min-width: 0;
 }
 .vps-filters select {
-  max-width: 240px;
+  max-width: 200px;
+  min-width: 0;
 }
 .vps-filters > span {
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.vps-layout-tabs {
+  margin-left: auto;
+  flex: none;
 }
 .vps-grid {
   display: grid;
@@ -64,17 +118,17 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 .vps-card[hidden] {
   display: none;
 }
 .vps-card > header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
 }
-.vps-card > header > div {
+.vps-title-block {
   flex: 1;
   min-width: 0;
 }
@@ -85,15 +139,27 @@
 }
 .vps-card header p {
   font-size: var(--ui-text-xs);
-  margin: 5px 0 0;
+  margin: 4px 0 0;
   color: var(--ui-muted);
   overflow-wrap: anywhere;
+}
+.vps-badges {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: none;
+  max-width: 48%;
+}
+.vps-badges [hidden] {
+  display: none;
 }
 .vps-symbol {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   flex: none;
   border: 1px solid var(--ui-line);
   border-radius: var(--ui-radius-md);
@@ -104,23 +170,28 @@
   justify-content: space-between;
   gap: 8px;
   border-block: 1px solid var(--ui-line);
-  padding: 12px 0;
-}
-.vps-address code {
-  font-size: var(--ui-text-md);
-  overflow-wrap: anywhere;
+  padding: 10px 0;
   min-width: 0;
 }
-.vps-address button {
+.vps-address code {
+  font-size: var(--ui-text-sm);
+  overflow-wrap: anywhere;
+  min-width: 0;
+  flex: 1;
+}
+.vps-address-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   flex: none;
 }
 .vps-facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px 14px;
   margin: 0;
 }
-.vps-facts div {
+.vps-facts > div {
   min-width: 0;
 }
 .vps-facts dt {
@@ -172,8 +243,15 @@
   padding-top: 12px;
   border-top: 1px solid var(--ui-line);
 }
-.vps-card footer > :last-child {
+.vps-footer-cta {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.vps-terminal-new {
+  padding-inline: 8px;
 }
 .vps-terminal-hint {
   margin: 0;
@@ -198,28 +276,43 @@
 .vps-terminal-inline p {
   margin: 0 0 8px;
 }
-.vps-terminal-inline form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 8px;
-}
-.vps-terminal-inline label {
-  display: grid;
-  gap: 4px;
-  flex: 1 1 100%;
-  min-width: 0;
-}
-.vps-terminal-inline select {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
+.vps-terminal-inline p:last-child {
+  margin-bottom: 0;
 }
 #vps-terminal-host {
   min-width: 0;
 }
+.vps-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.vps-form-main,
+.vps-form-side {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+.vps-section-head {
+  display: grid;
+  gap: 4px;
+}
+.vps-section-head h3 {
+  margin: 0;
+  font-size: var(--ui-text-md);
+  font-weight: var(--ui-weight-semibold);
+}
+.vps-section-head .form-note {
+  margin: 0;
+}
 .vps-check-list {
-  max-height: 250px;
+  display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 8px;
+  max-height: 280px;
   overflow: auto;
   overscroll-behavior: contain;
 }
@@ -237,15 +330,18 @@
   color: var(--ui-muted);
 }
 .vps-extra {
-  margin-bottom: 18px;
+  margin-top: 4px;
+  border-top: 1px solid var(--ui-line);
+  padding-top: 6px;
 }
 .vps-extra summary {
   font-size: var(--ui-text-sm);
   cursor: pointer;
-  padding: 8px 0 14px;
+  padding: 6px 0 10px;
 }
 .vps-error {
   line-height: 1.6;
+  margin: 12px 0 0;
   padding: 10px 12px;
   border-left: 3px solid currentColor;
   overflow-wrap: anywhere;
@@ -262,21 +358,84 @@
 #vps-check-state {
   overflow-wrap: anywhere;
 }
+@media (min-width: 860px) {
+  .modal.vps-edit-dialog {
+    width: min(880px, calc(100vw - 48px));
+    max-width: 880px;
+  }
+  .vps-form-grid {
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+    gap: 24px;
+  }
+  .vps-form-side {
+    padding-left: 24px;
+    border-left: 1px solid var(--ui-line);
+  }
+  .vps-check-list {
+    max-height: 360px;
+  }
+}
+@media (min-width: 960px) {
+  .vps-grid[data-layout='list'] {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  .vps-grid[data-layout='list'] .vps-card:not([hidden]) {
+    display: grid;
+    grid-template-columns:
+      minmax(0, 1.2fr) minmax(0, 1.35fr) minmax(0, 1.25fr)
+      auto;
+    align-items: center;
+    gap: 10px 16px;
+    padding: 12px var(--ui-panel-inset);
+  }
+  .vps-grid[data-layout='list'] .vps-card > header {
+    align-items: center;
+  }
+  .vps-grid[data-layout='list'] .vps-symbol {
+    width: 36px;
+    height: 36px;
+  }
+  .vps-grid[data-layout='list'] .vps-address {
+    border-block: 0;
+    padding: 0;
+  }
+  .vps-grid[data-layout='list'] .vps-facts {
+    gap: 6px 12px;
+  }
+  .vps-grid[data-layout='list'] .vps-fact-secondary {
+    display: none;
+  }
+  .vps-grid[data-layout='list'] .vps-card footer {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+  }
+  .vps-grid[data-layout='list'] .vps-notes,
+  .vps-grid[data-layout='list'] .vps-terminal-hint,
+  .vps-grid[data-layout='list'] .vps-terminal-inline {
+    grid-column: 1 / -1;
+  }
+}
 @media (max-width: 640px) {
   .vps-summary {
-    gap: 14px 22px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px 16px;
   }
-  .vps-summary strong {
-    font-size: var(--ui-text-h2);
+  .vps-stat + .vps-stat {
+    padding-left: 0;
+    border-left: 0;
   }
-  .vps-summary p {
+  .vps-sessions-enter {
+    margin-left: 0;
     width: 100%;
-    margin: 0;
-    align-items: flex-start;
+    justify-content: center;
   }
   .vps-filters select {
     max-width: none;
-    flex: 1;
+    flex: 1 1 130px;
   }
   .vps-search {
     flex-basis: 100%;

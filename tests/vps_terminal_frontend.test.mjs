@@ -816,8 +816,230 @@ test('shows actionable Web SSH failures and a bounded unknown reason code', () =
   assert.match(reasonText('VPS_CREDENTIAL_UNAVAILABLE'), /连接设置/);
   assert.equal(reasonText('UNMAPPED_PUBLIC_CODE'), '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）');
   assert.equal(reasonText('UNMAPPED_PUBLIC_CODE', '允许的说明'), '允许的说明');
-  assert.equal(reasonText('UNMAPPED_PUBLIC_CODE', 'x'.repeat(241)), '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）');
+  assert.equal(
+    reasonText('UNMAPPED_PUBLIC_CODE', 'x'.repeat(241)),
+    '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）',
+  );
   assert.equal(reasonText('plain text <not a code>'), '终端连接暂不可用');
   assert.equal(reasonText('toString'), '终端连接暂不可用');
   assert.equal(reasonText('__proto__'), '终端连接暂不可用');
+});
+
+test('direct VPS open works without project_id, backfills host metadata, and supports vpsId lookup', async () => {
+  const calls = [];
+  let seq = 0;
+  const store = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async (path, args) => {
+      calls.push({ path, body: args?.body ? JSON.parse(args.body) : null });
+      if (path === '/api/vps/vps-lookup')
+        return {
+          id: 'vps-lookup',
+          name: '新加坡节点',
+          host: '198.51.100.8',
+          port: 2222,
+          username: 'debian',
+        };
+      if (path.startsWith('/api/vps-terminal/capabilities'))
+        return { available: true, protocol_version: 1, limits: {} };
+      if (path === '/api/vps-terminal/sessions' && args?.method === 'POST') {
+        const id = (++seq).toString(16).padStart(32, '0');
+        return { session_id: id, state: 'connecting', mode: 'tmux', direct_vps: true };
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    },
+  });
+  store.adopt = (session, meta) => {
+    const record = {
+      id: session.session_id,
+      session,
+      ...meta,
+      state: session.state,
+      transport: { state: 'ready', socket: {}, connect() {}, detach() {} },
+      view: { show() {}, focus() {}, dispose() {} },
+    };
+    store.records.set(record.id, record);
+    return record;
+  };
+  await assert.rejects(store.open({}), /请选择要连接的 VPS/);
+  const direct = await store.open({
+    vps: { id: 'vps-direct', name: '东京直连', host: '203.0.113.10', port: 22, username: 'ubuntu' },
+  });
+  assert.equal(calls[0].path, '/api/vps-terminal/capabilities?vps_id=vps-direct');
+  assert.equal('project_id' in calls[1].body, false);
+  assert.equal(direct.host, '203.0.113.10');
+  assert.equal(direct.port, 22);
+  assert.equal(direct.username, 'ubuntu');
+  assert.equal(direct.project_id, undefined);
+  const reused = await store.open({ vpsId: 'vps-direct' });
+  assert.equal(reused.session_id, direct.session_id);
+  assert.equal(calls.length, 2);
+  const byId = await store.open({ vpsId: 'vps-lookup', newSession: true });
+  assert.equal(calls[2].path, '/api/vps/vps-lookup');
+  assert.equal(calls[3].path, '/api/vps-terminal/capabilities?vps_id=vps-lookup');
+  assert.equal(byId.host, '198.51.100.8');
+  assert.equal(byId.port, 2222);
+  store.dispose();
+});
+
+test('duplicate opens a project-free session when session is direct or project assignment changed', async () => {
+  const bodies = [];
+  let seq = 10;
+  const store = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async (path, args) => {
+      if (path === '/api/vps/vps-unassigned')
+        return {
+          id: 'vps-unassigned',
+          name: '法兰克福',
+          host: '192.0.2.9',
+          port: 22,
+          username: 'root',
+          projects: [],
+        };
+      if (path.startsWith('/api/vps-terminal/capabilities')) return { available: true, limits: {} };
+      if (path === '/api/vps-terminal/sessions' && args?.method === 'POST') {
+        const body = JSON.parse(args.body);
+        bodies.push(body);
+        const id = (++seq).toString(16).padStart(32, '0');
+        return { session_id: id, vps_id: body.vps_id, state: 'ready', mode: 'tmux' };
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    },
+  });
+  store.adopt = (session, meta) => {
+    const record = {
+      id: session.session_id,
+      session,
+      ...meta,
+      state: 'ready',
+      transport: { state: 'ready', socket: {}, connect() {}, detach() {} },
+      view: { show() {}, focus() {}, dispose() {} },
+    };
+    store.records.set(record.id, record);
+    return record;
+  };
+  const orphanRecord = store.adopt({
+    session_id: SESSION,
+    vps_id: 'vps-unassigned',
+    project_id: 'removed-project',
+    state: 'ready',
+  });
+  const duplicated = await store.duplicate(orphanRecord, true);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].vps_id, 'vps-unassigned');
+  assert.equal('project_id' in bodies[0], false);
+  assert.ok(duplicated.session_id);
+  store.dispose();
+});
+
+test('activating tabs in split mode preserves split and loads third tab into the focused pane', () => {
+  const THIRD = '33333333333333333333333333333333';
+  const navigated = [];
+  const store = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async () => ({}),
+    onNavigate: (id) => navigated.push(id),
+  });
+  for (const id of [SESSION, GENERATION, THIRD]) {
+    store.records.set(id, {
+      id,
+      session: { session_id: id },
+      state: 'ready',
+      transport: { state: 'ready', socket: {}, connect() {}, detach() {} },
+      view: { show() {}, focus() {}, dispose() {} },
+    });
+  }
+  store.activate(SESSION);
+  store.activate(GENERATION, { split: true });
+  assert.equal(store.activeId, SESSION);
+  assert.equal(store.secondaryId, GENERATION);
+  assert.equal(store.focusedId, GENERATION);
+
+  store.activate(SESSION);
+  assert.equal(store.activeId, SESSION);
+  assert.equal(store.secondaryId, GENERATION);
+  assert.equal(store.focusedId, SESSION);
+  assert.equal(navigated.at(-1), SESSION);
+
+  store.activate(GENERATION);
+  assert.equal(store.activeId, SESSION);
+  assert.equal(store.secondaryId, GENERATION);
+  assert.equal(store.focusedId, GENERATION);
+  assert.equal(navigated.at(-1), GENERATION);
+
+  store.activate(THIRD);
+  assert.equal(store.activeId, SESSION);
+  assert.equal(store.secondaryId, THIRD);
+  assert.equal(store.focusedId, THIRD);
+
+  store.activate(SESSION);
+  store.activate(GENERATION);
+  assert.equal(store.activeId, GENERATION);
+  assert.equal(store.secondaryId, THIRD);
+  assert.equal(store.focusedId, GENERATION);
+});
+
+test('transport computes ping/pong RTT only for matching nonces', async (t) => {
+  let clock = 1000;
+  const rtts = [];
+  const f = await fixture({ onRtt: (ms) => rtts.push(ms) }, { now: () => clock });
+  t.after(() => f.transport.dispose());
+  f.socket.receive(attached());
+  await turn();
+  const nonce = f.transport.sendPing();
+  assert.equal(typeof nonce, 'string');
+  assert.equal(f.socket.controls().at(-1).type, 'ping');
+  clock = 1042;
+  f.socket.receive({ type: 'pong', nonce: 'unmatched-nonce' });
+  assert.deepEqual(rtts, []);
+  f.socket.receive({ type: 'pong', nonce });
+  assert.deepEqual(rtts, [42]);
+  assert.equal(f.transport.rttMs, 42);
+});
+
+test('direct reason codes and VPS catalog refresh degrade cleanly', async () => {
+  for (const code of [
+    'NO_TERMINAL_AGENT',
+    'VPS_DISABLED',
+    'SHELL_DISABLED',
+    'SHELL_NOT_ALLOWED',
+    'VPS_AUTHORIZATION_CHANGED',
+    'VPS_CONFIGURATION_CHANGED',
+  ]) {
+    assert.notEqual(reasonText(code), '终端连接暂不可用');
+  }
+  assert.equal(reasonText('VPS_NOT_ASSIGNED').includes('项目'), false);
+
+  const storeWithCatalog = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async () => ({
+      vps: [
+        { id: 'v1', name: '可用', enabled: true },
+        { id: 'v2', name: '停用', enabled: false },
+        { id: 'v3', name: '无权限', enabled: true, terminal: { eligible: false } },
+      ],
+    }),
+  });
+  const list = await storeWithCatalog.refreshVpsCatalog();
+  assert.deepEqual(
+    list.map((item) => item.id),
+    ['v1'],
+  );
+  storeWithCatalog.dispose();
+  assert.deepEqual(storeWithCatalog.vpsCatalog, []);
+
+  const fallbackStore = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async () => {
+      throw new Error('unimplemented /api/vps');
+    },
+  });
+  assert.deepEqual(await fallbackStore.refreshVpsCatalog(), []);
+  fallbackStore.dispose();
 });

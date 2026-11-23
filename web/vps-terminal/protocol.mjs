@@ -149,7 +149,9 @@ export function limitsFrom(values = {}) {
     scrollback_lines: [0, 100000],
   };
   const invalid = () => {
-    throw Object.assign(new Error('终端配置与当前界面不兼容'), { code: 'PROTOCOL_MISMATCH' });
+    throw Object.assign(new Error('终端配置与当前界面不兼容'), {
+      code: 'PROTOCOL_MISMATCH',
+    });
   };
   for (const [key, [min, max]] of Object.entries(ranges)) {
     if (values[key] === undefined) continue;
@@ -205,6 +207,11 @@ export const STOP_RETRY_CODES = new Set([
   'TARGET_REVISION_CHANGED',
   'VPS_DISABLED',
   'VPS_NOT_ASSIGNED',
+  'NO_TERMINAL_AGENT',
+  'SHELL_DISABLED',
+  'SHELL_NOT_ALLOWED',
+  'VPS_AUTHORIZATION_CHANGED',
+  'VPS_CONFIGURATION_CHANGED',
   'SSH_AUTH_FAILED',
   'HOST_KEY_UNKNOWN',
   'HOST_KEY_CHANGED',
@@ -237,7 +244,12 @@ const REASONS = {
   FORBIDDEN: '此账号没有终端权限',
   TARGET_REVISION_CHANGED: '连接配置已更新，请新建终端',
   VPS_DISABLED: 'VPS 连接已停用',
-  VPS_NOT_ASSIGNED: 'VPS 已不再分配给此项目',
+  VPS_NOT_ASSIGNED: '当前账号暂无此 VPS 的连接权限',
+  NO_TERMINAL_AGENT: '暂无可用的连接电脑，请先启动连接电脑',
+  SHELL_DISABLED: '连接电脑尚未启用终端命令功能',
+  SHELL_NOT_ALLOWED: '连接电脑未允许打开此终端',
+  VPS_AUTHORIZATION_CHANGED: '服务器访问授权已更新，请新建终端',
+  VPS_CONFIGURATION_CHANGED: '服务器连接配置已更新，请新建终端',
   AGENT_OFFLINE: '连接电脑离线',
   AGENT_UPGRADE_REQUIRED: '请更新连接电脑后打开终端',
   FEATURE_DISABLED: '管理员已暂停新建终端',

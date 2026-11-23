@@ -39,6 +39,25 @@ class AgentTerminalLink:
             "limits": self.config.public_limits(),
         }
 
+    def _direct_vps_allowed(self):
+        config = getattr(self.agent, "config", None)
+        if not isinstance(config, dict):
+            return True
+        from .shell import direct_vps_denial
+
+        return direct_vps_denial(config) is None
+
+    def _hello(self):
+        return {
+            "type": "terminal_hello",
+            "protocol": 1,
+            "runtime_generation": self.manager.generation,
+            "limits": self.config.public_limits(),
+            "direct_vps": True,
+            "direct_vps_allowed": self._direct_vps_allowed(),
+            "probe": True,
+        }
+
     async def emit(self, event):
         queue = self.queue
         if queue is None or queue.closed:
@@ -104,17 +123,7 @@ class AgentTerminalLink:
             channel = terminal_secure_channel(
                 config["secret"], challenge["challenge"], config["device_id"], "agent"
             )
-            await socket.send(
-                await pack_channel(
-                    channel,
-                    {
-                        "type": "terminal_hello",
-                        "protocol": 1,
-                        "runtime_generation": self.manager.generation,
-                        "limits": self.config.public_limits(),
-                    },
-                )
-            )
+            await socket.send(await pack_channel(channel, self._hello()))
             ready = await unpack_channel(
                 channel, await asyncio.wait_for(socket.recv(), self.config.auth_timeout_seconds)
             )

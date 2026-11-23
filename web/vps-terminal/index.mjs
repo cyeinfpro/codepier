@@ -18,10 +18,14 @@ function ensure() {
     identity = current;
     const guardedApi = async (...args) => {
       if (options.getIdentity() !== current)
-        throw Object.assign(new Error('登录状态已变化'), { code: 'AUTH_REVOKED' });
+        throw Object.assign(new Error('登录状态已变化'), {
+          code: 'AUTH_REVOKED',
+        });
       const response = await options.api(...args);
       if (options.getIdentity() !== current)
-        throw Object.assign(new Error('登录状态已变化'), { code: 'AUTH_REVOKED' });
+        throw Object.assign(new Error('登录状态已变化'), {
+          code: 'AUTH_REVOKED',
+        });
       return response;
     };
     store = new TerminalStore({
@@ -36,7 +40,10 @@ function ensure() {
         options.onCountChange?.(store?.count() || 0);
       },
     });
-    layout = new TerminalLayout({ store, onBack: () => options.onNavigate?.(null) });
+    layout = new TerminalLayout({
+      store,
+      onBack: () => options.onNavigate?.(null),
+    });
   }
   return store;
 }
@@ -66,13 +73,17 @@ export async function mount(container, { sessionId } = {}) {
         await current.restore(requested, {
           isCurrent: () => version === mountVersion && container.isConnected,
         });
+      if (!current.vpsCatalog.length) current.refreshVpsCatalog().catch(() => {});
     } catch (error) {
       if (layout && version === mountVersion && container.isConnected) {
         layout.error.textContent = error.message;
         layout.error.hidden = false;
       }
     }
-  } else current.refreshSessions().catch(() => {});
+  } else {
+    current.refreshSessions().catch(() => {});
+    current.refreshVpsCatalog().catch(() => {});
+  }
   return api;
 }
 export function hide() {

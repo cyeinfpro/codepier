@@ -26,8 +26,11 @@ export class TerminalStore {
     this.creationIntents = new Map();
     this.creating = new Map();
     this.remoteSessions = [];
+    this.vpsCatalog = [];
     this.activeId = null;
     this.secondaryId = null;
+    this.focusedId = null;
+    this.limits = { ...DEFAULT_LIMITS };
     this.version = 0;
     this.disposed = false;
   }
@@ -50,6 +53,32 @@ export class TerminalStore {
   get secondary() {
     return this.records.get(this.secondaryId);
   }
+  get focused() {
+    return this.records.get(this.focusedId) || this.active;
+  }
+
+  async refreshVpsCatalog() {
+    const version = this.version;
+    try {
+      const result = await this.api('/api/vps?limit=200&offset=0');
+      if (this.disposed || version !== this.version) return [];
+      const items = Array.isArray(result?.vps)
+        ? result.vps
+        : Array.isArray(result?.items)
+          ? result.items
+          : Array.isArray(result)
+            ? result
+            : [];
+      this.vpsCatalog = items.filter(
+        (item) => item && item.id && item.enabled !== false && item.terminal?.eligible !== false,
+      );
+      this.changed();
+      return this.vpsCatalog;
+    } catch {
+      if (!this.disposed && version === this.version) this.vpsCatalog = [];
+      return [];
+    }
+  }
 
   async refreshSessions() {
     const version = this.version;
@@ -70,17 +99,28 @@ export class TerminalStore {
     }
   }
 
-  async open({ vps, project, newSession = false, split = false, isCurrent = this.isCurrent }) {
+  async open({
+    vps,
+    vpsId,
+    project = null,
+    projectId = null,
+    mode = 'auto',
+    newSession = false,
+    split = false,
+    isCurrent = this.isCurrent,
+  } = {}) {
     if (this.disposed) throw new Error('登录状态已变化');
-    if (!vps?.id || !project?.id) throw new Error('请选择 VPS 和连接项目');
-    const key = `${vps.id}:${project.id}`;
+    const resolvedVpsId = vps?.id || vpsId;
+    if (!resolvedVpsId) throw new Error('请选择要连接的 VPS');
+    const resolvedProjectId = project?.id || projectId || null;
+    const key = resolvedProjectId ? `${resolvedVpsId}:${resolvedProjectId}` : resolvedVpsId;
     if (!newSession) {
       const recent = [...this.records.values()]
         .reverse()
         .find(
           (record) =>
-            record.session.vps_id === vps.id &&
-            record.session.project_id === project.id &&
+            record.session.vps_id === resolvedVpsId &&
+            (!resolvedProjectId || record.session.project_id === resolvedProjectId) &&
             !ENDED.has(record.state),
         );
       if (recent) {
@@ -94,7 +134,17 @@ export class TerminalStore {
       return session;
     }
     const version = this.version;
-    const promise = this.create({ vps, project, key, version, split, isCurrent });
+    const promise = this.create({
+      vps,
+      vpsId: resolvedVpsId,
+      project,
+      resolvedProjectId,
+      mode,
+      key,
+      version,
+      split,
+      isCurrent,
+    });
     this.creating.set(key, promise);
     this.changed();
     try {
@@ -106,13 +156,14 @@ export class TerminalStore {
   }
 
   async capability(vpsId, projectId) {
-    if (!vpsId || !projectId)
+    if (!vpsId)
       throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
         code: 'PROTOCOL_MISMATCH',
       });
-    const capability = await this.api(
-      `/api/vps-terminal/capabilities?vps_id=${encodeURIComponent(vpsId)}&project_id=${encodeURIComponent(projectId)}`,
-    );
+    const query = projectId
+      ? `?vps_id=${encodeURIComponent(vpsId)}&project_id=${encodeURIComponent(projectId)}`
+      : `?vps_id=${encodeURIComponent(vpsId)}`;
+    const capability = await this.api(`/api/vps-terminal/capabilities${query}`);
     if (capability.protocol_version !== undefined && capability.protocol_version !== 1)
       throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
         code: 'PROTOCOL_MISMATCH',
@@ -120,8 +171,21 @@ export class TerminalStore {
     return capability;
   }
 
-  async create({ vps, project, key, version, split, isCurrent }) {
-    const capability = await this.capability(vps.id, project.id);
+  async create({
+    vps,
+    vpsId,
+    project,
+    resolvedProjectId,
+    mode = 'auto',
+    key,
+    version,
+    split,
+    isCurrent,
+  }) {
+    const targetVps = vps?.id ? vps : await this.api(`/api/vps/${encodeURIComponent(vpsId)}`);
+    if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
+    if (!targetVps?.id) throw new Error('请选择要连接的 VPS');
+    const capability = await this.capability(targetVps.id, resolvedProjectId);
     if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
     if (
       capability.available === false ||
@@ -136,8 +200,11 @@ export class TerminalStore {
       );
     }
     const limits = limitsFrom(capability.limits);
+    this.limits = limits;
     if (this.count() >= limits.max_user_sessions)
-      throw Object.assign(new Error(reasonText('SESSION_LIMIT')), { code: 'SESSION_LIMIT' });
+      throw Object.assign(new Error(reasonText('SESSION_LIMIT')), {
+        code: 'SESSION_LIMIT',
+      });
     // Keep this request id across a lost POST response. A retry reconciles the
     // original create on the server instead of launching another shell.
     let requestId = this.creationIntents.get(key);
@@ -145,26 +212,35 @@ export class TerminalStore {
       requestId = uuid();
       this.creationIntents.set(key, requestId);
     }
+    const body = {
+      vps_id: targetVps.id,
+      ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
+      request_id: requestId,
+      mode: mode || 'auto',
+      cols: 100,
+      rows: 30,
+    };
     const session = await this.api('/api/vps-terminal/sessions', {
       method: 'POST',
-      body: JSON.stringify({
-        vps_id: vps.id,
-        project_id: project.id,
-        request_id: requestId,
-        mode: 'auto',
-        cols: 100,
-        rows: 30,
-      }),
+      body: JSON.stringify(body),
     });
     if (this.disposed || version !== this.version) return session;
     this.creationIntents.delete(key);
-    session.vps_name ||= vps.name;
-    session.project_alias ||= project.alias;
-    session.device_name ||= project.device_name;
-    session.username ||= vps.username;
-    session.vps_id ||= vps.id;
-    session.project_id ||= project.id;
-    const record = this.adopt(session, { vps, project, limits });
+    session.vps_name ||= targetVps.name;
+    session.host ||= targetVps.host;
+    session.port ||= targetVps.port;
+    session.username ||= targetVps.username;
+    session.vps_id ||= targetVps.id;
+    if (project) {
+      if (project.alias) session.project_alias ||= project.alias;
+      if (project.device_name) session.device_name ||= project.device_name;
+      if (project.id) session.project_id ||= project.id;
+    }
+    const record = this.adopt(session, {
+      vps: targetVps,
+      project: project || null,
+      limits,
+    });
     if (isCurrent()) this.activate(record.id, { split });
     return session;
   }
@@ -174,6 +250,9 @@ export class TerminalStore {
     const existing = this.records.get(id);
     if (existing) {
       Object.assign(existing.session, session);
+      if (vps) existing.vps = vps;
+      if (project) existing.project = project;
+      existing.view.syncSession?.(existing.session);
       return existing;
     }
     const record = {
@@ -183,6 +262,7 @@ export class TerminalStore {
       project,
       state: session.state || 'connecting',
       label: session.vps_name || session.name || 'VPS',
+      rttMs: null,
       closing: false,
     };
     const transport = (record.transport = new TerminalTransport({
@@ -200,6 +280,10 @@ export class TerminalStore {
         },
         onNotice: (code) => record.view.showNotice(code),
         onAuthChallenge: (message) => record.view.authChallenge(message),
+        onRtt: (rtt) => {
+          record.rttMs = rtt;
+          record.view.setRtt?.(rtt);
+        },
       },
     }));
     record.view = new TerminalView({
@@ -235,10 +319,15 @@ export class TerminalStore {
   activate(id, { split = false } = {}) {
     const record = this.records.get(normalizeUuid(id));
     if (!record) return;
-    if (split && this.activeId && this.activeId !== record.id) this.secondaryId = record.id;
-    else {
+    if (split && this.activeId && this.activeId !== record.id) {
+      this.secondaryId = record.id;
+    } else if (this.secondaryId) {
+      if (record.id !== this.activeId && record.id !== this.secondaryId) {
+        if (this.focusedId === this.secondaryId) this.secondaryId = record.id;
+        else this.activeId = record.id;
+      }
+    } else {
       this.activeId = record.id;
-      if (this.secondaryId === record.id) this.secondaryId = null;
     }
     this.focusedId = record.id;
     this.changed(); // Layout mounts a real renderer before socket output can arrive.
@@ -259,8 +348,6 @@ export class TerminalStore {
       const version = this.version;
       const session = await this.api(`/api/vps-terminal/sessions/${id}`);
       if (this.disposed || version !== this.version || !isCurrent()) return;
-      // Limits are scoped to the server-authorized target. Never borrow them
-      // from a different session, identity, or Space.
       let limits;
       if (!ENDED.has(session.state)) {
         const capability = await this.capability(session.vps_id, session.project_id);
@@ -272,14 +359,29 @@ export class TerminalStore {
     if (isCurrent()) this.activate(id, { split });
     return record.session;
   }
-  async duplicate(record = this.active, split = false) {
-    if (!record) throw new Error('请先选择 VPS');
+  async duplicate(record = this.focused || this.active, split = false) {
+    if (!record) throw new Error('请选择要连接的 VPS');
     const vps =
-      record.vps || (await this.api(`/api/vps/${encodeURIComponent(record.session.vps_id)}`));
-    const project =
-      record.project || (vps.projects || []).find((item) => item.id === record.session.project_id);
-    if (!project) throw new Error('项目分配已变化，请返回 VPS 选择连接项目');
-    return this.open({ vps, project, newSession: true, split });
+      record.vps ||
+      (record.session?.vps_id
+        ? await this.api(`/api/vps/${encodeURIComponent(record.session.vps_id)}`)
+        : null);
+    if (!vps?.id) throw new Error('请选择要连接的 VPS');
+    const isDirect =
+      !!record.session?.direct_vps ||
+      !!record.session?._direct_vps ||
+      String(record.session?.binding_id || '').startsWith('direct:');
+    const sessionProjectId =
+      !isDirect && record.session?.project_id ? record.session.project_id : null;
+    const project = sessionProjectId
+      ? Array.isArray(vps.projects)
+        ? vps.projects.find((item) => item.id === sessionProjectId) || null
+        : record.project?.id === sessionProjectId
+          ? record.project
+          : null
+      : null;
+    if (project) return this.open({ vps, project, newSession: true, split });
+    return this.open({ vps, newSession: true, split });
   }
   rename(id, name) {
     const record = this.records.get(id);
@@ -352,6 +454,7 @@ export class TerminalStore {
     this.changed();
     this.onNavigate?.(this.focusedId, { terminal: true });
     this.refreshSessions().catch(() => {});
+    if (!this.activeId) this.refreshVpsCatalog().catch(() => {});
   }
   async close(id) {
     const record = this.records.get(id);
@@ -377,12 +480,18 @@ export class TerminalStore {
         if (!this.hasStreamingAttachment(record)) record.transport.finish(result);
       } else if (result.state === 'close_unknown') {
         record.state = 'close_unknown';
-        record.view.stateChanged({ state: 'close_unknown', reason_code: 'CLOSE_UNKNOWN' });
+        record.view.stateChanged({
+          state: 'close_unknown',
+          reason_code: 'CLOSE_UNKNOWN',
+        });
       }
       // Otherwise the live control stream delivers the authoritative exit.
     } catch (error) {
       record.state = 'close_unknown';
-      record.view.stateChanged({ state: 'close_unknown', reason_code: 'CLOSE_UNKNOWN' });
+      record.view.stateChanged({
+        state: 'close_unknown',
+        reason_code: 'CLOSE_UNKNOWN',
+      });
       throw error;
     } finally {
       record.closing = false;
@@ -401,6 +510,7 @@ export class TerminalStore {
     this.creationIntents.clear();
     this.creating.clear();
     this.remoteSessions = [];
+    this.vpsCatalog = [];
     this.activeId = null;
     this.secondaryId = null;
     this.focusedId = null;

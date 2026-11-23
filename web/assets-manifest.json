@@ -1,5 +1,5 @@
 {
-  "version": "1.34.3",
+  "version": "1.34.4",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -231,28 +231,28 @@
       "bytes": 9343
     },
     "ui.js": {
-      "sha256": "53c1c11bcbeef18c21c5cc02ec718b2fdec02803982cdc6f201d157418d11efa",
-      "bytes": 37627
+      "sha256": "21f6bcd6288c6f04667d3802d2449488a845abb5c3bda0a311bf0b3f533db38a",
+      "bytes": 40228
     },
     "vendor/js-sha256-1.0.0/sha256.min.js": {
       "sha256": "a050d794e170699bd1a69d33908d0942c68901cb88347016064b60b240f0067e",
       "bytes": 8156
     },
     "vps-terminal.css": {
-      "sha256": "e9146f4d990130d9be21d97a0f0f9797be7585413bd8bf0c7c2878f12dd197e1",
-      "bytes": 17474
+      "sha256": "627b690e8aafed0102c73f3f36faa5285e0597cb83eef541fb9134f7a21c1e13",
+      "bytes": 23433
     },
     "vps-terminal.js": {
-      "sha256": "21366797924724131a6e30f174bfed00559e0b5f8894c767cca2697dbc2fde95",
-      "bytes": 591101
+      "sha256": "9b0c0529d16b68b704762098964be1e90d7b30e0d442496acabdefcc8142f28f",
+      "bytes": 608257
     },
     "vps.css": {
-      "sha256": "54a91671b99a3152b0ecd845a7383710c8954505f003d653b45d5d39e9fea784",
-      "bytes": 5346
+      "sha256": "881ee413ac79c1373694fd057da61bb2285c0d611f491b663989b0688a0b3f5f",
+      "bytes": 8777
     },
     "vps.js": {
-      "sha256": "1de4d55158934f31e4c7adbe0a533d01bb5eda38d2dc87c6525ab9eb12dbf5a4",
-      "bytes": 29420
+      "sha256": "e4cece85bce5dfeed7bd1f4e94018bd68b7bea1e55bde8b61840fb01c21d2a7d",
+      "bytes": 42823
     },
     "workflows.js": {
       "sha256": "681001d14df5b01d99548a282ced85d12f3211cf37cc8af713b5c24897d55d19",

@@ -44,6 +44,7 @@ export class TerminalTransport {
     WebSocketImpl = globalThis.WebSocket,
     baseUrl,
     random = Math.random,
+    now = Date.now,
   }) {
     this.sessionId = normalizeUuid(session.session_id || session.id);
     this.session = session;
@@ -54,12 +55,15 @@ export class TerminalTransport {
     this.WebSocketImpl = WebSocketImpl;
     this.baseUrl = baseUrl;
     this.random = random;
+    this.now = now;
     this.connectionVersion = 0;
     this.renderVersion = 0;
     this.renderedOffset = 0n;
     this.receivedOffset = 0n;
     this.nextInputSeq = 1n;
     this.pendingInputs = new Map();
+    this.pendingPings = new Map();
+    this.rttMs = null;
     this.pendingInputBytes = 0;
     this.pendingOutputBytes = 0;
     this.renderQueue = Promise.resolve();
@@ -72,7 +76,7 @@ export class TerminalTransport {
     this.retryAttempts = 0;
     this.inputUncertain = false;
     this.pauseReconnect = false;
-    this.lastSeen = Date.now();
+    this.lastSeen = this.now();
   }
 
   get canInput() {
@@ -91,7 +95,11 @@ export class TerminalTransport {
   changeState(state, details = {}) {
     this.state = state;
     if (state !== 'ready') this.live = false;
-    this.callbacks.onState?.({ state, input_uncertain: this.inputUncertain, ...details });
+    this.callbacks.onState?.({
+      state,
+      input_uncertain: this.inputUncertain,
+      ...details,
+    });
   }
 
   async connect({ manual = false } = {}) {
@@ -128,14 +136,16 @@ export class TerminalTransport {
       });
       if (!this.current(version)) return;
       if (!ticket?.ticket || typeof ticket.ticket !== 'string')
-        throw Object.assign(new Error('终端凭据无效'), { code: 'PROTOCOL_MISMATCH' });
+        throw Object.assign(new Error('终端凭据无效'), {
+          code: 'PROTOCOL_MISMATCH',
+        });
       const socket = new this.WebSocketImpl(websocketUrl(ticket.ws_path, this.baseUrl));
       this.socket = socket;
       socket.binaryType = 'arraybuffer';
       let authTicket = ticket.ticket;
       socket.onopen = () => {
         if (!this.current(version)) return socket.close();
-        this.lastSeen = Date.now();
+        this.lastSeen = this.now();
         this.sendControl({
           type: 'authenticate',
           ticket: authTicket,
@@ -147,7 +157,7 @@ export class TerminalTransport {
       };
       socket.onmessage = (event) => {
         if (!this.current(version)) return;
-        this.lastSeen = Date.now();
+        this.lastSeen = this.now();
         try {
           if (typeof event.data === 'string') {
             if (encoder.encode(event.data).byteLength > this.limits.control_bytes)
@@ -207,7 +217,17 @@ export class TerminalTransport {
       });
       return;
     }
-    if (message.type === 'pong' || message.type === 'authenticated') return;
+    if (message.type === 'pong') {
+      if (typeof message.nonce === 'string' && this.pendingPings.has(message.nonce)) {
+        const sentAt = this.pendingPings.get(message.nonce);
+        this.pendingPings.delete(message.nonce);
+        const rtt = Math.max(0, Math.round(this.now() - sentAt));
+        this.rttMs = rtt;
+        this.callbacks.onRtt?.(rtt);
+      }
+      return;
+    }
+    if (message.type === 'authenticated') return;
     if (message.type === 'attached') {
       clearTimeout(this.openTimer);
       this.clearOutputAck();
@@ -245,7 +265,9 @@ export class TerminalTransport {
       this.session.mode = message.mode;
       this.retryAttempts = 0;
       this.callbacks.onAttached?.({ ...message, preserve });
-      this.changeState(strategy === 'live' ? 'connecting' : 'restoring', { mode: message.mode });
+      this.changeState(strategy === 'live' ? 'connecting' : 'restoring', {
+        mode: message.mode,
+      });
       // The attachment boundary can precede its output frames. It is a target,
       // not evidence of a gap merely because the following bytes have not arrived.
       if (strategy !== 'history_replay' && message.state === 'ready')
@@ -341,7 +363,11 @@ export class TerminalTransport {
       boundary = message.final_offset ?? message.output_end_offset;
     const target = boundary === undefined ? this.receivedOffset : counter(boundary);
     const previous = this.pendingBarrier?.target || 0n;
-    this.pendingBarrier = { version, renderVersion, target: target > previous ? target : previous };
+    this.pendingBarrier = {
+      version,
+      renderVersion,
+      target: target > previous ? target : previous,
+    };
     this.renderQueue
       .then(() => {
         this.tryCompleteBarrier();
@@ -546,7 +572,11 @@ export class TerminalTransport {
       responses.some((x) => typeof x !== 'string' || x.length > 4096)
     )
       return false;
-    return this.sendControl({ type: 'auth_answer', challenge_id: challengeId, responses });
+    return this.sendControl({
+      type: 'auth_answer',
+      challenge_id: challengeId,
+      responses,
+    });
   }
 
   markUncertain() {
@@ -568,6 +598,9 @@ export class TerminalTransport {
       ...details,
       reason_code: code,
       message: reasonText(code, details.message),
+      ...(!this.pauseReconnect && this.retryAttempts < RETRIES
+        ? { retry_attempt: this.retryAttempts + 1, max_retries: RETRIES }
+        : {}),
     });
     if (!this.pauseReconnect) this.scheduleRetry();
   }
@@ -595,15 +628,30 @@ export class TerminalTransport {
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
   }
+  sendPing() {
+    if (!this.isOpen() || this.disposed) return null;
+    const nonce = uuid();
+    if (this.pendingPings.size >= 16) {
+      const oldest = this.pendingPings.keys().next().value;
+      this.pendingPings.delete(oldest);
+    }
+    const timestamp = this.now();
+    this.pendingPings.set(nonce, timestamp);
+    if (!this.sendControl({ type: 'ping', nonce, timestamp })) {
+      this.pendingPings.delete(nonce);
+      return null;
+    }
+    return nonce;
+  }
   startHeartbeat(version) {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
       if (!this.current(version)) return;
-      if (Date.now() - this.lastSeen > this.limits.heartbeat_timeout_seconds * 1000) {
+      if (this.now() - this.lastSeen > this.limits.heartbeat_timeout_seconds * 1000) {
         this.fail('NETWORK_ERROR');
         return;
       }
-      this.sendControl({ type: 'ping', nonce: uuid(), timestamp: Date.now() });
+      this.sendPing();
     }, this.limits.heartbeat_seconds * 1000);
   }
   stopHeartbeat() {
@@ -615,6 +663,7 @@ export class TerminalTransport {
     clearTimeout(this.openTimer);
     clearTimeout(this.resizeTimer);
     this.stopHeartbeat();
+    this.pendingPings.clear();
     const socket = this.socket;
     this.socket = null;
     this.attachment = null;
@@ -655,6 +704,8 @@ export class TerminalTransport {
           reason_code: message.reason_code || 'SSH_CHANNEL_CLOSED',
           message: 'SSH 已断开，正在恢复原会话',
           output_complete: message.output_complete,
+          retry_attempt: this.retryAttempts + 1,
+          max_retries: RETRIES,
         });
         this.scheduleRetry();
         return;
@@ -662,7 +713,10 @@ export class TerminalTransport {
       this.changeState(message.state || 'exited', {
         ...message,
         ...(message.output_complete === false
-          ? { reason_code: 'OUTPUT_INCOMPLETE', message: reasonText('OUTPUT_INCOMPLETE') }
+          ? {
+              reason_code: 'OUTPUT_INCOMPLETE',
+              message: reasonText('OUTPUT_INCOMPLETE'),
+            }
           : {}),
       });
     });
@@ -670,7 +724,11 @@ export class TerminalTransport {
   detach() {
     if (this.disposed) return;
     this.flushOutputAck();
-    this.sendControl({ type: 'detach', request_id: uuid(), reason: 'view_closed' });
+    this.sendControl({
+      type: 'detach',
+      request_id: uuid(),
+      reason: 'view_closed',
+    });
     this.dispose();
   }
   dispose() {
@@ -681,6 +739,7 @@ export class TerminalTransport {
     this.clearRetry();
     this.closeSocket();
     this.pendingInputs.clear();
+    this.pendingPings.clear();
     this.pendingInputBytes = 0;
     this.callbacks = {};
   }

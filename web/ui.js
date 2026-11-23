@@ -484,18 +484,78 @@ async function uiCommand() {
   let projects = [...S.projects],
     filtered = [],
     active = -1;
-  const entries = () => [
-    ...nav
-      .filter(([id]) => CodePierIdentity.canNavigate(id))
-      .map(([id, ico, label]) => ({ id, ico, label, kind: 'page', hint: '页面' })),
-    ...projects.map((p) => ({
-      id: p.id,
-      ico: 'folder',
-      label: p.alias,
-      kind: 'project',
-      hint: p.device_name || '项目',
-    })),
-  ];
+  const entries = () => {
+    const canVps = CodePierIdentity.canNavigate('vps');
+    const vpsList = canVps && Array.isArray(S.vps) ? S.vps : [];
+    const activeSessions =
+      canVps && typeof window !== 'undefined'
+        ? (window.CodePierVpsTerminal?.list?.() || []).filter(
+            (item) => item && !['closed', 'exited', 'failed', 'revoked'].includes(item.state),
+          )
+        : [];
+    return [
+      ...nav
+        .filter(([id]) => CodePierIdentity.canNavigate(id))
+        .map(([id, ico, label]) => ({
+          id,
+          ico,
+          label,
+          kind: 'page',
+          hint: '页面',
+        })),
+      ...activeSessions.map((item) => {
+        const vps = vpsList.find((v) => v.id === item.vps_id);
+        const name = item.vps_name || item.title || vps?.name || 'SSH 终端';
+        const host = item.host || vps?.host || '';
+        const region = vps?.region || '';
+        const sid = item.session_id || item.id || '';
+        return {
+          id: sid || item.vps_id || 'vps-terminal',
+          sessionId: sid,
+          ico: 'terminal',
+          label: `终端 · ${name}`,
+          kind: 'vps-session',
+          hint: [host, region, '活跃 SSH 终端'].filter(Boolean).join(' · '),
+          search: [
+            name,
+            host,
+            region,
+            item.username || vps?.username || '',
+            'ssh',
+            'terminal',
+          ].join(' '),
+        };
+      }),
+      ...projects.map((p) => ({
+        id: p.id,
+        ico: 'folder',
+        label: p.alias,
+        kind: 'project',
+        hint: p.device_name || '项目',
+      })),
+      ...vpsList.map((v) => {
+        const canTerminal = v.enabled !== false && (!v.terminal || v.terminal.eligible !== false);
+        return {
+          id: v.id,
+          ico: 'cloud',
+          label: v.name,
+          kind: 'vps',
+          canTerminal,
+          hint: [
+            v.username ? `${v.username}@${v.host}` : v.host,
+            v.region,
+            v.provider,
+            v.enabled === false ? 'VPS · 已停用' : 'VPS · 打开终端',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          search: [v.name, v.host, v.region, v.provider, v.username, v.system, 'vps', 'ssh']
+            .filter(Boolean)
+            .join(' '),
+        };
+      }),
+    ];
+  };
   const itemKey = (item) => item && item.kind + ':' + item.id;
   function sync() {
     $$('[data-command-index]', results).forEach((el, i) =>
@@ -509,7 +569,9 @@ async function uiCommand() {
     const selected = itemKey(filtered[active]),
       q = input.value.trim().toLocaleLowerCase();
     filtered = entries().filter((item) =>
-      (item.label + ' ' + item.id + ' ' + item.hint).toLocaleLowerCase().includes(q),
+      (item.label + ' ' + item.id + ' ' + item.hint + ' ' + (item.search || ''))
+        .toLocaleLowerCase()
+        .includes(q),
     );
     active = reset ? -1 : filtered.findIndex((item) => itemKey(item) === selected);
     const previous = new Map(
@@ -555,8 +617,30 @@ async function uiCommand() {
       return;
     if (session !== S.session || !dialog.isConnected) return;
     closeModal(dialog);
-    if (item.kind === 'project') resetWork(item.id);
-    await navigate(item.kind === 'project' ? 'workbench' : item.id);
+    if (item.kind === 'project') {
+      resetWork(item.id);
+      await navigate('workbench');
+      return;
+    }
+    if (item.kind === 'vps-session') {
+      await navigate(
+        item.sessionId
+          ? 'vps?view=terminal&session=' + encodeURIComponent(item.sessionId)
+          : 'vps?view=terminal',
+      );
+      return;
+    }
+    if (item.kind === 'vps') {
+      if (item.canTerminal && typeof vpsOpenTerminal === 'function') {
+        if (S.page !== 'vps') await navigate('vps');
+        await vpsOpenTerminal(item.id);
+      } else {
+        S.vpsQuery = item.label;
+        await navigate('vps');
+      }
+      return;
+    }
+    await navigate(item.id);
   }
   input.oninput = () => render();
   results.onclick = (e) => {
@@ -583,7 +667,9 @@ async function uiCommand() {
             : filtered.length - 1
           : (active + (e.key === 'ArrowDown' ? 1 : -1) + filtered.length) % filtered.length;
       sync();
-      $(`[data-command-index="${active}"]`, results)?.scrollIntoView({ block: 'nearest' });
+      $(`[data-command-index="${active}"]`, results)?.scrollIntoView({
+        block: 'nearest',
+      });
     }
     if (e.key === 'Enter') {
       e.preventDefault();

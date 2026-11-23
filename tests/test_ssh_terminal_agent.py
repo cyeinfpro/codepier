@@ -1663,3 +1663,113 @@ def test_canonical_bare_ed25519_rows_do_not_grant_or_block_host_trust(tmp_path):
     assert not policy.validate_candidate("revoked", "", 22, key)
     assert policy.error.code == "HOST_KEY_REVOKED"
     assert path.read_text() == data
+
+
+def test_direct_vps_denial_and_link_hello_capabilities():
+    from agent.shell import direct_vps_denial
+    from agent.ssh_terminal_link import AgentTerminalLink
+
+    assert direct_vps_denial({}) == (
+        "SHELL_DISABLED", "请在本机 Agent 配置中开启 shell.enabled 执行权限",
+    )
+    assert direct_vps_denial({"shell": {"enabled": True, "projects": ["Alpha"]}}) == (
+        "SHELL_NOT_ALLOWED", "无项目直连 VPS 需要本机 shell.projects 包含 * 授权",
+    )
+    assert direct_vps_denial({"shell": {"enabled": True, "projects": ["*"]}}) is None
+
+    default_hello = AgentTerminalLink(None)._hello()
+    assert default_hello["direct_vps"] is True
+    assert default_hello["direct_vps_allowed"] is True
+    assert default_hello["probe"] is True
+
+    denied_agent = SimpleNamespace(config={"shell": {"enabled": False, "projects": []}})
+    assert AgentTerminalLink(denied_agent)._hello()["direct_vps_allowed"] is False
+
+    allowed_agent = SimpleNamespace(config={"shell": {"enabled": True, "projects": ["*"]}})
+    assert AgentTerminalLink(allowed_agent)._hello()["direct_vps_allowed"] is True
+
+
+@pytest.mark.asyncio
+async def test_manager_direct_vps_gate_and_cross_mode_isolation():
+    agent_stub = SimpleNamespace(config={"shell": {"enabled": False, "projects": []}})
+    manager = TerminalSessionManager(agent=agent_stub, emit=lambda _: None, connector=FakeTransport)
+    direct = {"_direct_vps": True, "id": "", "root": "",
+              "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+    try:
+        with pytest.raises(TerminalProtocolError) as bad_path:
+            await manager.control("list", {}, {**direct, "root": "/not-allowed"})
+        assert bad_path.value.code == "AUTH_REVOKED"
+
+        with pytest.raises(TerminalProtocolError) as disabled:
+            await manager.control("list", {}, direct)
+        assert disabled.value.code == "SHELL_DISABLED"
+
+        agent_stub.config = {"shell": {"enabled": True, "projects": ["project-a"]}}
+        with pytest.raises(TerminalProtocolError) as not_wildcard:
+            await manager.control("list", {}, direct)
+        assert not_wildcard.value.code == "SHELL_NOT_ALLOWED"
+
+        agent_stub.config = {"shell": {"enabled": True, "projects": ["*"]}}
+        assert manager._scope("owner-a", "space-a", direct) == ("owner-a", "space-a", "", "")
+        req = create_request(manager, binding_id="direct:vps-a")
+        await admitted_create(manager, req, direct)
+        await settled(manager, req["session_id"])
+
+        isolated_mgr = TerminalSessionManager(emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None)
+        isolated_mgr.sessions.update(manager.sessions)
+        non_direct = {"id": "", "root": "", "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+        with pytest.raises(TerminalProtocolError) as cross:
+            await isolated_mgr.control("status", {"session_id": req["session_id"]}, non_direct)
+        assert cross.value.code == "SESSION_NOT_FOUND"
+        assert (await isolated_mgr.control("list", {}, non_direct))["sessions"] == []
+    finally:
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_manager_stateless_probe_redaction_and_error_classification():
+    calls = []
+
+    class ProbeTransport(FakeTransport):
+        def __init__(self, fail=False):
+            super().__init__()
+            self.fail = fail
+
+        async def connect(self, target, password, *, challenge=None):
+            assert challenge is None
+            calls.append(("connect", dict(target), password))
+            if self.fail:
+                raise SSHTransportError("SSH_AUTH_FAILED", f"rejected {password}")
+            return self
+
+        async def run_control(self, command, *, wait_seconds=None, max_bytes=8192):
+            calls.append(("run_control", command, wait_seconds, max_bytes))
+            return 0, b"CODEPIER_VPS_OK\nhost-1\nfixture-secret-only\n"
+
+    transports = []
+
+    def make_ok():
+        item = ProbeTransport(fail=False)
+        transports.append(item)
+        return item
+
+    direct = {"_direct_vps": True, "id": "", "root": "",
+              "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+    manager = TerminalSessionManager(emit=lambda _: None, connector=make_ok, authorize=lambda _: None)
+    payload = {
+        "host": "server.example.invalid", "port": 2222, "username": "root",
+        "password": "fixture-secret-only", "host_key_policy": "accept-new", "timeout_seconds": 99,
+    }
+    res = await manager.control("probe", payload, direct)
+    assert res["ok"] is True and res["state"] == "succeeded" and res["exit_code"] == 0
+    assert "CODEPIER_VPS_OK" in res["output"] and "<redacted>" in res["output"]
+    assert "fixture-secret-only" not in res["output"] and "password" not in payload
+    assert calls[1][2] == 60 and calls[1][3] == 16384
+    assert transports[0].closed is True and manager.sessions == {}
+
+    fail_mgr = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: ProbeTransport(fail=True), authorize=lambda _: None,
+    )
+    failed = await fail_mgr.control("probe", {**payload, "password": "fixture-secret-only"}, direct)
+    assert failed["ok"] is False and failed["state"] == "failed" and failed["exit_code"] is None
+    assert failed["error"] == {"code": "SSH_AUTH_FAILED", "message": "rejected <redacted>"}

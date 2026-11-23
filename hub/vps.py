@@ -16,11 +16,15 @@ import unicodedata
 import uuid
 
 from fastapi import APIRouter, Query, Request
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from shared.contracts import Args, SSHExec, VPSList
+from shared.ssh_terminal_protocol import TerminalProtocolError
 from shared.util import DevError
 from hub import iam
+
+_VPS_CHECK_COMMAND = "printf 'CODEPIER_VPS_OK\\n'; hostname; id -un; uname -sr; df -h /"
+_PUBLIC_PROJECT_KEYS = ("id", "alias", "device_id", "device_name", "mode", "allow_tasks")
 
 
 PUBLIC_FIELDS = (
@@ -102,32 +106,213 @@ class ProjectVPSAssignments(Args):
     expected_vps_ids: list[str] = Field(max_length=500)
 
 
+class VPSCheckInput(Args):
+    project_id: str | None = Field(default=None, max_length=100)
+    timeout_seconds: int = Field(default=30, ge=1, le=300)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+    @field_validator("project_id")
+    @classmethod
+    def normalize_project_id(cls, value):
+        if value is None:
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("project_id 不能包含控制字符")
+        return value.strip() or None
+
+
+def _terminal_state(*, eligible, available, check_ready, direct, reason_code, device_name=None):
+    return {
+        "eligible": bool(eligible),
+        "available": bool(available),
+        "check_ready": bool(check_ready),
+        "direct": bool(direct),
+        "reason_code": reason_code,
+        "device_name": device_name if eligible else None,
+    }
+
+
+def _member_actions(principal, perms, project_id):
+    if (
+        not principal.admin
+        and "*" not in principal.projects
+        and project_id not in principal.projects
+    ):
+        return set()
+    return set(perms.get(project_id, ())) & set(principal.scopes)
+
+
+def _agent_probe_ready(agent, project):
+    if agent is None or agent.closed or not getattr(agent, "probe_supported", False):
+        return False
+    if project.get("_direct_vps") is True:
+        return bool(
+            getattr(agent, "direct_vps", False) and getattr(agent, "direct_vps_allowed", True)
+        )
+    return True
+
+
 class VPSService:
     def __init__(self, runtime):
         self.runtime = runtime
         self.store = runtime.store
 
-    def public(self, row, visible_ids=None):
+    def _admin_terminal_summary(self, row, all_projects, principal, terminal_service):
+        exec_ready = any(
+            p["online"] and p["device_enabled"] and p["mode"] == "write" and p["allow_tasks"]
+            for p in all_projects
+        )
+        if not row["enabled"]:
+            return _terminal_state(
+                eligible=True,
+                available=False,
+                check_ready=False,
+                direct=True,
+                reason_code="VPS_DISABLED",
+            )
+        if terminal_service is None:
+            dev_name = next((p["device_name"] for p in all_projects if p["online"]), None)
+            reason = "AGENT_UPGRADE_REQUIRED" if exec_ready else "AGENT_OFFLINE"
+            return _terminal_state(
+                eligible=True,
+                available=False,
+                check_ready=exec_ready,
+                direct=True,
+                reason_code=reason,
+                device_name=dev_name,
+            )
+        if not terminal_service.enabled or terminal_service.closing:
+            return _terminal_state(
+                eligible=True,
+                available=False,
+                check_ready=exec_ready,
+                direct=True,
+                reason_code="FEATURE_DISABLED",
+            )
+        try:
+            project = terminal_service._select_admin_project(principal, row["id"])
+        except DevError as exc:
+            return _terminal_state(
+                eligible=True, available=False, check_ready=False, direct=True, reason_code=exc.code
+            )
+        agent = terminal_service.agents.get(project["device_id"])
+        reason = terminal_service._capability_reason(project, agent)
+        check_ready = _agent_probe_ready(agent, project) or exec_ready
+        return _terminal_state(
+            eligible=True,
+            available=reason is None,
+            check_ready=check_ready,
+            direct=True,
+            reason_code=reason,
+            device_name=project.get("device_name") or None,
+        )
+
+    def _member_eligible_projects(self, visible_projects, principal):
+        if principal is None:
+            return [
+                p
+                for p in visible_projects
+                if p["device_enabled"] and p["mode"] == "write" and p["allow_tasks"]
+            ]
+        perms = iam.project_permissions(self.store, principal)
+        return [
+            p
+            for p in visible_projects
+            if (
+                {"read", "write", "execute"} <= _member_actions(principal, perms, p["id"])
+                and p["device_enabled"]
+                and p["mode"] == "write"
+                and p["allow_tasks"]
+            )
+        ]
+
+    def _member_terminal_summary(self, row, visible_projects, principal, terminal_service):
+        eligible_projects = self._member_eligible_projects(visible_projects, principal)
+        if not eligible_projects:
+            return _terminal_state(
+                eligible=False,
+                available=False,
+                check_ready=False,
+                direct=False,
+                reason_code="SSH_TERMINAL_FORBIDDEN",
+            )
+        if not row["enabled"]:
+            return _terminal_state(
+                eligible=True,
+                available=False,
+                check_ready=False,
+                direct=False,
+                reason_code="VPS_DISABLED",
+                device_name=eligible_projects[0]["device_name"],
+            )
+        exec_ready = any(p["online"] for p in eligible_projects)
+        if terminal_service is None:
+            best = next((p for p in eligible_projects if p["online"]), eligible_projects[0])
+            reason = "AGENT_UPGRADE_REQUIRED" if exec_ready else "AGENT_OFFLINE"
+            return _terminal_state(
+                eligible=True,
+                available=False,
+                check_ready=exec_ready,
+                direct=False,
+                reason_code=reason,
+                device_name=best["device_name"],
+            )
+        counts = terminal_service._active_device_counts()
+        best = min(
+            eligible_projects,
+            key=lambda p: (
+                -terminal_service._candidate_tier(p["device_id"], counts.get(p["device_id"], 0)),
+                counts.get(p["device_id"], 0),
+                p["id"],
+            ),
+        )
+        agent = terminal_service.agents.get(best["device_id"])
+        reason = terminal_service._capability_reason(best, agent)
+        check_ready = _agent_probe_ready(agent, best) or exec_ready
+        return _terminal_state(
+            eligible=True,
+            available=reason is None,
+            check_ready=check_ready,
+            direct=False,
+            reason_code=reason,
+            device_name=best["device_name"],
+        )
+
+    def public(self, row, visible_ids=None, *, principal=None):
         result = {key: row[key] for key in PUBLIC_FIELDS}
         result["enabled"] = bool(result["enabled"])
         result["has_password"] = True
         result["target"] = "vps:" + row["id"]
-        projects = self.store.all(
-            """SELECT p.id,p.alias,p.device_id,d.name AS device_name,
+        raw_projects = self.store.all(
+            """SELECT p.id,p.alias,p.device_id,d.name AS device_name,d.enabled AS device_enabled,
             p.mode,p.allow_tasks FROM vps_projects vp JOIN projects p ON p.id=vp.project_id
             JOIN devices d ON d.id=p.device_id WHERE vp.vps_id=? ORDER BY p.alias_key""",
             (row["id"],),
         )
-        result["projects"] = [
+        enriched = [
             {
                 **p,
                 "online": self.runtime.online(p["device_id"]),
                 "allow_tasks": bool(p["allow_tasks"]),
+                "device_enabled": bool(p["device_enabled"]),
             }
-            for p in projects
-            if visible_ids is None or p["id"] in visible_ids
+            for p in raw_projects
+        ]
+        visible_enriched = [p for p in enriched if visible_ids is None or p["id"] in visible_ids]
+        result["projects"] = [
+            {**{k: p[k] for k in _PUBLIC_PROJECT_KEYS}, "online": p["online"]}
+            for p in visible_enriched
         ]
         result["project_ids"] = [p["id"] for p in result["projects"]]
+        terminal_service = getattr(self.runtime, "ssh_terminal", None)
+        if principal is not None and principal.admin and not principal.grant_id:
+            result["terminal"] = self._admin_terminal_summary(
+                row, enriched, principal, terminal_service
+            )
+        else:
+            result["terminal"] = self._member_terminal_summary(
+                row, visible_enriched, principal, terminal_service
+            )
         return result
 
     def get(self, identifier, principal):
@@ -145,7 +330,7 @@ class VPSService:
             (identifier, *sorted(visible)),
         ):
             raise DevError("VPS_NOT_FOUND", "未找到已授权 VPS", 404)
-        return self.public(row, visible)
+        return self.public(row, None if principal.admin else visible, principal=principal)
 
     def manage(self, principal, identifier=None):
         principal = iam.live_principal(self.store, principal)
@@ -159,6 +344,7 @@ class VPSService:
         return principal
 
     def list(self, args, principal):
+        principal = iam.live_principal(self.store, principal)
         projects = self.runtime.list_projects(principal)
         visible = {p["id"] for p in projects}
         chosen = (
@@ -177,25 +363,25 @@ class VPSService:
             f"SELECT {PUBLIC_SQL} FROM vps_connections v{where} ORDER BY v.name_key,v.id",
             (principal.space_id, *params),
         )
-        results = []
-        for row in rows:
-            if query and not any(
-                query in name_key(str(row[key])) for key in ("name", "host", "provider", "region")
-            ):
-                # IPv6 can be supplied in a different, equivalent representation.
-                if canonical_host(args.get("query", "")) != row["host"]:
-                    continue
-            results.append(row)
+        results = [row for row in rows if self._matches_query(row, query, args.get("query", ""))]
         offset, limit = args.get("offset", 0), args.get("limit", 50)
         end = offset + limit
         return {
             "vps": [
-                self.public(row, None if principal.admin else visible)
+                self.public(row, None if principal.admin else visible, principal=principal)
                 for row in results[offset:end]
             ],
             "total": len(results),
             "next_offset": end if end < len(results) else None,
         }
+
+    @staticmethod
+    def _matches_query(row, query, raw_query):
+        if not query:
+            return True
+        if any(query in name_key(str(row[key])) for key in ("name", "host", "provider", "region")):
+            return True
+        return canonical_host(raw_query) == row["host"]
 
     def _validate_projects(self, identifiers, principal):
         self.store.require_transaction()
@@ -440,6 +626,209 @@ class VPSService:
             "binding_id": row["binding_id"],
         }
 
+    def _authorized_direct_row(self, ref, space_id, *, credential=False):
+        ref = (ref.get("vps_ref") if isinstance(ref, dict) and "vps_ref" in ref else ref) or {}
+        vps_id = ref.get("id")
+        expected_binding = "direct:" + str(vps_id or "")
+        columns = PUBLIC_SQL + (",v.secret" if credential else "")
+        row = self.store.one(
+            f"SELECT {columns} FROM vps_connections v WHERE v.id=? AND v.space_id=?",
+            (vps_id, space_id),
+        )
+        if not row or not row["enabled"] or not vps_id or ref.get("binding_id") != expected_binding:
+            raise DevError(
+                "VPS_AUTHORIZATION_CHANGED",
+                "VPS 已停用、删除或直连授权已变化；尚未下发的命令不能继续执行",
+                403,
+            )
+        if row["connection_revision"] != ref.get("connection_revision"):
+            raise DevError(
+                "VPS_CONFIGURATION_CHANGED", "VPS 连接或凭据已变化；请核对原操作后明确重新提交", 409
+            )
+        return {**row, "binding_id": expected_binding}
+
+    def _bound_exec_project(self, identifier, principal):
+        rows = self.store.all(
+            """SELECT p.id, p.device_id, d.name AS device_name
+            FROM vps_projects vp JOIN projects p ON p.id=vp.project_id
+            JOIN devices d ON d.id=p.device_id
+            WHERE vp.vps_id=? AND p.space_id=? AND d.enabled=1 AND p.mode='write' AND p.allow_tasks=1
+            ORDER BY p.alias_key, p.id""",
+            (identifier, principal.space_id),
+        )
+        if not (principal.admin and not principal.grant_id):
+            perms = iam.project_permissions(self.store, principal)
+            rows = [
+                r
+                for r in rows
+                if {"read", "write", "execute"} <= _member_actions(principal, perms, r["id"])
+            ]
+        if not rows:
+            return None
+        chosen = next((r for r in rows if self.runtime.online(r["device_id"])), rows[0])
+        return self.runtime.project(chosen["id"], principal)
+
+    def _prepare_check(self, identifier, body, principal):
+        principal = iam.live_principal(self.store, principal)
+        if not principal.user_id or not principal.session_hash:
+            raise DevError("AUTH_REQUIRED", "请从面板登录后检查连接", 401)
+        terminal_service = getattr(self.runtime, "ssh_terminal", None)
+        if terminal_service is not None:
+            principal, project, target = terminal_service._authorize(
+                principal,
+                body.project_id,
+                identifier,
+                credentials=True,
+            )
+            exec_project = (
+                project if body.project_id else self._bound_exec_project(identifier, principal)
+            )
+            return principal, project, target, exec_project
+        exec_project = (
+            self.runtime.project(body.project_id, principal)
+            if body.project_id
+            else self._bound_exec_project(identifier, principal)
+        )
+        if exec_project is None:
+            raise DevError("NO_TERMINAL_AGENT", "当前没有可用于连接检查的关联项目或终端通道", 409)
+        self.runtime.authorize(principal, "write", project_id=exec_project["id"])
+        self.runtime.authorize(principal, "execute", project_id=exec_project["id"])
+        ref = self.reference({"vps": identifier}, exec_project)
+        target = self._authorized_row({"vps_ref": ref}, exec_project["id"], credential=False)
+        return principal, exec_project, target, exec_project
+
+    async def _run_probe_check(
+        self, identifier, agent, project, target, password, timeout_seconds, principal
+    ):
+        timeout = min(60, max(5, int(timeout_seconds)))
+        payload = {
+            "host": target["host"],
+            "port": target["port"],
+            "username": target["username"],
+            "password": password,
+            "host_key_policy": target["host_key_policy"],
+            "timeout_seconds": timeout,
+        }
+        try:
+            probe_res = await agent.request("probe", payload, project, wait_seconds=timeout + 5)
+            ok = bool(probe_res.get("ok"))
+            result = {
+                "ok": ok,
+                "state": probe_res.get("state") or ("succeeded" if ok else "failed"),
+                "pending": False,
+                "operation_id": None,
+                "output": str(probe_res.get("output") or ""),
+                "error": probe_res.get("error"),
+                "device_name": project.get("device_name") or None,
+            }
+        except TerminalProtocolError as exc:
+            result = {
+                "ok": False,
+                "state": "failed",
+                "pending": False,
+                "operation_id": None,
+                "output": "",
+                "error": {"code": exc.code, "message": exc.message},
+                "device_name": project.get("device_name") or None,
+            }
+        finally:
+            payload.pop("password", None)
+        await self.store.run(
+            self.store.audit,
+            principal.actor,
+            "vps.checked",
+            identifier,
+            "ok" if result["ok"] else "error",
+            {"mode": "probe", "device_id": project["device_id"]},
+        )
+        return result
+
+    async def _run_exec_check(self, identifier, exec_project, body, principal):
+        timeout = min(300, max(5, int(body.timeout_seconds)))
+        receipt = await self.runtime.invoke(
+            "exec",
+            {
+                "project": exec_project["id"],
+                "target": "vps:" + identifier,
+                "command": _VPS_CHECK_COMMAND,
+                "timeout_seconds": timeout,
+                "yield_seconds": min(8, timeout),
+                "idempotency_key": body.idempotency_key,
+            },
+            principal,
+        )
+        state = receipt.get("state") or "queued"
+        pending = bool(receipt.get("pending", state in {"queued", "running"}))
+        ok = state == "succeeded"
+        raw_res = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+        error = (
+            None
+            if ok
+            else (
+                raw_res.get("error")
+                or (
+                    {"code": "EXEC_FAILED", "message": str(receipt["error"])}
+                    if receipt.get("error")
+                    else None
+                )
+            )
+        )
+        return {
+            "ok": ok,
+            "state": state,
+            "pending": pending,
+            "operation_id": receipt.get("operation_id") or receipt.get("id"),
+            "output": str(receipt.get("output") or ""),
+            "error": error,
+            "device_name": exec_project.get("device_name") or None,
+        }
+
+    def _raise_check_unavailable(self, agent, project):
+        if (
+            agent is not None
+            and not agent.closed
+            and getattr(agent, "direct_vps", False)
+            and not getattr(agent, "direct_vps_allowed", True)
+        ):
+            raise DevError(
+                "SHELL_DISABLED", "请在本机 Agent 配置中开启 shell.enabled 与 * 授权", 403
+            )
+        if (agent is not None and not agent.closed) or self.runtime.online(project["device_id"]):
+            raise DevError(
+                "AGENT_UPGRADE_REQUIRED",
+                "当前节点不支持免绑定连接检查，请升级 Agent 或先分配可写项目",
+                409,
+            )
+        raise DevError("AGENT_OFFLINE", "关联节点当前离线，无法执行连接检查", 409)
+
+    async def check(self, identifier, body, principal):
+        principal, project, target, exec_project = await self.store.run(
+            self._prepare_check,
+            identifier,
+            body,
+            principal,
+        )
+        password = target.pop("password", None)
+        try:
+            terminal_service = getattr(self.runtime, "ssh_terminal", None)
+            agent = terminal_service.agents.get(project["device_id"]) if terminal_service else None
+            if _agent_probe_ready(agent, project):
+                return await self._run_probe_check(
+                    identifier,
+                    agent,
+                    project,
+                    target,
+                    password,
+                    body.timeout_seconds,
+                    principal,
+                )
+            password = None
+            if exec_project is None:
+                self._raise_check_unavailable(agent, project)
+            return await self._run_exec_check(identifier, exec_project, body, principal)
+        finally:
+            password = None
+
     def _authorized_row(self, request, project_id, *, credential=False):
         ref = request.get("vps_ref") or {}
         columns = PUBLIC_SQL + (",v.secret" if credential else "")
@@ -539,5 +928,10 @@ def make_vps_router(auth, runtime):
     @database_endpoint(runtime.store)
     def delete_vps(identifier: str, request: Request, expected_version: int = Query(..., ge=1)):
         return service.delete(identifier, expected_version, auth.panel(request, True))
+
+    @router.post("/api/vps/{identifier}/check")
+    async def check_vps(identifier: str, request: Request, body: VPSCheckInput):
+        principal = await runtime.store.run(auth.panel, request, True)
+        return await service.check(identifier, body, principal)
 
     return router

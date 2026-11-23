@@ -489,3 +489,112 @@ async def test_dispatched_revoked_request_only_probes_original_receipt(inventory
     assert packets == [{'type': 'probe', 'id': operation}]
     row = r.store.one('SELECT state,result,attempts FROM operations WHERE id=?', (operation,))
     assert row['state'] == 'queued' and row['result'] is None and row['attempts'] == 1
+
+
+def test_terminal_readiness_field_and_privacy_isolation(inventory):
+    r, owner, projects = inventory
+    bound = r.vps.save(body(projects[:2]), owner)
+    unassigned = r.vps.save(VPSInput(name='Unassigned Direct', host='direct.invalid', password=PASSWORD, project_ids=[]), owner)
+    assert unassigned['terminal']['eligible'] is True and unassigned['terminal']['direct'] is True
+    assert unassigned['terminal']['available'] is False
+    assert bound['terminal']['eligible'] is True
+
+    from tests.legacy_iam_fixture import seed_grant
+    seed_grant(r.store, 'ro-grant', 'owner', ['read'], [projects[0]])
+    caller = Principal('mcp:ro-grant', 'owner', {'read'}, [projects[0]], grant_id='ro-grant')
+    listed = r.vps.list({'project': '', 'query': '', 'offset': 0, 'limit': 50}, caller)
+    assert len(listed['vps']) == 1
+    assert listed['vps'][0]['terminal'] == {
+        'eligible': False, 'available': False, 'check_ready': False,
+        'direct': False, 'reason_code': 'SSH_TERMINAL_FORBIDDEN', 'device_name': None,
+    }
+    serialized = json.dumps(listed)
+    assert projects[1] not in serialized and unassigned['id'] not in serialized and PASSWORD not in serialized
+
+
+def _setup_vps_check_app(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from hub.app import create_app
+    from shared.crypto import password_hash
+    from tests.legacy_iam_fixture import seed_owner
+
+    monkeypatch.setenv('HUB_PUBLIC_URL', 'https://testserver')
+    monkeypatch.setenv('MCP_PUBLIC_URL', '')
+    monkeypatch.setenv('CODEPIER_SSH_TERMINAL_ENABLED', '1')
+    app = create_app(str(tmp_path / 'check-hub'))
+    store = app.state.store
+    seed_owner(store, 'owner', 'owner')
+    store.execute("UPDATE users SET password_hash=? WHERE id='owner'", (password_hash('check-login-pass'),))
+    device_id, project_id = 'd1' * 16, 'f1' * 16
+    with store.transaction():
+        store.db.execute("INSERT INTO spaces(id,label,kind,created) VALUES('check-space','check-space','team',?)", (time.time(),))
+        store.db.execute("INSERT INTO memberships(space_id,user_id,level) VALUES('check-space','owner','owner')")
+        store.db.execute(
+            "INSERT INTO devices(id,name,secret,space_id,owner_user_id,created) VALUES(?,?,?,'check-space','owner',?)",
+            (device_id, 'Check Agent', store.encrypt('dev-secret'), time.time()),
+        )
+        store.db.execute(
+            "INSERT INTO projects(id,alias,alias_key,device_id,root,mode,allow_tasks,space_id,owner_user_id,created) "
+            "VALUES(?,?,?,?,?,'write',1,'check-space','owner',?)",
+            (project_id, 'CheckProject', 'checkproject', device_id, str(tmp_path / 'proj'), time.time()),
+        )
+    return app, TestClient, device_id, project_id
+
+
+def test_vps_check_endpoint_stateless_probe_and_exec_fallback(tmp_path, monkeypatch):
+    app, TestClient, device_id, project_id = _setup_vps_check_app(tmp_path, monkeypatch)
+    origin = 'https://testserver'
+    with TestClient(app, base_url=origin, raise_server_exceptions=True) as client:
+        login = client.post('/api/login', json={'username': 'owner', 'password': 'check-login-pass'}, headers={'Origin': origin})
+        headers = {
+            'Cookie': 'rd_session=' + login.cookies['rd_session'],
+            'X-RD-CSRF': login.json()['csrf'],
+            'X-CodePier-Space': 'check-space',
+            'Origin': origin,
+        }
+        client.cookies.clear()
+        unassigned = client.post('/api/vps', headers=headers, json={
+            'name': 'Probe VPS', 'host': 'probe.invalid', 'password': PASSWORD, 'project_ids': [],
+        }).json()
+        assigned = client.post('/api/vps', headers=headers, json={
+            'name': 'Exec VPS', 'host': 'exec.invalid', 'password': PASSWORD, 'project_ids': [project_id],
+        }).json()
+        assert client.post(f"/api/vps/{unassigned['id']}/check", json={'idempotency_key': 'check-no-auth'}).status_code == 401
+        assert client.post(f"/api/vps/{unassigned['id']}/check", headers={**headers, 'X-RD-CSRF': ''}, json={'idempotency_key': 'check-no-csrf'}).status_code == 403
+
+        probed = []
+
+        class ProbePeer:
+            generation = 'cc' * 16
+            closed = False
+            direct_vps = True
+            direct_vps_allowed = True
+            probe_supported = True
+
+            async def request(self, action, payload, project, **kwargs):
+                probed.append((action, dict(payload), dict(project)))
+                return {'ok': True, 'state': 'succeeded', 'pending': False, 'exit_code': 0, 'output': 'CODEPIER_VPS_OK\nnode-1\n', 'error': None}
+
+            async def close(self):
+                self.closed = True
+
+        peer = ProbePeer()
+        peer.device_id = device_id
+        client.portal.call(app.state.runtime.ssh_terminal.register_agent, peer)
+        res = client.post(f"/api/vps/{unassigned['id']}/check", headers=headers, json={'idempotency_key': 'probe-key-001'})
+        assert res.status_code == 200 and res.json()['ok'] is True and res.json()['operation_id'] is None
+        assert 'CODEPIER_VPS_OK' in res.json()['output'] and res.json()['device_name'] == 'Check Agent'
+        assert probed[0][0] == 'probe' and probed[0][2]['_direct_vps'] is True and PASSWORD not in res.text
+
+        peer.probe_supported = False
+        app.state.runtime.connections[device_id] = SimpleNamespace(unusable=False)
+        monkeypatch.setattr(app.state.runtime, 'online', lambda did: did == device_id)
+
+        async def fake_invoke(tool, args, principal):
+            return {'operation_id': 'ee' * 16, 'state': 'succeeded', 'pending': False, 'output': 'CODEPIER_VPS_OK\nfallback\n', 'result': {'ok': True}}
+
+        monkeypatch.setattr(app.state.runtime, 'invoke', fake_invoke)
+        no_bound = client.post(f"/api/vps/{unassigned['id']}/check", headers=headers, json={'idempotency_key': 'exec-key-001'})
+        assert no_bound.status_code == 409 and no_bound.json()['error']['code'] == 'AGENT_UPGRADE_REQUIRED'
+        fallback = client.post(f"/api/vps/{assigned['id']}/check", headers=headers, json={'idempotency_key': 'exec-key-002'})
+        assert fallback.status_code == 200 and fallback.json()['ok'] is True and fallback.json()['operation_id'] == 'ee' * 16

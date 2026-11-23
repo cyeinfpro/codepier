@@ -74,7 +74,14 @@ def metrics(web: Path = WEB, limits=None) -> dict:
     used = collections.Counter()
     sizes, raw_sizes, radii, raw_radii, weights = set(), set(), set(), set(), set()
     layers, per_file = set(), {}
-    for path in sorted(web.glob("*.css")):
+    terminal_css = web / "vps-terminal/styles.css"
+    css_paths = [
+        p
+        for p in sorted(web.glob("*.css"))
+        if not (p.name == "vps-terminal.css" and terminal_css.exists())
+    ] + ([terminal_css] if terminal_css.exists() else [])
+    for path in css_paths:
+        rel_name = path.relative_to(web).as_posix()
         css = clean(path.read_text(encoding="utf-8"))
         row = {
             "hex": 0,
@@ -85,10 +92,10 @@ def metrics(web: Path = WEB, limits=None) -> dict:
             "font_px_below_12": 0,
         }
         for context, selector, prop, value in declarations(css):
-            hexes = len(HEX.findall(value)) if path.name != "tokens.css" else 0
+            hexes = len(HEX.findall(value)) if rel_name != "tokens.css" else 0
             row["hex"] += hexes
-            identity = key(path.name, context, selector, prop, value)
-            if eligible_fallback(path.name, value) and used[identity] < allowed[identity]:
+            identity = key(rel_name, context, selector, prop, value)
+            if eligible_fallback(rel_name, value) and used[identity] < allowed[identity]:
                 used[identity] += 1
                 row["compatibility_hex"] += hexes
             row["important"] += value.count("!important")
@@ -108,10 +115,20 @@ def metrics(web: Path = WEB, limits=None) -> dict:
                 numbers = [float(n) for n in re.findall(r"(?<![\w.-])(\d+(?:\.\d+)?)px", value)]
                 row["font_px_below_11"] += sum(n < 11 for n in numbers)
                 row["font_px_below_12"] += sum(n < 12 for n in numbers)
-        per_file[path.name] = row
+        per_file[rel_name] = row
     total = lambda field: sum(row[field] for row in per_file.values())
     confirms, references, show_modal = 0, 0, 0
-    for path in list(web.glob("*.js")) + list((web / "core").glob("*.mjs")):
+    terminal_dir = web / "vps-terminal"
+    js_paths = (
+        [p for p in web.glob("*.js") if not (p.name == "vps-terminal.js" and terminal_dir.exists())]
+        + list((web / "core").glob("*.mjs"))
+        + (
+            [p for p in terminal_dir.glob("*.mjs") if p.name != "xterm-runtime.mjs"]
+            if terminal_dir.exists()
+            else []
+        )
+    )
+    for path in js_paths:
         code = path.read_text(encoding="utf-8")
         count = len(CONFIRM.findall(code))
         references += count

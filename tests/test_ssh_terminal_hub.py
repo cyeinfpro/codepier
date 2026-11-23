@@ -173,6 +173,14 @@ class RepositoryTests(unittest.TestCase):
         self.repository.insert(row(id="77" * 16, space_id="space-b"))
         self.assertEqual([SID], [r["id"] for r in self.repository.list("space-a", "user-a")])
 
+    def test_direct_vps_metadata_persists_without_project_alias(self):
+        self.repository.insert(row(project_id="", project_root="", binding_id="direct:vps-a",
+                                   metadata=json.dumps({"project_alias": ""})))
+        updated = self.repository.update(SID, {"direct_vps": True})
+        projected = self.repository.public(updated)
+        self.assertTrue(projected["direct_vps"])
+        self.assertEqual("", projected["project_alias"])
+
 
 class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -370,6 +378,20 @@ class AgentConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({}, self.connection.pending)
         # The submitted command stays ambiguous; no retry command is added.
         self.assertEqual(1, self.connection.queue.queued_items)
+
+    async def test_direct_vps_flag_projected_only_when_present(self):
+        direct_project = {"id": "", "root": "", "_direct_vps": True,
+                          "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+        pending = asyncio.create_task(self.connection.request("probe", {"host": "h"}, direct_project, wait_seconds=1))
+        try:
+            packet = await asyncio.wait_for(self.connection.queue.get(), 1)
+            self.assertEqual(direct_project, packet["project"])
+            self.connection.pending[packet["request_id"]].set_result({"ok": True})
+            self.assertEqual({"ok": True}, await pending)
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
 
     async def test_internal_create_projects_only_execution_fields_and_fits_credentials(self):
         project = {"id": "project-a", "root": "/" + "r" * 4080, "mode": "write",
@@ -1339,6 +1361,119 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service.ticket(SID, principal(), AttachTicket(renderer_id=RENDERER))
         self.assertEqual("TARGET_REVISION_CHANGED", raised.exception.code)
         self.assertEqual({}, self.service.tickets)
+
+    def _seed_routing_schema(self):
+        with self.store.transaction():
+            self.store.db.executescript("""
+                CREATE TABLE IF NOT EXISTS devices (
+                    id TEXT PRIMARY KEY, name TEXT, space_id TEXT, enabled INTEGER, created REAL
+                );
+                CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY, alias TEXT, alias_key TEXT, device_id TEXT,
+                    root TEXT, mode TEXT, allow_tasks INTEGER, space_id TEXT
+                );
+                CREATE TABLE IF NOT EXISTS vps_connections (
+                    id TEXT PRIMARY KEY, space_id TEXT, connection_revision INTEGER, enabled INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS vps_projects (
+                    vps_id TEXT, project_id TEXT, binding_id TEXT
+                );
+            """)
+            self.store.db.execute(
+                "INSERT INTO devices VALUES ('device-a','Fixture device','space-a',1,1.0)"
+            )
+            self.store.db.execute(
+                "INSERT INTO projects VALUES ('project-a','Fixture project','fixture project','device-a','/fixture/project','write',1,'space-a')"
+            )
+            self.store.db.execute(
+                "INSERT INTO vps_connections VALUES ('vps-a','space-a',1,1),('vps-free','space-a',1,1)"
+            )
+            self.store.db.execute(
+                "INSERT INTO vps_projects VALUES ('vps-a','project-a','binding-a')"
+            )
+
+        def direct_target(ref, space_id, **kwargs):
+            if ref.get("binding_id") != "direct:" + ref.get("id", ""):
+                raise self.DevError("VPS_AUTHORIZATION_CHANGED", "bad direct binding", 403)
+            return {**self.target, "id": ref["id"], "binding_id": ref["binding_id"]}
+
+        self.service.runtime.vps._authorized_direct_row = direct_target
+
+    async def test_admin_direct_unassigned_vps_and_legacy_1340_carrier_fallback(self):
+        from hub.ssh_terminal.models import CreateSession
+
+        self._seed_routing_schema()
+        admin = Principal(
+            actor="panel:owner", user_id="owner-a", scopes={"read", "write", "execute"},
+            projects=[], space_id="space-a", session_hash="login-owner", admin=True,
+        )
+        self.agent.direct_vps = True
+        self.agent.direct_vps_allowed = True
+        native = await self.service.create(
+            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a1" * 16),
+        )
+        await self.service.sessions[native["session_id"]].create_task
+        self.assertEqual("", native["project_id"])
+        self.assertEqual("", native["project_alias"])
+        self.assertTrue(native["direct_vps"])
+        self.assertTrue(self.agent.requests[-1][2]["_direct_vps"])
+
+        self.agent.direct_vps = False
+        carrier = await self.service.create(
+            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a2" * 16),
+        )
+        await self.service.sessions[carrier["session_id"]].create_task
+        self.assertEqual("project-a", carrier["project_id"])
+        self.assertEqual("", carrier["project_alias"])
+        self.assertTrue(carrier["direct_vps"])
+        self.assertEqual("direct:vps-free", self.service.sessions[carrier["session_id"]].row["binding_id"])
+
+    async def test_admin_demotion_immediately_revokes_direct_session(self):
+        from hub.ssh_terminal.models import CreateSession
+
+        self._seed_routing_schema()
+        self.agent.direct_vps = True
+        admin = Principal(
+            actor="panel:owner", user_id="owner-a", scopes={"read", "write", "execute"},
+            projects=[], space_id="space-a", session_hash="login-owner", admin=True,
+        )
+        created = await self.service.create(
+            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a3" * 16),
+        )
+        session = self.service.sessions[created["session_id"]]
+        await session.create_task
+        with patch("hub.ssh_terminal.service.iam.live_principal", side_effect=lambda _s, p: replace(p, admin=False)):
+            await self.service._renew_one(session)
+        self.assertTrue(session.revoked)
+        self.assertEqual("failed", session.row["state"])
+        self.assertEqual("AUTH_REVOKED", session.row["reason_code"])
+        self.assertEqual("revoke", self.agent.requests[-1][0])
+
+    async def test_member_auto_selects_executable_bound_project_without_denied_audit(self):
+        from hub.ssh_terminal.models import CreateSession
+
+        self._seed_routing_schema()
+        with self.store.transaction():
+            self.store.db.execute(
+                "INSERT INTO projects VALUES ('project-ro','Readonly','a-readonly','device-a','/ro','write',1,'space-a')"
+            )
+            self.store.db.execute(
+                "INSERT INTO vps_projects VALUES ('vps-a','project-ro','binding-ro')"
+            )
+        authorized_projects = []
+        self.service.runtime.authorize = lambda _p, action, project_id=None: authorized_projects.append((action, project_id))
+        member = Principal(
+            actor="panel:alice", user_id="user-a", scopes={"read", "write", "execute"},
+            projects=["project-ro", "project-a"], space_id="space-a", session_hash="login-a",
+        )
+        perms = {"project-ro": {"read"}, "project-a": {"read", "write", "execute"}}
+        with patch("hub.ssh_terminal.service.iam.project_permissions", return_value=perms):
+            result = await self.service.create(
+                member, CreateSession(vps_id="vps-a", project_id=None, request_id="a4" * 16),
+            )
+        await self.service.sessions[result["session_id"]].create_task
+        self.assertEqual("project-a", result["project_id"])
+        self.assertEqual([("write", "project-a"), ("execute", "project-a")] * 2, authorized_projects)
 
 
 if __name__ == "__main__":

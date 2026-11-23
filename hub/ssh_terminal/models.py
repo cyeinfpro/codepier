@@ -13,11 +13,20 @@ class StrictBody(BaseModel):
 
 class CreateSession(StrictBody):
     vps_id: str = Field(min_length=1, max_length=100)
-    project_id: str = Field(min_length=1, max_length=100)
+    project_id: str | None = Field(default=None, max_length=100)
     request_id: str
     mode: Literal["auto", "direct", "tmux"] = "auto"
     cols: int = Field(default=100, ge=2, le=1000)
     rows: int = Field(default=30, ge=1, le=500)
+
+    @field_validator("project_id")
+    @classmethod
+    def normalize_project_id(cls, value):
+        if value is None:
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("project_id 不能包含控制字符")
+        return value.strip() or None
 
     @field_validator("request_id")
     @classmethod

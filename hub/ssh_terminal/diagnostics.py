@@ -108,6 +108,13 @@ REASONS = frozenset(
         "TERMINAL_CONFIG_MISMATCH",
         "CONNECTION_CLOSED",
         "HUB_RESTARTING",
+        "FEATURE_DISABLED",
+        "NO_TERMINAL_AGENT",
+        "VPS_DISABLED",
+        "VPS_AUTHORIZATION_CHANGED",
+        "VPS_CONFIGURATION_CHANGED",
+        "SHELL_DISABLED",
+        "SHELL_NOT_ALLOWED",
     }
 )
 

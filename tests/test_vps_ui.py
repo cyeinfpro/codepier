@@ -15,7 +15,7 @@ from tests.test_ssh import PASSWORD, fake_transport
 @pytest.fixture(scope='module')
 def ui_stack(stack):
     stack.stop_agent()
-    stack.config['shell'] = {'enabled':True,'projects':['ProjectAlpha','ProjectGamma','ProjectBeta'],
+    stack.config['shell'] = {'enabled':True,'projects':['*','ProjectAlpha','ProjectGamma','ProjectBeta'],
                              'command':['/bin/sh','-c'],'env':{'PATH':fake_transport(stack.directory/'vps-ui-bin')}}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
@@ -169,6 +169,91 @@ def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
         assert all('password' not in submission['arguments'] for submission in submissions)
         assert PASSWORD not in json.dumps(submissions) and PASSWORD not in page.content()
     finally:page.close()
+
+
+def test_layout_toggle_copy_ssh_and_unassigned_vps_check(browser,ui_stack):
+    engine,_=browser;s=ui_stack
+    system_tag='Debian13-'+uuid.uuid4().hex[:6]
+    v=create_vps(s,project_ids=[],username='ubuntu',region='东京',system=system_tag)
+    page=open_page(engine,s,1440)
+    direct_checks=[]
+    def handle_direct_check(route):
+        direct_checks.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type='application/json',
+            body=json.dumps({
+                'state':'succeeded',
+                'pending':False,
+                'output':'CODEPIER_VPS_OK\nunassigned-vps\n',
+                'error':None,
+            }),
+        )
+    page.route('**/api/vps/'+v['id']+'/check',handle_direct_check)
+    try:
+        expect(page.locator('.vps-summary [data-vps-stat="total"]')).to_be_visible()
+        expect(page.locator('.vps-summary [data-vps-stat="ready"]')).to_be_visible()
+        expect(page.locator('.vps-summary [data-vps-stat="sessions"]')).to_be_visible()
+        expect(page.locator('.vps-summary [data-vps-stat="projects"]')).to_be_visible()
+        # Full-field search matches system/username/region as well as name.
+        page.fill('#vps-query',system_tag)
+        card=page.locator('[data-vps-card]:visible')
+        expect(card).to_have_count(1)
+        expect(card.locator('.vps-address code')).to_have_text(f"{v['username']}@{v['host']}:{v['port']}")
+        expect(card).to_contain_text('未关联（仅人工终端）')
+        expect(card.locator('[data-vps-action="assign"]')).to_have_count(0)
+        expect(card.locator('[data-vps-action="check"]')).to_be_enabled()
+        expect(card.locator('[data-vps-action="terminal"]')).to_be_enabled()
+
+        # Cards / compact list view toggle + localStorage persistence.
+        list_tab=page.locator('[data-vps-layout="list"]')
+        cards_tab=page.locator('[data-vps-layout="cards"]')
+        list_tab.click()
+        expect(page.locator('.vps-grid')).to_have_attribute('data-layout','list')
+        expect(list_tab).to_have_attribute('aria-pressed','true')
+        assert page.evaluate("localStorage.getItem('codepier-vps-layout')")=='list'
+        assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+        cards_tab.click()
+        expect(page.locator('.vps-grid')).to_have_attribute('data-layout','cards')
+        expect(cards_tab).to_have_attribute('aria-pressed','true')
+
+        # Copy full SSH command action and feedback toast.
+        page.evaluate('''() => {
+          window.__copiedSsh = null;
+          const prev = window.copy;
+          window.copy = async (text) => {
+            window.__copiedSsh = text;
+            try { return await prev(text); } catch {}
+          };
+        }''')
+        card.locator('[data-vps-action="copy-ssh"]').click()
+        assert page.evaluate('window.__copiedSsh')==f"ssh -p {v['port']} {v['username']}@{v['host']}"
+        expect(page.get_by_text('已复制 SSH 命令').first).to_be_visible()
+
+        # Unassigned VPS connection check without project picker.
+        card.locator('[data-vps-action="check"]').click()
+        expect(page.locator('#vps-check-project')).to_be_hidden()
+        expect(page.locator('[data-vps-action="check-terminal"]')).to_be_enabled()
+        run_btn=page.locator('#vps-check-run')
+        expect(run_btn).to_be_enabled()
+        run_btn.click()
+        expect(page.locator('#vps-check-state')).to_contain_text('连接检查成功')
+        expect(page.locator('#vps-check-output')).to_contain_text('CODEPIER_VPS_OK')
+        expect(run_btn).to_have_text('重新检查')
+        assert len(direct_checks)==1
+        assert direct_checks[0]['timeout_seconds']==30
+        assert direct_checks[0]['idempotency_key'].startswith('vps-check-')
+        page.locator('.modal-footer [data-action="close-modal"]').click()
+
+        # Command palette exposes loaded VPS entries searchable by name/region.
+        page.evaluate('uiCommand()')
+        expect(page.locator('#command-query')).to_be_visible()
+        page.fill('#command-query',v['name'])
+        expect(page.locator('#command-results')).to_contain_text(v['name'])
+        page.keyboard.press('Escape')
+    finally:
+        page.unroute_all(behavior='wait')
+        page.close()
 
 
 def test_stale_edit_is_not_overwritten_and_text_is_escaped(browser,ui_stack):

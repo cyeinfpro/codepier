@@ -64,6 +64,7 @@ SAFE_METADATA = frozenset(
         "tmux_ref",
         "state_revision",
         "ssh_connected",
+        "direct_vps",
     }
 )
 UPDATE_FIELDS = frozenset(

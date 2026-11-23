@@ -32,6 +32,9 @@ class TerminalAgentConnection:
         self.pending = {}
         self.closed = False
         self.sender = None
+        self.direct_vps = False
+        self.direct_vps_allowed = True
+        self.probe_supported = False
 
     async def request(self, action, payload, project, *, wait_seconds=None):
         if self.closed:
@@ -56,6 +59,7 @@ class TerminalAgentConnection:
                 "_terminal_owner",
                 "_terminal_space",
                 "_execution_policy",
+                "_direct_vps",
             )
             if key in project
         }

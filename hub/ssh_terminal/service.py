@@ -27,6 +27,51 @@ from .diagnostics import TerminalMetrics, counter, queue_bytes, safe_metadata, s
 from .repository import TERMINAL_STATES, TerminalRepository
 
 
+def _direct_project(device_id, device_name, space_id):
+    return {
+        "id": "",
+        "alias": "",
+        "root": "",
+        "mode": "write",
+        "allow_tasks": True,
+        "device_id": device_id,
+        "device_name": device_name or "",
+        "device_enabled": True,
+        "space_id": space_id,
+        "_direct_vps": True,
+    }
+
+
+def _member_project_actions(principal, perms, project_id):
+    if (
+        not principal.admin
+        and "*" not in principal.projects
+        and project_id not in principal.projects
+    ):
+        return set()
+    return set(perms.get(project_id, ())) & set(principal.scopes)
+
+
+@dataclass
+class HubSession:
+    row: dict
+    principal: object
+    project: dict
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    attachment_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    update_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    attachment: object = None
+    challenge: dict | None = None
+    challenge_until: float = 0
+    render_epoch: int = 0
+    create_task: object = None
+    revoked: bool = False
+    authority_revision: str = field(default_factory=lambda: uuid.uuid4().hex)
+    metrics: TerminalMetrics = field(default_factory=TerminalMetrics)
+    diagnostic_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    diagnostic_next_probe: float = 0
+
+
 @dataclass
 class HubSession:
     row: dict
@@ -383,10 +428,43 @@ class TerminalService:
         self.agents.clear()
         self.tickets.clear()
 
-    def _authorize(self, principal, project_id, vps_id=None, row=None, *, credentials=False):
-        principal = iam.live_principal(self.store, principal)
-        if not principal.user_id or not principal.session_hash:
-            raise DevError("AUTH_REQUIRED", "请从面板登录后打开终端", 401)
+    def _device_online(self, device_id):
+        return device_id in getattr(self.runtime, "connections", {})
+
+    def _active_device_counts(self):
+        rows = self.store.all(
+            "SELECT device_id, COUNT(*) AS n FROM vps_terminal_sessions "
+            "WHERE state NOT IN ('exited','failed','close_unknown') GROUP BY device_id"
+        )
+        return {row["device_id"]: row["n"] for row in rows}
+
+    def _candidate_tier(self, device_id, active):
+        agent = self.agents.get(device_id)
+        if agent is not None and not agent.closed:
+            return 3 if active < self.config.max_sessions_per_agent else 2
+        return 1 if self._device_online(device_id) else 0
+
+    def _decrypt_target(self, target, credentials):
+        if not credentials:
+            return target
+        try:
+            result = {**target, "password": self.store.decrypt(target["secret"])}
+        except Exception as exc:
+            raise DevError(
+                "VPS_CREDENTIAL_UNAVAILABLE", "保存的 VPS 凭据不可用，请检查连接设置", 409
+            ) from exc
+        result.pop("secret", None)
+        return result
+
+    @staticmethod
+    def _stamp_project(principal, project):
+        return {
+            **project,
+            "_terminal_owner": "user:" + principal.user_id,
+            "_terminal_space": principal.space_id,
+        }
+
+    def _authorize_bound(self, principal, project_id, vps_id, row, *, credentials):
         project = self.runtime.project(project_id, principal)
         self.runtime.authorize(principal, "write", project_id=project["id"])
         self.runtime.authorize(principal, "execute", project_id=project["id"])
@@ -397,8 +475,6 @@ class TerminalService:
         ):
             raise DevError("SSH_TERMINAL_FORBIDDEN", "项目须启用并允许写入与执行", 403)
         if row is not None:
-            if (row["owner_user_id"], row["space_id"]) != (principal.user_id, principal.space_id):
-                raise DevError("SESSION_NOT_FOUND", "找不到当前身份的终端会话", 404)
             if row["device_id"] != project["device_id"] or row["project_root"] != project["root"]:
                 raise DevError("PROJECT_MAPPING_CHANGED", "项目映射已变化，不能继续原终端", 403)
             ref = {
@@ -411,20 +487,263 @@ class TerminalService:
         target = self.runtime.vps._authorized_row(
             {"vps_ref": ref}, project["id"], credential=credentials
         )
-        project = {
-            **project,
-            "_terminal_owner": "user:" + principal.user_id,
-            "_terminal_space": principal.space_id,
+        return (
+            principal,
+            self._stamp_project(principal, project),
+            self._decrypt_target(target, credentials),
+        )
+
+    def _direct_row_project(self, principal, row, device):
+        if row["project_id"] == "":
+            if row["project_root"] != "":
+                raise DevError("PROJECT_MAPPING_CHANGED", "直连终端路径映射已变化", 403)
+            return _direct_project(device["id"], device["name"], principal.space_id)
+        project = self.runtime.project(row["project_id"], principal)
+        self.runtime.authorize(principal, "write", project_id=project["id"])
+        self.runtime.authorize(principal, "execute", project_id=project["id"])
+        if (
+            not project["device_enabled"]
+            or project["mode"] != "write"
+            or not project["allow_tasks"]
+        ):
+            raise DevError("SSH_TERMINAL_FORBIDDEN", "项目须启用并允许写入与执行", 403)
+        if row["device_id"] != project["device_id"] or row["project_root"] != project["root"]:
+            raise DevError("PROJECT_MAPPING_CHANGED", "项目映射已变化，不能继续原终端", 403)
+        return project
+
+    def _authorize_direct_row(self, principal, row, *, credentials):
+        if principal.grant_id or not principal.admin:
+            raise DevError("SSH_TERMINAL_FORBIDDEN", "免绑定终端仅限当前空间管理员使用", 403)
+        device = self.store.one(
+            "SELECT id,name,enabled FROM devices WHERE id=? AND space_id=?",
+            (row["device_id"], principal.space_id),
+        )
+        if not device or not device["enabled"]:
+            raise DevError("SSH_TERMINAL_FORBIDDEN", "终端所属节点已停用或不存在", 403)
+        project = self._direct_row_project(principal, row, device)
+        ref = {
+            "id": row["vps_id"],
+            "connection_revision": row["connection_revision"],
+            "binding_id": row["binding_id"],
         }
-        if credentials:
-            try:
-                target = {**target, "password": self.store.decrypt(target["secret"])}
-            except Exception as exc:
-                raise DevError(
-                    "VPS_CREDENTIAL_UNAVAILABLE", "保存的 VPS 凭据不可用，请检查连接设置", 409
-                ) from exc
-            target.pop("secret", None)
-        return principal, project, target
+        target = self.runtime.vps._authorized_direct_row(
+            ref, principal.space_id, credential=credentials
+        )
+        return (
+            principal,
+            self._stamp_project(principal, project),
+            self._decrypt_target(target, credentials),
+        )
+
+    def _member_bound_candidates(self, principal, vps_id):
+        rows = self.store.all(
+            """SELECT p.id, p.alias_key, p.device_id, p.mode, p.allow_tasks,
+            d.enabled AS device_enabled, vp.binding_id
+            FROM vps_projects vp
+            JOIN projects p ON p.id=vp.project_id
+            JOIN devices d ON d.id=p.device_id
+            WHERE vp.vps_id=? AND p.space_id=?
+            ORDER BY p.alias_key, p.id""",
+            (vps_id, principal.space_id),
+        )
+        perms = iam.project_permissions(self.store, principal)
+        visible, eligible = [], []
+        for item in rows:
+            actions = _member_project_actions(principal, perms, item["id"])
+            if "read" not in actions:
+                continue
+            visible.append(item)
+            if (
+                {"read", "write", "execute"} <= actions
+                and bool(item["device_enabled"])
+                and item["mode"] == "write"
+                and bool(item["allow_tasks"])
+            ):
+                eligible.append(item)
+        return visible, eligible
+
+    def _authorize_member_auto(self, principal, vps_id, *, credentials):
+        vps = self.store.one(
+            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
+            (vps_id, principal.space_id),
+        )
+        if not vps:
+            raise DevError("VPS_NOT_FOUND", "未找到已授权 VPS", 404)
+        visible, eligible = self._member_bound_candidates(principal, vps["id"])
+        if not visible:
+            raise DevError("VPS_NOT_FOUND", "未找到已授权 VPS", 404)
+        if not vps["enabled"]:
+            raise DevError("VPS_DISABLED", "该 VPS 已停用，请先启用后再连接", 409)
+        if not eligible:
+            raise DevError(
+                "SSH_TERMINAL_FORBIDDEN", "当前身份在该 VPS 关联项目上缺少写入与执行权限", 403
+            )
+        counts = self._active_device_counts()
+        best = min(
+            eligible,
+            key=lambda c: (
+                -self._candidate_tier(c["device_id"], counts.get(c["device_id"], 0)),
+                counts.get(c["device_id"], 0),
+                c["alias_key"],
+                c["id"],
+            ),
+        )
+        project = self.runtime.project(best["id"], principal)
+        self.runtime.authorize(principal, "write", project_id=project["id"])
+        self.runtime.authorize(principal, "execute", project_id=project["id"])
+        ref = {
+            "id": vps["id"],
+            "connection_revision": vps["connection_revision"],
+            "binding_id": best["binding_id"],
+        }
+        target = self.runtime.vps._authorized_row(
+            {"vps_ref": ref}, project["id"], credential=credentials
+        )
+        return (
+            principal,
+            self._stamp_project(principal, project),
+            self._decrypt_target(target, credentials),
+        )
+
+    def _vps_affinity(self, vps_id, space_id):
+        rows = self.store.all(
+            "SELECT p.id AS project_id, p.device_id FROM vps_projects vp "
+            "JOIN projects p ON p.id=vp.project_id WHERE vp.vps_id=? AND p.space_id=?",
+            (vps_id, space_id),
+        )
+        return {r["project_id"] for r in rows}, {r["device_id"] for r in rows}
+
+    def _select_admin_direct_device(self, devices, affinity_devices, counts):
+        ready = []
+        for dev in devices:
+            agent = self.agents.get(dev["id"])
+            if (
+                agent is not None
+                and not agent.closed
+                and getattr(agent, "direct_vps", False)
+                and getattr(agent, "direct_vps_allowed", True)
+            ):
+                ready.append(dev)
+        if not ready:
+            return None
+        return min(
+            ready,
+            key=lambda d: (
+                0 if counts.get(d["id"], 0) < self.config.max_sessions_per_agent else 1,
+                0 if d["id"] in affinity_devices else 1,
+                counts.get(d["id"], 0),
+                d["id"],
+            ),
+        )
+
+    def _select_admin_carrier_project(self, principal, bound_projects, affinity_devices, counts):
+        rows = self.store.all(
+            """SELECT p.id, p.alias_key, p.device_id FROM projects p
+            JOIN devices d ON d.id=p.device_id
+            WHERE p.space_id=? AND d.enabled=1 AND p.mode='write' AND p.allow_tasks=1
+            ORDER BY p.alias_key, p.id""",
+            (principal.space_id,),
+        )
+        carriers = [
+            row
+            for row in rows
+            if (agent := self.agents.get(row["device_id"])) is not None and not agent.closed
+        ]
+        if not carriers:
+            return None
+        chosen = min(
+            carriers,
+            key=lambda p: (
+                0 if counts.get(p["device_id"], 0) < self.config.max_sessions_per_agent else 1,
+                0 if p["id"] in bound_projects else 1,
+                0 if p["device_id"] in affinity_devices else 1,
+                counts.get(p["device_id"], 0),
+                p["alias_key"],
+                p["id"],
+            ),
+        )
+        project = self.runtime.project(chosen["id"], principal)
+        self.runtime.authorize(principal, "write", project_id=project["id"])
+        self.runtime.authorize(principal, "execute", project_id=project["id"])
+        return project
+
+    def _fallback_device_rank(self, device_id):
+        agent = self.agents.get(device_id)
+        if agent is not None and not agent.closed:
+            return 0 if getattr(agent, "direct_vps", False) else 1
+        return 1 if self._device_online(device_id) else 2
+
+    def _select_admin_project(self, principal, vps_id):
+        devices = self.store.all(
+            "SELECT id, name FROM devices WHERE space_id=? AND enabled=1 ORDER BY created, id",
+            (principal.space_id,),
+        )
+        if not devices:
+            raise DevError("NO_TERMINAL_AGENT", "当前空间没有可用的启用节点", 409)
+        bound_projects, affinity_devices = self._vps_affinity(vps_id, principal.space_id)
+        counts = self._active_device_counts()
+        direct_dev = self._select_admin_direct_device(devices, affinity_devices, counts)
+        if direct_dev is not None:
+            return _direct_project(direct_dev["id"], direct_dev["name"], principal.space_id)
+        carrier = self._select_admin_carrier_project(
+            principal, bound_projects, affinity_devices, counts
+        )
+        if carrier is not None:
+            return carrier
+        fallback = min(
+            devices,
+            key=lambda d: (
+                self._fallback_device_rank(d["id"]),
+                0 if d["id"] in affinity_devices else 1,
+                d["id"],
+            ),
+        )
+        return _direct_project(fallback["id"], fallback["name"], principal.space_id)
+
+    def _authorize_admin_auto(self, principal, vps_id, *, credentials):
+        vps = self.store.one(
+            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
+            (vps_id, principal.space_id),
+        )
+        if not vps:
+            raise DevError("VPS_NOT_FOUND", "未找到 VPS 连接", 404)
+        if not vps["enabled"]:
+            raise DevError("VPS_DISABLED", "该 VPS 已停用，请先启用后再连接", 409)
+        project = self._select_admin_project(principal, vps["id"])
+        ref = {
+            "id": vps["id"],
+            "connection_revision": vps["connection_revision"],
+            "binding_id": "direct:" + vps["id"],
+        }
+        target = self.runtime.vps._authorized_direct_row(
+            ref, principal.space_id, credential=credentials
+        )
+        return (
+            principal,
+            self._stamp_project(principal, project),
+            self._decrypt_target(target, credentials),
+        )
+
+    def _authorize(self, principal, project_id=None, vps_id=None, row=None, *, credentials=False):
+        principal = iam.live_principal(self.store, principal)
+        if not principal.user_id or not principal.session_hash:
+            raise DevError("AUTH_REQUIRED", "请从面板登录后打开终端", 401)
+        if row is not None:
+            if (row["owner_user_id"], row["space_id"]) != (principal.user_id, principal.space_id):
+                raise DevError("SESSION_NOT_FOUND", "找不到当前身份的终端会话", 404)
+            if str(row["binding_id"]).startswith("direct:"):
+                return self._authorize_direct_row(principal, row, credentials=credentials)
+            return self._authorize_bound(
+                principal, row["project_id"], vps_id, row, credentials=credentials
+            )
+        project_id = (project_id or "").strip() or None
+        if project_id is not None:
+            return self._authorize_bound(
+                principal, project_id, vps_id, None, credentials=credentials
+            )
+        if principal.admin and not principal.grant_id:
+            return self._authorize_admin_auto(principal, vps_id, credentials=credentials)
+        return self._authorize_member_auto(principal, vps_id, credentials=credentials)
 
     async def authorize(self, session, *, credentials=False, principal=None):
         if session.revoked and principal is None:
@@ -448,31 +767,84 @@ class TerminalService:
             )
         return connection
 
-    async def capabilities(self, principal, vps_id, project_id):
-        _, project, _ = await self.store.run(self._authorize, principal, project_id, vps_id)
-        agent = self.agents.get(project["device_id"])
-        available = self.enabled and agent is not None and not agent.closed and not self.closing
-        online = project["device_id"] in self.runtime.connections
+    def _admit_agent(self, project):
+        connection = self.agent(project["device_id"])
+        if project.get("_direct_vps") is True:
+            if not getattr(connection, "direct_vps", False):
+                raise DevError(
+                    "AGENT_UPGRADE_REQUIRED",
+                    "节点版本较旧且当前空间无可用载体项目，请升级 Agent",
+                    409,
+                )
+            if not getattr(connection, "direct_vps_allowed", True):
+                raise DevError(
+                    "SHELL_DISABLED", "请在本机 Agent 配置中开启 shell.enabled 与 * 授权", 403
+                )
+        return connection
+
+    def _capability_reason(self, project, agent):
+        if not self.enabled or self.closing:
+            return "FEATURE_DISABLED"
+        if agent is None or agent.closed:
+            return (
+                "AGENT_OFFLINE"
+                if not self._device_online(project["device_id"])
+                else "AGENT_UPGRADE_REQUIRED"
+            )
+        if project.get("_direct_vps") is True:
+            if not getattr(agent, "direct_vps", False):
+                return "AGENT_UPGRADE_REQUIRED"
+            if not getattr(agent, "direct_vps_allowed", True):
+                return "SHELL_DISABLED"
+        return None
+
+    def _capabilities_payload(self, *, available, reason_code, generation):
         return {
             "enabled": self.enabled,
             "available": available,
             "protocol": 1,
             "protocol_version": 1,
-            "reason_code": None
-            if available
-            else "FEATURE_DISABLED"
-            if not self.enabled
-            else "AGENT_OFFLINE"
-            if not online
-            else "AGENT_UPGRADE_REQUIRED",
-            "runtime_generation": agent.generation if agent and not agent.closed else None,
+            "reason_code": reason_code,
+            "runtime_generation": generation,
             "modes": ["auto", "tmux", "direct"],
             "limits": self.config.public_limits(),
             "persistence": "probed_on_connect",
         }
 
+    async def capabilities(self, principal, vps_id, project_id=None):
+        try:
+            _, project, _ = await self.store.run(self._authorize, principal, project_id, vps_id)
+        except DevError as exc:
+            if exc.code == "NO_TERMINAL_AGENT":
+                reason = "FEATURE_DISABLED" if not self.enabled else "NO_TERMINAL_AGENT"
+                return self._capabilities_payload(
+                    available=False, reason_code=reason, generation=None
+                )
+            raise
+        agent = self.agents.get(project["device_id"])
+        reason = self._capability_reason(project, agent)
+        generation = agent.generation if agent is not None and not agent.closed else None
+        return self._capabilities_payload(
+            available=reason is None, reason_code=reason, generation=generation
+        )
+
     def _new_row(self, principal, project, target, body, generation, fingerprint):
         now = time.time()
+        direct = str(target["binding_id"]).startswith("direct:")
+        metadata = {
+            "vps_name": target["name"],
+            "username": target["username"],
+            "host": target["host"],
+            "port": target["port"],
+            "project_alias": "" if direct else project["alias"],
+            "device_name": project.get("device_name", ""),
+            "hub_version": VERSION,
+            "protocol_version": 1,
+            "recover_count": 0,
+            "reconnect_count": 0,
+        }
+        if direct:
+            metadata["direct_vps"] = True
         return {
             "id": uuid.uuid4().hex,
             "space_id": principal.space_id,
@@ -496,22 +868,26 @@ class TerminalService:
             "rows": body.rows,
             "created": now,
             "updated": now,
-            "metadata": json.dumps(
-                {
-                    "vps_name": target["name"],
-                    "username": target["username"],
-                    "host": target["host"],
-                    "port": target["port"],
-                    "project_alias": project["alias"],
-                    "device_name": project.get("device_name", ""),
-                    "hub_version": VERSION,
-                    "protocol_version": 1,
-                    "recover_count": 0,
-                    "reconnect_count": 0,
-                },
-                ensure_ascii=False,
-            ),
+            "metadata": json.dumps(metadata, ensure_ascii=False),
         }
+
+    async def _check_session_quota(self, space_id, user_id, device_id):
+        total, user, device = await self.store.run(
+            self.repository.counts, space_id, user_id, device_id
+        )
+        active_devices = await self.store.run(self.repository.active_device_count)
+        self._guard_maintenance()
+        active_devices += int(device == 0)
+        per_session = 2 * self.config.hub_relay_bytes + self.config.frame_bytes
+        per_device = 4 * self.config.hub_relay_bytes + self.config.frame_bytes
+        if (
+            total >= self.config.max_sessions_per_hub
+            or user >= self.config.max_sessions_per_user
+            or device >= self.config.max_sessions_per_agent
+            or (total + 1) * per_session + active_devices * per_device
+            > self.config.hub_buffer_bytes
+        ):
+            raise DevError("SESSION_LIMIT", "终端会话已达到上限，请先结束不再使用的会话", 429)
 
     async def create(self, principal, body):
         if not self.enabled or self.closing:
@@ -537,27 +913,11 @@ class TerminalService:
             if old:
                 if old["request_fingerprint"] != fingerprint:
                     raise DevError("REQUEST_CONFLICT", "同一请求编号不能创建不同终端", 409)
-                # A lost POST response resolves this exact logical session. It
-                # cannot silently open a replacement shell.
                 return self.repository.public(old)
-            agent = self.agent(project["device_id"])
-            total, user, device = await self.store.run(
-                self.repository.counts, principal.space_id, principal.user_id, project["device_id"]
+            agent = self._admit_agent(project)
+            await self._check_session_quota(
+                principal.space_id, principal.user_id, project["device_id"]
             )
-            active_devices = await self.store.run(self.repository.active_device_count)
-            self._guard_maintenance()
-            # Empty Agent connections contain no terminal output. Account the
-            # bounded data queues only for devices admitted to live sessions.
-            active_devices += int(device == 0)
-            if (
-                total >= self.config.max_sessions_per_hub
-                or user >= self.config.max_sessions_per_user
-                or device >= self.config.max_sessions_per_agent
-                or (total + 1) * (2 * self.config.hub_relay_bytes + self.config.frame_bytes)
-                + active_devices * (4 * self.config.hub_relay_bytes + self.config.frame_bytes)
-                > self.config.hub_buffer_bytes
-            ):
-                raise DevError("SESSION_LIMIT", "终端会话已达到上限，请先结束不再使用的会话", 429)
             row = self._new_row(principal, project, target, body, agent.generation, fingerprint)
             row = await self.store.run(self.repository.insert, row)
             session = HubSession(row, principal, project)

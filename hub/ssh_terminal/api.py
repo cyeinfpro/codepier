@@ -19,6 +19,10 @@ from .browser import BrowserAttachment, check_websocket_origin
 from .models import AttachTicket, CreateSession, SessionAction
 
 
+def _clean_project_id(value: str | None) -> str | None:
+    return (value or "").strip() or None
+
+
 def make_terminal_router(auth, runtime):
     service = runtime.ssh_terminal
     store = runtime.store
@@ -34,10 +38,10 @@ def _register_http_routes(router, auth, store, service):
     async def capabilities(
         request: Request,
         vps_id: str = Query(..., max_length=100),
-        project_id: str = Query(..., max_length=100),
+        project_id: str | None = Query(default=None, max_length=100),
     ):
         principal = await store.run(auth.panel, request)
-        return await service.capabilities(principal, vps_id, project_id)
+        return await service.capabilities(principal, vps_id, _clean_project_id(project_id))
 
     @router.get("/api/vps-terminal/sessions")
     async def sessions(request: Request):
@@ -139,7 +143,7 @@ def _agent_authority(device_id, main_connection, runtime, store):
     return store.decrypt(device["secret"])
 
 
-async def _receive_agent_hello(socket, channel, service):
+async def _receive_agent_hello(socket, channel, service, hello_out=None):
     packet = await asyncio.wait_for(socket.receive_text(), service.config.auth_timeout_seconds)
     if len(packet) > 32 * 1024:
         raise TerminalProtocolError("FRAME_TOO_LARGE", "终端握手过大")
@@ -156,6 +160,8 @@ async def _receive_agent_hello(socket, channel, service):
         for key in ("frame_bytes", "input_frame_bytes", "control_bytes")
     ):
         raise TerminalProtocolError("TERMINAL_CONFIG_MISMATCH", "Hub 与 Agent 终端帧配置不同")
+    if isinstance(hello_out, dict):
+        hello_out.update(hello)
     return generation
 
 
@@ -188,7 +194,8 @@ async def _agent_socket(socket, device_id, runtime, store, service):
         )
         channel = terminal_secure_channel(secret, challenge, device_id, "hub")
         secret = None
-        generation = await _receive_agent_hello(socket, channel, service)
+        hello_info: dict = {}
+        generation = await _receive_agent_hello(socket, channel, service, hello_info)
         if runtime.connections.get(device_id) is not main_connection:
             raise TerminalProtocolError("AGENT_REPLACED", "主节点连接已变化")
         await store.run(_agent_authority, device_id, main_connection, runtime, store)
@@ -201,6 +208,11 @@ async def _agent_socket(socket, device_id, runtime, store, service):
             on_event=service.on_agent_event,
         )
         connection.main_connection = main_connection
+        connection.direct_vps = bool(hello_info.get("direct_vps"))
+        connection.direct_vps_allowed = bool(
+            hello_info.get("direct_vps_allowed", connection.direct_vps)
+        )
+        connection.probe_supported = bool(hello_info.get("probe"))
         await socket.send_text(
             await pack_channel(
                 channel,
