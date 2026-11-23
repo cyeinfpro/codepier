@@ -161,6 +161,15 @@
 .vt-tab[data-state='restoring'] .vt-tab-dot {
   background: var(--ui-warning);
 }
+.vt-tab-lock {
+  min-width: 28px;
+  padding-inline: 4px;
+  white-space: nowrap;
+  color: var(--ui-muted);
+}
+.vt-tab-lock[aria-pressed='true'] {
+  color: var(--ui-warning);
+}
 .vt-tab-close {
   min-width: 28px;
   padding-inline: 6px;
@@ -179,16 +188,10 @@
   background: var(--ui-panel);
   color: var(--ui-text);
 }
-.vt-new,
-.vt-new-pick {
+.vt-new {
   flex-shrink: 0;
   border-left: 1px solid var(--ui-line);
   border-radius: 0;
-}
-.vt-new-pick {
-  min-width: 28px;
-  padding-inline: 6px;
-  color: var(--ui-muted);
 }
 .vt-quick-connect {
   position: absolute;
@@ -205,6 +208,9 @@
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-md);
   box-shadow: var(--ui-elev-2);
+}
+.vt-quick-cancel {
+  align-self: flex-end;
 }
 .vt-quick-search,
 .vt-empty-search {
@@ -361,9 +367,13 @@
 .vt-deck {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+.vt-primary-slot {
+  grid-area: 1 / 1;
 }
 .vt-gutter,
 .vt-secondary-slot {
@@ -373,6 +383,7 @@
   grid-template-columns: minmax(0, var(--vt-split, 50%)) 6px minmax(0, 1fr);
 }
 .vt-has-split .vt-gutter {
+  grid-area: 1 / 2;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -396,6 +407,7 @@
   background: var(--ui-primary-text);
 }
 .vt-has-split .vt-secondary-slot {
+  grid-area: 1 / 3;
   display: flex;
 }
 .vt-has-split .vt-pane-focused .vt-pane-heading {
@@ -470,7 +482,24 @@
   flex-shrink: 0;
   font-size: var(--ui-text-xs);
 }
+.vt-state {
+  min-inline-size: 5em;
+  text-align: end;
+}
+.vt-screen {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+}
 .vt-progress {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+  pointer-events: none;
   height: 2px;
   width: 100%;
   background: var(--ui-accent-soft, var(--ui-line));
@@ -483,7 +512,12 @@
   width: 35%;
   height: 100%;
   background: var(--ui-primary);
-  animation: vt-progress-slide 1.2s infinite ease-in-out;
+  transform: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .vt-progress::after {
+    animation: vt-progress-slide 1.2s infinite ease-in-out;
+  }
 }
 @keyframes vt-progress-slide {
   0% {
@@ -553,6 +587,17 @@
   font-size: var(--ui-text-sm);
   border-bottom: 1px solid var(--ui-line);
 }
+.vt-screen > .vt-notice {
+  position: absolute;
+  z-index: 2;
+  inset: 8px 8px auto auto;
+  max-inline-size: calc(100% - 16px);
+  max-block-size: calc(100% - 16px);
+  overflow: auto;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-small);
+  box-shadow: var(--ui-elev-1);
+}
 .vt-notice[data-severity='danger'],
 .vt-workspace-error {
   background: var(--ui-danger-bg);
@@ -575,6 +620,7 @@
 }
 .vt-to-bottom {
   position: absolute;
+  z-index: 2;
   right: 28px;
   bottom: 16px;
   background: var(--ui-raised);
@@ -879,16 +925,19 @@
 }
 .vt-workspace:fullscreen,
 .vt-workspace.vt-expanded {
-  height: 100dvh;
+  height: var(--vt-available-height, 100dvh);
+  max-height: 100dvh;
+  box-sizing: border-box;
+  padding-inline: env(safe-area-inset-left, 0) env(safe-area-inset-right, 0);
   border: 0;
   border-radius: 0;
 }
 .vt-workspace.vt-expanded {
   position: fixed;
-  inset: 0;
+  inset: 0 0 auto;
   z-index: var(--ui-z-modal);
 }
-@media (max-width: 700px) {
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .vt-workspace {
     border-radius: var(--ui-radius-md);
     min-height: min(160px, var(--vt-available-height, 160px));
@@ -937,8 +986,14 @@
   .vt-tab-select {
     min-height: 44px;
   }
-  .vt-tab-close {
-    min-width: 36px;
+  .vt-tab-close,
+  .vt-tab-lock {
+    min-inline-size: 44px;
+    min-block-size: 44px;
+  }
+  .vt-tabs,
+  .vt-mobile-keys {
+    overscroll-behavior-inline: contain;
   }
   .vt-has-split .vt-deck {
     grid-template-columns: minmax(0, 1fr);
@@ -961,17 +1016,25 @@
   }
   .vt-mobile-keys .vt-button {
     flex-shrink: 0;
-    min-width: 40px;
+    min-inline-size: 44px;
+    min-block-size: 44px;
     padding-inline: 8px;
     font-family: var(--ui-mono);
     font-size: var(--ui-text-xs);
+  }
+  .vt-mobile-keys .vt-open-keyboard {
+    font-family: var(--ui-font);
+    color: var(--ui-primary-text);
+    background: var(--ui-primary);
+  }
+  .vt-keyboard-open .vt-open-keyboard {
+    display: none;
   }
   .vt-mobile-keys [aria-pressed='true'] {
     background: var(--ui-primary);
     color: var(--ui-primary-text);
   }
   .vt-to-bottom {
-    bottom: calc(54px + env(safe-area-inset-bottom, 0));
     min-height: 36px;
   }
   .vt-canvas {

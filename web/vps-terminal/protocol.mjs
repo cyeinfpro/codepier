@@ -219,6 +219,7 @@ export const STOP_RETRY_CODES = new Set([
   'PROTOCOL_MISMATCH',
   'REMOTE_SESSION_MISSING',
   'HISTORY_GAP',
+  'HISTORY_RECOVERY_UNSUPPORTED',
   'WRITER_CONFLICT',
   'WRITER_REPLACED',
   'SESSION_NOT_FOUND',
@@ -258,7 +259,11 @@ const REASONS = {
   HOST_KEY_UNKNOWN: '主机指纹尚未受信任',
   HOST_KEY_CHANGED: '主机指纹已变化，请核验服务器',
   SESSION_LIMIT: '已达到终端会话上限',
-  HISTORY_GAP: '无法完整恢复原画面，请新建终端',
+  HISTORY_GAP:
+    '旧画面无法完整恢复。可尝试继续同一会话，不会重跑命令；临时 SSH 只显示之后的新输出。',
+  HISTORY_RECOVERY_UNSUPPORTED:
+    '当前面板或连接电脑不支持安全继续原会话。请升级后再试，不会自动新建终端。',
+  SESSION_LIVE_TAIL: '已继续原 SSH，会话未重建。旧画面和历史输出无法恢复，只显示之后的新输出。',
   INPUT_UNCERTAIN: '有输入未确认，未自动重发',
   INPUT_GAP: '输入顺序已中断，请重新连接',
   INPUT_BACKPRESSURE: '输入暂未发送，请等待远端接收后再输入',
@@ -279,7 +284,11 @@ const REASONS = {
   STALE_WRITER: '终端已由另一窗口接管',
   SSH_DEPENDENCY_MISSING: '请更新连接电脑后打开终端',
   AUTH_CHALLENGE_EXPIRED: '认证问题已过期，请重新连接',
-  PERSISTENCE_UNAVAILABLE: '此 VPS 暂不支持持久会话',
+  PERSISTENCE_UNAVAILABLE:
+    '此 VPS 缺少受支持的 tmux，无法后台保留任务。临时连接在关闭网页或断线后可能结束远端任务。',
+  TEMPORARY_SESSION: '临时 SSH 不保留后台任务；关闭网页或断线后，远端任务可能结束。',
+  DETACH_EXPIRED: '临时 SSH 分离超时，原会话已结束，请新建终端。',
+  SESSION_REDRAW: '已恢复原远端会话并重绘当前画面；旧网页的滚动历史和断线期间的部分输出可能不全。',
   SSH_CONNECTION_FAILED: 'SSH 连接失败，请检查服务器和网络',
   SSH_CONNECT_FAILED: '面板未能启动 SSH 会话，请打开连接诊断',
   SSH_TERMINAL_FORBIDDEN: '连接电脑未授权此项目运行终端',

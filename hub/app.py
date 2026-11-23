@@ -40,6 +40,7 @@ from hub.incoming_files import make_incoming_file_router
 from hub.agent_install import make_agent_install_router
 from hub.native_cli import make_native_router
 from hub.vps import make_vps_router
+from hub.vps_readiness_wiring import VPSReadinessWiring, native_readiness_from_env
 from hub.ssh_terminal.api import make_terminal_router
 from hub.ssh_terminal.service import TerminalService
 from hub.panel_update import make_panel_update_router
@@ -60,6 +61,7 @@ def _make_lifespan(runtime, oidc, store, instance_lock):
         try:
             await runtime.start()
             await runtime.ssh_terminal.start()
+            await runtime.vps_readiness.start()
             await runtime.panel_agent_rollouts.start()
             await oidc.start()
             await runtime.collaboration.loops.start()
@@ -79,9 +81,12 @@ def _make_lifespan(runtime, oidc, store, instance_lock):
                             await runtime.gateway.close()
                     finally:
                         try:
-                            await runtime.ssh_terminal.stop()
+                            await runtime.vps_readiness.stop()
                         finally:
-                            await runtime.stop()
+                            try:
+                                await runtime.ssh_terminal.stop()
+                            finally:
+                                await runtime.stop()
             finally:
                 try:
                     await store.aclose()
@@ -91,7 +96,14 @@ def _make_lifespan(runtime, oidc, store, instance_lock):
     return lifespan
 
 
-def create_app(data_dir: str | None = None):
+def _configure_remote_access(runtime, auth, store, readiness_executor_factory):
+    runtime.ssh_terminal = TerminalService(runtime, auth)
+    runtime.vps_readiness = VPSReadinessWiring(
+        store, executor_factory=readiness_executor_factory or native_readiness_from_env
+    )
+
+
+def create_app(data_dir: str | None = None, *, readiness_executor_factory=None):
     from hub.collaboration.config import CollaborationConfig
     from hub.collaboration.room_host_rollout import resolve_startup_mode
 
@@ -117,7 +129,7 @@ def create_app(data_dir: str | None = None):
         )
         initialize_file_import_settings(store)
         runtime, auth = Runtime(store, collaboration_config=collaboration_config), Auth(store)
-        runtime.ssh_terminal = TerminalService(runtime, auth)
+        _configure_remote_access(runtime, auth, store, readiness_executor_factory)
         runtime.collaboration.loops.host_backfill_pending = host_backfill_pending
         runtime.gateway = Gateway(store)
 

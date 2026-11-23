@@ -60,7 +60,7 @@ def _register_http_routes(router, auth, store, service):
     @router.get("/api/vps-terminal/sessions/{session_id}")
     async def get_session(session_id: str, request: Request):
         session = await service.load(session_id, await store.run(auth.panel, request))
-        return service.repository.public(session.row)
+        return {**service.repository.public(session.row), "limits": service.config.public_limits()}
 
     @router.get("/api/vps-terminal/sessions/{session_id}/diagnostics")
     async def diagnostics(session_id: str, request: Request, response: Response):
@@ -213,6 +213,7 @@ async def _agent_socket(socket, device_id, runtime, store, service):
             hello_info.get("direct_vps_allowed", connection.direct_vps)
         )
         connection.probe_supported = bool(hello_info.get("probe"))
+        connection.host_pin_supported = hello_info.get("host_pin") is True
         await socket.send_text(
             await pack_channel(
                 channel,

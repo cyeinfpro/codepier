@@ -15,7 +15,7 @@ class CreateSession(StrictBody):
     vps_id: str = Field(min_length=1, max_length=100)
     project_id: str | None = Field(default=None, max_length=100)
     request_id: str
-    mode: Literal["auto", "direct", "tmux"] = "auto"
+    mode: Literal["auto", "direct", "tmux"] = "tmux"
     cols: int = Field(default=100, ge=2, le=1000)
     rows: int = Field(default=30, ge=1, le=500)
 
@@ -39,6 +39,7 @@ class AttachTicket(StrictBody):
     runtime_generation: str | None = None
     known_epoch: str | None = None
     rendered_offset: str | None = None
+    resume_from_live: bool = False
 
     @field_validator("renderer_id", "runtime_generation")
     @classmethod

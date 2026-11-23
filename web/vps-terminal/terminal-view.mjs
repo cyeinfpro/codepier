@@ -94,6 +94,7 @@ export class TerminalView {
     onFocus,
     onState,
     onNewSession,
+    onTemporarySession,
     onEdit,
     onTakeover,
     onRefreshState,
@@ -104,6 +105,7 @@ export class TerminalView {
     this.runtime = runtime;
     this.onState = onState;
     this.onNewSession = onNewSession;
+    this.onTemporarySession = onTemporarySession;
     this.onEdit = onEdit;
     this.onTakeover = onTakeover;
     this.onRefreshState = onRefreshState;
@@ -138,6 +140,7 @@ export class TerminalView {
     );
     this.progressBar = el('div', 'vt-progress');
     this.progressBar.setAttribute('aria-hidden', 'true');
+    this.progressBar.hidden = true;
     this.syncSession(session);
     this.searchBar = this.makeSearch();
     this.notice = el('div', 'vt-notice');
@@ -169,16 +172,15 @@ export class TerminalView {
     );
     this.bottom.hidden = true;
     this.mobileKeys = this.makeMobileKeys();
+    const screen = el('div', 'vt-screen');
+    screen.append(this.canvas, this.progressBar, this.notice, this.bottom);
     this.root.append(
       this.header,
-      this.progressBar,
       this.searchBar,
-      this.notice,
       this.authBox,
       this.diagnostics.root,
       this.pasteBox,
-      this.canvas,
-      this.bottom,
+      screen,
       this.mobileKeys,
     );
     this.blockUserInput = true;
@@ -287,15 +289,19 @@ export class TerminalView {
     terminal.open(this.canvas);
     // Remote OSC 52 may not silently read/write the browser clipboard.
     this.disposers.push(terminal.parser.registerOscHandler(52, () => true));
+    this.bindInputProvenance(terminal);
     this.disposers.push(
       terminal.onData((data) => {
+        if (!this.acceptRendererInput()) return;
         this.lastPasteAccepted = this.transport.sendBytes(encoder.encode(data), {
           automatic: true,
         });
       }),
     );
     this.disposers.push(
-      terminal.onBinary((data) => this.transport.sendBytes(binaryInput(data), { automatic: true })),
+      terminal.onBinary((data) => {
+        if (!this.liveTail) this.transport.sendBytes(binaryInput(data), { automatic: true });
+      }),
     );
     this.disposers.push(
       terminal.onResize(({ cols, rows }) => {
@@ -407,6 +413,8 @@ export class TerminalView {
   }
   applyTheme() {
     const theme = this.theme();
+    if (this.appliedTheme === theme) return;
+    this.appliedTheme = theme;
     if (this.terminal) this.terminal.options.theme = theme;
     this.canvas.style.background = theme.background;
     this.canvas.style.setProperty('--vt-background', theme.background);
@@ -416,35 +424,57 @@ export class TerminalView {
     this.applyTheme();
   }
   setScreenReader(value) {
-    this.screenReaderMode = !!value;
-    if (this.terminal) this.terminal.options.screenReaderMode = !!value;
+    const enabled = !!value;
+    if (this.screenReaderMode === enabled) return;
+    this.screenReaderMode = enabled;
+    if (this.terminal) this.terminal.options.screenReaderMode = enabled;
   }
   setFontSize(value) {
-    this.fontSize = Math.max(12, Math.min(24, value));
+    if (!Number.isFinite(value)) return;
+    const size = Math.max(12, Math.min(24, value));
+    if (this.fontSize === size) return;
+    this.fontSize = size;
     if (this.terminal) {
       this.terminal.options.fontSize = this.fontSize;
       this.fit();
     }
   }
   fit() {
-    if (this.fitFrame || this.disposed || this.replayingHistory) return;
-    this.fitFrame = requestAnimationFrame(() => {
-      this.fitFrame = null;
-      if (
-        this.replayingHistory ||
-        !this.terminal ||
-        !this.canvas.isConnected ||
-        this.canvas.clientWidth < 40 ||
-        this.canvas.clientHeight < 40
-      )
-        return;
-      try {
-        this.fitAddon.fit();
-        this.updateSize(this.terminal.cols, this.terminal.rows);
-      } catch {
-        /* Hidden/transitioning layout has no reliable size yet. */
-      }
-    });
+    if (this.fitFrame != null || this.disposed || this.replayingHistory) return;
+    const sample = (previous) => {
+      this.fitFrame = requestAnimationFrame(() => {
+        this.fitFrame = null;
+        if (
+          this.disposed ||
+          this.replayingHistory ||
+          !this.terminal ||
+          !this.canvas.isConnected ||
+          Math.abs((globalThis.visualViewport?.scale || 1) - 1) > 0.05
+        )
+          return;
+        const width = this.canvas.clientWidth,
+          height = this.canvas.clientHeight;
+        // Hidden/parked panes and a collapsed split must never change the PTY.
+        if (width < 40 || height < 40) return;
+        if (!previous || previous.width !== width || previous.height !== height) {
+          sample({ width, height });
+          return;
+        }
+        try {
+          const size = this.fitAddon.proposeDimensions();
+          if (!Number.isSafeInteger(size?.cols) || !Number.isSafeInteger(size?.rows)) return;
+          const limits = this.transport.limits,
+            cols = Math.max(limits.min_cols, Math.min(limits.max_cols, size.cols)),
+            rows = Math.max(limits.min_rows, Math.min(limits.max_rows, size.rows));
+          if (cols === this.terminal.cols && rows === this.terminal.rows) return;
+          // Resize the same xterm instance; don't clear its renderer for a fit.
+          this.terminal.resize(cols, rows);
+        } catch {
+          /* Fonts/renderer not ready yet; ResizeObserver or show will retry. */
+        }
+      });
+    };
+    sample();
   }
   show() {
     this.ensureTerminal();
@@ -465,10 +495,37 @@ export class TerminalView {
       });
     });
   }
+  bindInputProvenance(terminal) {
+    // xterm 6.0.0 fires the CoreService user-input event immediately before
+    // the matching onData, including keyboard, paste and composition. Parser
+    // replies never fire it. If a future runtime removes this seam, the tail
+    // mode fails closed for renderer data; explicit auxiliary keys still work.
+    const core = terminal._core?.coreService;
+    if (typeof core?.onUserInput !== 'function') return;
+    this.disposers.push(
+      core.onUserInput(() => {
+        this.rendererUserInput = true;
+        queueMicrotask(() => {
+          this.rendererUserInput = false;
+        });
+      }),
+    );
+  }
+
+  acceptRendererInput() {
+    const fromUser = !!this.rendererUserInput;
+    this.rendererUserInput = false;
+    return !this.liveTail || fromUser;
+  }
+
   attached(message) {
     this.ensureTerminal();
     this.syncSession(this.session);
     this.replayingHistory = message.resume_strategy === 'history_replay';
+    this.liveTail =
+      message.history_recovery === 'live_tail' || (!!this.liveTail && message.preserve);
+    this.historyRedrawn =
+      message.resume_strategy === 'redraw' || message.history_incomplete === true;
     if (!message.preserve) this.terminal?.reset();
     if (Number.isSafeInteger(message.cols) && Number.isSafeInteger(message.rows)) {
       if (this.replayingHistory) this.terminal?.resize(message.cols, message.rows);
@@ -485,6 +542,7 @@ export class TerminalView {
       this.fit();
     }
     this.blockUserInput = details.state !== 'ready' || !!this.pasteController;
+    this.keyboardButton.disabled = details.state !== 'ready';
     const labels = {
       idle: '待连接',
       creating: '创建会话',
@@ -503,7 +561,8 @@ export class TerminalView {
       failed: '连接失败',
       revoked: '权限已撤销',
     };
-    this.status.textContent = labels[details.state] || '正在连接';
+    const nextStatus = labels[details.state] || '正在连接';
+    if (this.status.textContent !== nextStatus) this.status.textContent = nextStatus;
     this.root.dataset.state = details.state;
     this.progressBar.hidden = ![
       'creating',
@@ -517,7 +576,9 @@ export class TerminalView {
     this.status.title = [
       formatEndpoint(this.session),
       this.session.device_name && `经由 ${this.session.device_name}`,
-      this.session.mode === 'tmux' ? '会话可在 SSH 断开后恢复' : '直连 SSH，会话依赖当前连接',
+      this.session.mode === 'tmux'
+        ? '会话可在 SSH 断开后恢复'
+        : '临时 SSH，关闭网页或断线后可能结束远端任务',
     ]
       .filter(Boolean)
       .join(' · ');
@@ -525,6 +586,9 @@ export class TerminalView {
       this.showNotice(details.reason_code, details.message, details.state, details);
     else if (details.state === 'ready') {
       if (details.input_uncertain) this.showNotice('INPUT_UNCERTAIN');
+      else if (this.liveTail) this.showNotice('SESSION_LIVE_TAIL');
+      else if (this.historyRedrawn) this.showNotice('SESSION_REDRAW');
+      else if (this.session.mode === 'direct') this.showNotice('TEMPORARY_SESSION');
       else {
         this.notice.hidden = true;
         delete this.notice.dataset.severity;
@@ -554,7 +618,11 @@ export class TerminalView {
       state === 'reconnecting' && details?.retry_attempt
         ? `（第 ${details.retry_attempt}/${details.max_retries || 8} 次重试）`
         : '';
-    this.statusText.textContent = `${baseText}${retryText}`;
+    const outputText =
+      details.output_complete === false && code !== 'OUTPUT_INCOMPLETE'
+        ? '；部分输出未完整收到'
+        : '';
+    this.statusText.textContent = `${baseText}${retryText}${outputText}`;
     this.actions.replaceChildren();
     if (state === 'reconnecting') {
       this.actions.append(
@@ -571,9 +639,15 @@ export class TerminalView {
       ].includes(code)
     )
       this.actions.append(button('编辑连接', () => this.onEdit?.()));
+    else if (code === 'PERSISTENCE_UNAVAILABLE')
+      this.actions.append(button('使用临时连接（不保留任务）', () => this.onTemporarySession?.()));
+    else if (code === 'HISTORY_GAP')
+      this.actions.append(
+        button('继续原会话', () => this.transport.resumeAfterHistoryGap(), 'vt-primary'),
+      );
     else if (
       [
-        'HISTORY_GAP',
+        'DETACH_EXPIRED',
         'REMOTE_SESSION_MISSING',
         'SESSION_NOT_FOUND',
         'SESSION_CLOSED',
@@ -598,6 +672,7 @@ export class TerminalView {
         'FEATURE_DISABLED',
         'AGENT_UPGRADE_REQUIRED',
         'PROTOCOL_MISMATCH',
+        'HISTORY_RECOVERY_UNSUPPORTED',
       ].includes(code)
     )
       this.actions.append(button('重新连接', () => this.transport.connect({ manual: true })));
@@ -796,7 +871,18 @@ export class TerminalView {
 
   makeMobileKeys() {
     const bar = el('div', 'vt-mobile-keys');
+    bar.setAttribute('role', 'group');
     bar.setAttribute('aria-label', '终端辅助键');
+    this.keyboardButton = button(
+      '输入',
+      () => {
+        if (this.transport.canInput && !this.blockUserInput) this.focus();
+      },
+      'vt-open-keyboard',
+    );
+    this.keyboardButton.disabled = true;
+    this.keyboardButton.setAttribute('aria-label', '打开终端键盘');
+    bar.append(this.keyboardButton);
     for (const [label, value, applicationValue] of [
       ['Esc', '\x1b'],
       ['Tab', '\t'],
@@ -816,19 +902,17 @@ export class TerminalView {
     this.ctrlButton = button('Ctrl', () => {
       this.ctrlLatched = !this.ctrlLatched;
       this.ctrlButton.setAttribute('aria-pressed', String(this.ctrlLatched));
-      this.focus();
     });
     this.altButton = button('Alt', () => {
       this.altLatched = !this.altLatched;
       this.altButton.setAttribute('aria-pressed', String(this.altLatched));
-      this.focus();
     });
     this.ctrlButton.setAttribute('aria-pressed', 'false');
     this.altButton.setAttribute('aria-pressed', 'false');
     for (const key of [this.ctrlButton, this.altButton])
       key.addEventListener('pointerdown', (event) => event.preventDefault());
-    bar.insertBefore(this.ctrlButton, bar.children[2]);
-    bar.insertBefore(this.altButton, bar.children[3]);
+    bar.insertBefore(this.ctrlButton, bar.children[3]);
+    bar.insertBefore(this.altButton, bar.children[4]);
     const pasteKey = button('粘贴', () => this.clipboardPaste());
     pasteKey.addEventListener('pointerdown', (event) => event.preventDefault());
     bar.append(pasteKey);
@@ -858,7 +942,6 @@ export class TerminalView {
     if (!this.transport.canInput || this.pasteController) return;
     this.transport.sendBytes(encoder.encode(value));
     this.clearModifiers();
-    this.focus();
   }
 
   authChallenge(message) {
@@ -932,7 +1015,7 @@ export class TerminalView {
     this.diagnostics.dispose();
     this.pasteController?.abort();
     this.clearAuth();
-    if (this.fitFrame) cancelAnimationFrame(this.fitFrame);
+    if (this.fitFrame != null) cancelAnimationFrame(this.fitFrame);
     this.resizeObserver?.disconnect();
     this.appearanceObserver?.disconnect();
     for (const disposable of this.disposers) {

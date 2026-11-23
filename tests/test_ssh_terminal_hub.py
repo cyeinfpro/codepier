@@ -71,19 +71,41 @@ class MemoryStore:
 
 
 def principal(login="login-a", *, space="space-a", user="user-a"):
-    return Principal(actor="panel:alice", user_id=user, scopes={"write", "execute"},
-                     projects=["project-a"], space_id=space, session_hash=login)
+    return Principal(
+        actor="panel:alice",
+        user_id=user,
+        scopes={"write", "execute"},
+        projects=["project-a"],
+        space_id=space,
+        session_hash=login,
+    )
 
 
 def row(**changes):
     value = {
-        "id": SID, "space_id": "space-a", "owner_user_id": "user-a",
-        "project_id": "project-a", "device_id": "device-a", "vps_id": "vps-a",
-        "connection_revision": 1, "binding_id": "binding-a", "request_id": REQUEST,
-        "request_fingerprint": "fixture-fingerprint", "project_root": "/fixture/project",
-        "runtime_generation": GEN, "requested_mode": "direct", "mode": "direct",
-        "state": "ready", "reason_code": None, "writer_epoch": "1", "stream_epoch": "1",
-        "cols": 100, "rows": 30, "created": 1000.0, "updated": 1000.0, "metadata": "{}",
+        "id": SID,
+        "space_id": "space-a",
+        "owner_user_id": "user-a",
+        "project_id": "project-a",
+        "device_id": "device-a",
+        "vps_id": "vps-a",
+        "connection_revision": 1,
+        "binding_id": "binding-a",
+        "request_id": REQUEST,
+        "request_fingerprint": "fixture-fingerprint",
+        "project_root": "/fixture/project",
+        "runtime_generation": GEN,
+        "requested_mode": "direct",
+        "mode": "direct",
+        "state": "ready",
+        "reason_code": None,
+        "writer_epoch": "1",
+        "stream_epoch": "1",
+        "cols": 100,
+        "rows": 30,
+        "created": 1000.0,
+        "updated": 1000.0,
+        "metadata": "{}",
     }
     value.update(changes)
     return value
@@ -127,8 +149,15 @@ class MemoryAgent:
         self.requests.append((action, dict(payload), dict(project)))
         if self.handler is not None:
             return await self.handler(action, payload, project)
-        return {"state": "ready", "mode": "direct", "runtime_generation": self.generation,
-                "stream_epoch": "1", "writer_epoch": "1", "cols": 100, "rows": 30}
+        return {
+            "state": "ready",
+            "mode": "direct",
+            "runtime_generation": self.generation,
+            "stream_epoch": "1",
+            "writer_epoch": "1",
+            "cols": 100,
+            "rows": 30,
+        }
 
     async def input(self, frame):
         self.inputs.append(frame)
@@ -157,9 +186,17 @@ class RepositoryTests(unittest.TestCase):
 
     def test_lifecycle_updates_cannot_persist_terminal_content_or_secrets(self):
         self.repository.insert(row())
-        self.repository.update(SID, {"state": "detached", "bytes_out": 19,
-                                     "password": "do-not-store", "input": "private-input",
-                                     "output": "private-output", "responses": ["otp"]})
+        self.repository.update(
+            SID,
+            {
+                "state": "detached",
+                "bytes_out": 19,
+                "password": "do-not-store",
+                "input": "private-input",
+                "output": "private-output",
+                "responses": ["otp"],
+            },
+        )
         stored = self.repository.get(SID)
         serialized = json.dumps(stored)
         self.assertEqual("detached", stored["state"])
@@ -174,8 +211,14 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual([SID], [r["id"] for r in self.repository.list("space-a", "user-a")])
 
     def test_direct_vps_metadata_persists_without_project_alias(self):
-        self.repository.insert(row(project_id="", project_root="", binding_id="direct:vps-a",
-                                   metadata=json.dumps({"project_alias": ""})))
+        self.repository.insert(
+            row(
+                project_id="",
+                project_root="",
+                binding_id="direct:vps-a",
+                metadata=json.dumps({"project_alias": ""}),
+            )
+        )
         updated = self.repository.update(SID, {"direct_vps": True})
         projected = self.repository.public(updated)
         self.assertTrue(projected["direct_vps"])
@@ -186,27 +229,44 @@ class BrowserBoundaryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from hub.ssh_terminal.browser import BrowserAttachment
 
-        self.session = SimpleNamespace(row=row(), principal=principal(), attachment=None,
-                                       challenge=None, project={})
+        self.session = SimpleNamespace(
+            row=row(), principal=principal(), attachment=None, challenge=None, project={}
+        )
         self.service = SimpleNamespace(config=TerminalConfig(), authorize=AsyncMock())
         self.socket, self.agent = MemorySocket(), MemoryAgent()
         self.attachment = BrowserAttachment(self.service, self.socket, self.session, RENDERER)
         self.session.attachment = self.attachment
         self.attachment.bind(self.agent, GEN, 1, 1, 1, 8, "live")
-        await self.attachment.send_attached({
-            "type": "attached", "session_id": SID, "runtime_generation": GEN,
-            "attachment_id": self.attachment.id, "render_epoch": "1", "stream_epoch": "1",
-            "writer_epoch": "1", "mode": "direct", "resume_strategy": "live", "state": "ready",
-            "start_offset": "0", "output_end_offset": "8", "next_input_seq": "1",
-        })
+        await self.attachment.send_attached(
+            {
+                "type": "attached",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "attachment_id": self.attachment.id,
+                "render_epoch": "1",
+                "stream_epoch": "1",
+                "writer_epoch": "1",
+                "mode": "direct",
+                "resume_strategy": "live",
+                "state": "ready",
+                "start_offset": "0",
+                "output_end_offset": "8",
+                "next_input_seq": "1",
+            }
+        )
 
     async def asyncTearDown(self):
         await self.attachment.shutdown("TEST_FINISHED", 1000)
 
     def ack(self, offset, **changes):
-        message = {"type": "output_ack", "attachment_id": self.attachment.id,
-                   "runtime_generation": GEN, "render_epoch": "1", "stream_epoch": "1",
-                   "rendered_offset": str(offset)}
+        message = {
+            "type": "output_ack",
+            "attachment_id": self.attachment.id,
+            "runtime_generation": GEN,
+            "render_epoch": "1",
+            "stream_epoch": "1",
+            "rendered_offset": str(offset),
+        }
         message.update(changes)
         return message
 
@@ -323,8 +383,14 @@ class OriginTests(unittest.TestCase):
 
         for origin in ("https://panel.example", "https://PANEL.example:443"):
             check_websocket_origin(MemorySocket(origin=origin))
-        for origin in ("null", "https://evil.example", "https://panel.example:444",
-                       "https://panel.example/path", "http://panel.example", "https://x@panel.example"):
+        for origin in (
+            "null",
+            "https://evil.example",
+            "https://panel.example:444",
+            "https://panel.example/path",
+            "http://panel.example",
+            "https://x@panel.example",
+        ):
             with self.subTest(origin=origin), self.assertRaises(DevError):
                 check_websocket_origin(MemorySocket(origin=origin))
 
@@ -332,9 +398,13 @@ class OriginTests(unittest.TestCase):
         from hub.ssh_terminal.browser import check_websocket_origin
         from shared.util import DevError
 
-        check_websocket_origin(MemorySocket("ws://localhost:8080/ws", origin="http://localhost:8080"))
+        check_websocket_origin(
+            MemorySocket("ws://localhost:8080/ws", origin="http://localhost:8080")
+        )
         with self.assertRaises(DevError):
-            check_websocket_origin(MemorySocket("ws://panel.example/ws", origin="http://panel.example"))
+            check_websocket_origin(
+                MemorySocket("ws://panel.example/ws", origin="http://panel.example")
+            )
 
 
 class AgentConnectionTests(unittest.IsolatedAsyncioTestCase):
@@ -342,19 +412,29 @@ class AgentConnectionTests(unittest.IsolatedAsyncioTestCase):
         from hub.ssh_terminal.agent_transport import TerminalAgentConnection
 
         self.connection = TerminalAgentConnection(
-            MemorySocket(), object(), GEN, TerminalConfig(),
-            device_id="device-a", on_event=AsyncMock(),
+            MemorySocket(),
+            object(),
+            GEN,
+            TerminalConfig(),
+            device_id="device-a",
+            on_event=AsyncMock(),
         )
 
     async def asyncTearDown(self):
         await self.connection.close()
 
     async def test_browser_ack_is_translated_to_agent_control_type(self):
-        await self.connection.acknowledge({
-            "type": "output_ack", "session_id": SID, "attachment_id": "66" * 16,
-            "runtime_generation": GEN, "render_epoch": "1", "stream_epoch": "1",
-            "rendered_offset": "1024",
-        })
+        await self.connection.acknowledge(
+            {
+                "type": "output_ack",
+                "session_id": SID,
+                "attachment_id": "66" * 16,
+                "runtime_generation": GEN,
+                "render_epoch": "1",
+                "stream_epoch": "1",
+                "rendered_offset": "1024",
+            }
+        )
         packet = await self.connection.queue.get()
         self.assertEqual("terminal_output_ack", packet["type"])
         self.assertEqual("1024", packet["rendered_offset"])
@@ -380,9 +460,16 @@ class AgentConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, self.connection.queue.queued_items)
 
     async def test_direct_vps_flag_projected_only_when_present(self):
-        direct_project = {"id": "", "root": "", "_direct_vps": True,
-                          "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
-        pending = asyncio.create_task(self.connection.request("probe", {"host": "h"}, direct_project, wait_seconds=1))
+        direct_project = {
+            "id": "",
+            "root": "",
+            "_direct_vps": True,
+            "_terminal_owner": "user:owner-a",
+            "_terminal_space": "space-a",
+        }
+        pending = asyncio.create_task(
+            self.connection.request("probe", {"host": "h"}, direct_project, wait_seconds=1)
+        )
         try:
             packet = await asyncio.wait_for(self.connection.queue.get(), 1)
             self.assertEqual(direct_project, packet["project"])
@@ -394,19 +481,42 @@ class AgentConnectionTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(pending, return_exceptions=True)
 
     async def test_internal_create_projects_only_execution_fields_and_fits_credentials(self):
-        project = {"id": "project-a", "root": "/" + "r" * 4080, "mode": "write",
-                   "allow_tasks": True, "device_id": "device-a", "space_id": "space-a",
-                   "_terminal_owner": "user:user-a", "_terminal_space": "space-a",
-                   "description": "large project description" * 10000,
-                   "inventory": ["unrelated"] * 1000, "password": "unrelated-project-secret"}
+        project = {
+            "id": "project-a",
+            "root": "/" + "r" * 4080,
+            "mode": "write",
+            "allow_tasks": True,
+            "device_id": "device-a",
+            "space_id": "space-a",
+            "_terminal_owner": "user:user-a",
+            "_terminal_space": "space-a",
+            "description": "large project description" * 10000,
+            "inventory": ["unrelated"] * 1000,
+            "password": "unrelated-project-secret",
+        }
         payload = {"session_id": SID, "password": "p" * 4096}
-        pending = asyncio.create_task(self.connection.request("create", payload, project, wait_seconds=1))
+        pending = asyncio.create_task(
+            self.connection.request("create", payload, project, wait_seconds=1)
+        )
         try:
             packet = await asyncio.wait_for(self.connection.queue.get(), 1)
             self.assertEqual("terminal_control", packet["type"])
-            self.assertEqual({key: project[key] for key in (
-                "id", "root", "mode", "allow_tasks", "device_id", "space_id", "_terminal_owner", "_terminal_space",
-            )}, packet["project"])
+            self.assertEqual(
+                {
+                    key: project[key]
+                    for key in (
+                        "id",
+                        "root",
+                        "mode",
+                        "allow_tasks",
+                        "device_id",
+                        "space_id",
+                        "_terminal_owner",
+                        "_terminal_space",
+                    )
+                },
+                packet["project"],
+            )
             self.assertEqual(payload, packet["payload"])
             encoded = json.dumps(packet).encode()
             self.assertGreater(len(encoded), self.connection.config.control_bytes)
@@ -428,12 +538,27 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.DevError = DevError
         self.store = MemoryStore()
-        self.project = {"id": "project-a", "device_id": "device-a", "root": "/fixture/project",
-                        "device_enabled": True, "mode": "write", "allow_tasks": True,
-                        "alias": "Fixture project", "device_name": "Fixture device"}
-        self.target = {"id": "vps-a", "connection_revision": 1, "binding_id": "binding-a",
-                       "name": "Fixture VPS", "username": "fixture", "host": "fixture.invalid",
-                       "port": 22, "host_key_policy": "strict", "secret": "encrypted-fixture"}
+        self.project = {
+            "id": "project-a",
+            "device_id": "device-a",
+            "root": "/fixture/project",
+            "device_enabled": True,
+            "mode": "write",
+            "allow_tasks": True,
+            "alias": "Fixture project",
+            "device_name": "Fixture device",
+        }
+        self.target = {
+            "id": "vps-a",
+            "connection_revision": 1,
+            "binding_id": "binding-a",
+            "name": "Fixture VPS",
+            "username": "fixture",
+            "host": "fixture.invalid",
+            "port": 22,
+            "host_key_policy": "strict",
+            "secret": "encrypted-fixture",
+        }
         self.invalid_logins = set()
 
         def live_principal(store, value):
@@ -448,17 +573,26 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         def authorized_target(payload, pid, **kwargs):
             ref = payload["vps_ref"]
-            if any(ref.get(key) != self.target[key] for key in ("id", "connection_revision", "binding_id")):
+            if any(
+                ref.get(key) != self.target[key]
+                for key in ("id", "connection_revision", "binding_id")
+            ):
                 raise DevError("TARGET_REVISION_CHANGED", "fixture target changed", 409)
             return dict(self.target)
 
-        vps = SimpleNamespace(reference=lambda payload, project: {
-            key: self.target[key] for key in ("id", "connection_revision", "binding_id")
-        }, _authorized_row=authorized_target)
-        runtime = SimpleNamespace(store=self.store, vps=vps, project=get_project,
-                                  authorize=lambda *args, **kwargs: None)
+        vps = SimpleNamespace(
+            reference=lambda payload, project: {
+                key: self.target[key] for key in ("id", "connection_revision", "binding_id")
+            },
+            _authorized_row=authorized_target,
+        )
+        runtime = SimpleNamespace(
+            store=self.store, vps=vps, project=get_project, authorize=lambda *args, **kwargs: None
+        )
         auth = SimpleNamespace(session=lambda socket: dict(socket.auth_session))
-        self.patch = patch("hub.ssh_terminal.service.iam.live_principal", side_effect=live_principal)
+        self.patch = patch(
+            "hub.ssh_terminal.service.iam.live_principal", side_effect=live_principal
+        )
         self.patch.start()
         self.service = TerminalService(runtime, auth, config=TerminalConfig())
         saved = self.service.repository.insert(row())
@@ -485,7 +619,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.sessions.clear()
         cases = [
             ("direct", state, {}, True)
-            for state in ("creating", "connecting", "ready", "detached", "closing", "frozen", "close_unknown")
+            for state in (
+                "creating",
+                "connecting",
+                "ready",
+                "detached",
+                "closing",
+                "frozen",
+                "close_unknown",
+            )
         ] + [
             ("direct", "exited", {}, False),
             ("direct", "failed", {}, False),
@@ -507,7 +649,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(busy, self.service.maintenance_busy())
         with self.store.transaction():
             self.store.db.execute(
-                "UPDATE vps_terminal_sessions SET mode='tmux',state='exited',metadata='invalid json' WHERE id=?", (SID,),
+                "UPDATE vps_terminal_sessions SET mode='tmux',state='exited',metadata='invalid json' WHERE id=?",
+                (SID,),
             )
         self.assertTrue(self.service.maintenance_busy())
 
@@ -545,12 +688,19 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment = BrowserAttachment(self.service, socket, self.session, RENDERER)
         self.maintenance_gate()
         actions = [
-            lambda: self.service.create(principal(), CreateSession(project_id="project-a", vps_id="vps-a", request_id="ab" * 16)),
+            lambda: self.service.create(
+                principal(),
+                CreateSession(project_id="project-a", vps_id="vps-a", request_id="ab" * 16),
+            ),
             lambda: self.service.ticket(SID, principal(), body),
-            lambda: self.service.consume_ticket({"ticket": ticket["ticket"], "renderer_id": RENDERER}, socket),
+            lambda: self.service.consume_ticket(
+                {"ticket": ticket["ticket"], "renderer_id": RENDERER}, socket
+            ),
             lambda: self.service.ensure_ready(self.session),
             lambda: self.service.attach(self.session, attachment, {}),
-            lambda: self.service.action(SID, principal(), "takeover", SessionAction(request_id="ac" * 16)),
+            lambda: self.service.action(
+                SID, principal(), "takeover", SessionAction(request_id="ac" * 16)
+            ),
         ]
         for index, action in enumerate(actions):
             with self.subTest(action=index), self.assertRaises(self.DevError) as raised:
@@ -583,7 +733,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         ticket = await self.service.ticket(SID, principal(), body)
         with patch.object(self.service, "authorize", side_effect=authorize_then_gate):
             with self.assertRaises(self.DevError) as raised:
-                await self.service.consume_ticket({"ticket": ticket["ticket"], "renderer_id": RENDERER}, MemorySocket())
+                await self.service.consume_ticket(
+                    {"ticket": ticket["ticket"], "renderer_id": RENDERER}, MemorySocket()
+                )
         self.assertEqual("PANEL_UPDATING", raised.exception.code)
         self.assertEqual({}, self.service.tickets)
 
@@ -627,9 +779,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             return {"admission_token": "synthetic-admission-token"}
 
         self.agent.handler = handle
-        result = await self.service.create(principal(), CreateSession(
-            project_id="project-a", vps_id="vps-a", request_id="ab" * 16,
-        ))
+        result = await self.service.create(
+            principal(),
+            CreateSession(
+                project_id="project-a",
+                vps_id="vps-a",
+                request_id="ab" * 16,
+            ),
+        )
         created = self.service.sessions[result["session_id"]]
         await created.create_task
         self.assertEqual(["reserve_create"], [item[0] for item in self.agent.requests])
@@ -659,6 +816,62 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["status"], [item[0] for item in self.agent.requests])
         await self.service.detach(self.session, attachment)
 
+    async def test_browser_detach_control_closes_without_waiting_for_disconnect(self):
+        from hub.ssh_terminal.browser import BrowserAttachment
+
+        socket = MemorySocket()
+        attachment = BrowserAttachment(self.service, socket, self.session, RENDERER)
+        self.session.attachment = attachment
+        attachment.bind(self.agent, GEN, 1, 1, 1, 0, "live")
+        await socket.incoming.put(
+            {
+                "type": "websocket.receive",
+                "text": json.dumps(
+                    {
+                        "type": "detach",
+                        "request_id": "80" * 16,
+                    }
+                ),
+            }
+        )
+        await asyncio.wait_for(attachment._receive(), 0.25)
+        self.assertTrue(socket.incoming.empty())
+
+    async def test_browser_disconnect_cleans_up_unconfirmed_agent_attachment(self):
+        from hub.ssh_terminal.browser import BrowserAttachment
+
+        socket = MemorySocket()
+        attachment = BrowserAttachment(self.service, socket, self.session, RENDERER)
+        submitted = asyncio.Event()
+
+        async def handle(action, payload, project):
+            if action == "attach":
+                submitted.set()
+                await asyncio.Future()  # Agent can commit but lose the reply.
+            return {
+                "state": "ready",
+                "mode": "direct",
+                "runtime_generation": GEN,
+                "stream_epoch": "1",
+                "writer_epoch": "1",
+                "cols": 100,
+                "rows": 30,
+            }
+
+        self.agent.handler = handle
+        lifetime = asyncio.create_task(attachment.run({}))
+        try:
+            await asyncio.wait_for(submitted.wait(), 1)
+            await socket.incoming.put({"type": "websocket.disconnect"})
+            await asyncio.wait_for(lifetime, 1)
+        finally:
+            if not lifetime.done():
+                lifetime.cancel()
+                await asyncio.gather(lifetime, return_exceptions=True)
+        self.assertEqual(["status", "attach", "detach"], [item[0] for item in self.agent.requests])
+        self.assertEqual(attachment.id, self.agent.requests[-1][1]["attachment_id"])
+        self.assertIsNone(self.session.attachment)
+
     async def test_maintenance_keeps_existing_ack_otp_lease_and_explicit_close_usable(self):
         from hub.ssh_terminal.browser import BrowserAttachment
 
@@ -677,20 +890,32 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             if action == "auth_answer":
                 return {}
             self.assertIn(action, {"close", "detach"})
-            return {"state": "exited", "reason_code": "USER_CLOSED", "remote_session_state": "ended"}
+            return {
+                "state": "exited",
+                "reason_code": "USER_CLOSED",
+                "remote_session_state": "ended",
+            }
 
         self.agent.handler = handle
         await self.service._renew_one(self.session)
         await socket.receive_controls(
-            {"type": "output_ack", "attachment_id": attachment.id, "runtime_generation": GEN,
-             "render_epoch": "1", "stream_epoch": "1", "rendered_offset": "8"},
+            {
+                "type": "output_ack",
+                "attachment_id": attachment.id,
+                "runtime_generation": GEN,
+                "render_epoch": "1",
+                "stream_epoch": "1",
+                "rendered_offset": "8",
+            },
             {"type": "auth_answer", "challenge_id": "ab" * 16, "responses": ["synthetic-otp"]},
             {"type": "close", "request_id": "ac" * 16, "expected_generation": GEN},
         )
         await attachment._receive()
         self.assertEqual(8, attachment.acked_offset)
         self.assertEqual(1, len(self.agent.acks))
-        self.assertEqual(["renew", "auth_answer", "close"], [item[0] for item in self.agent.requests])
+        self.assertEqual(
+            ["renew", "auth_answer", "close"], [item[0] for item in self.agent.requests]
+        )
         self.assertEqual("exited", self.session.row["state"])
         self.assertTrue(self.service.maintenance_busy())  # exit tail still belongs to this socket
         await attachment.shutdown("USER_CLOSED", 1000)
@@ -724,8 +949,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 return await self.incoming.get()
 
         browser_socket, agent_socket = SlowBrowserSocket(), AgentSocket()
-        connection = TerminalAgentConnection(agent_socket, object(), GEN, self.service.config,
-                                             device_id="device-a", on_event=self.service.on_agent_event)
+        connection = TerminalAgentConnection(
+            agent_socket,
+            object(),
+            GEN,
+            self.service.config,
+            device_id="device-a",
+            on_event=self.service.on_agent_event,
+        )
         self.service.agents["device-a"] = connection
         attachment = BrowserAttachment(self.service, browser_socket, self.session, RENDERER)
         self.session.attachment = attachment
@@ -734,14 +965,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment.queue = TerminalSendQueue(max_items=2, max_control_items=1)
         first = TerminalFrame(FrameKind.OUTPUT, SID, GEN, 1, 1, 0, b"a")
         await attachment.output(first)
-        event = {"type": "terminal_output", "session_id": SID, "runtime_generation": GEN,
-                 "attachment_id": attachment.id, "stream_epoch": "1", "writer_epoch": "1",
-                 "offset": "1", "data": base64.b64encode(b"b").decode("ascii")}
+        event = {
+            "type": "terminal_output",
+            "session_id": SID,
+            "runtime_generation": GEN,
+            "attachment_id": attachment.id,
+            "stream_epoch": "1",
+            "writer_epoch": "1",
+            "offset": "1",
+            "data": base64.b64encode(b"b").decode("ascii"),
+        }
         reply = asyncio.get_running_loop().create_future()
         connection.pending["other-session-control"] = reply
         agent_socket.incoming.put_nowait(json.dumps(event))
-        agent_socket.incoming.put_nowait(json.dumps({"type": "terminal_reply", "request_id": "other-session-control",
-                                                    "result": {"state": "ready"}}))
+        agent_socket.incoming.put_nowait(
+            json.dumps(
+                {
+                    "type": "terminal_reply",
+                    "request_id": "other-session-control",
+                    "result": {"state": "ready"},
+                }
+            )
+        )
 
         async def decode(channel, raw):
             return json.loads(raw)
@@ -772,7 +1017,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await connection.close()
 
     async def test_browser_socket_global_quota_counts_unbound_slots_and_releases(self):
-        slots = [self.service.reserve_browser_socket() for _ in range(self.service.config.max_sessions_per_hub * 2)]
+        slots = [
+            self.service.reserve_browser_socket()
+            for _ in range(self.service.config.max_sessions_per_hub * 2)
+        ]
         with self.assertRaises(self.DevError) as raised:
             self.service.reserve_browser_socket()
         self.assertEqual("TERMINAL_CONNECTION_LIMIT", raised.exception.code)
@@ -845,8 +1093,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         async def handle(action, payload, project):
             self.assertEqual("status", action)
-            return {"session_id": SID, "runtime_generation": GEN, "state": "failed",
-                    "state_revision": "999", "ssh_connected": False, "reason_code": "SSH_CONNECTION_FAILED"}
+            return {
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "state": "failed",
+                "state_revision": "999",
+                "ssh_connected": False,
+                "reason_code": "SSH_CONNECTION_FAILED",
+            }
 
         self.agent.handler = handle
         snapshot = await self.service.diagnostics(SID, principal())
@@ -858,11 +1112,22 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         from hub.ssh_terminal.browser import BrowserAttachment
 
         async def handle(action, payload, project):
-            result = {"state": "ready", "mode": "direct", "runtime_generation": GEN,
-                      "stream_epoch": "1", "writer_epoch": payload.get("writer_epoch", "1"),
-                      "cols": 100, "rows": 30, "resume_strategy": "live", "start_offset": "0",
-                      "output_end_offset": "0", "next_input_seq": "1", "ssh_connected": True,
-                      "stage_timings_ms": {"ssh_connect": 12, "pty_open": 3}, "agent_version": "1.33.37"}
+            result = {
+                "state": "ready",
+                "mode": "direct",
+                "runtime_generation": GEN,
+                "stream_epoch": "1",
+                "writer_epoch": payload.get("writer_epoch", "1"),
+                "cols": 100,
+                "rows": 30,
+                "resume_strategy": "live",
+                "start_offset": "0",
+                "output_end_offset": "0",
+                "next_input_seq": "1",
+                "ssh_connected": True,
+                "stage_timings_ms": {"ssh_connect": 12, "pty_open": 3},
+                "agent_version": "1.33.37",
+            }
             return result
 
         self.agent.handler = handle
@@ -881,10 +1146,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service._recovered(self.session)
         await self.service.revoke(self.session)
         audits = self.store.audits
-        self.assertEqual(["vps_terminal.connect", "vps_terminal.disconnect"] * 2 +
-                         ["vps_terminal.recover", "vps_terminal.revoke"], [event[1] for event in audits])
+        self.assertEqual(
+            ["vps_terminal.connect", "vps_terminal.disconnect"] * 2
+            + ["vps_terminal.recover", "vps_terminal.revoke"],
+            [event[1] for event in audits],
+        )
         for event in audits:
-            self.assertEqual({"space_id", "owner_user_id", "project_id", "device_id", "vps_id"}, set(event[4]))
+            self.assertEqual(
+                {"space_id", "owner_user_id", "project_id", "device_id", "vps_id"}, set(event[4])
+            )
             self.assertNotIn("fixture-password", json.dumps(event))
             self.assertNotIn("/fixture/project", json.dumps(event))
         metadata = json.loads(self.session.row["metadata"])
@@ -895,7 +1165,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({"ssh_connect", "pty_open", "attach"}, set(metadata["stage_timings_ms"]))
 
     async def test_browser_socket_user_quota_cannot_be_bypassed_by_new_login_or_space(self):
-        identities = [principal("login-a"), principal("login-b"), principal("login-c", space="space-b")]
+        identities = [
+            principal("login-a"),
+            principal("login-b"),
+            principal("login-c", space="space-b"),
+        ]
         count = self.service.config.max_sessions_per_user * 2
         slots = []
         try:
@@ -927,14 +1201,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment.bind(self.agent, GEN, 1, 1, 1, 8, "history_replay")
         attachment.attached.set()
         attachment.sent_offset = 8
-        await socket.receive_controls({"type": "output_ack", "attachment_id": attachment.id,
-                                       "runtime_generation": GEN, "render_epoch": "1", "stream_epoch": "1",
-                                       "rendered_offset": "8"})
+        await socket.receive_controls(
+            {
+                "type": "output_ack",
+                "attachment_id": attachment.id,
+                "runtime_generation": GEN,
+                "render_epoch": "1",
+                "stream_epoch": "1",
+                "rendered_offset": "8",
+            }
+        )
         await attachment._receive()
         self.assertFalse(attachment.input_allowed)
         self.assertEqual(0, attachment.queue.queued_items)
-        event = {"type": "terminal_replay_complete", "session_id": SID, "runtime_generation": GEN,
-                 "attachment_id": attachment.id, "render_epoch": "1", "stream_epoch": "1", "final_offset": "8"}
+        event = {
+            "type": "terminal_replay_complete",
+            "session_id": SID,
+            "runtime_generation": GEN,
+            "attachment_id": attachment.id,
+            "render_epoch": "1",
+            "stream_epoch": "1",
+            "final_offset": "8",
+        }
         await self.service.on_agent_event(self.agent, event)
         self.assertTrue(attachment.input_allowed)
         packet = await attachment.queue.get()
@@ -947,10 +1235,19 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         from hub.ssh_terminal.browser import BrowserAttachment
 
         async def handle(action, payload, project):
-            return {"state": "ready", "mode": "direct", "runtime_generation": GEN,
-                    "stream_epoch": "1", "writer_epoch": payload.get("writer_epoch", "1"),
-                    "cols": 100, "rows": 30, "resume_strategy": "history_replay",
-                    "start_offset": "0", "output_end_offset": "0", "next_input_seq": "1"}
+            return {
+                "state": "ready",
+                "mode": "direct",
+                "runtime_generation": GEN,
+                "stream_epoch": "1",
+                "writer_epoch": payload.get("writer_epoch", "1"),
+                "cols": 100,
+                "rows": 30,
+                "resume_strategy": "history_replay",
+                "start_offset": "0",
+                "output_end_offset": "0",
+                "next_input_seq": "1",
+            }
 
         self.agent.handler = handle
         attachment = BrowserAttachment(self.service, MemorySocket(), self.session, RENDERER)
@@ -958,11 +1255,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, attachment.replay_boundary)
         self.assertFalse(attachment.input_allowed)
         self.assertEqual(0, attachment.queue.queued_items)
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_replay_complete", "session_id": SID, "runtime_generation": GEN,
-            "attachment_id": attachment.id, "render_epoch": str(attachment.render_epoch),
-            "stream_epoch": "1", "final_offset": "0",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_replay_complete",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "attachment_id": attachment.id,
+                "render_epoch": str(attachment.render_epoch),
+                "stream_epoch": "1",
+                "final_offset": "0",
+            },
+        )
         self.assertTrue(attachment.input_allowed)
 
     async def test_replay_barrier_rejects_stale_binding_and_wrong_boundary(self):
@@ -973,11 +1277,24 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment.bind(self.agent, GEN, 1, 1, 1, 8, "history_replay")
         attachment.attached.set()
         attachment.acked_offset = attachment.sent_offset = 8
-        event = {"type": "terminal_replay_complete", "session_id": SID, "runtime_generation": GEN,
-                 "attachment_id": attachment.id, "render_epoch": "1", "stream_epoch": "1", "final_offset": "8"}
-        for change in ({"runtime_generation": OTHER_GEN}, {"attachment_id": "99" * 16},
-                       {"render_epoch": "2"}, {"stream_epoch": "2"}, {"final_offset": "0"},
-                       {"final_offset": "9"}, {"final_offset": None}):
+        event = {
+            "type": "terminal_replay_complete",
+            "session_id": SID,
+            "runtime_generation": GEN,
+            "attachment_id": attachment.id,
+            "render_epoch": "1",
+            "stream_epoch": "1",
+            "final_offset": "8",
+        }
+        for change in (
+            {"runtime_generation": OTHER_GEN},
+            {"attachment_id": "99" * 16},
+            {"render_epoch": "2"},
+            {"stream_epoch": "2"},
+            {"final_offset": "0"},
+            {"final_offset": "9"},
+            {"final_offset": None},
+        ):
             with self.subTest(change=change):
                 candidate = {**event, **change}
                 if candidate["final_offset"] is None:
@@ -1000,8 +1317,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment.attached.set()
         attachment.acked_offset = attachment.sent_offset = 8
         await attachment.exit({"final_offset": "8", "output_complete": True})
-        event = {"type": "terminal_replay_complete", "session_id": SID, "runtime_generation": GEN,
-                 "attachment_id": attachment.id, "render_epoch": "1", "stream_epoch": "1", "final_offset": "8"}
+        event = {
+            "type": "terminal_replay_complete",
+            "session_id": SID,
+            "runtime_generation": GEN,
+            "attachment_id": attachment.id,
+            "render_epoch": "1",
+            "stream_epoch": "1",
+            "final_offset": "8",
+        }
         # Even before the persistent row catches up, exit is an irreversible
         # input fence for this attachment.
         self.assertEqual("ready", self.session.row["state"])
@@ -1017,19 +1341,36 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.session.attachment = attachment
         attachment.bind(self.agent, GEN, 1, 1, 1, 0, "live")
         attachment.attached.set()
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_state", "session_id": SID, "runtime_generation": GEN,
-            "state": "exited", "state_revision": "2", "output_complete": True, "reason_code": "EXITED",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_state",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "state": "exited",
+                "state_revision": "2",
+                "output_complete": True,
+                "reason_code": "EXITED",
+            },
+        )
         self.assertEqual("exited", self.session.row["state"])
         self.assertFalse(attachment.input_allowed)
         self.assertEqual(0, attachment.queue.queued_items)
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_exit", "session_id": SID, "runtime_generation": GEN,
-            "state": "exited", "state_revision": "3", "stream_epoch": "1",
-            "attachment_id": attachment.id, "final_offset": "10", "output_complete": True,
-            "reason_code": "EXITED",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_exit",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "state": "exited",
+                "state_revision": "3",
+                "stream_epoch": "1",
+                "attachment_id": attachment.id,
+                "final_offset": "10",
+                "output_complete": True,
+                "reason_code": "EXITED",
+            },
+        )
         packet = await attachment.queue.get()
         self.assertEqual("exit", packet["message"]["type"])
         self.assertEqual("10", packet["message"]["final_offset"])
@@ -1051,17 +1392,30 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(action)
 
         self.agent.handler = handle
-        created = await self.service.create(principal(), CreateSession(
-            project_id="project-a", vps_id="vps-a", request_id="ab" * 16,
-        ))
+        created = await self.service.create(
+            principal(),
+            CreateSession(
+                project_id="project-a",
+                vps_id="vps-a",
+                request_id="ab" * 16,
+            ),
+        )
         await asyncio.wait_for(entered.wait(), 1)
-        result = await asyncio.wait_for(self.service.action(
-            created["session_id"], principal(), "close", SessionAction(request_id="cd" * 16),
-        ), 1)
+        result = await asyncio.wait_for(
+            self.service.action(
+                created["session_id"],
+                principal(),
+                "close",
+                SessionAction(request_id="cd" * 16),
+            ),
+            1,
+        )
         release.set()
         await asyncio.sleep(0)
         self.assertEqual("exited", result["state"])
-        self.assertEqual(["reserve_create", "close"], [request[0] for request in self.agent.requests])
+        self.assertEqual(
+            ["reserve_create", "close"], [request[0] for request in self.agent.requests]
+        )
         self.assertTrue(self.service.sessions[created["session_id"]].create_task.done())
 
     async def test_revoke_cancels_inflight_admission_before_create_can_be_submitted(self):
@@ -1081,9 +1435,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(action)
 
         self.agent.handler = handle
-        created = await self.service.create(principal(), CreateSession(
-            project_id="project-a", vps_id="vps-a", request_id="ac" * 16,
-        ))
+        created = await self.service.create(
+            principal(),
+            CreateSession(
+                project_id="project-a",
+                vps_id="vps-a",
+                request_id="ac" * 16,
+            ),
+        )
         await asyncio.wait_for(entered.wait(), 1)
         session = self.service.sessions[created["session_id"]]
         await asyncio.wait_for(self.service.revoke(session), 1)
@@ -1093,9 +1452,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.create_task.done())
         self.assertEqual("failed", session.row["state"])
         self.assertEqual("AUTH_REVOKED", session.row["reason_code"])
-        self.assertEqual(["reserve_create", "revoke"], [request[0] for request in self.agent.requests])
+        self.assertEqual(
+            ["reserve_create", "revoke"], [request[0] for request in self.agent.requests]
+        )
 
-    async def test_session_cache_prunes_only_idle_completed_objects_and_keeps_durable_identity(self):
+    async def test_session_cache_prunes_only_idle_completed_objects_and_keeps_durable_identity(
+        self,
+    ):
         from hub.ssh_terminal.models import CreateSession
         from hub.ssh_terminal.service import HubSession
 
@@ -1105,17 +1468,26 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await victim.create_task
         await self.service.update(victim, {"state": "exited", "reason_code": "USER_CLOSED"})
         with self.store.transaction():
-            self.store.db.execute("UPDATE vps_terminal_sessions SET updated=0 WHERE id=?", (victim.row["id"],))
+            self.store.db.execute(
+                "UPDATE vps_terminal_sessions SET updated=0 WHERE id=?", (victim.row["id"],)
+            )
         victim.row = self.service.repository.get(victim.row["id"])
         limit = max(128, 2 * self.service.config.max_sessions_per_hub)
         for index in range(1, limit + 9):
-            saved = self.service.repository.insert(row(
-                id=f"{index:032x}", request_id=f"{index + 1000:032x}", state="exited", updated=float(index),
-            ))
+            saved = self.service.repository.insert(
+                row(
+                    id=f"{index:032x}",
+                    request_id=f"{index + 1000:032x}",
+                    state="exited",
+                    updated=float(index),
+                )
+            )
             self.service.sessions[saved["id"]] = HubSession(saved, principal(), dict(self.project))
         keep, ticket, attached, starting, live = [f"{index:032x}" for index in range(1, 6)]
-        self.service.tickets["fixture-ticket"] = {"session": self.service.sessions[ticket],
-                                                   "expires": self.service.clock() + 60}
+        self.service.tickets["fixture-ticket"] = {
+            "session": self.service.sessions[ticket],
+            "expires": self.service.clock() + 60,
+        }
         self.service.sessions[attached].attachment = SimpleNamespace(shutdown=AsyncMock())
         pending = asyncio.create_task(asyncio.Event().wait())
         self.service.sessions[starting].create_task = pending
@@ -1125,9 +1497,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service.prune_session_cache(keep=keep)
             self.assertEqual(limit, len(self.service.sessions))
             self.assertNotIn(victim.row["id"], self.service.sessions)
-            self.assertTrue({SID, keep, ticket, attached, starting, live} <= self.service.sessions.keys())
-            self.assertEqual(count_before, self.store.one("SELECT COUNT(*) AS n FROM vps_terminal_sessions")["n"])
-            self.assertEqual(victim.row["id"], self.service.repository.by_request("space-a", "user-a", body.request_id)["id"])
+            self.assertTrue(
+                {SID, keep, ticket, attached, starting, live} <= self.service.sessions.keys()
+            )
+            self.assertEqual(
+                count_before, self.store.one("SELECT COUNT(*) AS n FROM vps_terminal_sessions")["n"]
+            )
+            self.assertEqual(
+                victim.row["id"],
+                self.service.repository.by_request("space-a", "user-a", body.request_id)["id"],
+            )
             calls_before = len(self.agent.requests)
             replay = await self.service.create(principal(), body)
             self.assertEqual(victim.row["id"], replay["session_id"])
@@ -1145,19 +1524,31 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         one_session = 2 * self.service.config.hub_relay_bytes + self.service.config.frame_bytes
         one_device = 4 * self.service.config.hub_relay_bytes + self.service.config.frame_bytes
-        self.service.config = replace(self.service.config, hub_buffer_bytes=4 * one_session + one_device)
+        self.service.config = replace(
+            self.service.config, hub_buffer_bytes=4 * one_session + one_device
+        )
         for index in range(100):
             idle = MemoryAgent()
             idle.device_id = f"idle-device-{index}"
             self.service.agents[idle.device_id] = idle
-        first = await self.service.create(principal(), CreateSession(
-            project_id="project-a", vps_id="vps-a", request_id="fa" * 16,
-        ))
+        first = await self.service.create(
+            principal(),
+            CreateSession(
+                project_id="project-a",
+                vps_id="vps-a",
+                request_id="fa" * 16,
+            ),
+        )
         await self.service.sessions[first["session_id"]].create_task
         self.assertEqual(1, self.service.repository.active_device_count())
-        other = self.service.repository.insert(row(
-            id="fb" * 16, request_id="fc" * 16, device_id="active-device-b", owner_user_id="user-b",
-        ))
+        other = self.service.repository.insert(
+            row(
+                id="fb" * 16,
+                request_id="fc" * 16,
+                device_id="active-device-b",
+                owner_user_id="user-b",
+            )
+        )
         self.assertEqual(2, self.service.repository.active_device_count())
         proposed = CreateSession(project_id="project-a", vps_id="vps-a", request_id="fd" * 16)
         with self.assertRaises(self.DevError) as raised:
@@ -1175,8 +1566,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         issued = await self.service.ticket(SID, principal(), AttachTicket(renderer_id=RENDERER))
         body = {"type": "authenticate", "ticket": issued["ticket"], "renderer_id": RENDERER}
         socket = MemorySocket()
-        outcomes = await asyncio.gather(self.service.consume_ticket(body, socket),
-                                        self.service.consume_ticket(body, socket), return_exceptions=True)
+        outcomes = await asyncio.gather(
+            self.service.consume_ticket(body, socket),
+            self.service.consume_ticket(body, socket),
+            return_exceptions=True,
+        )
         self.assertEqual(1, sum(isinstance(value, tuple) for value in outcomes))
         errors = [value for value in outcomes if isinstance(value, Exception)]
         self.assertEqual(1, len(errors))
@@ -1189,8 +1583,10 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         socket = MemorySocket()
         socket.auth_session["id_hash"] = "login-b"
         with self.assertRaises(self.DevError):
-            await self.service.consume_ticket({"type": "authenticate", "ticket": issued["ticket"],
-                                               "renderer_id": RENDERER}, socket)
+            await self.service.consume_ticket(
+                {"type": "authenticate", "ticket": issued["ticket"], "renderer_id": RENDERER},
+                socket,
+            )
 
     async def test_new_login_lookup_cannot_reauthorize_old_browser_socket(self):
         from hub.ssh_terminal.browser import BrowserAttachment
@@ -1215,10 +1611,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         attachment = BrowserAttachment(self.service, MemorySocket(), self.session, RENDERER)
         self.session.attachment = attachment
         attachment.bind(self.agent, GEN, 1, 1, 1, 0, "live")
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_input_ack", "session_id": SID, "runtime_generation": GEN,
-            "writer_epoch": "1", "stream_epoch": "1", "input_seq": "1", "status": "forwarded",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_input_ack",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "writer_epoch": "1",
+                "stream_epoch": "1",
+                "input_seq": "1",
+                "status": "forwarded",
+            },
+        )
         packet = await attachment.queue.get()
         message = packet["message"]
         validate_control(message, direction="server")
@@ -1230,25 +1634,46 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_agent_generation_cannot_update_old_session_before_recovery(self):
         new_agent = MemoryAgent(OTHER_GEN)
         self.service.agents[new_agent.device_id] = new_agent
-        await self.service.on_agent_event(new_agent, {
-            "type": "terminal_state", "session_id": SID, "runtime_generation": OTHER_GEN,
-            "state": "exited", "reason_code": "FOREIGN_RUNTIME", "writer_epoch": "8",
-        })
+        await self.service.on_agent_event(
+            new_agent,
+            {
+                "type": "terminal_state",
+                "session_id": SID,
+                "runtime_generation": OTHER_GEN,
+                "state": "exited",
+                "reason_code": "FOREIGN_RUNTIME",
+                "writer_epoch": "8",
+            },
+        )
         self.assertEqual(GEN, self.session.row["runtime_generation"])
         self.assertEqual("ready", self.session.row["state"])
         self.assertEqual("1", self.session.row["writer_epoch"])
 
     async def test_late_rpc_snapshot_cannot_overwrite_newer_agent_state(self):
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_state", "session_id": SID, "runtime_generation": GEN,
-            "state": "ready", "state_revision": "12", "writer_epoch": "3", "stream_epoch": "2",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_state",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "state": "ready",
+                "state_revision": "12",
+                "writer_epoch": "3",
+                "stream_epoch": "2",
+            },
+        )
         # A status request captured this snapshot before the event above, but
         # its receipt arrived later through the prioritized control queue.
-        await self.service.update(self.session, {
-            "runtime_generation": GEN, "state": "detached", "state_revision": "11",
-            "writer_epoch": "2", "stream_epoch": "1",
-        })
+        await self.service.update(
+            self.session,
+            {
+                "runtime_generation": GEN,
+                "state": "detached",
+                "state_revision": "11",
+                "writer_epoch": "2",
+                "stream_epoch": "1",
+            },
+        )
         self.assertEqual("ready", self.session.row["state"])
         self.assertEqual("3", self.session.row["writer_epoch"])
         self.assertEqual("2", self.session.row["stream_epoch"])
@@ -1258,10 +1683,24 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_concurrent_state_updates_compare_revision_inside_database_phase(self):
         await asyncio.gather(
-            self.service.update(self.session, {"runtime_generation": GEN, "state": "ready",
-                                               "state_revision": "12", "writer_epoch": "3"}),
-            self.service.update(self.session, {"runtime_generation": GEN, "state": "detached",
-                                               "state_revision": "11", "writer_epoch": "2"}),
+            self.service.update(
+                self.session,
+                {
+                    "runtime_generation": GEN,
+                    "state": "ready",
+                    "state_revision": "12",
+                    "writer_epoch": "3",
+                },
+            ),
+            self.service.update(
+                self.session,
+                {
+                    "runtime_generation": GEN,
+                    "state": "detached",
+                    "state_revision": "11",
+                    "writer_epoch": "2",
+                },
+            ),
         )
         self.assertEqual("ready", self.session.row["state"])
         self.assertEqual("3", self.session.row["writer_epoch"])
@@ -1277,31 +1716,52 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 (OTHER_GEN, json.dumps({"state_revision": "1"}), SID),
             )
         self.session.row = self.service.repository.get(SID)
-        await self.service.update(self.session, {
-            "runtime_generation": GEN, "state": "exited", "state_revision": "100",
-            "reason_code": "OLD_RUNTIME_EXIT",
-        })
+        await self.service.update(
+            self.session,
+            {
+                "runtime_generation": GEN,
+                "state": "exited",
+                "state_revision": "100",
+                "reason_code": "OLD_RUNTIME_EXIT",
+            },
+        )
         self.assertEqual(OTHER_GEN, self.session.row["runtime_generation"])
         self.assertEqual("ready", self.session.row["state"])
         self.assertEqual(OTHER_GEN, self.service.repository.get(SID)["runtime_generation"])
 
     async def test_tmux_attachment_exit_does_not_claim_remote_session_ended(self):
         await self.service.update(self.session, {"mode": "tmux"})
-        await self.service.on_agent_event(self.agent, {
-            "type": "terminal_exit", "session_id": SID, "runtime_generation": GEN,
-            "stream_epoch": "1", "state": "detached", "remote_session_state": "running",
-            "final_offset": "0", "output_complete": True, "reason_code": "DETACHED",
-        })
+        await self.service.on_agent_event(
+            self.agent,
+            {
+                "type": "terminal_exit",
+                "session_id": SID,
+                "runtime_generation": GEN,
+                "stream_epoch": "1",
+                "state": "detached",
+                "remote_session_state": "running",
+                "final_offset": "0",
+                "output_complete": True,
+                "reason_code": "DETACHED",
+            },
+        )
         self.assertEqual("detached", self.session.row["state"])
-        self.assertEqual("running", self.service.repository.public(self.session.row)["remote_session_state"])
+        self.assertEqual(
+            "running", self.service.repository.public(self.session.row)["remote_session_state"]
+        )
 
     async def test_recovery_does_not_clear_ready_event_after_agent_reply(self):
         await self.service.update(self.session, {"mode": "tmux", "state": "failed"})
 
         async def handle(action, payload, project):
             if action == "status":
-                return {"state": "failed", "mode": "tmux", "reason_code": "SSH_CONNECTION_LOST",
-                        "recoverability": "reauthenticate", "ssh_connected": False}
+                return {
+                    "state": "failed",
+                    "mode": "tmux",
+                    "reason_code": "SSH_CONNECTION_LOST",
+                    "recoverability": "reauthenticate",
+                    "ssh_connected": False,
+                }
             if action == "recover":
                 await self.service.update(self.session, {"state": "ready", "reason_code": None})
                 return {"state": "ready", "mode": "tmux"}
@@ -1317,8 +1777,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         async def handle(action, payload, project):
             if action == "status":
-                return {"state": "detached", "mode": "tmux", "ssh_connected": False,
-                        "reason_code": "AUTH_LEASE_EXPIRED", "recoverability": "reauthenticate"}
+                return {
+                    "state": "detached",
+                    "mode": "tmux",
+                    "ssh_connected": False,
+                    "reason_code": "AUTH_LEASE_EXPIRED",
+                    "recoverability": "reauthenticate",
+                }
             if action == "recover":
                 self.assertEqual("fixture-password-never-persisted", payload.get("password"))
                 self.assertNotEqual("1", str(payload.get("authority_revision")))
@@ -1330,7 +1795,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         actual = await asyncio.wait_for(self.service.ensure_ready(self.session), timeout=0.2)
         self.assertIs(self.agent, actual)
         self.assertEqual(["status", "recover"], [request[0] for request in self.agent.requests])
-        self.assertNotIn("fixture-password-never-persisted", json.dumps(self.service.repository.get(SID)))
+        self.assertNotIn(
+            "fixture-password-never-persisted", json.dumps(self.service.repository.get(SID))
+        )
 
     async def test_replaced_agent_socket_forces_its_browser_to_reattach(self):
         attachment = SimpleNamespace(agent=self.agent, closed=False, shutdown=AsyncMock())
@@ -1345,8 +1812,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         from hub.ssh_terminal.models import CreateSession
 
         body = CreateSession(vps_id="vps-a", project_id="project-a", request_id="99" * 16)
-        first, second = await asyncio.gather(self.service.create(principal(), body),
-                                             self.service.create(principal(), body))
+        first, second = await asyncio.gather(
+            self.service.create(principal(), body), self.service.create(principal(), body)
+        )
         self.assertEqual(first["session_id"], second["session_id"])
         await asyncio.gather(*tuple(self.service.tasks))
         requests = [request for request in self.agent.requests if request[0] == "create"]
@@ -1389,6 +1857,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO vps_connections VALUES ('vps-a','space-a',1,1),('vps-free','space-a',1,1)"
             )
             self.store.db.execute(
+                "ALTER TABLE vps_connections ADD COLUMN host_key_policy TEXT NOT NULL DEFAULT 'strict'"
+            )
+            self.store.db.execute(
                 "INSERT INTO vps_projects VALUES ('vps-a','project-a','binding-a')"
             )
 
@@ -1404,13 +1875,19 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self._seed_routing_schema()
         admin = Principal(
-            actor="panel:owner", user_id="owner-a", scopes={"read", "write", "execute"},
-            projects=[], space_id="space-a", session_hash="login-owner", admin=True,
+            actor="panel:owner",
+            user_id="owner-a",
+            scopes={"read", "write", "execute"},
+            projects=[],
+            space_id="space-a",
+            session_hash="login-owner",
+            admin=True,
         )
         self.agent.direct_vps = True
         self.agent.direct_vps_allowed = True
         native = await self.service.create(
-            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a1" * 16),
+            admin,
+            CreateSession(vps_id="vps-free", project_id=None, request_id="a1" * 16),
         )
         await self.service.sessions[native["session_id"]].create_task
         self.assertEqual("", native["project_id"])
@@ -1420,13 +1897,16 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.agent.direct_vps = False
         carrier = await self.service.create(
-            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a2" * 16),
+            admin,
+            CreateSession(vps_id="vps-free", project_id=None, request_id="a2" * 16),
         )
         await self.service.sessions[carrier["session_id"]].create_task
         self.assertEqual("project-a", carrier["project_id"])
         self.assertEqual("", carrier["project_alias"])
         self.assertTrue(carrier["direct_vps"])
-        self.assertEqual("direct:vps-free", self.service.sessions[carrier["session_id"]].row["binding_id"])
+        self.assertEqual(
+            "direct:vps-free", self.service.sessions[carrier["session_id"]].row["binding_id"]
+        )
 
     async def test_admin_demotion_immediately_revokes_direct_session(self):
         from hub.ssh_terminal.models import CreateSession
@@ -1434,15 +1914,24 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self._seed_routing_schema()
         self.agent.direct_vps = True
         admin = Principal(
-            actor="panel:owner", user_id="owner-a", scopes={"read", "write", "execute"},
-            projects=[], space_id="space-a", session_hash="login-owner", admin=True,
+            actor="panel:owner",
+            user_id="owner-a",
+            scopes={"read", "write", "execute"},
+            projects=[],
+            space_id="space-a",
+            session_hash="login-owner",
+            admin=True,
         )
         created = await self.service.create(
-            admin, CreateSession(vps_id="vps-free", project_id=None, request_id="a3" * 16),
+            admin,
+            CreateSession(vps_id="vps-free", project_id=None, request_id="a3" * 16),
         )
         session = self.service.sessions[created["session_id"]]
         await session.create_task
-        with patch("hub.ssh_terminal.service.iam.live_principal", side_effect=lambda _s, p: replace(p, admin=False)):
+        with patch(
+            "hub.ssh_terminal.service.iam.live_principal",
+            side_effect=lambda _s, p: replace(p, admin=False),
+        ):
             await self.service._renew_one(session)
         self.assertTrue(session.revoked)
         self.assertEqual("failed", session.row["state"])
@@ -1461,19 +1950,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO vps_projects VALUES ('vps-a','project-ro','binding-ro')"
             )
         authorized_projects = []
-        self.service.runtime.authorize = lambda _p, action, project_id=None: authorized_projects.append((action, project_id))
+        self.service.runtime.authorize = lambda _p, action, project_id=None: (
+            authorized_projects.append((action, project_id))
+        )
         member = Principal(
-            actor="panel:alice", user_id="user-a", scopes={"read", "write", "execute"},
-            projects=["project-ro", "project-a"], space_id="space-a", session_hash="login-a",
+            actor="panel:alice",
+            user_id="user-a",
+            scopes={"read", "write", "execute"},
+            projects=["project-ro", "project-a"],
+            space_id="space-a",
+            session_hash="login-a",
         )
         perms = {"project-ro": {"read"}, "project-a": {"read", "write", "execute"}}
         with patch("hub.ssh_terminal.service.iam.project_permissions", return_value=perms):
             result = await self.service.create(
-                member, CreateSession(vps_id="vps-a", project_id=None, request_id="a4" * 16),
+                member,
+                CreateSession(vps_id="vps-a", project_id=None, request_id="a4" * 16),
             )
         await self.service.sessions[result["session_id"]].create_task
         self.assertEqual("project-a", result["project_id"])
-        self.assertEqual([("write", "project-a"), ("execute", "project-a")] * 2, authorized_projects)
+        self.assertEqual(
+            [("write", "project-a"), ("execute", "project-a")] * 2, authorized_projects
+        )
 
 
 if __name__ == "__main__":

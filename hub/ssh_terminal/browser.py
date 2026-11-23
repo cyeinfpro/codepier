@@ -67,6 +67,7 @@ class BrowserAttachment:
         self.closed = False
         self.close_task = None
         self.agent = None
+        self.pending_agent = None
         self.generation = None
         self.stream_epoch = self.writer_epoch = self.render_epoch = 0
         self.replay_boundary = 0
@@ -242,8 +243,8 @@ class BrowserAttachment:
                 raise TerminalProtocolError("STALE_WRITER", "终端已经由另一个窗口接管")
             if packet.get("bytes") is not None:
                 await self._receive_input(packet["bytes"])
-            else:
-                await self._receive_control(packet.get("text", ""))
+            elif await self._receive_control(packet.get("text", "")):
+                return
 
     async def _receive_input(self, raw):
         self._rate_limit()
@@ -279,7 +280,7 @@ class BrowserAttachment:
         elif kind == "resize":
             await self._receive_resize(message)
         elif kind == "detach":
-            return
+            return True
         elif kind in {"close", "takeover"}:
             body = SessionAction.model_validate({k: v for k, v in message.items() if k != "type"})
             await self.service.action(self.session.row["id"], self.principal, kind, body)

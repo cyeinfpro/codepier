@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator, model_validator
 
 from shared.contracts import Args, SSHExec, VPSList
+from shared.ssh_host_pin import CONFIRM_CHANGE, host_pin_supported, normalize_host_pin
 from shared.ssh_terminal_protocol import TerminalProtocolError
 from shared.util import DevError
 from hub import iam
@@ -34,6 +35,7 @@ PUBLIC_FIELDS = (
     "port",
     "username",
     "host_key_policy",
+    "host_key_fingerprint",
     "provider",
     "region",
     "system",
@@ -65,7 +67,8 @@ class VPSInput(Args):
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(default="root", min_length=1, max_length=128)
     password: str | None = Field(default=None, min_length=1, max_length=4096, repr=False)
-    host_key_policy: str = Field(default="strict", pattern=r"^(strict|accept-new)$")
+    host_key_policy: str = Field(default="strict", pattern=r"^(strict|accept-new|confirm-change)$")
+    host_key_fingerprint: str = Field(default="", max_length=80)
     provider: str = Field(default="", max_length=120)
     region: str = Field(default="", max_length=120)
     system: str = Field(default="", max_length=160)
@@ -80,6 +83,10 @@ class VPSInput(Args):
         self.host = canonical_host(self.host)
         if not self.name or any(ord(c) < 32 for c in self.name):
             raise ValueError("VPS 名称不能为空或含控制字符")
+        if self.host_key_policy == CONFIRM_CHANGE:
+            self.host_key_fingerprint = normalize_host_pin(self.host_key_fingerprint)
+        elif self.host_key_fingerprint:
+            raise ValueError("只有指纹变化时确认模式可保存控制台核验的指纹")
         # Reuse the transport's host/user/password validation; never echo inputs.
         SSHExec(
             project="validation",
@@ -88,7 +95,9 @@ class VPSInput(Args):
             username=self.username,
             password=self.password or "validation-only",
             command="true",
-            host_key_policy=self.host_key_policy,
+            host_key_policy="strict"
+            if self.host_key_policy == CONFIRM_CHANGE
+            else self.host_key_policy,
             idempotency_key="validation-only",
         )
         if len(set(self.project_ids)) != len(self.project_ids):
@@ -142,7 +151,9 @@ def _member_actions(principal, perms, project_id):
     return set(perms.get(project_id, ())) & set(principal.scopes)
 
 
-def _agent_probe_ready(agent, project):
+def _agent_probe_ready(agent, project, *, requires_pin=False):
+    if requires_pin and not host_pin_supported(agent):
+        return False
     if agent is None or agent.closed or not getattr(agent, "probe_supported", False):
         return False
     if project.get("_direct_vps") is True:
@@ -158,7 +169,8 @@ class VPSService:
         self.store = runtime.store
 
     def _admin_terminal_summary(self, row, all_projects, principal, terminal_service):
-        exec_ready = any(
+        requires_pin = row.get("host_key_policy") == CONFIRM_CHANGE
+        exec_ready = not requires_pin and any(
             p["online"] and p["device_enabled"] and p["mode"] == "write" and p["allow_tasks"]
             for p in all_projects
         )
@@ -172,7 +184,7 @@ class VPSService:
             )
         if terminal_service is None:
             dev_name = next((p["device_name"] for p in all_projects if p["online"]), None)
-            reason = "AGENT_UPGRADE_REQUIRED" if exec_ready else "AGENT_OFFLINE"
+            reason = "AGENT_UPGRADE_REQUIRED" if requires_pin or exec_ready else "AGENT_OFFLINE"
             return _terminal_state(
                 eligible=True,
                 available=False,
@@ -190,14 +202,16 @@ class VPSService:
                 reason_code="FEATURE_DISABLED",
             )
         try:
-            project = terminal_service._select_admin_project(principal, row["id"])
+            project = terminal_service._select_admin_project(
+                principal, row["id"], requires_pin=requires_pin
+            )
         except DevError as exc:
             return _terminal_state(
                 eligible=True, available=False, check_ready=False, direct=True, reason_code=exc.code
             )
         agent = terminal_service.agents.get(project["device_id"])
-        reason = terminal_service._capability_reason(project, agent)
-        check_ready = _agent_probe_ready(agent, project) or exec_ready
+        reason = terminal_service._capability_reason(project, agent, requires_pin=requires_pin)
+        check_ready = _agent_probe_ready(agent, project, requires_pin=requires_pin) or exec_ready
         return _terminal_state(
             eligible=True,
             available=reason is None,
@@ -245,10 +259,11 @@ class VPSService:
                 reason_code="VPS_DISABLED",
                 device_name=eligible_projects[0]["device_name"],
             )
-        exec_ready = any(p["online"] for p in eligible_projects)
+        requires_pin = row.get("host_key_policy") == CONFIRM_CHANGE
+        exec_ready = not requires_pin and any(p["online"] for p in eligible_projects)
         if terminal_service is None:
             best = next((p for p in eligible_projects if p["online"]), eligible_projects[0])
-            reason = "AGENT_UPGRADE_REQUIRED" if exec_ready else "AGENT_OFFLINE"
+            reason = "AGENT_UPGRADE_REQUIRED" if requires_pin or exec_ready else "AGENT_OFFLINE"
             return _terminal_state(
                 eligible=True,
                 available=False,
@@ -261,14 +276,15 @@ class VPSService:
         best = min(
             eligible_projects,
             key=lambda p: (
+                terminal_service._host_pin_rank(p["device_id"], requires_pin),
                 -terminal_service._candidate_tier(p["device_id"], counts.get(p["device_id"], 0)),
                 counts.get(p["device_id"], 0),
                 p["id"],
             ),
         )
         agent = terminal_service.agents.get(best["device_id"])
-        reason = terminal_service._capability_reason(best, agent)
-        check_ready = _agent_probe_ready(agent, best) or exec_ready
+        reason = terminal_service._capability_reason(best, agent, requires_pin=requires_pin)
+        check_ready = _agent_probe_ready(agent, best, requires_pin=requires_pin) or exec_ready
         return _terminal_state(
             eligible=True,
             available=reason is None,
@@ -283,6 +299,12 @@ class VPSService:
         result["enabled"] = bool(result["enabled"])
         result["has_password"] = True
         result["target"] = "vps:" + row["id"]
+        readiness = getattr(self.runtime, "vps_readiness", None)
+        result.update(
+            readiness.summary(principal, row["id"], result["enabled"])
+            if readiness is not None
+            else {"readiness_available": False, "readiness": None}
+        )
         raw_projects = self.store.all(
             """SELECT p.id,p.alias,p.device_id,d.name AS device_name,d.enabled AS device_enabled,
             p.mode,p.allow_tasks FROM vps_projects vp JOIN projects p ON p.id=vp.project_id
@@ -445,7 +467,14 @@ class VPSService:
                     body.password is not None
                     or any(
                         data[k] != old[k]
-                        for k in ("host", "port", "username", "host_key_policy", "enabled")
+                        for k in (
+                            "host",
+                            "port",
+                            "username",
+                            "host_key_policy",
+                            "host_key_fingerprint",
+                            "enabled",
+                        )
                     )
                 )
                 revision = old["connection_revision"] + int(bool(connection_changed)) if old else 1
@@ -457,6 +486,7 @@ class VPSService:
                     body.username,
                     secret,
                     body.host_key_policy,
+                    body.host_key_fingerprint,
                     body.provider,
                     body.region,
                     body.system,
@@ -469,15 +499,15 @@ class VPSService:
                 if old:
                     self.store.db.execute(
                         """UPDATE vps_connections SET name=?,name_key=?,host=?,port=?,username=?,secret=?,
-                        host_key_policy=?,provider=?,region=?,system=?,notes=?,enabled=?,version=?,connection_revision=?,updated=?
+                        host_key_policy=?,host_key_fingerprint=?,provider=?,region=?,system=?,notes=?,enabled=?,version=?,connection_revision=?,updated=?
                         WHERE id=?""",
                         (*values, identifier),
                     )
                 else:
                     self.store.db.execute(
                         """INSERT INTO vps_connections(name,name_key,host,port,username,secret,
-                        host_key_policy,provider,region,system,notes,enabled,version,connection_revision,updated,id,created,space_id,owner_user_id)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        host_key_policy,host_key_fingerprint,provider,region,system,notes,enabled,version,connection_revision,updated,id,created,space_id,owner_user_id)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (*values, identifier, now, principal.space_id, principal.user_id),
                     )
                 self._bind(identifier, body.project_ids)
@@ -494,6 +524,9 @@ class VPSService:
             },
         )
         self.runtime.publish("vps", {"id": identifier})
+        readiness = getattr(self.runtime, "vps_readiness", None)
+        if readiness is not None and body.enabled and (not existing_id or connection_changed):
+            readiness.enqueue_after_save(principal, identifier, revision)
         return self.get(identifier, principal)
 
     def assign(self, identifier, body, principal):
@@ -707,6 +740,7 @@ class VPSService:
             "username": target["username"],
             "password": password,
             "host_key_policy": target["host_key_policy"],
+            "host_key_fingerprint": target.get("host_key_fingerprint", ""),
             "timeout_seconds": timeout,
         }
         try:
@@ -812,7 +846,9 @@ class VPSService:
         try:
             terminal_service = getattr(self.runtime, "ssh_terminal", None)
             agent = terminal_service.agents.get(project["device_id"]) if terminal_service else None
-            if _agent_probe_ready(agent, project):
+            if _agent_probe_ready(
+                agent, project, requires_pin=target["host_key_policy"] == CONFIRM_CHANGE
+            ):
                 return await self._run_probe_check(
                     identifier,
                     agent,
@@ -823,6 +859,12 @@ class VPSService:
                     principal,
                 )
             password = None
+            if target["host_key_policy"] == CONFIRM_CHANGE:
+                raise DevError(
+                    "AGENT_UPGRADE_REQUIRED",
+                    "指纹变化时确认模式需要支持 Web SSH 的新版 Agent，不会使用旧式连接检查",
+                    409,
+                )
             if exec_project is None:
                 self._raise_check_unavailable(agent, project)
             return await self._run_exec_check(identifier, exec_project, body, principal)
@@ -858,6 +900,12 @@ class VPSService:
 
     def transport(self, request, project_id):
         row = self._authorized_row(request, project_id, credential=True)
+        if row["host_key_policy"] == CONFIRM_CHANGE:
+            raise DevError(
+                "SSH_HOST_PIN_REQUIRES_WEB_TERMINAL",
+                "此 VPS 使用控制台核验指纹，请使用 Web SSH 或面板连接检查",
+                409,
+            )
         try:
             password = self.store.decrypt(row["secret"])
         except Exception as exc:
@@ -882,6 +930,23 @@ class VPSService:
         return {**envelope, "core_ssh": command.model_dump()}
 
 
+def _add_readiness_routes(router, auth, runtime):
+    @router.post("/api/vps/readiness/backfill")
+    async def backfill_readiness(request: Request):
+        principal = await runtime.store.run(auth.panel, request, True)
+        return await runtime.vps_readiness.activate_space(principal)
+
+    @router.get("/api/vps/{identifier}/readiness")
+    async def get_readiness(identifier: str, request: Request):
+        principal = await runtime.store.run(auth.panel, request)
+        return await runtime.vps_readiness.get(principal, identifier)
+
+    @router.post("/api/vps/{identifier}/readiness")
+    async def request_readiness(identifier: str, request: Request):
+        principal = await runtime.store.run(auth.panel, request, True)
+        return await runtime.vps_readiness.request(principal, identifier)
+
+
 def make_vps_router(auth, runtime):
     router = APIRouter()
     service = runtime.vps
@@ -897,7 +962,9 @@ def make_vps_router(auth, runtime):
     ):
         principal = auth.panel(request)
         args = VPSList(project=project, query=query, offset=offset, limit=limit).model_dump()
-        return service.list(args, principal)
+        result = service.list(args, principal)
+        result.update(runtime.vps_readiness.fleet_summary(principal))
+        return result
 
     @router.post("/api/vps")
     @database_endpoint(runtime.store)
@@ -928,6 +995,8 @@ def make_vps_router(auth, runtime):
     @database_endpoint(runtime.store)
     def delete_vps(identifier: str, request: Request, expected_version: int = Query(..., ge=1)):
         return service.delete(identifier, expected_version, auth.panel(request, True))
+
+    _add_readiness_routes(router, auth, runtime)
 
     @router.post("/api/vps/{identifier}/check")
     async def check_vps(identifier: str, request: Request, body: VPSCheckInput):

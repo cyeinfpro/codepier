@@ -24,15 +24,27 @@ def available() -> bool:
         return False
 
 
+def _classify_host_key_error(exc):
+    # AsyncSSH 2.24.1 checks its revoked keys before calling our validator.
+    # This fixed library reason only affects the UI classification, never trust.
+    if str(exc).startswith("Host key is revoked for host "):
+        return SSHTransportError("HOST_KEY_REVOKED", "主机密钥已撤销")
+    return SSHTransportError("HOST_KEY_UNKNOWN", "无法核验 SSH 主机密钥或协商算法")
+
+
 def classify_error(exc, trust=None):
-    if isinstance(exc, (SSHTransportError, HostTrustError)):
+    if isinstance(exc, SSHTransportError):
         return exc
+    if isinstance(exc, HostTrustError):
+        return SSHTransportError(exc.code, exc.message)
     if trust is not None and trust.error is not None:
-        return trust.error
+        return SSHTransportError(trust.error.code, trust.error.message)
     kind = type(exc).__name__
     if kind in {"PermissionDenied", "PasswordChangeRequired"}:
         return SSHTransportError("SSH_AUTH_FAILED", "SSH 登录失败，请核对保存的凭据")
-    if kind in {"HostKeyNotVerifiable", "KeyExchangeFailed"}:
+    if kind == "HostKeyNotVerifiable":
+        return _classify_host_key_error(exc)
+    if kind == "KeyExchangeFailed":
         return SSHTransportError("HOST_KEY_UNKNOWN", "无法核验 SSH 主机密钥或协商算法")
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return SSHTransportError("SSH_CONNECT_TIMEOUT", "SSH 连接或认证超时")
@@ -239,6 +251,7 @@ class AsyncSSHTransport:
             target.get("host_key_policy", "strict"),
             sources=self.trust_sources,
             write_path=self.trust_write_path,
+            expected_fingerprint=target.get("host_key_fingerprint", ""),
         )
         ssh, trust = self.ssh, self.trust
 
@@ -255,8 +268,13 @@ class AsyncSSHTransport:
                     client_factory=lambda: client,
                     known_hosts=trust.known_hosts,
                     config=None,
-                    client_keys=[],
+                    # AsyncSSH treats [] as a request to load default local keys.
+                    client_keys=None,
+                    client_host_keys=None,
+                    client_host_keysign=False,
                     agent_path=None,
+                    agent_identities=None,
+                    pkcs11_provider=None,
                     password=None,
                     preferred_auth=["password", "keyboard-interactive"],
                     public_key_auth=False,

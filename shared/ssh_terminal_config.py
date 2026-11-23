@@ -14,6 +14,10 @@ from dataclasses import dataclass, fields
 from typing import ClassVar
 
 
+# Package installation is a separate, longer operation than SSH connection setup.
+TMUX_PROVISION_TIMEOUT_SECONDS = 180
+
+
 @dataclass(frozen=True)
 class TerminalConfig:
     frame_bytes: int = 16 * 1024

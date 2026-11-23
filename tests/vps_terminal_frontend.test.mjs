@@ -701,7 +701,7 @@ test('a restore finishing after navigation cannot reopen the departed workspace'
   assert.equal(store.activeId, null);
 });
 
-test('closing tabs moves the route to the remaining session or the terminal overview', () => {
+test('explicitly detaching tabs moves the route to the remaining session or overview', () => {
   const navigation = [];
   const store = new TerminalStore({
     identity: 'user:space',
@@ -710,7 +710,7 @@ test('closing tabs moves the route to the remaining session or the terminal over
     onNavigate: (...args) => navigation.push(args),
   });
   for (const id of [SESSION, GENERATION])
-    store.records.set(id, { transport: { detach() {} }, view: { dispose() {} } });
+    store.records.set(id, { id, state: 'ready', transport: { detach() {} }, view: { dispose() {} } });
   store.activeId = SESSION;
   store.secondaryId = GENERATION;
   store.focusedId = SESSION;

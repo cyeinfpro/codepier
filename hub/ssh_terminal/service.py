@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from hub import iam
 from shared.crypto import digest, token
 from shared.ssh_terminal_config import TerminalConfig
+from shared.ssh_host_pin import CONFIRM_CHANGE, host_pin_supported
 from shared.ssh_terminal_protocol import (
     FrameKind,
     TerminalFrame,
@@ -564,7 +565,7 @@ class TerminalService:
 
     def _authorize_member_auto(self, principal, vps_id, *, credentials):
         vps = self.store.one(
-            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
+            "SELECT id, connection_revision, enabled, host_key_policy FROM vps_connections WHERE id=? AND space_id=?",
             (vps_id, principal.space_id),
         )
         if not vps:
@@ -579,9 +580,11 @@ class TerminalService:
                 "SSH_TERMINAL_FORBIDDEN", "当前身份在该 VPS 关联项目上缺少写入与执行权限", 403
             )
         counts = self._active_device_counts()
+        requires_pin = vps["host_key_policy"] == CONFIRM_CHANGE
         best = min(
             eligible,
             key=lambda c: (
+                self._host_pin_rank(c["device_id"], requires_pin),
                 -self._candidate_tier(c["device_id"], counts.get(c["device_id"], 0)),
                 counts.get(c["device_id"], 0),
                 c["alias_key"],
@@ -613,7 +616,10 @@ class TerminalService:
         )
         return {r["project_id"] for r in rows}, {r["device_id"] for r in rows}
 
-    def _select_admin_direct_device(self, devices, affinity_devices, counts):
+    def _host_pin_rank(self, device_id, requires_pin):
+        return int(requires_pin and not host_pin_supported(self.agents.get(device_id)))
+
+    def _select_admin_direct_device(self, devices, affinity_devices, counts, *, requires_pin=False):
         ready = []
         for dev in devices:
             agent = self.agents.get(dev["id"])
@@ -622,6 +628,7 @@ class TerminalService:
                 and not agent.closed
                 and getattr(agent, "direct_vps", False)
                 and getattr(agent, "direct_vps_allowed", True)
+                and (not requires_pin or host_pin_supported(agent))
             ):
                 ready.append(dev)
         if not ready:
@@ -636,7 +643,9 @@ class TerminalService:
             ),
         )
 
-    def _select_admin_carrier_project(self, principal, bound_projects, affinity_devices, counts):
+    def _select_admin_carrier_project(
+        self, principal, bound_projects, affinity_devices, counts, *, requires_pin=False
+    ):
         rows = self.store.all(
             """SELECT p.id, p.alias_key, p.device_id FROM projects p
             JOIN devices d ON d.id=p.device_id
@@ -647,7 +656,9 @@ class TerminalService:
         carriers = [
             row
             for row in rows
-            if (agent := self.agents.get(row["device_id"])) is not None and not agent.closed
+            if (agent := self.agents.get(row["device_id"])) is not None
+            and not agent.closed
+            and (not requires_pin or host_pin_supported(agent))
         ]
         if not carriers:
             return None
@@ -673,7 +684,7 @@ class TerminalService:
             return 0 if getattr(agent, "direct_vps", False) else 1
         return 1 if self._device_online(device_id) else 2
 
-    def _select_admin_project(self, principal, vps_id):
+    def _select_admin_project(self, principal, vps_id, *, requires_pin=False):
         devices = self.store.all(
             "SELECT id, name FROM devices WHERE space_id=? AND enabled=1 ORDER BY created, id",
             (principal.space_id,),
@@ -682,11 +693,13 @@ class TerminalService:
             raise DevError("NO_TERMINAL_AGENT", "当前空间没有可用的启用节点", 409)
         bound_projects, affinity_devices = self._vps_affinity(vps_id, principal.space_id)
         counts = self._active_device_counts()
-        direct_dev = self._select_admin_direct_device(devices, affinity_devices, counts)
+        direct_dev = self._select_admin_direct_device(
+            devices, affinity_devices, counts, requires_pin=requires_pin
+        )
         if direct_dev is not None:
             return _direct_project(direct_dev["id"], direct_dev["name"], principal.space_id)
         carrier = self._select_admin_carrier_project(
-            principal, bound_projects, affinity_devices, counts
+            principal, bound_projects, affinity_devices, counts, requires_pin=requires_pin
         )
         if carrier is not None:
             return carrier
@@ -702,14 +715,16 @@ class TerminalService:
 
     def _authorize_admin_auto(self, principal, vps_id, *, credentials):
         vps = self.store.one(
-            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
+            "SELECT id, connection_revision, enabled, host_key_policy FROM vps_connections WHERE id=? AND space_id=?",
             (vps_id, principal.space_id),
         )
         if not vps:
             raise DevError("VPS_NOT_FOUND", "未找到 VPS 连接", 404)
         if not vps["enabled"]:
             raise DevError("VPS_DISABLED", "该 VPS 已停用，请先启用后再连接", 409)
-        project = self._select_admin_project(principal, vps["id"])
+        project = self._select_admin_project(
+            principal, vps["id"], requires_pin=vps["host_key_policy"] == CONFIRM_CHANGE
+        )
         ref = {
             "id": vps["id"],
             "connection_revision": vps["connection_revision"],
@@ -782,7 +797,17 @@ class TerminalService:
                 )
         return connection
 
-    def _capability_reason(self, project, agent):
+    def _require_host_pin_agent(self, project, target, agent):
+        if target.get("host_key_policy") != CONFIRM_CHANGE:
+            return
+        if self.agents.get(project["device_id"]) is not agent or not host_pin_supported(agent):
+            raise DevError(
+                "AGENT_UPGRADE_REQUIRED",
+                "当前节点未声明支持控制台核验指纹，请升级 Agent 后重新连接",
+                409,
+            )
+
+    def _capability_reason(self, project, agent, *, requires_pin=False):
         if not self.enabled or self.closing:
             return "FEATURE_DISABLED"
         if agent is None or agent.closed:
@@ -791,6 +816,8 @@ class TerminalService:
                 if not self._device_online(project["device_id"])
                 else "AGENT_UPGRADE_REQUIRED"
             )
+        if requires_pin and not host_pin_supported(agent):
+            return "AGENT_UPGRADE_REQUIRED"
         if project.get("_direct_vps") is True:
             if not getattr(agent, "direct_vps", False):
                 return "AGENT_UPGRADE_REQUIRED"
@@ -813,7 +840,9 @@ class TerminalService:
 
     async def capabilities(self, principal, vps_id, project_id=None):
         try:
-            _, project, _ = await self.store.run(self._authorize, principal, project_id, vps_id)
+            _, project, target = await self.store.run(
+                self._authorize, principal, project_id, vps_id
+            )
         except DevError as exc:
             if exc.code == "NO_TERMINAL_AGENT":
                 reason = "FEATURE_DISABLED" if not self.enabled else "NO_TERMINAL_AGENT"
@@ -822,7 +851,9 @@ class TerminalService:
                 )
             raise
         agent = self.agents.get(project["device_id"])
-        reason = self._capability_reason(project, agent)
+        reason = self._capability_reason(
+            project, agent, requires_pin=target.get("host_key_policy") == CONFIRM_CHANGE
+        )
         generation = agent.generation if agent is not None and not agent.closed else None
         return self._capabilities_payload(
             available=reason is None, reason_code=reason, generation=generation
@@ -915,6 +946,7 @@ class TerminalService:
                     raise DevError("REQUEST_CONFLICT", "同一请求编号不能创建不同终端", 409)
                 return self.repository.public(old)
             agent = self._admit_agent(project)
+            self._require_host_pin_agent(project, target, agent)
             await self._check_session_quota(
                 principal.space_id, principal.user_id, project["device_id"]
             )
@@ -926,6 +958,11 @@ class TerminalService:
             session.create_task = self.spawn(self._begin(session), "hub-ssh-create-" + row["id"])
             await self._audit(session, "create", principal=principal, outcome="accepted")
             return self.repository.public(row)
+
+    @staticmethod
+    def _runtime_create_mode(requested_mode, recover=False):
+        # Old clients may still send auto; new operations must never downgrade.
+        return "direct" if not recover and requested_mode == "direct" else "tmux"
 
     @staticmethod
     def target_ref(session):
@@ -979,6 +1016,7 @@ class TerminalService:
             target = await self.authorize(session, credentials=True)
             self._guard_maintenance()
             agent = self.agent(session.row["device_id"])
+            self._require_host_pin_agent(session.project, target, agent)
             if agent.generation != session.row["runtime_generation"]:
                 await self._sync_begin_generation(session, agent, recover=recover)
             self._guard_maintenance()
@@ -998,7 +1036,8 @@ class TerminalService:
                 "username": target["username"],
                 "password": target.pop("password"),
                 "host_key_policy": target["host_key_policy"],
-                "mode": "tmux" if recover else session.row["requested_mode"],
+                "host_key_fingerprint": target.get("host_key_fingerprint", ""),
+                "mode": self._runtime_create_mode(session.row["requested_mode"], recover),
                 "cols": session.row["cols"],
                 "rows": session.row["rows"],
                 "recover": recover,
@@ -1009,6 +1048,7 @@ class TerminalService:
                 {"stage_timings_ms": {"hub_prepare": max(0, self.clock() - started) * 1000}},
             )
             self._guard_maintenance()
+            self._require_host_pin_agent(session.project, target, agent)
             result = await agent.request("create", payload, session.project)
             # A ready event may arrive before the create receipt. Never regress
             # its lifecycle back to creating.
@@ -1191,6 +1231,7 @@ class TerminalService:
             session.authority_revision = uuid.uuid4().hex
             session.ready.clear()
             payload = {**self.target_ref(session), "password": target.pop("password")}
+            self._require_host_pin_agent(session.project, target, agent)
             recovered = await agent.request("recover", payload, session.project)
         finally:
             target.pop("password", None)
@@ -1216,24 +1257,7 @@ class TerminalService:
         async with session.attachment_lock:
             await self.authorize(session, principal=attachment.principal)
             self._guard_maintenance()
-            previous = session.attachment
-            if previous is not None and not previous.closed:
-                # A new socket for the same renderer replaces an interrupted
-                # connection; a different tab needs explicit takeover.
-                if previous.renderer_id != attachment.renderer_id:
-                    raise TerminalProtocolError(
-                        "WRITER_CONFLICT", "此终端正在另一窗口使用，请选择接管"
-                    )
-                if previous.agent and not previous.agent.closed:
-                    await previous.agent.request(
-                        "detach",
-                        {**self.target_ref(session), "attachment_id": previous.id},
-                        session.project,
-                        wait_seconds=self.config.write_timeout,
-                    )
-                await previous.shutdown("STALE_WRITER", 4409)
-            if previous is not None:
-                await self._disconnected(session, previous)
+            await self._replace_attachment_locked(session, attachment)
             self._guard_maintenance()
             # A new explicitly authenticated attachment may become the logical
             # lease owner. Read/list/ticket calls never replace a live socket's
@@ -1243,6 +1267,8 @@ class TerminalService:
             session.attachment = attachment
             if session.challenge and self.clock() < session.challenge_until:
                 await attachment.control(session.challenge)
+            previous_generation = session.row["runtime_generation"]
+            previous_stream_epoch = str(session.row["stream_epoch"])
             agent = await self.ensure_ready(session, principal=attachment.principal)
             await self.authorize(session, principal=attachment.principal)
             self._guard_maintenance()
@@ -1262,7 +1288,14 @@ class TerminalService:
             if resume.get("runtime_generation") != agent.generation:
                 payload["rendered_offset"] = "0"
                 payload["stream_epoch"] = session.row["stream_epoch"]
+            if resume.get("resume_from_live") is True:
+                payload["resume_from_live"] = True
+            # Cancellation or timeout of the RPC does not undo an attach
+            # already delivered to the Agent. Keep its exact cleanup target.
+            attachment.pending_agent = agent
             status = await agent.request("attach", payload, session.project)
+            if payload.get("resume_from_live"):
+                self._verify_history_recovery(status)
             await self.update(session, status)
             strategy = {"resume": "resume_unconsumed", "replay": "history_replay"}.get(
                 status.get("resume_strategy"), status.get("resume_strategy", "live")
@@ -1291,6 +1324,14 @@ class TerminalService:
                 "mode": status["mode"],
                 "state": status["state"],
                 "resume_strategy": strategy,
+                **(
+                    {"history_recovery": "live_tail"}
+                    if status.get("history_recovery") == "live_tail"
+                    else {}
+                ),
+                "history_incomplete": self._attachment_history_incomplete(
+                    strategy, status, agent.generation, previous_generation, previous_stream_epoch
+                ),
                 "start_offset": start,
                 "output_end_offset": status.get(
                     "output_end_offset", status.get("available_end", "0")
@@ -1307,6 +1348,48 @@ class TerminalService:
             ):
                 await attachment.complete_replay()
 
+    async def _replace_attachment_locked(self, session, attachment):
+        previous = session.attachment
+        if previous is not None and not previous.closed:
+            # A new socket for the same renderer replaces an interrupted
+            # connection; a different tab needs explicit takeover.
+            if previous.renderer_id != attachment.renderer_id:
+                raise TerminalProtocolError("WRITER_CONFLICT", "此终端正在另一窗口使用，请选择接管")
+            if previous.agent and not previous.agent.closed:
+                await previous.agent.request(
+                    "detach",
+                    {**self.target_ref(session), "attachment_id": previous.id},
+                    session.project,
+                    wait_seconds=self.config.write_timeout,
+                )
+            await previous.shutdown("STALE_WRITER", 4409)
+        elif previous is not None:
+            # Its cleanup may be waiting for this lock. Do not orphan the
+            # Agent attachment when installing a replacement ahead of it.
+            await self._detach_agent_attachment(session, previous)
+        if previous is not None:
+            await self._disconnected(session, previous)
+
+    @staticmethod
+    def _verify_history_recovery(status):
+        if status.get("mode") == "tmux" and status.get("resume_strategy") == "redraw":
+            return
+        if status.get("mode") == "direct" and status.get("history_recovery") == "live_tail":
+            return
+        raise TerminalProtocolError(
+            "HISTORY_RECOVERY_UNSUPPORTED", "当前连接电脑不支持安全继续原会话，请先升级"
+        )
+
+    @staticmethod
+    def _attachment_history_incomplete(
+        strategy, status, generation, previous_generation, previous_epoch
+    ):
+        return status["mode"] == "tmux" and (
+            strategy == "redraw"
+            or generation != previous_generation
+            or str(status["stream_epoch"]) != previous_epoch
+        )
+
     async def detach(self, session, attachment):
         async with session.attachment_lock:
             await self._detach_locked(session, attachment)
@@ -1315,14 +1398,7 @@ class TerminalService:
         if session.attachment is not attachment:
             return
         session.attachment = None
-        if attachment.agent and not attachment.agent.closed:
-            with contextlib.suppress(Exception):
-                await attachment.agent.request(
-                    "detach",
-                    {**self.target_ref(session), "attachment_id": attachment.id},
-                    session.project,
-                    wait_seconds=self.config.write_timeout,
-                )
+        await self._detach_agent_attachment(session, attachment)
         if (
             session.attachment is None
             and session.row["state"] not in TERMINAL_STATES
@@ -1330,6 +1406,21 @@ class TerminalService:
         ):
             await self.update(session, {"state": "detached"})
         await self._disconnected(session, attachment)
+
+    async def _detach_agent_attachment(self, session, attachment):
+        agent = attachment.agent or attachment.pending_agent
+        if agent is not None and not agent.closed:
+            with contextlib.suppress(Exception):
+                await agent.request(
+                    "detach",
+                    {
+                        **self.target_ref(session),
+                        "runtime_generation": agent.generation,
+                        "attachment_id": attachment.id,
+                    },
+                    session.project,
+                    wait_seconds=self.config.write_timeout,
+                )
 
     async def action(self, sid, principal, action, body):
         session = await self.load(sid, principal)
@@ -1393,6 +1484,7 @@ class TerminalService:
         target = await self.authorize(session, credentials=True, principal=principal)
         payload = {**self.target_ref(session), "password": target.pop("password")}
         try:
+            self._require_host_pin_agent(session.project, target, agent)
             return await agent.request("close", payload, session.project)
         finally:
             payload.pop("password", None)

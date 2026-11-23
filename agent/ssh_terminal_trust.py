@@ -10,11 +10,14 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 import glob
+import hmac
 import os
 from pathlib import Path
 import shlex
 import stat
 import threading
+
+from shared.ssh_host_pin import CONFIRM_CHANGE, validate_optional_host_pin
 
 
 class HostTrustError(Exception):
@@ -215,9 +218,15 @@ def _file_lock(path: Path):
 class HostKeyPolicy:
     """A connection-local validator backed by shared OpenSSH known_hosts."""
 
-    def __init__(self, ssh, policy: str, *, sources=None, write_path=None, home=None):
-        if policy not in {"strict", "accept-new"}:
+    def __init__(
+        self, ssh, policy: str, *, sources=None, write_path=None, home=None, expected_fingerprint=""
+    ):
+        if policy not in {"strict", "accept-new", CONFIRM_CHANGE}:
             raise HostTrustError("HOST_TRUST_CONFIGURATION", "未知主机密钥政策")
+        try:
+            self.expected_fingerprint = validate_optional_host_pin(policy, expected_fingerprint)
+        except ValueError as exc:
+            raise HostTrustError("HOST_TRUST_CONFIGURATION", str(exc)) from None
         self.ssh, self.policy = ssh, policy
         if sources is None:
             check_native_trust_configuration(home)
@@ -268,7 +277,12 @@ class HostKeyPolicy:
         return self._loaded.match(host_key, "", None)
 
     def known_hosts(self, host, address, port):
-        return self.matched(host, address, port)
+        matches = self.matched(host, address, port)
+        if self.expected_fingerprint:
+            # No known key, certificate authority, or X.509 trust may bypass
+            # validate_candidate; retain both public-key and certificate revocations.
+            return [], [], matches[2], [], [], [], matches[6]
+        return matches
 
     def validate_candidate(self, host, address, port, key) -> bool:
         port = port or 22
@@ -276,6 +290,15 @@ class HostKeyPolicy:
             matches = self.matched(host, address, port, reload=True)
             if key in matches[2]:
                 raise HostTrustError("HOST_KEY_REVOKED", "主机密钥已撤销")
+            if self.expected_fingerprint:
+                presented = key.get_fingerprint()
+                if not hmac.compare_digest(self.expected_fingerprint, presented):
+                    raise HostTrustError(
+                        "HOST_KEY_CHANGED",
+                        "主机指纹不匹配；请在 VPS 云控制台核验，并更新保存的指纹",
+                    )
+                self.fingerprint = presented
+                return True
             if key in matches[0]:
                 self.fingerprint = key.get_fingerprint()
                 return True
@@ -291,6 +314,8 @@ class HostKeyPolicy:
             return False
 
     def commit_before_authentication(self) -> None:
+        if self.expected_fingerprint and not self.fingerprint:
+            raise HostTrustError("HOST_KEY_CHANGED", "尚未确认已保存的主机指纹")
         if self.pending is None:
             return
         host, address, port, key = self.pending

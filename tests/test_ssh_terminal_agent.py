@@ -22,18 +22,35 @@ from shared.ssh_terminal_protocol import FrameKind, TerminalFrame, TerminalProto
 
 
 def project():
-    return {"id": "project-a", "root": ".", "mode": "write", "allow_tasks": True,
-            "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+    return {
+        "id": "project-a",
+        "root": ".",
+        "mode": "write",
+        "allow_tasks": True,
+        "_terminal_owner": "user:owner-a",
+        "_terminal_space": "space-a",
+    }
 
 
 def create_request(manager, **changes):
     return {
-        "session_id": uuid.uuid4().hex, "runtime_generation": manager.generation,
-        "owner_user_id": "owner-a", "space_id": "space-a", "vps_id": "vps-a",
-        "connection_revision": 1, "binding_id": "binding-a", "authority_revision": "authority-a",
-        "host": "server.example.invalid", "port": 22, "username": "fixture",
-        "password": "fixture-secret-only", "host_key_policy": "strict",
-        "mode": "direct", "cols": 120, "rows": 30, **changes,
+        "session_id": uuid.uuid4().hex,
+        "runtime_generation": manager.generation,
+        "owner_user_id": "owner-a",
+        "space_id": "space-a",
+        "vps_id": "vps-a",
+        "connection_revision": 1,
+        "binding_id": "binding-a",
+        "authority_revision": "authority-a",
+        "host": "server.example.invalid",
+        "port": 22,
+        "username": "fixture",
+        "password": "fixture-secret-only",
+        "host_key_policy": "strict",
+        "mode": "direct",
+        "cols": 120,
+        "rows": 30,
+        **changes,
     }
 
 
@@ -53,21 +70,27 @@ async def test_create_admission_is_scoped_single_use_expiring_and_bounded():
         connectors.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None, clock=lambda: current[0]
+    )
     request = create_request(manager)
     try:
         with pytest.raises(TerminalProtocolError) as error:
             await manager.control("create", request, project())
         assert error.value.code == "CREATE_ADMISSION_REQUIRED" and not connectors
         reservation = await manager.control("reserve_create", request, project())
-        assert (await manager.control("reserve_create", request, project()))["admission_token"] == reservation["admission_token"]
+        assert (await manager.control("reserve_create", request, project()))[
+            "admission_token"
+        ] == reservation["admission_token"]
         request["admission_token"] = reservation["admission_token"]
         with pytest.raises(TerminalProtocolError):
             await manager.control("create", {**request, "connection_revision": 2}, project())
         with pytest.raises(TerminalProtocolError):
-            await manager.control("create", {**request, "owner_user_id": "other"},
-                                  {**project(), "_terminal_owner": "user:other"})
+            await manager.control(
+                "create",
+                {**request, "owner_user_id": "other"},
+                {**project(), "_terminal_owner": "user:other"},
+            )
         assert not connectors
         current[0] = 31
         with pytest.raises(TerminalProtocolError) as error:
@@ -76,7 +99,9 @@ async def test_create_admission_is_scoped_single_use_expiring_and_bounded():
         await admitted_create(manager, request)
         await settled(manager, request["session_id"])
         assert request["session_id"] not in manager._admissions
-        assert (await manager.control("reserve_create", request, project()))["admission_token"] is None
+        assert (await manager.control("reserve_create", request, project()))[
+            "admission_token"
+        ] is None
         await manager.control("create", request, project())
         assert len(connectors) == 1
         for _ in range(manager._admission_limit):
@@ -95,8 +120,9 @@ async def test_create_admission_is_scoped_single_use_expiring_and_bounded():
 @pytest.mark.parametrize("action", ["close", "revoke"])
 async def test_pending_create_admission_can_be_closed_or_revoked_before_delayed_create(action):
     connections = []
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: connections.append(True),
-                                     authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: connections.append(True), authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         grant = await manager.control("reserve_create", request, project())
@@ -105,7 +131,9 @@ async def test_pending_create_admission_can_be_closed_or_revoked_before_delayed_
         assert stopped["remote_end_confirmed"] and not stopped["input_enabled"]
         late = await manager.control("create", request, project())
         assert late["state"] in {"exited", "failed"}
-        assert (await manager.control("reserve_create", request, project()))["admission_token"] is None
+        assert (await manager.control("reserve_create", request, project()))[
+            "admission_token"
+        ] is None
         assert request["session_id"] not in manager.sessions and not connections
     finally:
         await manager.close_all()
@@ -123,7 +151,9 @@ async def test_many_closed_sessions_stay_bounded_and_old_creates_cannot_reopen()
         connectors.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector, config=config, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, config=config, authorize=lambda _: None
+    )
     uncertain = create_request(manager, mode="tmux")
     requests = {}
     try:
@@ -140,9 +170,15 @@ async def test_many_closed_sessions_stay_bounded_and_old_creates_cannot_reopen()
             assert len(manager.sessions) <= manager._metadata_limit
             assert len(manager._tombstones) <= manager._tombstone_limit
         assert uncertain["session_id"] in manager.sessions and remote["creates"] == 1
-        assert sum(item.ring.capacity_bytes for item in manager.sessions.values()) <= manager._metadata_limit
+        assert (
+            sum(item.ring.capacity_bytes for item in manager.sessions.values())
+            <= manager._metadata_limit
+        )
         first = next(iter(requests.values()))
-        assert first["session_id"] not in manager.sessions and first["session_id"] not in manager._tombstones
+        assert (
+            first["session_id"] not in manager.sessions
+            and first["session_id"] not in manager._tombstones
+        )
         before = len(connectors)
         with pytest.raises(TerminalProtocolError) as error:
             await manager.control("create", first, project())
@@ -150,35 +186,48 @@ async def test_many_closed_sessions_stay_bounded_and_old_creates_cannot_reopen()
         tombstone_id = next(iter(manager._tombstones))
         retired = await manager.control("create", requests[tombstone_id], project())
         assert retired["state"] == "exited" and len(connectors) == before
-        assert (await manager.control("status", requests[tombstone_id], project()))["state"] == "exited"
+        assert (await manager.control("status", requests[tombstone_id], project()))[
+            "state"
+        ] == "exited"
 
         page = await manager.control("list", {}, project())
         assert len(page["sessions"]) <= 32 and page["truncated"]
         listed = []
         while True:
-            assert len(json.dumps(page, ensure_ascii=True, separators=(",", ":")).encode()) < 48 * 1024
+            assert (
+                len(json.dumps(page, ensure_ascii=True, separators=(",", ":")).encode()) < 48 * 1024
+            )
             assert len(page["sessions"]) <= 64 and page["retention"] == "active_and_recent"
             listed.extend(item["session_id"] for item in page["sessions"])
             if not page["truncated"]:
                 assert page["next_cursor"] is None
                 break
-            page = await manager.control("list", {"cursor": page["next_cursor"], "limit": 64}, project())
+            page = await manager.control(
+                "list", {"cursor": page["next_cursor"], "limit": 64}, project()
+            )
         assert len(listed) == len(set(listed)) == len(manager.sessions)
         assert set(listed) == set(manager.sessions)
-        assert not (await manager.control("list", {}, {**project(), "root": "/different-project"}))["sessions"]
+        assert not (await manager.control("list", {}, {**project(), "root": "/different-project"}))[
+            "sessions"
+        ]
     finally:
         await manager.close_all()
 
 
 def test_metadata_limits_remain_small_at_maximum_configured_session_capacity():
-    manager = TerminalSessionManager(emit=lambda _: None, authorize=lambda _: None,
-                                     config=replace(DEFAULT_CONFIG, max_sessions_per_agent=256))
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        authorize=lambda _: None,
+        config=replace(DEFAULT_CONFIG, max_sessions_per_agent=256),
+    )
     assert manager._metadata_limit == manager._tombstone_limit == 1024
     assert manager._admission_limit == 256
 
 
 @pytest.mark.parametrize("extractor", ["installer", "current_updater", "legacy_updater"])
-def test_downloaded_agent_archive_contains_importable_terminal_and_keeps_old_updater_compatibility(tmp_path, extractor):
+def test_downloaded_agent_archive_contains_importable_terminal_and_keeps_old_updater_compatibility(
+    tmp_path, extractor
+):
     import importlib.util
     import io
     import subprocess
@@ -191,10 +240,16 @@ def test_downloaded_agent_archive_contains_importable_terminal_and_keeps_old_upd
 
     root = Path(__file__).resolve().parents[1]
     expected = {
-        "agent/ssh_terminal.py", "agent/ssh_terminal_manager.py", "agent/ssh_terminal_transport.py",
-        "agent/ssh_terminal_trust.py", "agent/ssh_terminal_tmux.py", "agent/ssh_terminal_link.py",
-        "shared/ssh_terminal_protocol.py", "shared/ssh_terminal_config.py",
-        "shared/ssh_terminal_flow.py", "shared/ssh_terminal_channel.py",
+        "agent/ssh_terminal.py",
+        "agent/ssh_terminal_manager.py",
+        "agent/ssh_terminal_transport.py",
+        "agent/ssh_terminal_trust.py",
+        "agent/ssh_terminal_tmux.py",
+        "agent/ssh_terminal_link.py",
+        "shared/ssh_terminal_protocol.py",
+        "shared/ssh_terminal_config.py",
+        "shared/ssh_terminal_flow.py",
+        "shared/ssh_terminal_channel.py",
     }
     package = AgentPackage(root).build()
     with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
@@ -209,8 +264,9 @@ def test_downloaded_agent_archive_contains_importable_terminal_and_keeps_old_upd
     elif extractor == "current_updater":
         LifecycleManager._extract(archive, package.sha256, destination)
     else:
-        spec = importlib.util.spec_from_file_location("legacy_terminal_package_check",
-                                                     root / "tests/fixtures/legacy-agent-lifecycle-v180.py")
+        spec = importlib.util.spec_from_file_location(
+            "legacy_terminal_package_check", root / "tests/fixtures/legacy-agent-lifecycle-v180.py"
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.LifecycleManager._extract(archive, package.sha256, destination)
@@ -229,8 +285,13 @@ for name in ('agent.runner', 'agent.ssh_terminal', 'agent.ssh_terminal_manager',
 from agent.ssh_terminal import TerminalSessionManager
 assert TerminalSessionManager(emit=lambda _: None).capabilities()['protocol'] == 1
 """
-    result = subprocess.run([sys.executable, "-I", "-c", verification, str(destination)],
-                            cwd=tmp_path, capture_output=True, text=True, timeout=20)
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", verification, str(destination)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -241,11 +302,17 @@ async def settled(manager, sid):
 
 def attach_request(manager, request, **changes):
     return {
-        "session_id": request["session_id"], "runtime_generation": manager.generation,
-        "vps_id": request["vps_id"], "binding_id": request["binding_id"],
+        "session_id": request["session_id"],
+        "runtime_generation": manager.generation,
+        "vps_id": request["vps_id"],
+        "binding_id": request["binding_id"],
         "connection_revision": request["connection_revision"],
-        "attachment_id": uuid.uuid4().hex, "renderer_id": uuid.uuid4().hex,
-        "render_epoch": "1", "writer_epoch": "1", "stream_epoch": "1", "rendered_offset": "0",
+        "attachment_id": uuid.uuid4().hex,
+        "renderer_id": uuid.uuid4().hex,
+        "render_epoch": "1",
+        "writer_epoch": "1",
+        "stream_epoch": "1",
+        "rendered_offset": "0",
         **changes,
     }
 
@@ -299,7 +366,7 @@ class FakeTmuxTransport(FakeTransport):
     async def run_control(self, command, **kwargs):
         self.remote.setdefault("commands", []).append(command)
         if "command -v tmux" in command:
-            return 0, b"tmux 3.5a\n"
+            return 0, b"/usr/bin/tmux\ntmux 3.5a\n"
         if "has-session" in command:
             return (0, b"") if self.remote.get("exists") else (1, b"no server running\n")
         if "new-session" in command:
@@ -319,18 +386,36 @@ class FakeTmuxTransport(FakeTransport):
 def maintenance_owner(manager, lifecycle):
     from agent.runner import Agent
 
-    owner = SimpleNamespace(lifecycle=lifecycle, computer=SimpleNamespace(session=None),
-                            jobs={}, processes={}, transfer_tasks=set(), kill_tasks=set(),
-                            ssh_terminal=SimpleNamespace(manager=manager))
+    owner = SimpleNamespace(
+        lifecycle=lifecycle,
+        computer=SimpleNamespace(session=None),
+        jobs={},
+        processes={},
+        transfer_tasks=set(),
+        kill_tasks=set(),
+        ssh_terminal=SimpleNamespace(manager=manager),
+    )
     manager.agent = owner
     lifecycle.activity_check = lambda operation: Agent.check_maintenance_idle(owner, operation)
     return owner
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activity", ["reservation", "creating", "direct", "tail", "detached_tmux",
-                                      "uncertain_tmux_create", "uncertain_tmux_close"])
-async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path, monkeypatch, activity):
+@pytest.mark.parametrize(
+    "activity",
+    [
+        "reservation",
+        "creating",
+        "direct",
+        "tail",
+        "detached_tmux",
+        "uncertain_tmux_create",
+        "uncertain_tmux_close",
+    ],
+)
+async def test_managed_maintenance_requires_confirmed_webssh_retirement(
+    tmp_path, monkeypatch, activity
+):
     from shared.util import DevError
     from tests.test_agent_lifecycle import managed_manager
 
@@ -356,8 +441,9 @@ async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path
         return {"stage": "prepared"}
 
     monkeypatch.setattr(lifecycle, "_prepare_control", prepare)
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None, clock=lambda: current[0]
+    )
     maintenance_owner(manager, lifecycle)
     request = create_request(manager, mode="tmux" if "tmux" in activity else "direct")
     try:
@@ -376,8 +462,9 @@ async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path
                     await manager.control("attach", attachment, project())
                 if activity == "tail":
                     session.transport.on_data(b"unconsumed final output")
-                    session.transport.on_exit({"output_complete": True, "exit_status": 0,
-                                               "reason_code": "SSH_EXITED"})
+                    session.transport.on_exit(
+                        {"output_complete": True, "exit_status": 0, "reason_code": "SSH_EXITED"}
+                    )
                     assert session.state == "exited" and session.ring.size > 0
                 if activity == "detached_tmux":
                     await manager.control("detach", attachment, project())
@@ -386,7 +473,9 @@ async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path
                     assert session.transport is None and remote["exists"]
                     assert session.public()["recoverability"] == "reauthenticate"
                 if activity == "uncertain_tmux_create":
-                    assert session.state == "failed" and session.stopped.is_set() and remote["exists"]
+                    assert (
+                        session.state == "failed" and session.stopped.is_set() and remote["exists"]
+                    )
                 if activity == "uncertain_tmux_close":
                     remote["uncertain_close"] = True
                     await manager.control("close", request, project())
@@ -401,7 +490,9 @@ async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path
         result = await manager.control("close", request, project())
         assert result["remote_end_confirmed"] is True
         assert not manager.maintenance_busy()
-        assert (await lifecycle.prepare("webssh-maintenance", "agent_restart", {}))["stage"] == "prepared"
+        assert (await lifecycle.prepare("webssh-maintenance", "agent_restart", {}))[
+            "stage"
+        ] == "prepared"
         assert prepared == ["agent_restart"]
         if activity != "reservation":
             assert request["session_id"] in manager.sessions  # Retained history doesn't stay busy.
@@ -413,8 +504,12 @@ async def test_managed_maintenance_requires_confirmed_webssh_retirement(tmp_path
 @pytest.mark.asyncio
 async def test_maintenance_ignores_expired_admission_and_confirmed_missing_tmux():
     current = [0.0]
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: FakeTmuxTransport({}),
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        connector=lambda: FakeTmuxTransport({}),
+        authorize=lambda _: None,
+        clock=lambda: current[0],
+    )
     try:
         await manager.control("reserve_create", create_request(manager), project())
         assert manager.maintenance_busy()
@@ -430,16 +525,27 @@ async def test_maintenance_ignores_expired_admission_and_confirmed_missing_tmux(
 
 
 @pytest.mark.asyncio
-async def test_maintenance_ack_rechecks_webssh_and_keeps_plan_until_explicit_close(tmp_path, monkeypatch):
+async def test_maintenance_ack_rechecks_webssh_and_keeps_plan_until_explicit_close(
+    tmp_path, monkeypatch
+):
     from shared.util import DevError
     from tests.test_agent_lifecycle import managed_manager
 
     lifecycle, base = managed_manager(tmp_path, monkeypatch)
     operation, launched = "webssh-maintenance", []
-    lifecycle._write_plan(operation, {"action": "agent_restart", "base": str(base),
-                                      "helper": str(base / "helper.py"), "python": str(base / "python")})
+    lifecycle._write_plan(
+        operation,
+        {
+            "action": "agent_restart",
+            "base": str(base),
+            "helper": str(base / "helper.py"),
+            "python": str(base / "python"),
+        },
+    )
     monkeypatch.setattr(lifecycle, "_launch_helper", lambda *_: launched.append(True))
-    manager = TerminalSessionManager(emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None
+    )
     maintenance_owner(manager, lifecycle)
     request = create_request(manager)
     try:
@@ -481,7 +587,9 @@ async def test_maintenance_rechecks_inflight_connection_and_recovery(stage):
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None
+    )
     maintenance_owner(manager, lifecycle)
     request = create_request(manager, mode="tmux")
     recovery = None
@@ -490,7 +598,9 @@ async def test_maintenance_rechecks_inflight_connection_and_recovery(stage):
         if stage == "recover_close":
             session = await settled(manager, request["session_id"])
             session.transport.closed = True
-            recovery = asyncio.create_task(manager.control("recover", {**request, "authority_revision": "renewed"}, project()))
+            recovery = asyncio.create_task(
+                manager.control("recover", {**request, "authority_revision": "renewed"}, project())
+            )
         await asyncio.wait_for(entered.wait(), 1)
         lifecycle.handoff_pending = True
         release.set()
@@ -519,7 +629,9 @@ async def test_maintenance_fences_new_and_queued_input_resize_and_link_receipts(
     lifecycle = SimpleNamespace(handoff_pending=False)
     transport = FakeTransport()
     transport.block_write = asyncio.Event()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     owner = maintenance_owner(manager, lifecycle)
     request = create_request(manager)
     tasks = []
@@ -528,7 +640,9 @@ async def test_maintenance_fences_new_and_queued_input_resize_and_link_receipts(
         session = await settled(manager, request["session_id"])
         attachment = attach_request(manager, request)
         await manager.control("attach", attachment, project())
-        frame = lambda seq: TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 1, seq, b"x")
+        frame = lambda seq: TerminalFrame(
+            FrameKind.INPUT, session.id, manager.generation, 1, 1, seq, b"x"
+        )
         first = asyncio.create_task(manager.input(frame(1)))
         tasks.append(first)
         async with asyncio.timeout(1):
@@ -544,13 +658,17 @@ async def test_maintenance_fences_new_and_queued_input_resize_and_link_receipts(
             await manager.input(frame(3))
         assert error.value.code == "AGENT_MAINTENANCE"
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("resize", {**attachment, "resize_seq": "1", "cols": 80, "rows": 24}, project())
+            await manager.control(
+                "resize", {**attachment, "resize_seq": "1", "cols": 80, "rows": 24}, project()
+            )
         assert error.value.code == "AGENT_MAINTENANCE" and transport.size == (120, 30)
         with pytest.raises(TerminalProtocolError) as error:
             await manager.control("reserve_create", create_request(manager), project())
         assert error.value.code == "AGENT_MAINTENANCE"
         transport.block_write.set()
-        assert (await first)["status"] == "forwarded"  # It was written before handoff, never repeated.
+        assert (await first)[
+            "status"
+        ] == "forwarded"  # It was written before handoff, never repeated.
         with pytest.raises(TerminalProtocolError) as error:
             await queued
         assert error.value.code == "AGENT_MAINTENANCE"
@@ -560,9 +678,15 @@ async def test_maintenance_fences_new_and_queued_input_resize_and_link_receipts(
         link.manager = manager
         await link._input(frame(3), queue)
         assert (await queue.get())["reason_code"] == "AGENT_MAINTENANCE"
-        await link._control({"request_id": uuid.uuid4().hex, "action": "resize",
-                             "payload": {**attachment, "resize_seq": "1", "cols": 80, "rows": 24},
-                             "project": project()}, queue)
+        await link._control(
+            {
+                "request_id": uuid.uuid4().hex,
+                "action": "resize",
+                "payload": {**attachment, "resize_seq": "1", "cols": 80, "rows": 24},
+                "project": project(),
+            },
+            queue,
+        )
         assert (await queue.get())["error"]["code"] == "AGENT_MAINTENANCE"
         assert (await manager.control("status", request, project()))["session_id"] == session.id
         assert (await manager.control("close", request, project()))["remote_end_confirmed"]
@@ -577,7 +701,9 @@ async def test_maintenance_fences_new_and_queued_input_resize_and_link_receipts(
 @pytest.mark.asyncio
 async def test_maintenance_rechecks_attach_after_waiting_for_session_lock():
     lifecycle = SimpleNamespace(handoff_pending=False)
-    manager = TerminalSessionManager(emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None
+    )
     maintenance_owner(manager, lifecycle)
     request = create_request(manager)
     pending = None
@@ -585,7 +711,9 @@ async def test_maintenance_rechecks_attach_after_waiting_for_session_lock():
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         await session.attach_lock.acquire()
-        pending = asyncio.create_task(manager.control("attach", attach_request(manager, request), project()))
+        pending = asyncio.create_task(
+            manager.control("attach", attach_request(manager, request), project())
+        )
         await asyncio.sleep(0)
         lifecycle.handoff_pending = True
         session.attach_lock.release()
@@ -595,6 +723,40 @@ async def test_maintenance_rechecks_attach_after_waiting_for_session_lock():
     finally:
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
+        await manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_detach_waits_for_in_flight_agent_attach(monkeypatch):
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None
+    )
+    request = create_request(manager)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    tasks = []
+    try:
+        await admitted_create(manager, request)
+        session = await settled(manager, request["session_id"])
+        original_resume = manager._attachment_resume
+
+        async def delayed_resume(*args):
+            entered.set()
+            await resume.wait()
+            return await original_resume(*args)
+
+        monkeypatch.setattr(manager, "_attachment_resume", delayed_resume)
+        pending = attach_request(manager, request)
+        tasks.append(asyncio.create_task(manager.control("attach", pending, project())))
+        await asyncio.wait_for(entered.wait(), 1)
+        tasks.append(asyncio.create_task(manager.control("detach", pending, project())))
+        await asyncio.sleep(0)
+        resume.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 1)
+        assert not session.attached
+        assert session.state == "detached"
+    finally:
+        resume.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await manager.close_all()
 
 
@@ -614,8 +776,9 @@ async def test_maintenance_allows_only_close_authentication_to_resolve_detached_
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=events.append, connector=connector,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=events.append, connector=connector, authorize=lambda _: None, clock=lambda: current[0]
+    )
     maintenance_owner(manager, lifecycle)
     request = create_request(manager, mode="tmux")
     closing = None
@@ -626,14 +789,23 @@ async def test_maintenance_allows_only_close_authentication_to_resolve_detached_
         await manager.sweep()
         lifecycle.handoff_pending = True
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("auth_answer", {**request, "challenge_id": "old", "responses": ["fixture-code"]}, project())
+            await manager.control(
+                "auth_answer",
+                {**request, "challenge_id": "old", "responses": ["fixture-code"]},
+                project(),
+            )
         assert error.value.code == "AGENT_MAINTENANCE"
         closing = asyncio.create_task(manager.control("close", request, project()))
         async with asyncio.timeout(1):
             while session.challenge_id is None:
                 await asyncio.sleep(0)
-        assert (await manager.control("auth_answer", {**request, "challenge_id": session.challenge_id,
-                                                       "responses": ["fixture-code"]}, project()))["accepted"]
+        assert (
+            await manager.control(
+                "auth_answer",
+                {**request, "challenge_id": session.challenge_id, "responses": ["fixture-code"]},
+                project(),
+            )
+        )["accepted"]
         result = await closing
         assert result["remote_end_confirmed"] and not remote["exists"]
         assert remote["creates"] == 1 and not manager.maintenance_busy()
@@ -662,10 +834,20 @@ async def test_diagnostics_measure_real_stages_and_one_pause_until_its_lifecycle
             return await super().open_pty(*args, **kwargs)
 
     transport = Timed()
-    config = replace(DEFAULT_CONFIG, ring_bytes=65536, ssh_window_bytes=16384,
-                     output_high_water_bytes=32768, output_low_water_bytes=8192)
-    manager = TerminalSessionManager(emit=events.append, connector=lambda: transport,
-                                     authorize=lambda _: None, clock=lambda: current[0], config=config)
+    config = replace(
+        DEFAULT_CONFIG,
+        ring_bytes=65536,
+        ssh_window_bytes=16384,
+        output_high_water_bytes=32768,
+        output_low_water_bytes=8192,
+    )
+    manager = TerminalSessionManager(
+        emit=events.append,
+        connector=lambda: transport,
+        authorize=lambda _: None,
+        clock=lambda: current[0],
+        config=config,
+    )
     request = create_request(manager)
     try:
         creating = await admitted_create(manager, request)
@@ -699,8 +881,14 @@ async def test_diagnostics_measure_real_stages_and_one_pause_until_its_lifecycle
                     break
             assert not transport.paused
         elif release == "exit":
-            transport.on_exit({"exit_status": 0, "exit_signal": None,
-                               "output_complete": False, "reason_code": "OUTPUT_INCOMPLETE"})
+            transport.on_exit(
+                {
+                    "exit_status": 0,
+                    "exit_signal": None,
+                    "output_complete": False,
+                    "reason_code": "OUTPUT_INCOMPLETE",
+                }
+            )
         else:
             await manager.control(release, attach, project())
         current[0] += 1
@@ -738,8 +926,9 @@ async def test_diagnostics_include_failed_await_without_inventing_unrun_stage(fa
             current[0] += 0.25
             raise SSHTransportError("SSH_CHANNEL_CLOSED", "fixture PTY rejected")
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=Failure,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=Failure, authorize=lambda _: None, clock=lambda: current[0]
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -757,8 +946,12 @@ async def test_diagnostics_include_failed_await_without_inventing_unrun_stage(fa
 async def test_diagnostics_pause_clock_zero_and_counters_saturate():
     current = [0.0]
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        connector=lambda: transport,
+        authorize=lambda _: None,
+        clock=lambda: current[0],
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -788,8 +981,9 @@ async def test_tmux_lease_recovery_restarts_io_without_creating_another_shell():
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=events.append, connector=connector,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=events.append, connector=connector, authorize=lambda _: None, clock=lambda: current[0]
+    )
     request = create_request(manager, mode="auto")
     try:
         await admitted_create(manager, request)
@@ -804,12 +998,25 @@ async def test_tmux_lease_recovery_restarts_io_without_creating_another_shell():
         assert session.public()["recoverability"] == "reauthenticate"
         with pytest.raises(TerminalProtocolError):
             await manager.control("renew", request, project())
-        await manager.control("recover", {**request, "authority_revision": "fresh-recovery"}, project())
+        await manager.control(
+            "recover", {**request, "authority_revision": "fresh-recovery"}, project()
+        )
         await settled(manager, request["session_id"])
-        attachment.update(stream_epoch=str(session.stream_epoch), writer_epoch="3", attachment_id=uuid.uuid4().hex)
+        attachment.update(
+            stream_epoch=str(session.stream_epoch), writer_epoch="3", attachment_id=uuid.uuid4().hex
+        )
         await manager.control("attach", attachment, project())
-        result = await manager.input(TerminalFrame(FrameKind.INPUT, session.id, manager.generation,
-                                                   session.stream_epoch, 3, 1, b"pwd\r"))
+        result = await manager.input(
+            TerminalFrame(
+                FrameKind.INPUT,
+                session.id,
+                manager.generation,
+                session.stream_epoch,
+                3,
+                1,
+                b"pwd\r",
+            )
+        )
         transports[-1].on_data(b"resumed\r\n")
         for _ in range(4):
             await asyncio.sleep(0)
@@ -824,8 +1031,9 @@ async def test_tmux_lease_recovery_restarts_io_without_creating_another_shell():
 @pytest.mark.asyncio
 async def test_tmux_reauthorization_requires_new_revision_and_never_resurrects_closed_session():
     remote = {}
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: FakeTmuxTransport(remote),
-                                     authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: FakeTmuxTransport(remote), authorize=lambda _: None
+    )
     request = create_request(manager, mode="tmux")
     try:
         await admitted_create(manager, request)
@@ -836,14 +1044,18 @@ async def test_tmux_reauthorization_requires_new_revision_and_never_resurrects_c
             await manager.control("recover", request, project())
         assert error.value.code == "AUTH_RECONFIRM_REQUIRED"
         with pytest.raises(TerminalProtocolError):
-            await manager.control("renew", {**request, "authority_revision": "new-login"}, project())
+            await manager.control(
+                "renew", {**request, "authority_revision": "new-login"}, project()
+            )
         await manager.control("recover", {**request, "authority_revision": "new-login"}, project())
         await settled(manager, request["session_id"])
         assert not session.frozen and remote["creates"] == 1
         await manager.control("close", request, project())
         assert not remote["exists"]
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("recover", {**request, "authority_revision": "another-login"}, project())
+            await manager.control(
+                "recover", {**request, "authority_revision": "another-login"}, project()
+            )
         assert error.value.code == "SESSION_ENDED"
     finally:
         await manager.close_all()
@@ -865,13 +1077,17 @@ async def test_recover_cannot_overwrite_revocation_while_old_transport_close_is_
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None
+    )
     request = create_request(manager, mode="tmux")
     try:
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         transports[0].closed = True  # The underlying TCP connection was lost.
-        recovery = asyncio.create_task(manager.control("recover", {**request, "authority_revision": "new-auth"}, project()))
+        recovery = asyncio.create_task(
+            manager.control("recover", {**request, "authority_revision": "new-auth"}, project())
+        )
         await asyncio.wait_for(closing.wait(), 1)
         revoked = asyncio.create_task(manager.control("revoke", request, project()))
         for _ in range(3):
@@ -899,7 +1115,9 @@ async def test_cancelled_close_receipt_does_not_cancel_bounded_cleanup():
             self.closed = True
 
     transport = Delayed()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -920,8 +1138,12 @@ async def test_cancelled_close_receipt_does_not_cancel_bounded_cleanup():
 @pytest.mark.asyncio
 async def test_detached_tmux_close_requires_credentials_and_can_reconcile_unknown_result():
     current, remote = [0.0], {}
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: FakeTmuxTransport(remote),
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        connector=lambda: FakeTmuxTransport(remote),
+        authorize=lambda _: None,
+        clock=lambda: current[0],
+    )
     request = create_request(manager, mode="tmux")
     try:
         await admitted_create(manager, request)
@@ -929,7 +1151,11 @@ async def test_detached_tmux_close_requires_credentials_and_can_reconcile_unknow
         current[0] += manager.config.lease_seconds + 1
         await manager.sweep()
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("close", {key: value for key, value in request.items() if key != "password"}, project())
+            await manager.control(
+                "close",
+                {key: value for key, value in request.items() if key != "password"},
+                project(),
+            )
         assert error.value.code == "REMOTE_END_UNCONFIRMED" and remote["exists"]
         remote["uncertain_close"] = True
         with pytest.raises(TerminalProtocolError):
@@ -947,8 +1173,9 @@ async def test_detached_tmux_close_requires_credentials_and_can_reconcile_unknow
 @pytest.mark.asyncio
 async def test_unknown_tmux_create_never_falls_back_to_direct_or_repeats_create():
     remote = {"uncertain_create": True}
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: FakeTmuxTransport(remote),
-                                     authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: FakeTmuxTransport(remote), authorize=lambda _: None
+    )
     request = create_request(manager, mode="auto")
     try:
         await admitted_create(manager, request)
@@ -957,7 +1184,9 @@ async def test_unknown_tmux_create_never_falls_back_to_direct_or_repeats_create(
         assert session.reason == "SSH_CONTROL_UNCERTAIN"
         await admitted_create(manager, request)
         assert remote["creates"] == 1
-        await manager.control("recover", {**request, "authority_revision": "new-confirmation"}, project())
+        await manager.control(
+            "recover", {**request, "authority_revision": "new-confirmation"}, project()
+        )
         await settled(manager, request["session_id"])
         assert session.state == "ready" and remote["creates"] == 1
     finally:
@@ -977,14 +1206,18 @@ async def test_cross_generation_auth_failure_retains_original_tmux_recoverabilit
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None
+    )
     request = create_request(manager, mode="tmux", recover=True)
     try:
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         assert session.state == "failed" and session.mode == "tmux"
         assert session.public()["recoverability"] == "reauthenticate"
-        await manager.control("recover", {**request, "authority_revision": "fixed-credential"}, project())
+        await manager.control(
+            "recover", {**request, "authority_revision": "fixed-credential"}, project()
+        )
         await settled(manager, request["session_id"])
         assert session.state == "ready" and session.mode == "tmux"
         assert remote.get("creates", 0) == 0
@@ -1006,7 +1239,9 @@ async def test_close_during_tmux_reauthentication_reconciles_the_existing_remote
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=lambda _: None, connector=connector, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=connector, authorize=lambda _: None
+    )
     request = create_request(manager, mode="tmux", recover=True)
     try:
         await admitted_create(manager, request)
@@ -1023,8 +1258,12 @@ async def test_close_during_tmux_reauthentication_reconciles_the_existing_remote
 async def test_uncertain_persistent_creation_keeps_its_session_reservation():
     remote = {"uncertain_create": True}
     config = replace(DEFAULT_CONFIG, max_sessions_per_agent=1, max_sessions_per_user=1)
-    manager = TerminalSessionManager(emit=lambda _: None, config=config,
-                                     connector=lambda: FakeTmuxTransport(remote), authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        config=config,
+        connector=lambda: FakeTmuxTransport(remote),
+        authorize=lambda _: None,
+    )
     request = create_request(manager, mode="auto")
     try:
         await admitted_create(manager, request)
@@ -1051,23 +1290,35 @@ async def test_late_old_writer_error_does_not_freeze_new_writer_tracker():
             raise TimeoutError("old writer")
 
     transport.wait_writable = wait_writable
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         attachment = attach_request(manager, request)
         await manager.control("attach", attachment, project())
-        old = asyncio.create_task(manager.input(TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 1, 1, b"old\r")))
+        old = asyncio.create_task(
+            manager.input(
+                TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 1, 1, b"old\r")
+            )
+        )
         for _ in range(3):
             await asyncio.sleep(0)
         tracker = session.tracker
-        await manager.control("attach", {**attachment, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"}, project())
+        await manager.control(
+            "attach",
+            {**attachment, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"},
+            project(),
+        )
         wake.set()
         with pytest.raises(TerminalProtocolError):
             await old
         assert session.input_enabled and session.tracker is not tracker
-        result = await manager.input(TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 2, 1, b"new\r"))
+        result = await manager.input(
+            TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 2, 1, b"new\r")
+        )
         assert result["writer_epoch"] == "2" and result["status"] == "forwarded"
         assert transport.writes == [b"old\r", b"new\r"]
     finally:
@@ -1084,7 +1335,9 @@ async def test_closed_data_queue_detaches_and_new_attachment_resumes_output():
         events.append(event)
 
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=emit, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=emit, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -1096,16 +1349,30 @@ async def test_closed_data_queue_detaches_and_new_attachment_resumes_output():
             await asyncio.sleep(0)
         assert not session.attached and not session.pump_task.done()
         fail[0] = False
-        await manager.control("attach", {**attachment, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"}, project())
+        await manager.control(
+            "attach",
+            {**attachment, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"},
+            project(),
+        )
         for _ in range(3):
             await asyncio.sleep(0)
-        assert b"".join(item["payload"] for item in events if item["type"] == "terminal_output") == b"retained-output"
+        assert (
+            b"".join(item["payload"] for item in events if item["type"] == "terminal_output")
+            == b"retained-output"
+        )
     finally:
         await manager.close_all()
 
 
-@pytest.mark.parametrize("line", ["Include=custom.conf", "Include = custom.conf",
-                                   "Include =custom.conf", "Include= custom.conf"])
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Include=custom.conf",
+        "Include = custom.conf",
+        "Include =custom.conf",
+        "Include= custom.conf",
+    ],
+)
 def test_native_include_equals_cannot_hide_custom_trust(tmp_path, line):
     directory = tmp_path / ".ssh"
     directory.mkdir()
@@ -1125,7 +1392,9 @@ async def test_same_create_after_resize_does_not_open_second_shell():
         transports.append(transport)
         return transport
 
-    manager = TerminalSessionManager(emit=events.append, connector=connector, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=events.append, connector=connector, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         result = await admitted_create(manager, request)
@@ -1133,7 +1402,9 @@ async def test_same_create_after_resize_does_not_open_second_shell():
         session = await settled(manager, request["session_id"])
         attach = attach_request(manager, request)
         await manager.control("attach", attach, project())
-        await manager.control("resize", {**attach, "resize_seq": "1", "cols": 150, "rows": 40}, project())
+        await manager.control(
+            "resize", {**attach, "resize_seq": "1", "cols": 150, "rows": 40}, project()
+        )
         await admitted_create(manager, request)
         assert len(transports) == 1
         assert session.target["cols"] == 150
@@ -1146,19 +1417,28 @@ async def test_same_create_after_resize_does_not_open_second_shell():
 @pytest.mark.asyncio
 async def test_inputs_at_most_once_and_old_writer_fenced():
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
         await settled(manager, request["session_id"])
         attach = attach_request(manager, request)
         await manager.control("attach", attach, project())
-        frame = TerminalFrame(FrameKind.INPUT, request["session_id"], manager.generation, 1, 1, 1, b"whoami\r")
+        frame = TerminalFrame(
+            FrameKind.INPUT, request["session_id"], manager.generation, 1, 1, 1, b"whoami\r"
+        )
         assert (await manager.input(frame))["status"] == "forwarded"
         assert (await manager.input(frame))["status"] == "forwarded"
         assert transport.writes == [b"whoami\r"]
-        assert manager.sessions[request["session_id"]].input_task.get_coro().cr_frame.f_locals["frame"] is None
-        await manager.control("attach", {**attach, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"}, project())
+        assert (
+            manager.sessions[request["session_id"]].input_task.get_coro().cr_frame.f_locals["frame"]
+            is None
+        )
+        await manager.control(
+            "attach", {**attach, "attachment_id": uuid.uuid4().hex, "writer_epoch": "2"}, project()
+        )
         with pytest.raises(TerminalProtocolError, match="不可输入|接管"):
             await manager.input(frame)
     finally:
@@ -1169,15 +1449,22 @@ async def test_inputs_at_most_once_and_old_writer_fenced():
 async def test_revocation_does_not_wait_for_blocked_ssh_write():
     transport = FakeTransport()
     transport.block_write = asyncio.Event()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         attach = attach_request(manager, request)
         await manager.control("attach", attach, project())
-        task = asyncio.create_task(manager.input(TerminalFrame(
-            FrameKind.INPUT, request["session_id"], manager.generation, 1, 1, 1, b"secret\r")))
+        task = asyncio.create_task(
+            manager.input(
+                TerminalFrame(
+                    FrameKind.INPUT, request["session_id"], manager.generation, 1, 1, 1, b"secret\r"
+                )
+            )
+        )
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         await asyncio.wait_for(manager.control("revoke", request, project()), 0.5)
@@ -1194,7 +1481,9 @@ async def test_revocation_does_not_wait_for_blocked_ssh_write():
 async def test_output_credit_blocks_until_consumption_ack_and_fences_old_attachment():
     events = []
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=events.append, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=events.append, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -1207,9 +1496,18 @@ async def test_output_credit_blocks_until_consumption_ack_and_fences_old_attachm
             await asyncio.sleep(0)
         output = [e for e in events if e["type"] == "terminal_output"]
         assert sum(len(e["payload"]) for e in output) == manager.config.output_high_water_bytes
-        assert not (await manager.acknowledge({**attach, "attachment_id": uuid.uuid4().hex,
-                                              "rendered_offset": str(manager.config.output_high_water_bytes)}))["accepted"]
-        await manager.acknowledge({**attach, "rendered_offset": str(manager.config.output_high_water_bytes)})
+        assert not (
+            await manager.acknowledge(
+                {
+                    **attach,
+                    "attachment_id": uuid.uuid4().hex,
+                    "rendered_offset": str(manager.config.output_high_water_bytes),
+                }
+            )
+        )["accepted"]
+        await manager.acknowledge(
+            {**attach, "rendered_offset": str(manager.config.output_high_water_bytes)}
+        )
         for _ in range(4):
             await asyncio.sleep(0)
         assert sum(len(e["payload"]) for e in events if e["type"] == "terminal_output") == len(data)
@@ -1221,7 +1519,9 @@ async def test_output_credit_blocks_until_consumption_ack_and_fences_old_attachm
 @pytest.mark.asyncio
 async def test_direct_new_renderer_after_ring_gap_is_rejected():
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=lambda: transport, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -1231,7 +1531,9 @@ async def test_direct_new_renderer_after_ring_gap_is_rejected():
         await manager.control("detach", attach, project())
         transport.on_data(b"x" * (manager.config.ring_bytes + 1))
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("attach", attach_request(manager, request, writer_epoch="2"), project())
+            await manager.control(
+                "attach", attach_request(manager, request, writer_epoch="2"), project()
+            )
         assert error.value.code == "HISTORY_GAP"
     finally:
         await manager.close_all()
@@ -1241,8 +1543,12 @@ async def test_direct_new_renderer_after_ring_gap_is_rejected():
 async def test_lease_expiry_closes_direct_without_browser_cleanup():
     current = [0.0]
     transport = FakeTransport()
-    manager = TerminalSessionManager(emit=lambda _: None, connector=lambda: transport,
-                                     authorize=lambda _: None, clock=lambda: current[0])
+    manager = TerminalSessionManager(
+        emit=lambda _: None,
+        connector=lambda: transport,
+        authorize=lambda _: None,
+        clock=lambda: current[0],
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -1272,8 +1578,10 @@ def test_accept_new_rechecks_concurrent_first_key_and_keeps_existing_content(tmp
     path.write_text("# existing comment\n")
     one = HostKeyPolicy(ssh, "accept-new", sources=[path])
     two = HostKeyPolicy(ssh, "accept-new", sources=[path])
-    key1, key2 = (ssh.import_public_key(ssh.generate_private_key("ssh-ed25519").export_public_key())
-                  for _ in range(2))
+    key1, key2 = (
+        ssh.import_public_key(ssh.generate_private_key("ssh-ed25519").export_public_key())
+        for _ in range(2)
+    )
     assert one.validate_candidate("server", "127.0.0.1", 2222, key1)
     assert two.validate_candidate("server", "127.0.0.1", 2222, key2)
     one.commit_before_authentication()
@@ -1289,11 +1597,17 @@ def test_accept_new_rechecks_concurrent_first_key_and_keeps_existing_content(tmp
 def test_hashed_host_revocation_and_no_nondefault_port_fallback(tmp_path):
     import base64
     import hmac
+
     ssh = pytest.importorskip("asyncssh")
     key = ssh.import_public_key(ssh.generate_private_key("ssh-ed25519").export_public_key())
     public = key.export_public_key().decode().strip()
     salt = b"s" * 20
-    hashed = "|1|" + base64.b64encode(salt).decode() + "|" + base64.b64encode(hmac.new(salt, b"server", hashlib.sha1).digest()).decode()
+    hashed = (
+        "|1|"
+        + base64.b64encode(salt).decode()
+        + "|"
+        + base64.b64encode(hmac.new(salt, b"server", hashlib.sha1).digest()).decode()
+    )
     path = tmp_path / "known_hosts"
     path.write_text(hashed + " " + public + "\n")
     policy = HostKeyPolicy(ssh, "strict", sources=[path])
@@ -1351,13 +1665,21 @@ async def test_real_asyncssh_password_pty_resize_binary_and_eof(tmp_path):
             return Echo()
 
     host_key = ssh.generate_private_key("ssh-ed25519")
-    server = await ssh.create_server(Server, "127.0.0.1", 0, server_host_keys=[host_key],
-                                     encoding=None, line_editor=False)
+    server = await ssh.create_server(
+        Server, "127.0.0.1", 0, server_host_keys=[host_key], encoding=None, line_editor=False
+    )
     transport = AsyncSSHTransport(DEFAULT_CONFIG, trust_sources=[tmp_path / "known_hosts"])
     output, finished = [], asyncio.get_running_loop().create_future()
     try:
-        await transport.connect({"host": "127.0.0.1", "port": server.get_port(),
-                                 "username": "fixture", "host_key_policy": "accept-new"}, "fixture-password")
+        await transport.connect(
+            {
+                "host": "127.0.0.1",
+                "port": server.get_port(),
+                "username": "fixture",
+                "host_key_policy": "accept-new",
+            },
+            "fixture-password",
+        )
         await transport.open_pty(120, 30, output.append, lambda event: finished.set_result(event))
         transport.resize(90, 25)
         transport.write("中文".encode() + b"\x00\xff")
@@ -1393,13 +1715,21 @@ async def test_real_unknown_host_never_receives_password(tmp_path):
             passwords.append(password)
             return True
 
-    server = await ssh.create_server(Server, "127.0.0.1", 0,
-                                     server_host_keys=[ssh.generate_private_key("ssh-ed25519")])
+    server = await ssh.create_server(
+        Server, "127.0.0.1", 0, server_host_keys=[ssh.generate_private_key("ssh-ed25519")]
+    )
     transport = AsyncSSHTransport(DEFAULT_CONFIG, trust_sources=[tmp_path / "known_hosts"])
     try:
         with pytest.raises((SSHTransportError, HostTrustError)) as error:
-            await transport.connect({"host": "127.0.0.1", "port": server.get_port(),
-                                     "username": "fixture", "host_key_policy": "strict"}, "sensitive-fixture")
+            await transport.connect(
+                {
+                    "host": "127.0.0.1",
+                    "port": server.get_port(),
+                    "username": "fixture",
+                    "host_key_policy": "strict",
+                },
+                "sensitive-fixture",
+            )
         assert error.value.code == "HOST_KEY_UNKNOWN"
         assert passwords == []
         assert not (tmp_path / "known_hosts").exists()
@@ -1432,13 +1762,21 @@ async def test_real_keyboard_interactive_challenge_is_bounded_and_answered_in_me
         challenges.append((name, instruction, prompts))
         return ["123456"]
 
-    server = await ssh.create_server(Server, "127.0.0.1", 0,
-                                     server_host_keys=[ssh.generate_private_key("ssh-ed25519")])
+    server = await ssh.create_server(
+        Server, "127.0.0.1", 0, server_host_keys=[ssh.generate_private_key("ssh-ed25519")]
+    )
     transport = AsyncSSHTransport(DEFAULT_CONFIG, trust_sources=[tmp_path / "known_hosts"])
     try:
-        await transport.connect({"host": "127.0.0.1", "port": server.get_port(),
-                                 "username": "fixture", "host_key_policy": "accept-new"},
-                                "saved-password", challenge=challenge)
+        await transport.connect(
+            {
+                "host": "127.0.0.1",
+                "port": server.get_port(),
+                "username": "fixture",
+                "host_key_policy": "accept-new",
+            },
+            "saved-password",
+            challenge=challenge,
+        )
         assert transport.connected
         assert received == [("123456",)]
         assert len(challenges) == 1 and challenges[0][2] == [("Verification code: ", False)]
@@ -1459,7 +1797,9 @@ async def test_manager_auth_answer_obeys_revocation_and_does_not_leak_responses(
             answered.append(response)
             return self
 
-    manager = TerminalSessionManager(emit=events.append, connector=Interactive, authorize=lambda _: None)
+    manager = TerminalSessionManager(
+        emit=events.append, connector=Interactive, authorize=lambda _: None
+    )
     request = create_request(manager)
     try:
         await admitted_create(manager, request)
@@ -1467,16 +1807,28 @@ async def test_manager_auth_answer_obeys_revocation_and_does_not_leak_responses(
             await asyncio.sleep(0)
         event = next(item for item in events if item["type"] == "terminal_auth_challenge")
         assert event["deadline_seconds"] <= 120
-        await manager.control("auth_answer", {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]}, project())
+        await manager.control(
+            "auth_answer",
+            {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]},
+            project(),
+        )
         session = await settled(manager, request["session_id"])
         assert answered == [["654321"]] and session.challenge is None
         assert "654321" not in repr(events) and "654321" not in repr(session.target)
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("auth_answer", {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]}, project())
+            await manager.control(
+                "auth_answer",
+                {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]},
+                project(),
+            )
         assert error.value.code == "AUTH_CHALLENGE_EXPIRED"
         await manager.control("revoke", request, project())
         with pytest.raises(TerminalProtocolError) as error:
-            await manager.control("auth_answer", {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]}, project())
+            await manager.control(
+                "auth_answer",
+                {**request, "challenge_id": event["challenge_id"], "responses": ["654321"]},
+                project(),
+            )
         assert error.value.code == "AUTH_REVOKED"
     finally:
         await manager.close_all()
@@ -1485,9 +1837,14 @@ async def test_manager_auth_answer_obeys_revocation_and_does_not_leak_responses(
 @pytest.mark.asyncio
 async def test_real_100_mib_stream_has_bounded_buffers_and_final_sentinel(tmp_path):
     ssh = pytest.importorskip("asyncssh")
-    config = replace(DEFAULT_CONFIG, ring_bytes=65536, ssh_window_bytes=16384,
-                     output_high_water_bytes=32768, output_low_water_bytes=8192,
-                     lease_seconds=120)
+    config = replace(
+        DEFAULT_CONFIG,
+        ring_bytes=65536,
+        ssh_window_bytes=16384,
+        output_high_water_bytes=32768,
+        output_low_water_bytes=8192,
+        lease_seconds=120,
+    )
     chunk = bytes(range(256)) * 64
     rounds = 100 * 1024 * 1024 // len(chunk)
     sentinel = b"\r\ncodepier-final-sentinel\r\n"
@@ -1542,8 +1899,14 @@ async def test_real_100_mib_stream_has_bounded_buffers_and_final_sentinel(tmp_pa
         def session_requested(self):
             return Stream()
 
-    server = await ssh.create_server(Server, "127.0.0.1", 0, encoding=None, line_editor=False,
-                                     server_host_keys=[ssh.generate_private_key("ssh-ed25519")])
+    server = await ssh.create_server(
+        Server,
+        "127.0.0.1",
+        0,
+        encoding=None,
+        line_editor=False,
+        server_host_keys=[ssh.generate_private_key("ssh-ed25519")],
+    )
     actual, total, max_ring = hashlib.sha256(), [0], [0]
     finished = asyncio.get_running_loop().create_future()
     attachment = None
@@ -1557,20 +1920,29 @@ async def test_real_100_mib_stream_has_bounded_buffers_and_final_sentinel(tmp_pa
             # Make the downstream consumer slower than the peer. Credit is
             # returned only after this simulated terminal rendering completes.
             await asyncio.sleep(0.0001)
-            await manager.acknowledge({**attachment,
-                                       "rendered_offset": str(int(event["offset"]) + len(event["payload"]))})
+            await manager.acknowledge(
+                {**attachment, "rendered_offset": str(int(event["offset"]) + len(event["payload"]))}
+            )
         elif event["type"] == "terminal_exit" and not finished.done():
             finished.set_result(event)
 
-    manager = TerminalSessionManager(emit=consume, config=config, authorize=lambda _: None,
-                                     connector=lambda: AsyncSSHTransport(config, trust_sources=[tmp_path / "known_hosts"]))
-    request = create_request(manager, host="127.0.0.1", port=server.get_port(), host_key_policy="accept-new")
+    manager = TerminalSessionManager(
+        emit=consume,
+        config=config,
+        authorize=lambda _: None,
+        connector=lambda: AsyncSSHTransport(config, trust_sources=[tmp_path / "known_hosts"]),
+    )
+    request = create_request(
+        manager, host="127.0.0.1", port=server.get_port(), host_key_policy="accept-new"
+    )
     try:
         await admitted_create(manager, request)
         session = await settled(manager, request["session_id"])
         attachment = attach_request(manager, request)
         await manager.control("attach", attachment, project())
-        await manager.input(TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 1, 1, b"start\r"))
+        await manager.input(
+            TerminalFrame(FrameKind.INPUT, session.id, manager.generation, 1, 1, 1, b"start\r")
+        )
         event = await asyncio.wait_for(finished, 30)
         assert total[0] == 100 * 1024 * 1024 + len(sentinel)
         assert actual.digest() == expected.digest()
@@ -1591,6 +1963,7 @@ async def test_real_100_mib_stream_has_bounded_buffers_and_final_sentinel(tmp_pa
 async def test_tmux_create_recover_close_never_creates_during_recovery(tmp_path, monkeypatch):
     import socket
     import tempfile
+
     binary = shutil.which("tmux")
     if not binary:
         pytest.skip("An isolated tmux binary is required")
@@ -1607,7 +1980,8 @@ async def test_tmux_create_recover_close_never_creates_during_recovery(tmp_path,
     class LocalControl:
         async def run_control(self, command, **kwargs):
             process = await asyncio.create_subprocess_shell(
-                command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+                command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            )
             output, _ = await asyncio.wait_for(process.communicate(), 5)
             return process.returncode, output
 
@@ -1621,7 +1995,11 @@ async def test_tmux_create_recover_close_never_creates_during_recovery(tmp_path,
         assert await controller.exists()
         await controller.recover()
         code, output = await controller.transport.run_control(
-            controller.reference.prefix() + " display-message -p -t " + controller.reference.session + " '#{history_limit}'")
+            controller.reference.prefix()
+            + " display-message -p -t "
+            + controller.reference.session
+            + " '#{history_limit}'"
+        )
         assert code == 0 and output.strip() == str(DEFAULT_CONFIG.tmux_history_lines).encode()
         await controller.close()
         assert not await controller.exists()
@@ -1633,8 +2011,9 @@ async def test_tmux_create_recover_close_never_creates_during_recovery(tmp_path,
         short_directory.cleanup()
 
 
-
-@pytest.mark.parametrize("malformed", ["server ssh-ed25519", "@revoked {bare}", "ssh-ed25519 {invalid}"])
+@pytest.mark.parametrize(
+    "malformed", ["server ssh-ed25519", "@revoked {bare}", "ssh-ed25519 {invalid}"]
+)
 def test_malformed_scoped_or_noncanonical_known_hosts_records_fail_closed(tmp_path, malformed):
     ssh = pytest.importorskip("asyncssh")
     bare = ssh.generate_private_key("ssh-ed25519").export_public_key().decode().strip()
@@ -1670,10 +2049,12 @@ def test_direct_vps_denial_and_link_hello_capabilities():
     from agent.ssh_terminal_link import AgentTerminalLink
 
     assert direct_vps_denial({}) == (
-        "SHELL_DISABLED", "请在本机 Agent 配置中开启 shell.enabled 执行权限",
+        "SHELL_DISABLED",
+        "请在本机 Agent 配置中开启 shell.enabled 执行权限",
     )
     assert direct_vps_denial({"shell": {"enabled": True, "projects": ["Alpha"]}}) == (
-        "SHELL_NOT_ALLOWED", "无项目直连 VPS 需要本机 shell.projects 包含 * 授权",
+        "SHELL_NOT_ALLOWED",
+        "无项目直连 VPS 需要本机 shell.projects 包含 * 授权",
     )
     assert direct_vps_denial({"shell": {"enabled": True, "projects": ["*"]}}) is None
 
@@ -1693,8 +2074,13 @@ def test_direct_vps_denial_and_link_hello_capabilities():
 async def test_manager_direct_vps_gate_and_cross_mode_isolation():
     agent_stub = SimpleNamespace(config={"shell": {"enabled": False, "projects": []}})
     manager = TerminalSessionManager(agent=agent_stub, emit=lambda _: None, connector=FakeTransport)
-    direct = {"_direct_vps": True, "id": "", "root": "",
-              "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+    direct = {
+        "_direct_vps": True,
+        "id": "",
+        "root": "",
+        "_terminal_owner": "user:owner-a",
+        "_terminal_space": "space-a",
+    }
     try:
         with pytest.raises(TerminalProtocolError) as bad_path:
             await manager.control("list", {}, {**direct, "root": "/not-allowed"})
@@ -1715,9 +2101,16 @@ async def test_manager_direct_vps_gate_and_cross_mode_isolation():
         await admitted_create(manager, req, direct)
         await settled(manager, req["session_id"])
 
-        isolated_mgr = TerminalSessionManager(emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None)
+        isolated_mgr = TerminalSessionManager(
+            emit=lambda _: None, connector=FakeTransport, authorize=lambda _: None
+        )
         isolated_mgr.sessions.update(manager.sessions)
-        non_direct = {"id": "", "root": "", "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
+        non_direct = {
+            "id": "",
+            "root": "",
+            "_terminal_owner": "user:owner-a",
+            "_terminal_space": "space-a",
+        }
         with pytest.raises(TerminalProtocolError) as cross:
             await isolated_mgr.control("status", {"session_id": req["session_id"]}, non_direct)
         assert cross.value.code == "SESSION_NOT_FOUND"
@@ -1753,12 +2146,23 @@ async def test_manager_stateless_probe_redaction_and_error_classification():
         transports.append(item)
         return item
 
-    direct = {"_direct_vps": True, "id": "", "root": "",
-              "_terminal_owner": "user:owner-a", "_terminal_space": "space-a"}
-    manager = TerminalSessionManager(emit=lambda _: None, connector=make_ok, authorize=lambda _: None)
+    direct = {
+        "_direct_vps": True,
+        "id": "",
+        "root": "",
+        "_terminal_owner": "user:owner-a",
+        "_terminal_space": "space-a",
+    }
+    manager = TerminalSessionManager(
+        emit=lambda _: None, connector=make_ok, authorize=lambda _: None
+    )
     payload = {
-        "host": "server.example.invalid", "port": 2222, "username": "root",
-        "password": "fixture-secret-only", "host_key_policy": "accept-new", "timeout_seconds": 99,
+        "host": "server.example.invalid",
+        "port": 2222,
+        "username": "root",
+        "password": "fixture-secret-only",
+        "host_key_policy": "accept-new",
+        "timeout_seconds": 99,
     }
     res = await manager.control("probe", payload, direct)
     assert res["ok"] is True and res["state"] == "succeeded" and res["exit_code"] == 0
@@ -1768,7 +2172,9 @@ async def test_manager_stateless_probe_redaction_and_error_classification():
     assert transports[0].closed is True and manager.sessions == {}
 
     fail_mgr = TerminalSessionManager(
-        emit=lambda _: None, connector=lambda: ProbeTransport(fail=True), authorize=lambda _: None,
+        emit=lambda _: None,
+        connector=lambda: ProbeTransport(fail=True),
+        authorize=lambda _: None,
     )
     failed = await fail_mgr.control("probe", {**payload, "password": "fixture-secret-only"}, direct)
     assert failed["ok"] is False and failed["state"] == "failed" and failed["exit_code"] is None

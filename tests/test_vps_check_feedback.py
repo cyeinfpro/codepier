@@ -216,7 +216,7 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
   );
 
   const navigated = [], openedCalls = [];
-  let apiReads = 0;
+  let apiReads = 0, presenceReads = 0;
   const termScope = {
     S: {session: {user_id: 'u-1'}, space_id: 'space-1', page: 'vps'},
     location: {hash: '#vps'},
@@ -230,6 +230,10 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
     icon: name => `<i data-icon="${name}"></i>`,
     navigate: async dest => { navigated.push(dest); },
     api: async url => {
+      if (url === '/api/vps-terminal/sessions') {
+        presenceReads++;
+        return {sessions: [{session_id: 'sess-77', vps_id: 'vps-1', state: 'running'}]};
+      }
       apiReads++;
       assert.equal(url, '/api/vps/vps-1');
       return {
@@ -249,10 +253,25 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
   };
   vm.createContext(termScope);
   vm.runInContext(source, termScope);
+  // A local session is visible only after the module belongs to this login/space.
+  await termScope.vpsTerminalModule();
   await termScope.vpsOpenTerminal('vps-1');
-  assert.equal(apiReads, 0, 'existing active session must navigate without GET /api/vps/:id');
+  assert.equal(presenceReads, 0, 'existing local session must not query Hub presence');
+  assert.equal(apiReads, 0, 'existing local session must not fetch VPS metadata');
   assert.deepEqual(navigated, ['vps?view=terminal&session=sess-77']);
+  assert.equal(openedCalls.length, 0, 'returning to a local session must not create a new one');
+
+  // A cold browser does not own the local record and instead finds its session at the Hub.
+  termScope.vpsTerminalForget();
+  await termScope.vpsOpenTerminal('vps-1');
+  assert.equal(presenceReads, 1);
+  assert.equal(apiReads, 0, 'discovered existing session must not fetch VPS metadata');
+  assert.deepEqual(navigated, [
+    'vps?view=terminal&session=sess-77', 'vps?view=terminal&session=sess-77',
+  ]);
+  assert.equal(openedCalls.length, 0, 'returning to a discovered session must not create a new one');
   await termScope.vpsOpenTerminal('vps-1', null, {newSession: true});
+  assert.equal(presenceReads, 1);
   assert.equal(apiReads, 1);
   assert.equal(openedCalls.length, 1);
   assert.equal(openedCalls[0].newSession, true);

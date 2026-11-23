@@ -401,7 +401,13 @@ def _schemas(config: TerminalConfig) -> tuple[dict, dict]:
                 "state": _STATE,
                 "start_offset": _counter,
             },
-            {"output_end_offset": _counter, "next_input_seq": _counter, **dims},
+            {
+                "output_end_offset": _counter,
+                "next_input_seq": _counter,
+                "history_incomplete": _boolean,
+                "history_recovery": _enum("live_tail"),
+                **dims,
+            },
         ),
         "input_ack": (
             {

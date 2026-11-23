@@ -1,3 +1,9 @@
+import { computeTerminalViewport } from './viewport.mjs';
+
+const MOBILE_LAYOUT = '(max-width: 700px), (pointer: coarse) and (max-height: 500px)';
+const EDITABLE =
+  '.xterm-helper-textarea, input:not([type=button]):not([type=checkbox]), textarea, [contenteditable=true]';
+
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -50,25 +56,12 @@ export class TerminalLayout {
     this.tabList = el('div', 'vt-tabs');
     this.tabList.setAttribute('role', 'tablist');
     this.tabList.setAttribute('aria-label', 'SSH 会话');
-    this.newButton = action(
-      '＋ 新建',
-      () => {
-        const current = this.focused();
-        if (current) {
-          this.closeQuickConnect();
-          this.run(() => store.duplicate(current));
-        } else {
-          this.toggleQuickConnect();
-        }
-      },
-      'vt-new',
-    );
-    this.quickConnectButton = action('▾', () => this.toggleQuickConnect(), 'vt-new-pick');
-    this.quickConnectButton.setAttribute('aria-label', '选择服务器新建终端');
-    this.quickConnectButton.setAttribute('aria-haspopup', 'dialog');
-    this.quickConnectButton.setAttribute('aria-expanded', 'false');
+    this.newButton = action('＋ 新建', () => this.toggleQuickConnect(), 'vt-new');
+    this.newButton.setAttribute('aria-haspopup', 'dialog');
+    this.newButton.setAttribute('aria-expanded', 'false');
+    this.newButton.setAttribute('aria-controls', 'vt-server-picker');
     this.quickConnect = this.makeQuickConnect();
-    this.tabRow.append(this.tabList, this.newButton, this.quickConnectButton, this.quickConnect);
+    this.tabRow.append(this.tabList, this.newButton, this.quickConnect);
 
     this.toolbar = el('div', 'vt-toolbar');
     this.toolbar.setAttribute('aria-label', '终端操作');
@@ -83,7 +76,11 @@ export class TerminalLayout {
     this.fullscreenButton = action('全屏', () => this.toggleFullscreen());
     this.diagnosticsButton = action('诊断', () => this.focused()?.view.toggleDiagnostics());
     this.settingsDetails = this.makeSettings();
-    this.endButton = action('结束会话', () => this.confirmClose(), 'vt-end');
+    this.endButton = action(
+      '结束会话',
+      () => this.confirmClose(this.focused(), this.endButton),
+      'vt-end',
+    );
     this.toolbar.append(
       this.findButton,
       this.copyButton,
@@ -100,12 +97,13 @@ export class TerminalLayout {
     this.error.setAttribute('role', 'alert');
     this.confirm = el('div', 'vt-close-confirm');
     this.confirm.hidden = true;
+    this.confirm.setAttribute('role', 'alertdialog');
+    this.confirm.setAttribute('aria-labelledby', 'vt-close-confirm-title');
     this.recent = el('section', 'vt-recent');
     this.recent.hidden = true;
 
     this.deck = el('div', 'vt-deck');
-    this.primary = el('div', 'vt-slot vt-primary-slot');
-    this.secondary = el('div', 'vt-slot vt-secondary-slot');
+    this.paneHosts = new Map();
     this.gutter = el('div', 'vt-gutter');
     this.gutter.tabIndex = 0;
     this.gutter.setAttribute('role', 'separator');
@@ -114,10 +112,7 @@ export class TerminalLayout {
     this.gutter.setAttribute('aria-valuemin', '25');
     this.gutter.setAttribute('aria-valuemax', '75');
     this.gutter.setAttribute('aria-valuenow', '50');
-    this.deck.append(this.primary, this.gutter, this.secondary);
-
-    this.stash = el('div', 'vt-stash');
-    this.stash.hidden = true;
+    this.deck.append(this.gutter);
 
     this.empty = this.makeEmpty();
 
@@ -130,7 +125,6 @@ export class TerminalLayout {
       this.recent,
       this.deck,
       this.empty,
-      this.stash,
     );
     this.parking = el('div', 'vt-parking');
     this.parking.hidden = true;
@@ -139,6 +133,10 @@ export class TerminalLayout {
 
     this.viewport = () => this.fitViewport();
     window.addEventListener('resize', this.viewport);
+    window.addEventListener('orientationchange', this.viewport);
+    window.screen?.orientation?.addEventListener?.('change', this.viewport);
+    this.root.addEventListener('focusin', this.viewport);
+    this.root.addEventListener('focusout', this.viewport);
     globalThis.visualViewport?.addEventListener('resize', this.viewport);
     globalThis.visualViewport?.addEventListener('scroll', this.viewport);
 
@@ -158,7 +156,6 @@ export class TerminalLayout {
       if (
         !this.quickConnect.hidden &&
         !this.quickConnect.contains(target) &&
-        !this.quickConnectButton.contains(target) &&
         !this.newButton.contains(target)
       ) {
         this.closeQuickConnect();
@@ -182,6 +179,11 @@ export class TerminalLayout {
         isComposing(event)
       )
         return;
+      if (!this.confirm.hidden) {
+        event.preventDefault();
+        this.dismissConfirm(true);
+        return;
+      }
       if (!this.quickConnect.hidden) {
         event.preventDefault();
         this.closeQuickConnect({ restoreFocus: true });
@@ -197,12 +199,6 @@ export class TerminalLayout {
         event.preventDefault();
         this.recent.hidden = true;
         this.recentButton.focus();
-        return;
-      }
-      if (!this.confirm.hidden) {
-        event.preventDefault();
-        this.confirm.hidden = true;
-        this.confirmSessionId = null;
         return;
       }
       if (this.root.classList.contains('vt-expanded')) {
@@ -259,6 +255,7 @@ export class TerminalLayout {
   hide() {
     if (this.disposed) return;
     this.visible = false;
+    this.dismissConfirm();
     this.closeQuickConnect();
     if (this.settingsDetails) this.settingsDetails.open = false;
     if (document.fullscreenElement === this.root) document.exitFullscreen().catch(() => {});
@@ -372,6 +369,7 @@ export class TerminalLayout {
   makeQuickConnect() {
     const popover = el('div', 'vt-quick-connect');
     popover.hidden = true;
+    popover.id = 'vt-server-picker';
     popover.setAttribute('role', 'dialog');
     popover.setAttribute('aria-label', '快速连接服务器');
     this.quickSearchInput = el('input', 'vt-quick-search');
@@ -407,7 +405,12 @@ export class TerminalLayout {
       }
     });
     this.quickList = el('div', 'vt-quick-list');
-    popover.append(this.quickSearchInput, this.quickList);
+    const cancel = action(
+      '取消',
+      () => this.closeQuickConnect({ restoreFocus: true }),
+      'vt-quick-cancel',
+    );
+    popover.append(this.quickSearchInput, this.quickList, cancel);
     return popover;
   }
 
@@ -425,7 +428,7 @@ export class TerminalLayout {
     if (this.settingsDetails) this.settingsDetails.open = false;
     this.recent.hidden = true;
     this.quickConnect.hidden = false;
-    this.quickConnectButton.setAttribute('aria-expanded', 'true');
+    this.newButton.setAttribute('aria-expanded', 'true');
     this.quickSearchInput.value = '';
     this.quickIndex = 0;
     this.renderQuickConnect();
@@ -438,11 +441,8 @@ export class TerminalLayout {
   closeQuickConnect({ restoreFocus = false } = {}) {
     if (this.quickConnect.hidden) return;
     this.quickConnect.hidden = true;
-    this.quickConnectButton.setAttribute('aria-expanded', 'false');
-    if (restoreFocus) {
-      if (this.focused()) this.focused().view.focus();
-      else this.quickConnectButton.focus();
-    }
+    this.newButton.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) this.newButton.focus();
   }
 
   openFromQuickConnect(vps, split = false) {
@@ -499,11 +499,15 @@ export class TerminalLayout {
     if (this.disposed) return;
     const store = this.store,
       records = [...store.records.values()];
-    const narrow = window.matchMedia('(max-width: 700px)').matches;
+    const narrow = window.matchMedia(MOBILE_LAYOUT).matches;
     this.narrow = narrow;
     this.splitButton.hidden = narrow;
-    if (narrow && store.secondaryId && store.focusedId === store.secondaryId)
-      [store.activeId, store.secondaryId] = [store.secondaryId, store.activeId];
+    // Rotation changes visible slots, not the store's split or its order.
+    const primaryId =
+      narrow && store.secondaryId && store.focusedId === store.secondaryId
+        ? store.secondaryId
+        : store.activeId;
+    const secondaryId = narrow ? null : store.secondaryId;
     this.summary.textContent = records.length ? `${store.count()} 个会话` : '';
     this.empty.hidden = !!store.active;
     this.deck.hidden = !store.active;
@@ -516,14 +520,15 @@ export class TerminalLayout {
       this.renderEmptyResume();
     }
     this.newButton.disabled = store.creating.size > 0;
-    this.quickConnectButton.disabled = store.creating.size > 0;
     this.splitButton.textContent = store.secondaryId ? '合并分屏' : '分屏';
-    this.root.classList.toggle('vt-has-split', !!store.secondaryId);
+    this.root.classList.toggle('vt-has-split', !!secondaryId);
 
     for (const [id, tab] of this.tabs)
       if (!store.records.has(id)) {
         tab.remove();
         this.tabs.delete(id);
+        this.paneHosts.get(id)?.remove();
+        this.paneHosts.delete(id);
       }
     for (const record of records) {
       let tab = this.tabs.get(record.id);
@@ -536,7 +541,7 @@ export class TerminalLayout {
         tab.addEventListener('auxclick', (event) => {
           if (event.button === 1) {
             event.preventDefault();
-            store.detach(record.id);
+            this.confirmClose(record, tab.querySelector('.vt-tab-close'), true);
           }
         });
         const choose = action('', () => store.activate(record.id));
@@ -570,13 +575,20 @@ export class TerminalLayout {
             this.tabs.get(ids[index])?.querySelector('[role=tab]')?.focus();
           }
         });
-        const close = action('×', () => store.detach(record.id), 'vt-tab-close');
-        close.setAttribute('aria-label', `关闭 ${record.label} 的标签，保留远端会话`);
-        tab.append(choose, close);
+        const close = action('×', () => this.confirmClose(record, close, true), 'vt-tab-close');
+        const lock = action(
+          '锁',
+          () => {
+            record.tabLocked = !record.tabLocked;
+            this.render();
+          },
+          'vt-tab-lock',
+        );
+        tab.append(choose, lock, close);
         this.tabs.set(record.id, tab);
         this.tabList.append(tab);
       }
-      const selected = record.id === store.activeId || record.id === store.secondaryId,
+      const selected = record.id === primaryId || record.id === secondaryId,
         focused = record.id === store.focusedId;
       const choose = tab.querySelector('[role=tab]');
       choose.setAttribute('aria-selected', String(selected));
@@ -584,6 +596,22 @@ export class TerminalLayout {
       tab.classList.toggle('vt-tab-active', selected);
       tab.classList.toggle('vt-tab-focused', focused);
       tab.dataset.state = record.state;
+      const close = tab.querySelector('.vt-tab-close');
+      const lock = tab.querySelector('.vt-tab-lock');
+      close.disabled = !!record.tabLocked || !!record.closing;
+      close.title = record.tabLocked
+        ? '标签已锁定，解锁后可关闭'
+        : record.state === 'close_unknown'
+          ? '结束结果待确认，点击重试'
+          : record.closing
+            ? '正在结束会话'
+            : '结束会话并关闭标签';
+      close.setAttribute('aria-label', `${record.label}：${close.title}`);
+      lock.textContent = record.tabLocked ? '解锁' : '锁';
+      lock.title = record.tabLocked ? '解锁标签' : '锁定标签，防止误关';
+      lock.setAttribute('aria-label', `${record.label}：${lock.title}`);
+      lock.setAttribute('aria-pressed', String(!!record.tabLocked));
+      lock.disabled = !!record.closing;
       tab.querySelector('.vt-tab-label').textContent = record.label;
       const badge = tab.querySelector('.vt-tab-badge');
       if (badge) badge.hidden = record.session.mode !== 'tmux';
@@ -602,28 +630,39 @@ export class TerminalLayout {
       viewRoot.id = `vt-pane-${record.id}`;
       viewRoot.setAttribute('role', 'tabpanel');
       viewRoot.setAttribute('aria-labelledby', choose.id);
-      const slot =
-        record.id === store.activeId
-          ? this.primary
-          : record.id === store.secondaryId
-            ? this.secondary
-            : this.stash;
-      if (viewRoot.parentNode !== slot) slot.append(viewRoot);
+      // Keep the xterm canvas under one parent for the lifetime of the tab.
+      // Changing a grid position does not detach the renderer from the DOM.
+      let host = this.paneHosts.get(record.id);
+      if (!host) {
+        host = el('div', 'vt-slot');
+        host.hidden = true;
+        host.append(viewRoot);
+        this.deck.append(host);
+        this.paneHosts.set(record.id, host);
+      }
+      const primary = record.id === primaryId,
+        secondary = record.id === secondaryId,
+        displayed = primary || secondary,
+        changed =
+          host.hidden !== !displayed || host.classList.contains('vt-primary-slot') !== primary;
+      host.classList.toggle('vt-primary-slot', primary);
+      host.classList.toggle('vt-secondary-slot', secondary);
+      host.hidden = !displayed;
+      host.inert = !displayed;
       viewRoot.classList.toggle('vt-pane-focused', focused);
-      if (selected && this.visible) record.view.show();
+      if (displayed && this.visible && (changed || !record.view.terminal)) record.view.show();
     }
 
     const record = this.focused();
     if (!record) this.lastFocusedTabId = null;
+    const confirmedTab = store.records.get(this.confirmSessionId);
     if (
       !this.confirm.hidden &&
-      (!record ||
-        record.id !== this.confirmSessionId ||
-        ['exited', 'closed', 'revoked'].includes(record.state))
-    ) {
-      this.confirm.hidden = true;
-      this.confirmSessionId = null;
-    }
+      (!confirmedTab ||
+        store.isEnded(confirmedTab) ||
+        (this.confirmDismissesTab && confirmedTab.tabLocked))
+    )
+      this.dismissConfirm(true);
 
     for (const node of [
       this.findButton,
@@ -634,6 +673,8 @@ export class TerminalLayout {
     ])
       node.disabled = !record;
     this.pasteButton.disabled = !record?.transport.canInput;
+    this.detachButton.disabled =
+      !record || !!record.tabLocked || !!record.closing || !!record.dismissOnEnd;
     this.endButton.disabled =
       !record || record.closing || ['exited', 'closed', 'revoked'].includes(record.state);
     this.endButton.textContent = record?.closing ? '正在结束' : '结束会话';
@@ -768,32 +809,59 @@ export class TerminalLayout {
       for (const record of this.store.records.values()) record.view.setScreenReader(check.checked);
     });
     accessible.append(check, document.createTextNode('屏幕阅读器模式'));
-    panel.append(sizes, themeLabel, accessible);
+    this.detachButton = action('分离标签', () => {
+      const record = this.focused();
+      if (record) this.store.detach(record.id);
+      details.open = false;
+    });
+    this.detachButton.title = '只关闭当前标签，保留远端会话';
+    panel.append(sizes, themeLabel, accessible, this.detachButton);
     details.append(summary, panel);
     return details;
   }
 
-  confirmClose() {
-    const record = this.focused();
-    if (!record || record.closing) return;
+  dismissConfirm(restoreFocus = false) {
+    this.confirm.hidden = true;
+    this.confirmSessionId = null;
+    const trigger = this.confirmTrigger;
+    this.confirmTrigger = null;
+    this.confirmDismissesTab = false;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  confirmClose(record, trigger, dismiss = false) {
+    if (!record || record.closing || (dismiss && record.tabLocked)) return;
+    if (this.store.isEnded(record)) {
+      if (dismiss) this.store.dismissEnded(record.id);
+      return;
+    }
+    this.closeQuickConnect();
     this.confirmSessionId = record.id;
-    this.confirm.replaceChildren(
-      el('span', '', `结束“${record.label}”的远端会话？`),
-      action('取消', () => {
-        this.confirm.hidden = true;
-        this.confirmSessionId = null;
-      }),
-      action(
-        '结束会话',
-        () => {
-          this.confirm.hidden = true;
-          this.confirmSessionId = null;
-          this.run(() => this.store.close(record.id));
-        },
-        'vt-danger',
-      ),
+    this.confirmTrigger = trigger;
+    this.confirmDismissesTab = dismiss;
+    const title = el('span', '', `结束“${record.label}”的远端会话？`);
+    title.id = 'vt-close-confirm-title';
+    const cancel = action('取消', () => this.dismissConfirm(true));
+    const end = action(
+      '结束会话',
+      () => {
+        if (this.confirmSessionId !== record.id) return;
+        this.dismissConfirm(true);
+        this.run(async () => {
+          try {
+            await this.store.close(record.id, { dismiss });
+          } catch (error) {
+            if (record.state !== 'close_unknown') throw error;
+          }
+          if (record.state === 'close_unknown')
+            throw new Error(`“${record.label}”的结束结果待确认，标签已保留。`);
+        });
+      },
+      'vt-danger',
     );
+    this.confirm.replaceChildren(title, cancel, end);
     this.confirm.hidden = false;
+    cancel.focus();
   }
 
   syncFullscreenLabel() {
@@ -826,44 +894,39 @@ export class TerminalLayout {
     if (!this.visible || this.disposed || this.resizeFrame) return;
     this.resizeFrame = requestAnimationFrame(() => {
       this.resizeFrame = null;
-      const viewport = globalThis.visualViewport,
-        height = viewport?.height || window.innerHeight;
-      if (this.narrow !== window.matchMedia('(max-width: 700px)').matches) this.render();
-      this.root.classList.toggle(
-        'vt-keyboard-open',
-        !!viewport && height < window.innerHeight * 0.75,
-      );
-      const offsetTop = viewport?.offsetTop || 0,
-        bounds = this.root.getBoundingClientRect(),
-        top = Math.max(0, bounds.top - offsetTop);
-      let bottom = height;
-      // The panel's fixed mobile navigation remains usable below the terminal.
-      // Measure its actual safe-area/viewport geometry instead of assuming a
-      // device-specific height. Fullscreen does not share that navigation.
-      const dock = document.querySelector('.mobile-dock');
-      if (
-        dock &&
-        document.fullscreenElement !== this.root &&
-        !this.root.classList.contains('vt-expanded')
-      ) {
-        const style = getComputedStyle(dock),
-          dockBounds = dock.getBoundingClientRect(),
-          dockTop = dockBounds.top - offsetTop;
-        if (
-          style.display !== 'none' &&
-          style.visibility !== 'hidden' &&
-          dockBounds.width > 0 &&
-          dockBounds.height > 0 &&
-          dockBounds.right > bounds.left &&
-          dockBounds.left < bounds.right &&
-          dockTop > top
-        )
-          bottom = Math.min(bottom, dockTop);
+      if (!this.visible || this.disposed) return;
+      const narrow = window.matchMedia(MOBILE_LAYOUT).matches;
+      if (this.narrow !== narrow) this.render();
+      const expanded =
+        document.fullscreenElement === this.root || this.root.classList.contains('vt-expanded');
+      const dock = expanded ? null : document.querySelector('.mobile-dock');
+      let dockRect = null;
+      if (dock) {
+        const style = getComputedStyle(dock);
+        if (style.display !== 'none' && style.visibility !== 'hidden')
+          dockRect = dock.getBoundingClientRect();
       }
-      this.root.style.setProperty(
-        '--vt-available-height',
-        `${Math.max(0, Math.floor(bottom - top - 12))}px`,
+      const focused = document.activeElement;
+      this.viewportState = computeTerminalViewport(
+        {
+          innerHeight: window.innerHeight,
+          innerWidth: window.innerWidth,
+          visualViewport: globalThis.visualViewport,
+          workspaceRect: this.root.getBoundingClientRect(),
+          dockRect,
+          expanded,
+          editableFocused: !!(focused && this.root.contains(focused) && focused.matches(EDITABLE)),
+          keyboardEligible: narrow || window.matchMedia('(pointer: coarse)').matches,
+          orientationKey: window.screen?.orientation?.angle ?? window.orientation,
+          gap: expanded ? 0 : 12,
+        },
+        this.viewportState,
       );
+      this.root.classList.toggle('vt-keyboard-open', this.viewportState.keyboardOpen);
+      const availableHeight = `${this.viewportState.availableHeight}px`;
+      if (this.root.style.getPropertyValue('--vt-available-height') !== availableHeight)
+        this.root.style.setProperty('--vt-available-height', availableHeight);
+      if (this.viewportState.zoomed) return;
       this.store.active?.view.fit();
       this.store.secondary?.view.fit();
     });
@@ -889,7 +952,7 @@ export class TerminalLayout {
     this.gutter.addEventListener('pointermove', (event) => {
       if (this.dragging !== event.pointerId) return;
       const bounds = this.deck.getBoundingClientRect();
-      set(((event.clientX - bounds.left) / bounds.width) * 100);
+      if (bounds.width > 0) set(((event.clientX - bounds.left) / bounds.width) * 100);
     });
     const end = (event) => {
       if (this.dragging === event.pointerId) {
@@ -913,6 +976,10 @@ export class TerminalLayout {
     if (this.disposed) return;
     this.disposed = true;
     window.removeEventListener('resize', this.viewport);
+    window.removeEventListener('orientationchange', this.viewport);
+    window.screen?.orientation?.removeEventListener?.('change', this.viewport);
+    this.root.removeEventListener('focusin', this.viewport);
+    this.root.removeEventListener('focusout', this.viewport);
     globalThis.visualViewport?.removeEventListener('resize', this.viewport);
     globalThis.visualViewport?.removeEventListener('scroll', this.viewport);
     document.removeEventListener('fullscreenchange', this.fullscreen);
@@ -922,5 +989,6 @@ export class TerminalLayout {
     this.root.remove();
     this.parking.remove();
     this.tabs.clear();
+    this.paneHosts.clear();
   }
 }

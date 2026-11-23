@@ -1,13 +1,187 @@
-"""Fixed tmux commands scoped to one generated, CodePier-owned session."""
+"""Scoped tmux controls and a separate authorized VPS environment provisioner."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from inspect import isawaitable
 import re
 import shlex
+import time
 import uuid
+from weakref import WeakValueDictionary
+
+from shared.ssh_terminal_config import TMUX_PROVISION_TIMEOUT_SECONDS
 
 from .ssh_terminal_transport import SSHTransportError
+
+
+_TMUX_PATHS = ("/usr/bin/tmux", "/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux")
+_PROBE = (
+    "located=$(command -v tmux 2>/dev/null) || located=; "
+    + 'for candidate in "$located" '
+    + " ".join(shlex.quote(path) for path in _TMUX_PATHS)
+    + "; do "
+    + 'case "$candidate" in '
+    + "|".join(_TMUX_PATHS)
+    + ") ;; *) continue ;; esac; "
+    + 'if test -f "$candidate" && test -x "$candidate"; then '
+    + 'printf \'%s\\n\' "$candidate"; exec "$candidate" -V; fi; done; '
+    # A PATH-visible but unverified executable/function is not absence. Never
+    # execute it or start a package transaction on that evidence.
+    + 'test -z "$located" || exit 78; exit 127'
+)
+_FAILURE_COOLDOWN_SECONDS = 30
+_MAX_UNCERTAIN_ENDPOINTS = 256
+_HOLDS = WeakValueDictionary()
+# Uncertain outcomes are never auto-replayed. Keep them until a probe proves
+# tmux available; refuse further writes rather than evicting unresolved entries.
+_UNCERTAIN = set()
+_RECENT_FAILURES = {}
+_INSTALL = r"""
+system=$(/usr/bin/uname -s) || exit 70
+uid=$(/usr/bin/id -u) || exit 70
+case "$system" in
+Linux)
+    test -f /etc/debian_version && test -x /usr/bin/apt-get || exit 69
+    set -- /usr/bin/apt-get -y --no-install-recommends -o DPkg::Lock::Timeout=30 -o Dpkg::Use-Pty=0 install tmux
+    if test "$uid" = 0; then
+        DEBIAN_FRONTEND=noninteractive "$@" </dev/null >/dev/null 2>&1 || exit 70
+    else
+        test -x /usr/bin/sudo || exit 77
+        /usr/bin/sudo -n -l -- "$@" </dev/null >/dev/null 2>&1 || exit 77
+        /usr/bin/sudo -n -k -- "$@" </dev/null >/dev/null 2>&1 || exit 70
+    fi
+    ;;
+Darwin)
+    test "$uid" != 0 || exit 77
+    for brew in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        test -f "$brew" && test -x "$brew" || continue
+        test -O "${brew%/bin/brew}" || exit 77
+        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 "$brew" install tmux </dev/null >/dev/null 2>&1 || exit 70
+        exit 0
+    done
+    exit 69
+    ;;
+*) exit 69 ;;
+esac
+exit 0
+"""
+_INSTALL_FAILURES = {
+    69: ("TMUX_INSTALL_UNAVAILABLE", "目标机没有受支持的既有包管理器，无法自动安装 tmux"),
+    77: ("TMUX_INSTALL_PERMISSION", "当前 SSH 用户没有非交互式 tmux 安装权限"),
+}
+_INSTALL_FAILED = ("TMUX_INSTALL_FAILED", "自动安装 tmux 失败，请检查目标机的包管理器")
+_INSTALL_UNCERTAIN = ("TMUX_INSTALL_UNCERTAIN", "tmux 安装结果尚未确认，不会自动重试")
+
+
+async def _probe_tmux(transport):
+    status, output = await transport.run_control(_PROBE, max_bytes=1024)
+    if status == 127 and not output.strip():
+        return {"available": False, "reason": "TMUX_NOT_INSTALLED"}, None
+    if status == 78 and not output.strip():
+        return {"available": False, "reason": "TMUX_LOCATION_UNSUPPORTED"}, None
+    if status != 0:
+        raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "无法确认 tmux 能力")
+    fields = output.strip().splitlines()
+    match = (
+        re.fullmatch(rb"tmux (\d+)\.(\d+)[a-z]?(?:[^\r\n]*)", fields[1])
+        if len(fields) == 2 and fields[0] in tuple(x.encode() for x in _TMUX_PATHS)
+        else None
+    )
+    if not match:
+        raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "tmux 路径或版本响应无法核验")
+    version = (int(match[1]), int(match[2]))
+    binary = fields[0].decode("ascii")
+    if version < (2, 6):
+        return {"available": False, "reason": "TMUX_VERSION_UNSUPPORTED"}, binary
+    return {"available": True, "version": f"{version[0]}.{version[1]}"}, binary
+
+
+async def probe_tmux(transport):
+    """Report a usable installed binary without opening a terminal or writing."""
+    capability, _binary = await _probe_tmux(transport)
+    return capability
+
+
+def _check_install_budget(endpoint):
+    if endpoint in _UNCERTAIN or len(_UNCERTAIN) >= _MAX_UNCERTAIN_ENDPOINTS:
+        raise SSHTransportError(*_INSTALL_UNCERTAIN)
+    now = time.monotonic()
+    for key, (expires, _) in list(_RECENT_FAILURES.items()):
+        if expires <= now:
+            del _RECENT_FAILURES[key]
+    recent = _RECENT_FAILURES.get(endpoint)
+    if recent:
+        raise SSHTransportError(*recent[1])
+    if len(_RECENT_FAILURES) >= _MAX_UNCERTAIN_ENDPOINTS:
+        raise SSHTransportError(*_INSTALL_FAILED)
+
+
+async def _authorize_install(authorize):
+    decision = authorize()
+    if isawaitable(decision):
+        if await decision is not True:
+            raise SSHTransportError("AUTH_REVOKED", "tmux 安装授权已失效")
+    elif decision is False:
+        raise SSHTransportError("AUTH_REVOKED", "tmux 安装授权已失效")
+
+
+async def _run_install(transport, endpoint):
+    # Register before the remote request: cancellation or response loss
+    # cannot turn an ambiguous mutation into an automatic retry.
+    _UNCERTAIN.add(endpoint)
+    try:
+        status, _ = await transport.run_control(
+            _INSTALL, wait_seconds=TMUX_PROVISION_TIMEOUT_SECONDS, max_bytes=1024
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise SSHTransportError(*_INSTALL_UNCERTAIN) from exc
+    if status not in (0, 69, 70, 77):
+        raise SSHTransportError(*_INSTALL_UNCERTAIN)
+    if status == 70:
+        # The manager may have modified the host before reporting error.
+        raise SSHTransportError(*_INSTALL_FAILED)
+    if status != 0:
+        _UNCERTAIN.discard(endpoint)
+        failure = _INSTALL_FAILURES.get(status, _INSTALL_FAILED)
+        _RECENT_FAILURES[endpoint] = (time.monotonic() + _FAILURE_COOLDOWN_SECONDS, failure)
+        raise SSHTransportError(*failure)
+
+
+async def _confirm_install(transport, endpoint):
+    try:
+        capability, _binary = await _probe_tmux(transport)
+    except Exception as exc:
+        raise SSHTransportError(*_INSTALL_UNCERTAIN) from exc
+    if not capability["available"]:
+        raise SSHTransportError(*_INSTALL_UNCERTAIN)
+    _UNCERTAIN.discard(endpoint)
+    return capability
+
+
+async def provision_tmux(transport, endpoint_key, *, authorize):
+    """Check/provision a target through an authorized SSH control connection, no PTY."""
+    host, port, _username = endpoint_key
+    endpoint = (host.strip().strip("[]").rstrip(".").casefold(), port)
+    # Lock across SSH users of the same machine, not per browser/session.
+    hold = _HOLDS.get(endpoint)
+    if hold is None:
+        hold = _HOLDS[endpoint] = asyncio.Lock()
+    async with hold:
+        capability, _binary = await _probe_tmux(transport)
+        if capability["available"]:
+            _UNCERTAIN.discard(endpoint)
+            _RECENT_FAILURES.pop(endpoint, None)
+            return capability
+        if capability["reason"] != "TMUX_NOT_INSTALLED":
+            return capability
+        _check_install_budget(endpoint)
+        await _authorize_install(authorize)
+        await _run_install(transport, endpoint)
+        return await _confirm_install(transport, endpoint)
 
 
 @dataclass(frozen=True)
@@ -23,12 +197,12 @@ class TmuxReference:
             raise SSHTransportError("INVALID_SESSION", "终端会话编号无效") from exc
         return cls("codepier_" + ident, "cp_" + ident)
 
-    def prefix(self):
+    def prefix(self, binary="tmux"):
         if not re.fullmatch(r"codepier_[0-9a-f]{32}", self.socket) or not re.fullmatch(
             r"cp_[0-9a-f]{32}", self.session
         ):
             raise SSHTransportError("INVALID_TMUX_REFERENCE", "持久会话引用无效")
-        return "tmux -u -L " + shlex.quote(self.socket) + " -f /dev/null"
+        return shlex.quote(binary) + " -u -L " + shlex.quote(self.socket) + " -f /dev/null"
 
     def public(self):
         return {"socket": self.socket, "session": self.session}
@@ -38,27 +212,22 @@ class TmuxController:
     def __init__(self, transport, session_id, config):
         self.transport, self.config = transport, config
         self.reference = TmuxReference.for_session(session_id)
+        self._binary = None
 
     async def probe(self):
-        status, output = await self.transport.run_control(
-            "if command -v tmux >/dev/null 2>&1; then tmux -V; else exit 127; fi",
-            max_bytes=1024,
-        )
-        if status == 127:
-            return {"available": False, "reason": "TMUX_NOT_INSTALLED"}
-        if status != 0:
-            raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "无法确认 tmux 能力")
-        match = re.fullmatch(rb"tmux (\d+)\.(\d+)[a-z]?(?:[^\r\n]*)\r?\n?", output.strip())
-        if not match:
-            raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "tmux 版本响应无法核验")
-        version = (int(match[1]), int(match[2]))
-        if version < (2, 6):
-            return {"available": False, "reason": "TMUX_VERSION_UNSUPPORTED"}
-        return {"available": True, "version": f"{version[0]}.{version[1]}"}
+        capability, self._binary = await _probe_tmux(self.transport)
+        return capability
+
+    def _prefix(self):
+        if not self._binary:
+            raise SSHTransportError("PERSISTENCE_PROBE_FAILED", "尚未核验 tmux 可执行文件")
+        return self.reference.prefix(self._binary)
 
     async def exists(self):
+        if self._binary is None:
+            await self.probe()
         status, output = await self.transport.run_control(
-            self.reference.prefix() + " has-session -t " + shlex.quote(self.reference.session),
+            self._prefix() + " has-session -t " + shlex.quote(self.reference.session),
             max_bytes=4096,
         )
         if status == 0:
@@ -81,7 +250,7 @@ class TmuxController:
         if await self.exists():
             raise SSHTransportError("REMOTE_SESSION_EXISTS", "该持久会话已经存在，请恢复原会话")
         command = (
-            self.reference.prefix()
+            self._prefix()
             + " start-server"
             + " \\; set-option -g history-limit "
             + str(self.config.tmux_history_lines)
@@ -94,8 +263,7 @@ class TmuxController:
         status, _ = await self.transport.run_control(command)
         if status != 0:
             # It may have created the session before a later option failed.
-            # Caller must query/recover this exact ID, never fall back to a new
-            # direct shell after an uncertain remote side effect.
+            # Caller must query/recover this exact ID, never open another shell.
             raise SSHTransportError("SSH_SESSION_UNCERTAIN", "持久会话创建结果不完整，请查询原会话")
         if not await self.exists():
             raise SSHTransportError("REMOTE_SESSION_MISSING", "持久会话创建后已退出")
@@ -109,15 +277,13 @@ class TmuxController:
     def attach_command(self):
         # -d only detaches clients of this randomly named dedicated session.
         # There is deliberately no `new-session -A` recovery path.
-        return (
-            self.reference.prefix() + " attach-session -d -t " + shlex.quote(self.reference.session)
-        )
+        return self._prefix() + " attach-session -d -t " + shlex.quote(self.reference.session)
 
     async def close(self):
         if not await self.exists():
             return {"ended": True, "already_missing": True}
         status, _ = await self.transport.run_control(
-            self.reference.prefix() + " kill-session -t " + shlex.quote(self.reference.session)
+            self._prefix() + " kill-session -t " + shlex.quote(self.reference.session)
         )
         if status != 0 and await self.exists():
             raise SSHTransportError("SSH_CONTROL_UNCERTAIN", "尚未确认持久会话结束")

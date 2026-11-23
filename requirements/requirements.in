@@ -3,6 +3,7 @@ starlette==1.9.0
 uvicorn==0.54.0
 websockets==17.4
 cryptography==50.0.2
+asyncssh==2.24.1
 httpx==0.28.1
 pydantic==2.14.1
 tzdata==2026.6

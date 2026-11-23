@@ -1290,8 +1290,8 @@ class WebSSHMaintenanceLock:
             self.file.close()
             raise ValueError(
                 "WEB_SSH_BUSY: Could not acquire the Web SSH maintenance lock. "
-                "Explicitly end Web SSH sessions and confirm remote termination before retrying; "
-                "closing a browser tab does not end a persistent session."
+                "Installation has not switched the running Agent. Keep any running tmux session; "
+                "do not end it to proceed with the update. Check Web SSH activity before retrying."
             ) from exc
 
     def close(self):

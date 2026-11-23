@@ -205,8 +205,10 @@ class Agent:
         if terminal is not None and terminal.maintenance_busy():
             raise DevError(
                 "AGENT_BUSY",
-                "请先结束 Web SSH 会话并确认远端已结束；仅关闭终端标签不能开始维护",
+                "Web SSH 正在使用或状态尚未确认，Agent 维护未开始。"
+                "如果任务还在运行，请保留原会话；不要为升级结束 tmux。",
                 409,
+                reason_code="WEB_SSH_ACTIVITY",
             )
         busy = [key for key, task in self.jobs.items() if key != operation_id and not task.done()]
         if (

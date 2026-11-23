@@ -12,6 +12,7 @@ import time
 import uuid
 
 from shared.instance_lock import InstanceLock
+from shared.ssh_host_pin import CONFIRM_CHANGE, validate_optional_host_pin
 from shared.ssh_terminal_config import DEFAULT_CONFIG
 from shared.ssh_terminal_flow import (
     ByteRingBuffer,
@@ -601,7 +602,7 @@ class TerminalSessionManager:
         ):
             raise TerminalProtocolError("INVALID_ARGUMENT", "SSH 地址或账号格式无效")
         policy = payload.get("host_key_policy", "strict")
-        if policy not in {"strict", "accept-new"}:
+        if policy not in {"strict", "accept-new", CONFIRM_CHANGE}:
             raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
         timeout = min(
             60, max(5, _integer(payload.get("timeout_seconds", 30), "timeout_seconds", 1, 86400))
@@ -611,7 +612,15 @@ class TerminalSessionManager:
             "port": _integer(payload.get("port", 22), "port", 1, 65535),
             "username": username,
             "host_key_policy": policy,
+            "host_key_fingerprint": self._host_pin(policy, payload),
         }, timeout
+
+    @staticmethod
+    def _host_pin(policy, payload):
+        try:
+            return validate_optional_host_pin(policy, payload.get("host_key_fingerprint", ""))
+        except ValueError as exc:
+            raise TerminalProtocolError("INVALID_ARGUMENT", str(exc)) from None
 
     @staticmethod
     def _redact_secret(text, secret):
@@ -770,10 +779,13 @@ class TerminalSessionManager:
         return session.public()
 
     async def _control_detach(self, session, payload):
-        if payload.get("attachment_id") != session.attachment_id:
-            return session.public()  # A late old WS must not detach its replacement.
-        await self._detach(session)
-        return session.public()
+        # Control RPCs are dispatched concurrently. If the Hub abandoned an
+        # attach whose redraw is still running, wait until that writer commits.
+        async with session.attach_lock:
+            if payload.get("attachment_id") != session.attachment_id:
+                return session.public()  # Never detach a newer writer.
+            await self._detach(session)
+            return session.public()
 
     async def _control_close(self, session, action, payload, project):
         if action == "revoke":
@@ -981,7 +993,7 @@ class TerminalSessionManager:
             raise TerminalProtocolError("STALE_GENERATION", "Agent 运行代次已变化")
         if payload.get("owner_user_id", owner) != owner or payload.get("space_id", space) != space:
             raise TerminalProtocolError("AUTH_REVOKED", "终端归属与可信项目授权不一致")
-        mode = payload.get("mode", "auto")
+        mode = payload.get("mode", "tmux")
         if mode not in {"auto", "direct", "tmux"}:
             raise TerminalProtocolError("INVALID_ARGUMENT", "未知持久模式")
         if payload.get("recover") is True and mode == "direct":
@@ -1041,8 +1053,9 @@ class TerminalSessionManager:
             "cols": cols,
             "rows": rows,
         }
-        if target["host_key_policy"] not in {"strict", "accept-new"}:
+        if target["host_key_policy"] not in {"strict", "accept-new", CONFIRM_CHANGE}:
             raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
+        target["host_key_fingerprint"] = self._host_pin(target["host_key_policy"], payload)
         return target
 
     def _existing_creation(self, sid, payload, project, owner, space, target, create_key):
@@ -1191,7 +1204,8 @@ class TerminalSessionManager:
                 session.tmux = candidate
                 session.mode = "tmux"
                 await candidate.create(session.target["cols"], session.target["rows"])
-            elif session.requested_mode == "tmux":
+            else:
+                # Legacy requests for auto are a compatibility spelling for tmux.
                 raise SSHTransportError("PERSISTENCE_UNAVAILABLE", "该 VPS 暂不支持持久终端")
 
     async def _record_start_failure(self, session, transport, exc):
@@ -1340,6 +1354,8 @@ class TerminalSessionManager:
         strategy = "resume_unconsumed" if same_renderer else "live"
         session.input_enabled = False
         lifecycle = session.lifecycle_revision
+        if payload.get("resume_from_live") is True:
+            return await self._continue_after_history_gap(session, lifecycle)
         if session.mode == "tmux" and (
             not first_renderer and not same_renderer or gap or session.ended is not None
         ):
@@ -1352,6 +1368,16 @@ class TerminalSessionManager:
         elif gap or epoch != session.stream_epoch:
             raise TerminalProtocolError("HISTORY_GAP", "请求的终端输出已超出保留范围")
         return offset, strategy
+
+    async def _continue_after_history_gap(self, session, lifecycle):
+        if session.mode == "tmux":
+            await self._redraw_attachment(session, lifecycle)
+            return 0, "redraw"
+        if session.ended is not None or not _connected(session.transport):
+            raise TerminalProtocolError("SESSION_NOT_RECOVERABLE", "原临时 SSH 已结束，不能继续")
+        # This is the verified current cursor of the exact live PTY, not
+        # recovered scrollback. Do not read or replay any older bytes.
+        return session.ring.end_offset, "live_tail"
 
     async def _redraw_attachment(self, session, lifecycle):
         await session.tmux.recover()
@@ -1404,7 +1430,8 @@ class TerminalSessionManager:
         session.changed.set()
         return {
             **session.public(),
-            "resume_strategy": strategy,
+            "resume_strategy": "live" if strategy == "live_tail" else strategy,
+            **({"history_recovery": "live_tail"} if strategy == "live_tail" else {}),
             "start_offset": str(offset),
             "next_input_seq": str(session.tracker.next_input_seq),
             "output_end_offset": str(session.ring.end_offset),
@@ -1663,22 +1690,32 @@ class TerminalSessionManager:
                 await self._detach(session)
                 await self._state(session)
             if not session.attached and session.detached_at is not None:
-                timeout = (
-                    self.config.attachment_grace_seconds
-                    if session.mode == "tmux"
-                    else self.config.direct_detach_seconds
-                )
-                if now - session.detached_at >= timeout:
-                    if session.mode == "tmux" and session.transport is not None:
-                        await session.transport.close_channel()
-                        session.ended = {
-                            "output_complete": False,
-                            "exit_status": None,
-                            "reason_code": "DETACHED",
-                        }
-                    elif session.mode == "direct":
-                        await self._finish(session, "DETACH_EXPIRED")
+                await self._retire_detached_channel(session, now)
         self._release_activity_if_idle()
+
+    async def _retire_detached_channel(self, session, now):
+        # The transport removes its channel before awaiting SSH close. Holding the
+        # same lock as attach ensures a new renderer cannot adopt that missing
+        # channel or be overwritten by an earlier cleanup.
+        async with session.attach_lock:
+            if session.attached or session.detached_at is None or session.stopped.is_set():
+                return
+            if session.mode != "tmux":
+                if now - session.detached_at >= self.config.direct_detach_seconds:
+                    await self._finish(session, "DETACH_EXPIRED")
+                return
+            if now - session.detached_at < self.config.attachment_grace_seconds or session.ended:
+                return
+            transport, lifecycle = session.transport, session.lifecycle_revision
+            if transport is None:
+                return
+            await transport.close_channel()
+            if session.transport is transport and session.lifecycle_revision == lifecycle:
+                session.ended = {
+                    "output_complete": False,
+                    "exit_status": None,
+                    "reason_code": "DETACHED",
+                }
 
     async def _sweep_loop(self):
         try:

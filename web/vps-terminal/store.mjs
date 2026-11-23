@@ -38,6 +38,9 @@ export class TerminalStore {
   changed() {
     if (!this.disposed) this.onChange?.();
   }
+  isEnded(record) {
+    return !!record && ENDED.has(record.state);
+  }
   count() {
     return this.list().filter((session) => !ENDED.has(session.state)).length;
   }
@@ -137,7 +140,7 @@ export class TerminalStore {
     vpsId,
     project = null,
     projectId = null,
-    mode = 'auto',
+    mode = 'tmux',
     newSession = false,
     split = false,
     isCurrent = this.isCurrent,
@@ -146,7 +149,7 @@ export class TerminalStore {
     const resolvedVpsId = vps?.id || vpsId;
     if (!resolvedVpsId) throw new Error('请选择要连接的 VPS');
     const resolvedProjectId = project?.id || projectId || null;
-    const key = resolvedProjectId ? `${resolvedVpsId}:${resolvedProjectId}` : resolvedVpsId;
+    const key = JSON.stringify([resolvedVpsId, resolvedProjectId, mode]);
     if (!newSession) {
       const recent = [...this.records.values()]
         .reverse()
@@ -209,7 +212,7 @@ export class TerminalStore {
     vpsId,
     project,
     resolvedProjectId,
-    mode = 'auto',
+    mode = 'tmux',
     key,
     version,
     split,
@@ -249,7 +252,7 @@ export class TerminalStore {
       vps_id: targetVps.id,
       ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
       request_id: requestId,
-      mode: mode || 'auto',
+      mode: mode || 'tmux',
       cols: 100,
       rows: 30,
     };
@@ -306,9 +309,16 @@ export class TerminalStore {
         onOutput: (bytes) => record.view.write(bytes),
         onAttached: (message) => record.view.attached(message),
         onState: (details) => {
+          // The Agent attempted no working shell on this definite failure.
+          if (details.reason_code === 'PERSISTENCE_UNAVAILABLE')
+            details = { ...details, state: 'failed' };
           record.state = details.state;
           record.lastState = details;
           record.view.stateChanged(details);
+          if (record.dismissOnEnd && this.isEnded(record)) {
+            this.dismissEnded(record.id);
+            return;
+          }
           this.changed();
         },
         onNotice: (code) => record.view.showNotice(code),
@@ -333,6 +343,10 @@ export class TerminalStore {
       onDiagnostics: () => this.api(`/api/vps-terminal/sessions/${record.id}/diagnostics`),
       onNewSession: () =>
         this.duplicate(record).catch((error) =>
+          record.view.showNotice(errorCode(error), error.message),
+        ),
+      onTemporarySession: () =>
+        this.duplicate(record, false, { mode: 'direct' }).catch((error) =>
           record.view.showNotice(errorCode(error), error.message),
         ),
       onTakeover: () =>
@@ -381,18 +395,15 @@ export class TerminalStore {
       const version = this.version;
       const session = await this.api(`/api/vps-terminal/sessions/${id}`);
       if (this.disposed || version !== this.version || !isCurrent()) return;
-      let limits;
-      if (!ENDED.has(session.state)) {
-        const capability = await this.capability(session.vps_id, session.project_id);
-        if (this.disposed || version !== this.version || !isCurrent()) return;
-        limits = limitsFrom(capability.limits);
-      }
-      record = this.adopt(session, { limits });
+      // Resume is authorized by the existing session and attach ticket,
+      // not by the ability to create another connection. Direct sessions
+      // may carry an internal project ID which the create API cannot resolve.
+      record = this.adopt(session, { limits: limitsFrom(session.limits) });
     }
     if (isCurrent()) this.activate(id, { split });
     return record.session;
   }
-  async duplicate(record = this.focused || this.active, split = false) {
+  async duplicate(record = this.focused || this.active, split = false, { mode = 'tmux' } = {}) {
     if (!record) throw new Error('请选择要连接的 VPS');
     const vps =
       record.vps ||
@@ -413,8 +424,7 @@ export class TerminalStore {
           ? record.project
           : null
       : null;
-    if (project) return this.open({ vps, project, newSession: true, split });
-    return this.open({ vps, newSession: true, split });
+    return this.open({ vps, project, mode, newSession: true, split });
   }
   rename(id, name) {
     const record = this.records.get(id);
@@ -475,23 +485,44 @@ export class TerminalStore {
   detach(id) {
     const record = this.records.get(id);
     if (!record) return;
+    if (record.tabLocked || record.closing || record.dismissOnEnd) return;
     record.transport.detach();
+    this.removeTab(record);
+  }
+  dismissEnded(id) {
+    const record = this.records.get(id);
+    if (!this.isEnded(record) || record.tabLocked) return;
+    record.transport.dispose();
+    this.removeTab(record);
+  }
+  removeTab(record) {
     record.view.dispose();
+    const { id } = record;
     this.records.delete(id);
+    if (this.isEnded(record))
+      this.remoteSessions = this.remoteSessions.filter(
+        (session) => (session.session_id || session.id) !== id,
+      );
     if (this.secondaryId === id) this.secondaryId = null;
     if (this.activeId === id) {
       this.activeId = this.secondaryId || [...this.records.keys()].at(-1) || null;
       this.secondaryId = null;
     }
-    this.focusedId = this.activeId;
+    const moved = this.focusedId === id;
+    if (moved) this.focusedId = this.activeId;
     this.changed();
-    this.onNavigate?.(this.focusedId, { terminal: true });
+    if (moved) this.onNavigate?.(this.focusedId, { terminal: true });
     this.refreshSessions().catch(() => {});
     if (!this.activeId) this.refreshVpsCatalog().catch(() => {});
   }
-  async close(id) {
+  async close(id, { dismiss = false } = {}) {
     const record = this.records.get(id);
-    if (!record || record.closing || ENDED.has(record.state)) return;
+    if (!record || record.closing || (dismiss && record.tabLocked)) return;
+    if (this.isEnded(record)) {
+      if (dismiss) this.dismissEnded(id);
+      return;
+    }
+    if (dismiss) record.dismissOnEnd = true;
     record.closing = true;
     record.state = 'closing';
     record.transport.live = false;

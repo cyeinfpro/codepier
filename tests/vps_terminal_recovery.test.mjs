@@ -7,7 +7,7 @@ import { TerminalTransport } from '../web/vps-terminal/transport.mjs';
 const SESSION = '12345678123456781234567812345678';
 const GENERATION = 'abcdefabcdefabcdefabcdefabcdefab';
 const session = { session_id: SESSION, state: 'detached', vps_id: 'vps', project_id: 'project' };
-const endpoint = '/api/vps-terminal/capabilities?vps_id=vps&project_id=project';
+const endpoint = `/api/vps-terminal/sessions/${SESSION}`;
 
 class TestSocket {
   constructor() {
@@ -31,21 +31,20 @@ class TestSocket {
   }
 }
 
-test('cold restore loads target-specific limits before accepting a 32 KiB frame', async (t) => {
+test('cold restore loads scoped session limits before accepting a 32 KiB frame', async (t) => {
   const paths = [];
   const rendered = [];
   let transport;
   const store = new TerminalStore({
     api: async (path) => {
       paths.push(path);
-      if (path === endpoint)
-        return { available: true, protocol_version: 1, limits: { frame_bytes: 32768 } };
-      if (path.endsWith('/attach-ticket')) return { ticket: 'fixture-ticket' };
-      return { ...session };
+      if (path === endpoint) return { ...session, limits: { frame_bytes: 32768 } };
+      if (path === `${endpoint}/attach-ticket`) return { ticket: 'fixture-ticket' };
+      assert.fail(`unexpected request: ${path}`);
     },
   });
   store.adopt = (current, { limits }) => {
-    assert.deepEqual(paths, [`/api/vps-terminal/sessions/${SESSION}`, endpoint]);
+    assert.deepEqual(paths, [endpoint]);
     transport = new TerminalTransport({
       session: current,
       api: store.api,
@@ -89,32 +88,30 @@ test('cold restore loads target-specific limits before accepting a 32 KiB frame'
   assert.deepEqual(rendered, [payload]);
 });
 
-test('a pending capability cannot adopt or activate a terminal after identity disposal', async () => {
-  let resolveCapability;
+test('a pending session GET cannot adopt or activate a terminal after identity disposal', async () => {
+  let resolveSession;
   let loadStarted;
   const started = new Promise((resolve) => (loadStarted = resolve));
   const store = new TerminalStore({
     api: async (path) => {
-      if (path === endpoint) {
-        loadStarted();
-        return new Promise((resolve) => (resolveCapability = resolve));
-      }
-      return { ...session };
+      assert.equal(path, endpoint);
+      loadStarted();
+      return new Promise((resolve) => (resolveSession = resolve));
     },
   });
   store.adopt = store.activate = () => assert.fail('obsolete restore reached the renderer');
   const restore = store.restore(SESSION);
   await started;
   store.dispose();
-  resolveCapability({ limits: { frame_bytes: 32768 } });
+  resolveSession({ ...session, limits: { frame_bytes: 32768 } });
   assert.equal(await restore, undefined);
 });
 
-test('restore does not attach after an unauthorized capability response', async () => {
+test('restore does not attach after a forbidden scoped session GET', async () => {
   const store = new TerminalStore({
     api: async (path) => {
-      if (path === endpoint) throw Object.assign(new Error('denied'), { status: 403 });
-      return { ...session };
+      assert.equal(path, endpoint);
+      throw Object.assign(new Error('denied'), { status: 403 });
     },
   });
   store.adopt = store.activate = () => assert.fail('unauthorized restore reached the renderer');

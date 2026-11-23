@@ -102,6 +102,13 @@ export class TerminalTransport {
     });
   }
 
+  resumeAfterHistoryGap() {
+    if (this.lastFailureCode !== 'HISTORY_GAP' || this.disposed || this.connecting || this.socket)
+      return;
+    this.resumeFromLive = true;
+    return this.connect({ manual: true });
+  }
+
   async connect({ manual = false } = {}) {
     // The socket owns the connection intent from construction onward,
     // including the unauthenticated and OTP windows before an attachment.
@@ -124,6 +131,7 @@ export class TerminalTransport {
       await this.renderQueue;
       if (!this.current(version)) return;
       const body = { renderer_id: this.rendererId };
+      if (this.resumeFromLive) body.resume_from_live = true;
       if (this.runtimeGeneration)
         Object.assign(body, {
           runtime_generation: this.runtimeGeneration,
@@ -194,12 +202,13 @@ export class TerminalTransport {
         if (this.current(version) && !this.attachment) this.fail('SSH_CONNECT_TIMEOUT');
       }, 30000);
     } catch (error) {
-      if (this.current(version))
-        this.fail(
-          errorCode(error),
-          { message: error.message },
-          STOP_RETRY_CODES.has(errorCode(error)),
-        );
+      if (this.current(version)) {
+        const code =
+          this.resumeFromLive && error.status === 422
+            ? 'HISTORY_RECOVERY_UNSUPPORTED'
+            : errorCode(error);
+        this.fail(code, { message: error.message }, STOP_RETRY_CODES.has(code));
+      }
     } finally {
       if (this.current(version)) this.connecting = false;
     }
@@ -236,6 +245,15 @@ export class TerminalTransport {
         writer = counter(message.writer_epoch);
       const start = counter(message.start_offset ?? '0');
       const strategy = message.resume_strategy || 'live';
+      const liveTail = message.history_recovery === 'live_tail';
+      if (liveTail && (!this.resumeFromLive || message.mode !== 'direct' || strategy !== 'live'))
+        throw new Error('Unexpected history recovery');
+      if (this.resumeFromLive && !liveTail && (message.mode !== 'tmux' || strategy !== 'redraw')) {
+        this.fail('HISTORY_RECOVERY_UNSUPPORTED', {}, true);
+        return;
+      }
+      this.resumeFromLive = false;
+      this.lastFailureCode = null;
       if (!['live', 'redraw', 'resume_unconsumed', 'history_replay'].includes(strategy))
         throw new Error('Unknown resume strategy');
       if (!message.attachment_id || !message.render_epoch) throw new Error('Missing attachment');
@@ -323,7 +341,15 @@ export class TerminalTransport {
       this.callbacks.onAuthChallenge?.(message);
       return;
     }
+    if (message.type === 'history_gap') {
+      this.fail('HISTORY_GAP', message, true);
+      return;
+    }
     if (message.type === 'state') {
+      if (message.reason_code === 'HISTORY_GAP') {
+        this.fail('HISTORY_GAP', message, true);
+        return;
+      }
       Object.assign(this.session, message);
       if (message.state === 'ready' || message.state === 'live')
         this.completeReplay(message, version);
@@ -593,6 +619,8 @@ export class TerminalTransport {
     this.live = false;
     this.markUncertain();
     this.pauseReconnect = fatal || STOP_RETRY_CODES.has(code);
+    this.lastFailureCode = code;
+    if (this.pauseReconnect) this.resumeFromLive = false;
     this.closeSocket();
     this.changeState(this.pauseReconnect ? 'blocked' : 'reconnecting', {
       ...details,
@@ -712,7 +740,7 @@ export class TerminalTransport {
       }
       this.changeState(message.state || 'exited', {
         ...message,
-        ...(message.output_complete === false
+        ...(message.output_complete === false && !message.reason_code
           ? {
               reason_code: 'OUTPUT_INCOMPLETE',
               message: reasonText('OUTPUT_INCOMPLETE'),
