@@ -23,6 +23,9 @@ function matchesVpsQuery(vps, query) {
     .some((field) => String(field).toLowerCase().includes(needle));
 }
 
+const QUICK_CONNECT_LIMIT = 40;
+const isComposing = (event) => event.isComposing || event.keyCode === 229;
+
 export class TerminalLayout {
   constructor({ store, onBack }) {
     this.store = store;
@@ -171,7 +174,13 @@ export class TerminalLayout {
     document.addEventListener('pointerdown', this.outsidePointer);
 
     this.escapeHandler = (event) => {
-      if (!this.visible || this.disposed || event.key !== 'Escape' || event.defaultPrevented)
+      if (
+        !this.visible ||
+        this.disposed ||
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        isComposing(event)
+      )
         return;
       if (!this.quickConnect.hidden) {
         event.preventDefault();
@@ -374,6 +383,7 @@ export class TerminalLayout {
       this.renderQuickConnect();
     });
     popover.addEventListener('keydown', (event) => {
+      if (isComposing(event)) return;
       const items = this.filteredQuickServers();
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -402,9 +412,9 @@ export class TerminalLayout {
   }
 
   filteredQuickServers() {
-    return this.availableServers().filter((vps) =>
-      matchesVpsQuery(vps, this.quickSearchInput.value),
-    );
+    return this.availableServers()
+      .filter((vps) => matchesVpsQuery(vps, this.quickSearchInput.value))
+      .slice(0, QUICK_CONNECT_LIMIT);
   }
 
   toggleQuickConnect(force = this.quickConnect.hidden) {
@@ -465,7 +475,7 @@ export class TerminalLayout {
       this.quickList.append(empty);
       return;
     }
-    items.slice(0, 40).forEach((vps, index) => {
+    items.forEach((vps, index) => {
       const row = el('div', 'vt-quick-row');
       if (index === this.quickIndex) row.classList.add('vt-quick-row-active');
       const main = action('', () => this.openFromQuickConnect(vps, false), 'vt-quick-main');
@@ -651,6 +661,7 @@ export class TerminalLayout {
     };
     input.addEventListener('blur', save, { once: true });
     input.addEventListener('keydown', (event) => {
+      if (isComposing(event)) return;
       if (event.key === 'Enter') {
         event.preventDefault();
         save();

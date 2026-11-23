@@ -31,6 +31,7 @@ export class TerminalStore {
     this.secondaryId = null;
     this.focusedId = null;
     this.limits = { ...DEFAULT_LIMITS };
+    this.vpsCatalogRequest = null;
     this.version = 0;
     this.disposed = false;
   }
@@ -38,14 +39,30 @@ export class TerminalStore {
     if (!this.disposed) this.onChange?.();
   }
   count() {
-    return [...this.records.values()].filter((record) => !ENDED.has(record.state)).length;
+    return this.list().filter((session) => !ENDED.has(session.state)).length;
   }
   list() {
-    return [...this.records.values()].map((record) => ({
-      ...record.session,
-      label: record.label,
-      state: record.state,
-    }));
+    const sessions = new Map();
+    for (const record of this.records.values()) {
+      sessions.set(record.id, {
+        ...record.session,
+        label: record.label,
+        state: record.state,
+      });
+    }
+    for (const session of this.remoteSessions) {
+      const id = session.session_id || session.id;
+      if (id && !sessions.has(id)) sessions.set(id, session);
+    }
+    return [...sessions.values()];
+  }
+  activeCountsByVPS() {
+    const counts = Object.create(null);
+    for (const session of this.list()) {
+      if (session.vps_id && !ENDED.has(session.state))
+        counts[session.vps_id] = (counts[session.vps_id] || 0) + 1;
+    }
+    return counts;
   }
   get active() {
     return this.records.get(this.activeId);
@@ -58,26 +75,42 @@ export class TerminalStore {
   }
 
   async refreshVpsCatalog() {
-    const version = this.version;
+    if (this.disposed) return [];
+    if (this.vpsCatalogRequest) return this.vpsCatalogRequest;
+    const request = this.loadVpsCatalog(this.version);
+    this.vpsCatalogRequest = request;
     try {
-      const result = await this.api('/api/vps?limit=200&offset=0');
-      if (this.disposed || version !== this.version) return [];
-      const items = Array.isArray(result?.vps)
-        ? result.vps
-        : Array.isArray(result?.items)
-          ? result.items
-          : Array.isArray(result)
-            ? result
-            : [];
-      this.vpsCatalog = items.filter(
-        (item) => item && item.id && item.enabled !== false && item.terminal?.eligible !== false,
-      );
-      this.changed();
-      return this.vpsCatalog;
-    } catch {
-      if (!this.disposed && version === this.version) this.vpsCatalog = [];
-      return [];
+      return await request;
+    } finally {
+      if (this.vpsCatalogRequest === request) this.vpsCatalogRequest = null;
     }
+  }
+
+  async loadVpsCatalog(version) {
+    const catalog = new Map();
+    let offset = 0;
+    try {
+      while (true) {
+        const result = await this.api('/api/vps?limit=200&offset=' + offset);
+        if (this.disposed || version !== this.version) return [];
+        const items = result.vps ?? result.items ?? result;
+        for (const item of items) {
+          if (item?.id && item.enabled !== false && item.terminal?.eligible !== false)
+            catalog.set(item.id, item);
+        }
+        const next = result.next_offset;
+        if (next == null) break;
+        if (!Number.isSafeInteger(next) || next <= offset)
+          throw new Error('Invalid VPS catalog cursor');
+        offset = next;
+      }
+      this.vpsCatalog = [...catalog.values()];
+      this.changed();
+    } catch {
+      // Preserve the last complete inventory instead of replacing it with a
+      // partial page or an empty list on a transient failure.
+    }
+    return this.vpsCatalog;
   }
 
   async refreshSessions() {
@@ -458,7 +491,7 @@ export class TerminalStore {
   }
   async close(id) {
     const record = this.records.get(id);
-    if (!record || record.closing) return;
+    if (!record || record.closing || ENDED.has(record.state)) return;
     record.closing = true;
     record.state = 'closing';
     record.transport.live = false;
@@ -473,8 +506,9 @@ export class TerminalStore {
         method: 'POST',
         body: JSON.stringify(body),
       });
+      if (this.records.get(id) !== record || ENDED.has(record.state)) return;
       Object.assign(record.session, result);
-      if (['exited', 'closed'].includes(result.state)) {
+      if (ENDED.has(result.state)) {
         // The ordered WS exit/state closes an active renderer after its tail.
         // A confirmed HTTP result can close only an already offline view.
         if (!this.hasStreamingAttachment(record)) record.transport.finish(result);
@@ -487,6 +521,7 @@ export class TerminalStore {
       }
       // Otherwise the live control stream delivers the authoritative exit.
     } catch (error) {
+      if (this.records.get(id) !== record || ENDED.has(record.state)) return;
       record.state = 'close_unknown';
       record.view.stateChanged({
         state: 'close_unknown',

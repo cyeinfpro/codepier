@@ -29,8 +29,8 @@
   ],
   "outputs": {
     "vps-terminal.js": {
-      "bytes": 608257,
-      "sha256": "9b0c0529d16b68b704762098964be1e90d7b30e0d442496acabdefcc8142f28f"
+      "bytes": 609217,
+      "sha256": "b25bf82892b3601f9e04eed124aa0cbe4667a9c0e6e0ee67f6508c22a3653ad1"
     },
     "vps-terminal.css": {
       "bytes": 23433,

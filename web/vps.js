@@ -56,17 +56,42 @@ function vpsTerminalIdentity() {
 }
 function vpsTerminalForget() {
   vpsTerminalOwner = null;
+  S.vpsPresence = null;
 }
 function vpsActiveSessions(vpsId = null) {
-  if (typeof window === 'undefined') return [];
-  const items = window.CodePierVpsTerminal?.list?.() || [];
-  return items.filter(
-    (item) => item && !VPS_TERMINAL_ENDED.includes(item.state) && (!vpsId || item.vps_id === vpsId),
+  const identity = vpsTerminalIdentity();
+  if (!identity) return [];
+  const remote = S.vpsPresence?.identity === identity ? S.vpsPresence.items : [];
+  const local =
+    typeof window !== 'undefined' && vpsTerminalOwner === identity
+      ? window.CodePierVpsTerminal?.list?.() || []
+      : [];
+  const byId = new Map();
+  for (const item of [...remote, ...local]) {
+    const id = item?.session_id || item?.id;
+    if (id) byId.set(id, item);
+  }
+  return [...byId.values()].filter(
+    (item) => !VPS_TERMINAL_ENDED.includes(item.state) && (!vpsId || item.vps_id === vpsId),
   );
 }
 function vpsTerminalCount() {
-  if (typeof window === 'undefined') return 0;
-  return window.CodePierVpsTerminal?.count?.() || vpsActiveSessions().length;
+  return vpsActiveSessions().length;
+}
+async function vpsLoadPresence(seq) {
+  const identity = vpsTerminalIdentity();
+  if (!identity) return;
+  try {
+    const result = await api('/api/vps-terminal/sessions');
+    if (seq !== S.renderSeq || identity !== vpsTerminalIdentity()) return;
+    S.vpsPresence = {
+      identity,
+      items: Array.isArray(result?.sessions) ? result.sessions : [],
+    };
+    vpsSyncTerminalPresence();
+  } catch {
+    // Presence is supplemental; inventory stays usable if that API is down.
+  }
 }
 function vpsTerminalNavigate(id, { terminal = false } = {}) {
   if (!S.session || S.page !== 'vps') return;
@@ -90,8 +115,7 @@ function vpsActiveSessionsInnerHTML(sessions = vpsActiveSessions(), total = vpsT
       const user = item.username || vps?.username || '';
       const target = user && hostPort ? `${user}@${hostPort}` : hostPort;
       const sid = item.session_id || item.id || '';
-      const tmux =
-        item.tmux !== false && item.persistence !== 'none' && item.persistence !== 'ephemeral';
+      const tmux = item.mode === 'tmux';
       return `<button type="button" class="btn ghost small vps-session-pill" data-vps-action="resume-session" data-session="${esc(sid)}" data-id="${esc(item.vps_id || '')}"><span class="dot online" aria-hidden="true"></span><strong>${esc(name)}</strong>${target ? `<code>${esc(target)}</code>` : ''}${tmux ? '<span class="badge neutral">tmux 持久</span>' : ''}</button>`;
     })
     .join('');
@@ -186,43 +210,53 @@ function vpsTerminalProjects(v) {
     .filter((p) => p.mode === 'write' && p.allow_tasks && p.enabled !== false)
     .sort((a, b) => Number(!!b.online) - Number(!!a.online));
 }
+function vpsTerminalCode(v) {
+  return v.terminal?.reason_code || v.terminal?.code || '';
+}
 function vpsTerminalReason(v) {
   if (!v.enabled) return '连接已停用，启用后可打开终端。';
   if (v.terminal && typeof v.terminal === 'object') {
-    if (v.terminal.eligible === false) {
-      const code = v.terminal.reason_code || v.terminal.code || '';
-      if (code === 'SSH_TERMINAL_FORBIDDEN' || code === 'FORBIDDEN')
-        return '连接项目需要写入和执行命令权限。';
-      if (code === 'NO_TERMINAL_AGENT' || code === 'AGENT_OFFLINE' || code === 'NODE_OFFLINE')
-        return '当前空间暂无可用电脑，请先添加电脑。';
-      if (code === 'SHELL_DISABLED') return '连接电脑尚未开启命令执行权限。';
-      return v.terminal.reason || '当前无法打开终端，请检查连接电脑状态。';
-    }
-    return '';
+    if (v.terminal.eligible !== false && v.terminal.available !== false) return '';
+    const code = vpsTerminalCode(v);
+    if (code === 'SSH_TERMINAL_FORBIDDEN' || code === 'FORBIDDEN')
+      return '连接项目需要写入和执行命令权限。';
+    if (code === 'NO_TERMINAL_AGENT') return '当前空间暂无可用电脑，请先添加电脑。';
+    if (code === 'AGENT_OFFLINE' || code === 'NODE_OFFLINE')
+      return '连接电脑暂时离线，上线后可重试。';
+    if (code === 'SHELL_DISABLED') return '连接电脑尚未开启命令执行权限。';
+    if (['AGENT_UPGRADE_REQUIRED', 'PROTOCOL_MISMATCH', 'SSH_DEPENDENCY_MISSING'].includes(code))
+      return '连接电脑需要更新才能使用 Web SSH。';
+    if (code === 'FEATURE_DISABLED') return '当前空间未启用 Web SSH。';
+    return v.terminal.reason || '当前无法打开终端，请检查连接电脑状态。';
   }
-  if ((v.project_ids || []).length > 0 && vpsTerminalProjects(v).length === 0) {
+  if ((v.project_ids || []).length > 0 && vpsTerminalProjects(v).length === 0)
     return '连接项目需要写入和执行命令权限。';
-  }
   return '';
+}
+function vpsCheckReady(v, projects) {
+  if (!v.enabled) return false;
+  if (typeof v.terminal?.check_ready === 'boolean') return v.terminal.check_ready;
+  return !vpsTerminalReason(v) || projects.some((p) => p.online);
 }
 function vpsChannelLabel(v) {
   if (!v.enabled) return '已停用';
+  if (vpsTerminalReason(v)) return '当前不可直连';
   if (v.terminal?.device_name) return `经由 ${v.terminal.device_name} 直连`;
   const projects = vpsTerminalProjects(v);
   const online = projects.find((p) => p.online);
   if (online?.device_name) return `经由 ${online.device_name} 直连`;
+  if (v.terminal?.available === true || v.terminal?.eligible === true) return '空间电脑直连就绪';
   if (projects.length) return '等待连接电脑上线';
-  if (v.terminal?.eligible === true) return '空间电脑直连就绪';
   if (!v.terminal && !(v.project_ids || []).length) return '空间电脑直连';
   return '待授权执行权限';
 }
 function vpsActionsHTML(v) {
   const projects = vpsTerminalProjects(v),
     reason = vpsTerminalReason(v),
-    checkBlocked = !v.enabled || (!!reason && !projects.length),
-    checkTitle = !v.enabled ? '已停用，启用后可检查' : checkBlocked ? reason : '',
+    checkBlocked = !vpsCheckReady(v, projects),
+    checkTitle = !v.enabled ? '已停用，启用后可检查' : checkBlocked ? '当前没有可用的检查通道' : '',
     count = vpsActiveSessions(v.id).length,
-    terminalCode = v.terminal?.reason_code || v.terminal?.code || '',
+    terminalCode = vpsTerminalCode(v),
     showProjectFix =
       v.enabled &&
       (v.project_ids || []).length > 0 &&
@@ -230,9 +264,15 @@ function vpsActionsHTML(v) {
       reason === '连接项目需要写入和执行命令权限。',
     showDeviceFix =
       v.enabled &&
-      ['NO_TERMINAL_AGENT', 'AGENT_OFFLINE', 'NODE_OFFLINE', 'SHELL_DISABLED'].includes(
-        terminalCode,
-      );
+      [
+        'NO_TERMINAL_AGENT',
+        'AGENT_OFFLINE',
+        'NODE_OFFLINE',
+        'SHELL_DISABLED',
+        'AGENT_UPGRADE_REQUIRED',
+        'PROTOCOL_MISMATCH',
+        'SSH_DEPENDENCY_MISSING',
+      ].includes(terminalCode);
   return `<footer><button class="btn ghost small" type="button" data-vps-action="edit" data-id="${esc(v.id)}" aria-label="编辑 ${esc(v.name)}">${icon('edit')}编辑</button><button class="btn ghost small" type="button" data-vps-action="check" data-id="${esc(v.id)}" ${checkBlocked ? `disabled title="${esc(checkTitle)}"` : ''}>检查连接</button><div class="vps-footer-cta"><button class="btn primary small" type="button" data-vps-action="terminal" data-id="${esc(v.id)}" ${reason ? `disabled aria-describedby="vps-terminal-hint-${esc(v.id)}"` : ''}>${icon('terminal')}${count ? `返回终端 · ${count}` : '打开终端'}</button>${count && !reason ? `<button class="btn ghost small vps-terminal-new" type="button" data-vps-action="terminal-new" data-id="${esc(v.id)}" title="新开终端会话" aria-label="为 ${esc(v.name)} 新开终端">${icon('plus')}</button>` : ''}</div></footer>${reason ? `<p class="vps-terminal-hint" id="vps-terminal-hint-${esc(v.id)}">${esc(reason)}${showProjectFix ? `<button class="btn ghost small" type="button" data-action="edit-project" data-id="${esc(v.project_ids[0])}">项目权限</button>` : showDeviceFix ? '<button class="btn ghost small" type="button" data-nav="devices">电脑管理</button>' : ''}</p>` : ''}<div class="vps-terminal-inline" data-vps-terminal-inline hidden></div>`;
 }
 function vpsTerminalInline(id) {
@@ -276,7 +316,12 @@ async function vpsOpenTerminal(id, button, { newSession = false } = {}) {
   try {
     const v = await api('/api/vps/' + encodeURIComponent(id));
     if (!current()) return;
-    if (!v.enabled) throw new Error('连接已停用，请先编辑并启用 VPS');
+    const unavailable = vpsTerminalReason(v);
+    if (unavailable) {
+      const error = new Error(unavailable);
+      error.code = vpsTerminalCode(v);
+      throw error;
+    }
     const via = v.terminal?.device_name;
     vpsTerminalMessage(id, via ? `正在经由 ${via} 连接…` : `正在连接 ${v.name}…`);
     const terminal = await vpsTerminalModule();
@@ -378,11 +423,13 @@ function vpsComparableCard(card) {
 function vpsCardHTML(v, sessions) {
   const activeCount = sessions.filter((item) => item.vps_id === v.id).length,
     ready = !vpsTerminalReason(v),
+    blockedLabel = v.terminal?.eligible === false ? '待授权' : '未就绪',
     subtitle = [v.provider, v.region].filter(Boolean).join(' · ') || '通用 SSH 服务器',
     projects = v.projects || [];
-  return `<article class="panel vps-card" data-vps-card="${esc(v.id)}"><header><span class="vps-symbol">${icon('cloud')}</span><div class="vps-title-block"><h2>${esc(v.name)}</h2><p>${esc(subtitle)}</p></div><div class="vps-badges"><span class="badge running" data-vps-card-sessions ${activeCount ? '' : 'hidden'}>${activeCount ? `终端 · ${activeCount}` : ''}</span><span class="badge ${!v.enabled ? 'offline' : 'neutral'}">${!v.enabled ? '已停用' : ready ? '<span class="dot online" aria-hidden="true"></span>就绪' : '待授权'}</span></div></header><div class="vps-address"><code>${esc(v.username)}@${esc(vpsEndpoint(v))}</code><div class="vps-address-actions"><button class="btn ghost small" type="button" data-vps-action="copy-ssh" data-id="${esc(v.id)}" title="复制 SSH 命令" aria-label="复制 ${esc(v.name)} 的 SSH 命令">${icon('terminal')}SSH</button><button class="icon-btn" type="button" data-vps-action="copy" data-id="${esc(v.id)}" title="复制连接地址" aria-label="复制 ${esc(v.name)} 的地址">${icon('copy')}</button></div></div><dl class="vps-facts"><div><dt>系统环境</dt><dd>${esc(v.system || '未填写')}</dd></div><div class="vps-fact-secondary"><dt>密钥策略</dt><dd>${v.host_key_policy === 'strict' ? '严格验证' : '首次信任'}</dd></div><div class="vps-fact-secondary"><dt>连接通道</dt><dd>${esc(vpsChannelLabel(v))}</dd></div><div class="vps-fact-projects"><dt>AI 关联项目</dt><dd><div class="vps-projects" aria-label="已分配项目">${projects.map((p) => `<span class="badge neutral">${icon('folder')}${esc(p.alias)}</span>`).join('') || '<span class="muted tiny">未关联（仅人工终端）</span>'}</div></dd></div></dl>${v.notes ? `<p class="vps-notes">${esc(v.notes)}</p>` : ''}${vpsActionsHTML(v)}</article>`;
+  return `<article class="panel vps-card" data-vps-card="${esc(v.id)}"><header><span class="vps-symbol">${icon('cloud')}</span><div class="vps-title-block"><h2>${esc(v.name)}</h2><p>${esc(subtitle)}</p></div><div class="vps-badges"><span class="badge running" data-vps-card-sessions ${activeCount ? '' : 'hidden'}>${activeCount ? `终端 · ${activeCount}` : ''}</span><span class="badge ${!v.enabled ? 'offline' : 'neutral'}">${!v.enabled ? '已停用' : ready ? '<span class="dot online" aria-hidden="true"></span>就绪' : blockedLabel}</span></div></header><div class="vps-address"><code>${esc(v.username)}@${esc(vpsEndpoint(v))}</code><div class="vps-address-actions"><button class="btn ghost small" type="button" data-vps-action="copy-ssh" data-id="${esc(v.id)}" title="复制 SSH 命令" aria-label="复制 ${esc(v.name)} 的 SSH 命令">${icon('terminal')}SSH</button><button class="icon-btn" type="button" data-vps-action="copy" data-id="${esc(v.id)}" title="复制连接地址" aria-label="复制 ${esc(v.name)} 的地址">${icon('copy')}</button></div></div><dl class="vps-facts"><div><dt>系统环境</dt><dd>${esc(v.system || '未填写')}</dd></div><div class="vps-fact-secondary"><dt>密钥策略</dt><dd>${v.host_key_policy === 'strict' ? '严格验证' : '首次信任'}</dd></div><div class="vps-fact-secondary"><dt>连接通道</dt><dd>${esc(vpsChannelLabel(v))}</dd></div><div class="vps-fact-projects"><dt>AI 关联项目</dt><dd><div class="vps-projects" aria-label="已分配项目">${projects.map((p) => `<span class="badge neutral">${icon('folder')}${esc(p.alias)}</span>`).join('') || '<span class="muted tiny">未关联（仅人工终端）</span>'}</div></dd></div></dl>${v.notes ? `<p class="vps-notes">${esc(v.notes)}</p>` : ''}${vpsActionsHTML(v)}</article>`;
 }
 async function vpsHTML(seq) {
+  void vpsLoadPresence(seq);
   const [items] = await Promise.all([vpsInventory(), loadBasics()]);
   if (seq !== S.renderSeq) return '';
   S.vps = items;
@@ -522,9 +569,15 @@ async function vpsEdit(id = null) {
           closeModal(dialog);
           if (S.page === 'vps' || S.page === 'projects')
             await renderPage(false).catch((e) => toast(e.message, true));
-          if (saved.enabled !== false) {
-            if (S.page !== 'vps') await navigate('vps');
-            await vpsOpenTerminal(targetId);
+          if (
+            saved.enabled !== false &&
+            session === S.session &&
+            space === S.space_id &&
+            page === S.page
+          ) {
+            if (page !== 'vps') await navigate('vps');
+            if (session === S.session && space === S.space_id && S.page === 'vps')
+              await vpsOpenTerminal(targetId);
           }
           return;
         }
@@ -614,20 +667,16 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
   if (!current() || (dialog && !dialog.isConnected)) return;
   const projects = vpsTerminalProjects(v),
     termReason = vpsTerminalReason(v),
-    eligible = !!v.enabled && (projects.length > 0 || !termReason),
-    canAutoRun = projects.length
-      ? !!projects[0].online
-      : v.terminal
-        ? v.terminal.eligible !== false && v.terminal.online !== false
-        : true;
+    eligible = vpsCheckReady(v, projects),
+    usesProject =
+      Boolean(projects[0]?.online) &&
+      (v.terminal?.check_ready === undefined || v.terminal.direct !== true);
   const title = '检查连接 · ' + v.name;
   const initialState = !v.enabled
     ? '连接已停用。'
     : !eligible
       ? termReason || '当前无法执行连接检查。'
-      : autoRun && !canAutoRun
-        ? '已保存。可以在连接电脑上线后检查连接。'
-        : '等待检查。';
+      : '等待检查。';
   const body = `<p class="form-note">${esc(vpsEndpoint(v))} · ${esc(v.username)}。读取主机名、系统和磁盘用量。</p><div class="field" hidden><label for="vps-check-project">通过项目连接</label><select id="vps-check-project">${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)} · ${esc(p.device_name)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select></div>
     <p id="vps-check-state" class="form-note" role="status">${esc(initialState)}</p><div class="code-box"><pre id="vps-check-output"></pre></div>`;
   const footer = `<button class="btn ghost" type="button" data-action="close-modal">关闭</button><button class="btn" type="button" data-vps-action="check-terminal" data-id="${esc(id)}" ${termReason ? 'disabled' : ''}>打开终端</button><button class="btn primary" type="button" id="vps-check-run" ${eligible ? '' : 'disabled'}>开始检查</button>`;
@@ -661,7 +710,7 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
       select.disabled = true;
       try {
         if (!operation) {
-          if (projects.length > 0) {
+          if (usesProject) {
             if (!args)
               args = {
                 project: select.value || projects[0].id,
@@ -748,7 +797,7 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
       select.disabled = !finished;
     }
   };
-  if (autoRun && eligible && canAutoRun) button.click();
+  if (autoRun && eligible) button.click();
 }
 document.addEventListener('click', async (e) => {
   const layoutBtn = e.target.closest('[data-vps-layout]');

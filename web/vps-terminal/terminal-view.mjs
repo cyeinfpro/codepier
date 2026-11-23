@@ -625,6 +625,7 @@ export class TerminalView {
       this.searchResult.textContent = found ? '' : this.searchInput.value ? '没有匹配' : '';
     };
     this.searchInput.addEventListener('keydown', (event) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Enter') {
         event.preventDefault();
         find(event.shiftKey);
@@ -796,16 +797,19 @@ export class TerminalView {
   makeMobileKeys() {
     const bar = el('div', 'vt-mobile-keys');
     bar.setAttribute('aria-label', '终端辅助键');
-    for (const [label, value] of [
+    for (const [label, value, applicationValue] of [
       ['Esc', '\x1b'],
       ['Tab', '\t'],
-      ['↑', '\x1b[A'],
-      ['↓', '\x1b[B'],
-      ['←', '\x1b[D'],
-      ['→', '\x1b[C'],
+      ['↑', '\x1b[A', '\x1bOA'],
+      ['↓', '\x1b[B', '\x1bOB'],
+      ['←', '\x1b[D', '\x1bOD'],
+      ['→', '\x1b[C', '\x1bOC'],
       ['Ctrl-C', '\x03'],
     ]) {
-      const key = button(label, () => this.sendKey(value));
+      const key = button(label, () => {
+        const applicationMode = this.terminal?.modes.applicationCursorKeysMode;
+        this.sendKey((applicationMode && applicationValue) || value);
+      });
       key.addEventListener('pointerdown', (event) => event.preventDefault());
       bar.append(key);
     }

@@ -96,6 +96,9 @@ export function count() {
 export function list() {
   return store?.list() || [];
 }
+export function activeCountsByVPS() {
+  return store?.activeCountsByVPS() || Object.create(null);
+}
 export function reset() {
   mountVersion++;
   store?.dispose();
@@ -117,5 +120,6 @@ export const api = Object.freeze({
   dispose,
   count,
   list,
+  activeCountsByVPS,
 });
 globalThis.CodePierVpsTerminal = api;

@@ -274,13 +274,25 @@ def test_project_picker_survives_refresh_and_old_agents_show_an_actionable_reaso
             page.evaluate("location.hash = 'vps'")
             expect(page.locator("#vps-query")).to_be_visible()
 
-            # Unassigned VPS also connects directly without showing a project picker.
+            # A tab detaches without closing; the ordinary button resumes it.
+            first_session_id = next(iter(fixture.sessions))
+            page.locator('[data-vps-action="terminal"]').click()
+            expect(page.locator(".vt-state")).to_have_text("已连接")
+            assert f"session={first_session_id}" in page.url
+            assert len(fixture.creates) == 1
+            while page.locator(".vt-tab-close").count():
+                page.locator(".vt-tab-close").last.click()
+            page.evaluate("location.hash = 'vps'")
+            expect(page.locator("#vps-query")).to_be_visible()
+
+            # Explicit New creates a direct session even when a detached one exists.
             saved_projects = list(fixture.projects)
             fixture.vps["project_ids"] = []
             fixture.vps["projects"] = []
             page.evaluate("renderPage(false)")
-            expect(page.locator('[data-vps-action="terminal"]')).to_be_enabled()
-            page.locator('[data-vps-action="terminal"]').click()
+            new_terminal = page.locator('[data-vps-action="terminal-new"]')
+            expect(new_terminal).to_be_enabled()
+            new_terminal.click()
             expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
             expect(page.locator(".vt-state")).to_have_text("已连接")
             assert len(fixture.creates) == 2
