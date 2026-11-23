@@ -36,6 +36,7 @@ class TerminalAgentConnection:
         self.direct_vps_allowed = True
         self.probe_supported = False
         self.host_pin_supported = False
+        self.saved_vps_password_only_supported = False
 
     async def request(self, action, payload, project, *, wait_seconds=None):
         if self.closed:

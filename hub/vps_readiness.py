@@ -15,6 +15,15 @@ from uuid import uuid4
 
 
 _INSTALL_ELIGIBILITY_SECONDS = 30 * 60
+HOST_VERIFICATION_REQUIRED = "required"
+HOST_VERIFICATION_SKIP = "skip"
+_HOST_VERIFICATION_MODES = (HOST_VERIFICATION_REQUIRED, HOST_VERIFICATION_SKIP)
+
+
+def require_host_verification_mode(value):
+    if value not in _HOST_VERIFICATION_MODES:
+        raise ValueError("Unknown VPS readiness host verification mode")
+    return value
 
 
 _SCHEMA = """
@@ -28,6 +37,8 @@ CREATE TABLE IF NOT EXISTS vps_readiness_jobs (
     grant_id TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('queued','running','installing','ready','failed')),
     intent TEXT NOT NULL DEFAULT 'scan' CHECK(intent IN ('scan','install')),
+    host_verification TEXT NOT NULL DEFAULT 'required'
+        CHECK(host_verification IN ('required','skip')),
     reason_code TEXT,
     verify_only INTEGER NOT NULL DEFAULT 0 CHECK(verify_only IN (0,1)),
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -58,6 +69,7 @@ class ReadinessTarget:
     authorized_user_id: str
     connection_revision: int
     grant_id: str
+    host_verification: str = HOST_VERIFICATION_REQUIRED
 
     @classmethod
     def from_row(cls, row):
@@ -72,6 +84,7 @@ class ReadinessTarget:
                     "authorized_user_id",
                     "connection_revision",
                     "grant_id",
+                    "host_verification",
                 )
             )
         )
@@ -118,6 +131,11 @@ class VPSReadiness:
                 db.execute(
                     "ALTER TABLE vps_readiness_jobs ADD COLUMN intent TEXT NOT NULL "
                     "DEFAULT 'scan' CHECK(intent IN ('scan','install'))"
+                )
+            if "host_verification" not in columns:
+                db.execute(
+                    "ALTER TABLE vps_readiness_jobs ADD COLUMN host_verification TEXT NOT NULL "
+                    "DEFAULT 'required' CHECK(host_verification IN ('required','skip'))"
                 )
         self.store.execute(_DUE_INDEX)
         # Earlier versions set the fence even on independently verified
@@ -167,7 +185,15 @@ class VPSReadiness:
             return None
         public = {
             key: row[key]
-            for key in ("id", "state", "reason_code", "connection_revision", "updated", "intent")
+            for key in (
+                "id",
+                "state",
+                "reason_code",
+                "connection_revision",
+                "updated",
+                "intent",
+                "host_verification",
+            )
         }
         # Expose missing independently of failed, without rebuilding the
         # existing SQLite CHECK-constrained table on upgraded servers.
@@ -183,7 +209,16 @@ class VPSReadiness:
         )
         return public
 
-    def _enqueue(self, space_id, vps_id, grant_id, authorized_user_id, expected_revision, refresh):
+    def _enqueue(
+        self,
+        space_id,
+        vps_id,
+        grant_id,
+        authorized_user_id,
+        expected_revision,
+        refresh,
+        host_verification,
+    ):
         with self.store.transaction() as db:
             target = db.execute(
                 """SELECT owner_user_id,connection_revision FROM vps_connections
@@ -195,8 +230,9 @@ class VPSReadiness:
             now = self.clock()
             db.execute(
                 """INSERT OR IGNORE INTO vps_readiness_jobs
-                   (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,grant_id,state,next_attempt,updated)
-                   VALUES (?,?,?,?,?,?,?,'queued',?,?)""",
+                   (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,
+                    grant_id,state,next_attempt,updated,host_verification)
+                   VALUES (?,?,?,?,?,?,?,'queued',?,?,?)""",
                 (
                     uuid4().hex,
                     space_id,
@@ -207,6 +243,7 @@ class VPSReadiness:
                     grant_id,
                     now,
                     now,
+                    host_verification,
                 ),
             )
             if refresh:
@@ -215,19 +252,22 @@ class VPSReadiness:
                 db.execute(
                     """UPDATE vps_readiness_jobs
                        SET state='queued',intent='scan',reason_code=NULL,attempts=0,next_attempt=?,updated=?,
-                           authorized_user_id=?,grant_id=?
+                           authorized_user_id=?,grant_id=?,host_verification=?
                        WHERE space_id=? AND vps_id=? AND connection_revision=?
                          AND owner_user_id IS ?
-                         AND state IN ('ready','failed')""",
+                         AND state IN ('ready','failed')
+                         AND (verify_only=0 OR host_verification=?)""",
                     (
                         now,
                         now,
                         authorized_user_id,
                         grant_id,
+                        host_verification,
                         space_id,
                         vps_id,
                         expected_revision,
                         target["owner_user_id"],
+                        host_verification,
                     ),
                 )
             row = db.execute(
@@ -238,7 +278,15 @@ class VPSReadiness:
             return self._public(row, now=self.clock())
 
     async def enqueue(
-        self, space_id, vps_id, grant_id, *, authorized_user_id, expected_revision, refresh=False
+        self,
+        space_id,
+        vps_id,
+        grant_id,
+        *,
+        authorized_user_id,
+        expected_revision,
+        refresh=False,
+        host_verification=HOST_VERIFICATION_REQUIRED,
     ):
         """The route must pre-authorize this grant/Space before enqueueing."""
         self._grant(grant_id, authorized_user_id)
@@ -250,21 +298,38 @@ class VPSReadiness:
             authorized_user_id,
             expected_revision,
             refresh,
+            require_host_verification_mode(host_verification),
         )
         if row:
             self._wake.set()
         return row
 
-    def _backfill(self, space_id, grant_id, authorized_user_id, refresh):
+    def _backfill(self, space_id, grant_id, authorized_user_id, refresh, host_verification):
         now = self.clock()
         with self.store.transaction() as db:
             if refresh:
                 db.execute(
                     f"""UPDATE vps_readiness_jobs
                         SET state='queued',intent='scan',reason_code=NULL,attempts=0,
-                            next_attempt=?,updated=?,authorized_user_id=?,grant_id=?
-                        WHERE space_id=? AND state IN ('ready','failed') AND {_CURRENT_TARGET}""",
-                    (now, now, authorized_user_id, grant_id, space_id),
+                            next_attempt=?,updated=?,authorized_user_id=?,grant_id=?,host_verification=?
+                        WHERE space_id=? AND {_CURRENT_TARGET}
+                          AND (
+                            (state IN ('ready','failed') AND (verify_only=0 OR host_verification=?))
+                            OR (?='skip' AND host_verification='required' AND state='queued'
+                                AND intent='scan' AND attempts=0 AND verify_only=0
+                                AND authorized_user_id=?)
+                          )""",
+                    (
+                        now,
+                        now,
+                        authorized_user_id,
+                        grant_id,
+                        host_verification,
+                        space_id,
+                        host_verification,
+                        host_verification,
+                        authorized_user_id,
+                    ),
                 )
                 refreshed = db.execute("SELECT changes()").fetchone()[0]
             else:
@@ -273,27 +338,43 @@ class VPSReadiness:
                 refreshed
                 + db.execute(
                     """INSERT OR IGNORE INTO vps_readiness_jobs
-                   (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,grant_id,state,next_attempt,updated)
+                   (id,space_id,vps_id,owner_user_id,authorized_user_id,connection_revision,
+                    grant_id,state,next_attempt,updated,host_verification)
                    SELECT lower(hex(randomblob(16))),space_id,id,owner_user_id,?,connection_revision,
-                          ?,'queued',?,?
+                          ?,'queued',?,?,?
                    FROM vps_connections WHERE space_id=? AND enabled=1""",
-                    (authorized_user_id, grant_id, now, now, space_id),
+                    (authorized_user_id, grant_id, now, now, host_verification, space_id),
                 ).rowcount
             )
 
-    async def backfill(self, space_id, grant_id, *, authorized_user_id, refresh=False):
+    async def backfill(
+        self,
+        space_id,
+        grant_id,
+        *,
+        authorized_user_id,
+        refresh=False,
+        host_verification=HOST_VERIFICATION_REQUIRED,
+    ):
         """Queue read-only scans only in an already-authorized Space."""
         self._grant(grant_id, authorized_user_id)
         if not space_id:
             raise ValueError("An explicitly authorized Space is required")
         count = await self.store.run(
-            self._backfill, space_id, grant_id, authorized_user_id, refresh
+            self._backfill,
+            space_id,
+            grant_id,
+            authorized_user_id,
+            refresh,
+            require_host_verification_mode(host_verification),
         )
         if count:
             self._wake.set()
         return count
 
-    def _install_missing(self, space_id, grant_id, authorized_user_id, vps_id, expected_revision):
+    def _install_missing(
+        self, space_id, grant_id, authorized_user_id, vps_id, expected_revision, host_verification
+    ):
         now = self.clock()
         with self.store.transaction() as db:
             # Avoid a SELECT/UPDATE gap: rebind only an exact, latest positive
@@ -304,7 +385,7 @@ class VPSReadiness:
                         next_attempt=?,updated=?,authorized_user_id=?,grant_id=?
                     WHERE space_id=? AND state='failed' AND intent='scan'
                       AND reason_code='TMUX_MISSING' AND verify_only=0
-                      AND updated BETWEEN ? AND ?
+                      AND host_verification=? AND updated BETWEEN ? AND ?
                       AND (? IS NULL OR vps_id=?) AND (? IS NULL OR connection_revision=?)
                       AND {_CURRENT_TARGET}""",
                 (
@@ -313,6 +394,7 @@ class VPSReadiness:
                     authorized_user_id,
                     grant_id,
                     space_id,
+                    host_verification,
                     now - _INSTALL_ELIGIBILITY_SECONDS,
                     now,
                     vps_id,
@@ -323,7 +405,14 @@ class VPSReadiness:
             ).rowcount
 
     async def install_missing(
-        self, space_id, grant_id, *, authorized_user_id, vps_id=None, expected_revision=None
+        self,
+        space_id,
+        grant_id,
+        *,
+        authorized_user_id,
+        vps_id=None,
+        expected_revision=None,
+        host_verification=HOST_VERIFICATION_REQUIRED,
     ):
         """Promote only current, conclusively missing rows after explicit authorization."""
         self._grant(grant_id, authorized_user_id)
@@ -339,7 +428,13 @@ class VPSReadiness:
         if vps_id is None and expected_revision is not None:
             raise ValueError("A revision requires a single target")
         count = await self.store.run(
-            self._install_missing, space_id, grant_id, authorized_user_id, vps_id, expected_revision
+            self._install_missing,
+            space_id,
+            grant_id,
+            authorized_user_id,
+            vps_id,
+            expected_revision,
+            require_host_verification_mode(host_verification),
         )
         if count:
             self._wake.set()

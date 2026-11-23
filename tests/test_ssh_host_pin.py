@@ -141,44 +141,50 @@ def test_pin_lives_on_the_vps_and_rotation_changes_the_connection_revision(tmp_p
         store.close()
 
 
-def test_host_pin_capability_is_opt_in_and_scoped_to_the_current_connection(monkeypatch):
+def test_saved_vps_capability_uses_exact_bool_and_current_agent_connection(monkeypatch):
     from types import SimpleNamespace
 
     from hub.ssh_terminal.service import TerminalService
     from hub.vps import _agent_probe_ready
     from shared.util import DevError
 
-    old = SimpleNamespace(closed=False, probe_supported=True, direct_vps=True)
-    new = SimpleNamespace(
+    main = object()
+    old = SimpleNamespace(
         closed=False, probe_supported=True, direct_vps=True, host_pin_supported=True
     )
-    malformed = SimpleNamespace(
-        closed=False, probe_supported=True, direct_vps=True, host_pin_supported="true"
+    new = SimpleNamespace(
+        closed=False, probe_supported=True, direct_vps=True,
+        saved_vps_password_only_supported=True, main_connection=main,
     )
-    project = {"device_id": "old", "_direct_vps": True}
-    assert _agent_probe_ready(old, project)
-    assert not _agent_probe_ready(old, project, requires_pin=True)
-    assert not _agent_probe_ready(malformed, project, requires_pin=True)
-    assert _agent_probe_ready(new, project, requires_pin=True)
+    malformed = SimpleNamespace(
+        closed=False, probe_supported=True, direct_vps=True,
+        saved_vps_password_only_supported="true",
+    )
+    denied = SimpleNamespace(**{**vars(new), "direct_vps_allowed": False})
+    project = {"device_id": "new", "_direct_vps": True}
+    assert not _agent_probe_ready(old, project)
+    assert not _agent_probe_ready(malformed, project)
+    assert not _agent_probe_ready(denied, project)
+    assert _agent_probe_ready(new, project)
 
     terminal = TerminalService.__new__(TerminalService)
     monkeypatch.setenv("CODEPIER_SSH_TERMINAL_ENABLED", "1")
     terminal.closing = False
     terminal.config = TerminalConfig()
-    terminal.agents = {"old": old, "new": new}
-    devices = [{"id": "old"}, {"id": "new"}]
-    assert terminal._select_admin_direct_device(devices, {"old"}, {})["id"] == "old"
-    assert (
-        terminal._select_admin_direct_device(devices, {"old"}, {}, requires_pin=True)["id"] == "new"
-    )
-    assert terminal._capability_reason(project, old, requires_pin=True) == "AGENT_UPGRADE_REQUIRED"
-    assert terminal._capability_reason(project, old) is None
+    terminal.runtime = SimpleNamespace(connections={"new": main})
+    terminal.agents = {"old": old, "new": new, "denied": denied, "malformed": malformed}
+    devices = [{"id": identifier} for identifier in terminal.agents]
+    assert terminal._select_admin_direct_device(devices, {"old", "denied"}, {})["id"] == "new"
+    assert terminal._capability_reason(project, old) == "AGENT_UPGRADE_REQUIRED"
+    assert terminal._capability_reason(project, new) is None
+    assert terminal._require_saved_vps_agent(project, new) is None
 
-    pin_target = {"host_key_policy": "confirm-change"}
+    terminal.runtime.connections["new"] = object()
+    assert terminal._capability_reason(project, new) == "AGENT_UPGRADE_REQUIRED"
     with pytest.raises(DevError) as error:
-        terminal._require_host_pin_agent(project, pin_target, old)
+        terminal._require_saved_vps_agent(project, new)
     assert error.value.code == "AGENT_UPGRADE_REQUIRED"
-    assert terminal._require_host_pin_agent({"device_id": "new"}, pin_target, new) is None
+    terminal.runtime.connections["new"] = main
     terminal.agents["new"] = old
     with pytest.raises(DevError):
-        terminal._require_host_pin_agent({"device_id": "new"}, pin_target, new)
+        terminal._require_saved_vps_agent(project, new)

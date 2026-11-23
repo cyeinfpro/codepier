@@ -26,11 +26,21 @@ function fixture(receipts) {
     modal: () => dialog, uid: () => String(++uid),
     stateNames: {running: '运行中', failed: '失败', succeeded: '成功', cancelled: '已取消'},
     busy: async (button, run) => {button.disabled = true; try {await run();} finally {button.disabled = false;}},
-    api: async () => ({name: 'Fixture', host: 'fixture.invalid', username: 'fixture', port: 22,
-      enabled: true, projects: [{id: 'fixture-project', alias: 'Fixture', device_name: 'Fixture',
-      mode: 'write', allow_tasks: true, online: true}]}),
-    tool: async (name, args) => {
-      if (name === 'exec') {submissions.push({...args}); return {operation_id: 'op-' + submissions.length};}
+    api: async (url, options = {}) => {
+      if (url === '/api/vps/fixture-vps' && !options.method) return {
+        name: 'Fixture', host: 'fixture.invalid', username: 'fixture', port: 22,
+        enabled: true, saved_vps_host_verification: 'skip', check_available: true,
+        terminal: {eligible: true}, projects: [{id: 'fixture-project', alias: 'Fixture',
+        device_name: 'Fixture', mode: 'write', allow_tasks: true, online: true}],
+      };
+      assert.equal(url, '/api/vps/fixture-vps/check');
+      assert.equal(options.method, 'POST');
+      const args = JSON.parse(options.body);
+      assert.equal('project_id' in args, false);
+      submissions.push(args);
+      return {pending: true, operation_id: 'op-' + submissions.length};
+    },
+    tool: async (name) => {
       assert.equal(name, 'operations_wait');
       outputs.push(nodes['#vps-check-output'].textContent);
       const receipt = receipts[sequence++];
@@ -64,7 +74,7 @@ const terminal = (state, extra = {}) => ({state, pending: false, output: '', ...
   }
   const pending = fixture([{state: 'running', pending: true, output: ''}, terminal('failed')]);
   await pending.open(); await pending.click();
-  assert.equal(pending.outputs[1], '等待 Agent 返回…');
+  assert.equal(pending.outputs[1], '等待连接电脑返回…');
   assert.ok(!pending.nodes['#vps-check-output'].textContent.includes('等待'));
   assert.equal(pending.submissions.length, 1);
   const again = fixture([terminal('failed'), terminal('succeeded')]);
@@ -74,7 +84,6 @@ const terminal = (state, extra = {}) => ({state, pending: false, output: '', ...
   const recovery = fixture([new Error('temporary read failure'), terminal('succeeded')]);
   await recovery.open(); await recovery.click();
   assert.equal(recovery.nodes['#vps-check-run'].textContent, '重试');
-  assert.equal(recovery.nodes['#vps-check-project'].disabled, true);
   await recovery.click();
   assert.equal(recovery.submissions.length, 1, 'recovery must poll the original operation');
   const closed = fixture([(dialog) => {dialog.isConnected = false; return terminal('failed');}]);
@@ -118,6 +127,7 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
         return {
           id: 'unassigned-vps', name: 'Unassigned', host: '198.51.100.20', username: 'ubuntu',
           port: 2222, enabled: true, project_ids: [], projects: [],
+          saved_vps_host_verification: 'skip', check_available: true,
           terminal: {eligible: true, online: true, device_name: 'Studio-Mac'},
         };
       }
@@ -149,7 +159,7 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
     {state: 'failed', pending: false, output: '', error: 'SSH 认证失败'},
   ]);
   await direct.open();
-  assert.ok(direct.getBody().includes('<div class="field" hidden><label for="vps-check-project">'));
+  assert.ok(!direct.getBody().includes('vps-check-project'));
   assert.ok(direct.getBody().includes('等待检查。'));
   assert.ok(direct.getFooter().includes('data-vps-action="check-terminal"'));
   assert.ok(!direct.getFooter().includes('id="vps-check-run" disabled'));
@@ -238,7 +248,7 @@ function createUnassignedCheckFixture(checkResponses, waitResponses = []) {
       assert.equal(url, '/api/vps/vps-1');
       return {
         id: 'vps-1', name: 'Tokyo-1', enabled: true,
-        project_ids: [], terminal: {eligible: true, device_name: 'Mac'},
+        project_ids: [], saved_vps_host_verification: 'skip', terminal: {eligible: true, device_name: 'Mac'},
       };
     },
     window: {

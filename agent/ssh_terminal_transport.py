@@ -63,14 +63,18 @@ class _SSHAuthentication:
         self.failure = None
 
     def validate_host_public_key(self, host, address, port, key):
-        return self._trust.validate_candidate(host, address, port, key)
+        return self._trust is not None and self._trust.validate_candidate(host, address, port, key)
+
+    async def _confirm_host_trust(self):
+        if self._trust is not None:
+            await asyncio.to_thread(self._trust.commit_before_authentication)
 
     async def password_auth_requested(self):
         if self.sent_password:
             return None
         # Called only after key exchange proves host-key possession.
         try:
-            await asyncio.to_thread(self._trust.commit_before_authentication)
+            await self._confirm_host_trust()
         except HostTrustError as exc:
             self._trust.error = exc
             raise
@@ -100,7 +104,7 @@ class _SSHAuthentication:
                 "SSH_AUTH_CHALLENGE_REQUIRED", "SSH 服务器要求额外认证信息"
             )
             return None
-        await asyncio.to_thread(self._trust.commit_before_authentication)
+        await self._confirm_host_trust()
         return await self._challenge(name, instructions, prompts)
 
     def auth_completed(self):
@@ -237,6 +241,19 @@ class AsyncSSHTransport:
     def connected(self):
         return self.connection is not None and not self._closed and not self.connection.is_closed()
 
+    async def _load_host_trust(self, target):
+        if target.get("saved_vps_password_only") is True:
+            # Trusted saved-VPS Hub operations only, never system/generic SSH.
+            return None
+        return await asyncio.to_thread(
+            HostKeyPolicy,
+            self.ssh,
+            target.get("host_key_policy", "strict"),
+            sources=self.trust_sources,
+            write_path=self.trust_write_path,
+            expected_fingerprint=target.get("host_key_fingerprint", ""),
+        )
+
     async def connect(self, target, password, *, challenge=None):
         if self.ssh is None:
             try:
@@ -245,20 +262,15 @@ class AsyncSSHTransport:
                 raise SSHTransportError(
                     "SSH_DEPENDENCY_MISSING", "Agent 尚未安装 Web SSH 依赖，请更新 Agent"
                 ) from exc
-        self.trust = await asyncio.to_thread(
-            HostKeyPolicy,
-            self.ssh,
-            target.get("host_key_policy", "strict"),
-            sources=self.trust_sources,
-            write_path=self.trust_write_path,
-            expected_fingerprint=target.get("host_key_fingerprint", ""),
-        )
+        self.trust = await self._load_host_trust(target)
         ssh, trust = self.ssh, self.trust
 
         class Client(_SSHAuthentication, ssh.SSHClient):
             pass
 
-        client = Client(password, trust, challenge)
+        # Do not relay arbitrary OTP/echoed prompts from a host whose identity
+        # is not checked. The fixed saved-password KBI prompt still works.
+        client = Client(password, trust, challenge if trust is not None else None)
         try:
             self.connection = await asyncio.wait_for(
                 ssh.connect(
@@ -266,7 +278,7 @@ class AsyncSSHTransport:
                     port=target.get("port", 22),
                     username=target["username"],
                     client_factory=lambda: client,
-                    known_hosts=trust.known_hosts,
+                    known_hosts=None if trust is None else trust.known_hosts,
                     config=None,
                     # AsyncSSH treats [] as a request to load default local keys.
                     client_keys=None,
@@ -290,7 +302,7 @@ class AsyncSSHTransport:
                 self.config.connect_timeout + self.config.login_timeout,
             )
             # A server may allow the SSH 'none' authentication method.
-            await asyncio.to_thread(trust.commit_before_authentication)
+            await client._confirm_host_trust()
             return self
         except asyncio.CancelledError:
             await self.close()

@@ -197,7 +197,24 @@ export function uuid() {
   return globalThis.crypto.randomUUID().replaceAll('-', '');
 }
 
+const SAVED_VPS_LEGACY_ERRORS = new Set([
+  'HOST_KEY_UNKNOWN',
+  'HOST_KEY_CHANGED',
+  'HOST_KEY_REVOKED',
+  'HOST_KEY_UNVERIFIED',
+  'HOST_TRUST_CONFIGURATION',
+  'HOST_TRUST_UNAVAILABLE',
+  'HOST_TRUST_BUSY',
+  'SSH_HOST_KEY_CHANGED',
+  'SSH_HOST_KEY_UNTRUSTED',
+]);
+
+export function isSavedVpsLegacyError(code) {
+  return SAVED_VPS_LEGACY_ERRORS.has(code);
+}
+
 export const STOP_RETRY_CODES = new Set([
+  ...SAVED_VPS_LEGACY_ERRORS,
   'AUTH_REVOKED',
   'AUTH_REQUIRED',
   'LOGIN_REQUIRED',
@@ -256,8 +273,6 @@ const REASONS = {
   FEATURE_DISABLED: '管理员已暂停新建终端',
   SSH_CONNECT_TIMEOUT: 'SSH 连接超时',
   SSH_AUTH_FAILED: 'SSH 登录失败，请检查连接凭据',
-  HOST_KEY_UNKNOWN: '主机指纹尚未受信任',
-  HOST_KEY_CHANGED: '主机指纹已变化，请核验服务器',
   SESSION_LIMIT: '已达到终端会话上限',
   HISTORY_GAP:
     '旧画面无法完整恢复。可尝试继续同一会话，不会重跑命令；临时 SSH 只显示之后的新输出。',
@@ -292,10 +307,6 @@ const REASONS = {
   SSH_CONNECTION_FAILED: 'SSH 连接失败，请检查服务器和网络',
   SSH_CONNECT_FAILED: '面板未能启动 SSH 会话，请打开连接诊断',
   SSH_TERMINAL_FORBIDDEN: '连接电脑未授权此项目运行终端',
-  HOST_KEY_REVOKED: '主机指纹已被撤销，请通过可信渠道核验',
-  HOST_TRUST_CONFIGURATION: '连接电脑的 SSH 信任配置无法用于网页终端',
-  HOST_TRUST_UNAVAILABLE: '连接电脑无法读取或更新 SSH 信任记录',
-  HOST_TRUST_BUSY: '连接电脑正在更新 SSH 信任记录，请稍后重试',
   PERSISTENCE_PROBE_FAILED: '无法确认远端会话恢复能力，请查看连接诊断',
   TERMINAL_CONFIG_MISMATCH: '面板与连接电脑的终端配置不匹配',
   VPS_CREDENTIAL_UNAVAILABLE: '面板无法读取已保存的连接凭据，请检查 VPS 连接设置',
@@ -304,6 +315,7 @@ const REASONS = {
 };
 
 export function reasonText(code, fallback = '') {
+  if (isSavedVpsLegacyError(code)) return '当前面板或连接电脑版本不兼容，请更新后重试。';
   if (Object.hasOwn(REASONS, code)) return REASONS[code];
   if (typeof fallback === 'string' && fallback.length > 0 && fallback.length <= 240)
     return fallback;

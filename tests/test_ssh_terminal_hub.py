@@ -142,6 +142,7 @@ class MemoryAgent:
     def __init__(self, generation=GEN):
         self.device_id, self.generation = "device-a", generation
         self.closed = False
+        self.saved_vps_password_only_supported = True
         self.requests, self.inputs, self.acks = [], [], []
         self.handler = None
 
@@ -599,6 +600,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.session = HubSession(saved, principal(), dict(self.project))
         self.service.sessions[SID] = self.session
         self.agent = MemoryAgent()
+        self.agent.main_connection = object()
+        runtime.connections = {self.agent.device_id: self.agent.main_connection}
         self.service.agents[self.agent.device_id] = self.agent
 
     async def asyncTearDown(self):

@@ -92,6 +92,8 @@ class NativeSSHTarget:
     port: int
     username: str
     host_fingerprint: str
+    host_verification: str = "required"
+    purpose: str = "default"
 
 
 @dataclass(frozen=True)
@@ -143,15 +145,42 @@ async def _dial(address, port):
         raise
 
 
+def readiness_identity_pin(target) -> str | None:
+    """Return the pin unless this saved target is for the explicit managed VPS route."""
+    mode = getattr(target, "host_verification", "required")
+    if mode == "skip":
+        if getattr(target, "purpose", "default") not in {"manual_fleet", "managed_vps"}:
+            raise ValueError("managed VPS readiness scope is required for unverified VPS SSH")
+        return None
+    if mode != "required":
+        raise ValueError("unknown VPS readiness host verification policy")
+    fingerprint = target.host_fingerprint
+    normalized = normalize_host_pin(fingerprint)
+    if normalized != fingerprint:
+        raise ValueError("noncanonical VPS readiness host fingerprint")
+    return normalized
+
+
+def _matches_peer_report(pin, candidate):
+    if pin is None:
+        # Skip mode reports only successful KEX on the vetted endpoint.
+        return candidate is None
+    try:
+        return hmac.compare_digest(normalize_host_pin(candidate), pin)
+    except (TypeError, ValueError):
+        return False
+
+
 class NativeVPSReadiness:
     """VPSReadiness callback implementation with an injected identity-verified connector.
 
     resolve_target(job, action) asynchronously re-resolves the exact current
     record and active grant, returning NativeSSHTarget or None. The trusted SSH
     connector receives only the vetted already-connected socket and saved
-    original host identity. It must call verify_host with the cryptographically
-    proven SHA256 fingerprint before awaiting password. It must never fall back
-    to another socket, resolver, agent, known_hosts mode or authentication path.
+    original requested destination. It must report the SSH key from the
+    established socket before awaiting password only when a pin is required.\n    Authorized skip reports None after endpoint-bound KEX, without deriving a fingerprint.
+    The authorized managed VPS route does not establish host identity.
+    Never fall back to another socket, resolver or authentication path.
     """
 
     def __init__(
@@ -220,8 +249,7 @@ class NativeVPSReadiness:
         except (ValueError, UnicodeError):
             raise ReadinessNativeError("denied", "HUB_SSH_TARGET_INVALID") from None
         try:
-            if normalize_host_pin(target.host_fingerprint) != target.host_fingerprint:
-                raise ValueError
+            readiness_identity_pin(target)
         except ValueError:
             raise ReadinessNativeError("denied", "HUB_SSH_TRUST_MIGRATION_REQUIRED") from None
         return target
@@ -297,29 +325,25 @@ class NativeVPSReadiness:
         if self._connector is None:
             raise ReadinessNativeError("unsupported")
         sock = transport = None
-        trusted = secret_released = False
+        peer_proved = secret_released = False
+        pin = readiness_identity_pin(target)
 
         def verify_host(fingerprint):
-            nonlocal trusted
-            try:
-                candidate = normalize_host_pin(fingerprint)
-            except ValueError:
-                trusted = False
-                raise ReadinessNativeError("denied") from None
-            trusted = hmac.compare_digest(candidate, target.host_fingerprint)
-            if not trusted:
+            nonlocal peer_proved
+            peer_proved = _matches_peer_report(pin, fingerprint)
+            if not peer_proved:
                 raise ReadinessNativeError("denied")
 
         async def password():
             nonlocal secret_released
-            if not trusted or secret_released:
+            if not peer_proved or secret_released:
                 raise ReadinessNativeError("denied")
             # A changed/revoked record is rejected even after key exchange.
             await self._current(job, action, target)
             secret_released = True
             value = await self._secret(target)
             await self._current(job, action, target)
-            if not trusted or not isinstance(value, str) or not 0 < len(value) <= 4096:
+            if not peer_proved or not isinstance(value, str) or not 0 < len(value) <= 4096:
                 raise ReadinessNativeError("denied")
             return value
 
@@ -330,7 +354,7 @@ class NativeVPSReadiness:
                 self._connector(target, sock, verify_host=verify_host, password=password),
                 self._authentication_timeout,
             )
-            if not trusted:
+            if not peer_proved:
                 raise ReadinessNativeError("denied")
             await self._current(job, action, target)
             yield target, transport

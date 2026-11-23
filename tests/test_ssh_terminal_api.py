@@ -87,6 +87,7 @@ class TerminalPeer:
     def __init__(self):
         self.device_id, self.generation = DEVICE, GENERATION
         self.closed = False
+        self.saved_vps_password_only_supported = True
         self.sessions, self.actions = {}, []
         self.revision = 0
 
@@ -96,6 +97,8 @@ class TerminalPeer:
         if action == "reserve_create":
             return {"admission_token": None}
         if action == "create":
+            assert payload.get("saved_vps_password_only") is True
+            assert "host_key_policy" not in payload and "host_key_fingerprint" not in payload
             self.sessions[sid] = {
                 "session_id": sid,
                 "runtime_generation": self.generation,
@@ -159,8 +162,9 @@ class TerminalAPI:
 
     def install_terminal(self):
         if self.peer is None:
-            self.install_main()
+            main = self.install_main()
             self.peer = TerminalPeer()
+            self.peer.main_connection = main
             self.client.portal.call(self.service.register_agent, self.peer)
         return self.peer
 
@@ -334,9 +338,17 @@ def agent_hello(api, socket, *, secret=DEVICE_SECRET, **changes):
     assert challenge["type"] == "terminal_challenge" and challenge["protocol"] == 1
     assert len(challenge["challenge"]) >= 32
     peer = terminal_secure_channel(secret, challenge["challenge"], DEVICE, "agent")
-    hello = {"type": "terminal_hello", "protocol": 1, "runtime_generation": GENERATION,
-             "limits": {key: getattr(api.service.config, key)
-                        for key in ("frame_bytes", "input_frame_bytes", "control_bytes")}, **changes}
+    hello = {
+        "type": "terminal_hello",
+        "protocol": 1,
+        "runtime_generation": GENERATION,
+        "limits": {
+            key: getattr(api.service.config, key)
+            for key in ("frame_bytes", "input_frame_bytes", "control_bytes")
+        },
+        "saved_vps_password_only": True,
+        **changes,
+    }
     socket.send_text(peer.pack(hello))
     return peer
 
@@ -508,6 +520,7 @@ def test_capabilities_distinguish_offline_old_agent_and_supported_agent(terminal
     api.install_terminal()
     current = api.capabilities().json()
     assert current["available"] and current["protocol_version"] == 1
+    assert current["saved_vps_host_verification"] == "skip"
     assert current["runtime_generation"] == GENERATION
     assert current["limits"]["frame_bytes"] == api.service.config.frame_bytes
     assert VPS_PASSWORD not in json.dumps(current)
@@ -817,19 +830,34 @@ async def test_agent_scope_cancellation_settles_rpc_and_unregisters_only_its_ide
 def test_agent_hello_records_direct_vps_and_probe_flags(terminal_api):
     api = terminal_api
     api.install_main()
-    unassigned = api.owner.post("/api/vps", json={
-        "name": "Unassigned hello VPS", "host": "hello.invalid",
-        "username": "fixture", "password": VPS_PASSWORD, "project_ids": [], "host_key_policy": "strict",
-    }).json()
+    unassigned = api.owner.post(
+        "/api/vps",
+        json={
+            "name": "Unassigned hello VPS",
+            "host": "hello.invalid",
+            "username": "fixture",
+            "password": VPS_PASSWORD,
+            "project_ids": [],
+            "host_key_policy": "strict",
+        },
+    ).json()
     with api.client.websocket_connect(f"wss://testserver/agent/vps-terminal/{DEVICE}") as socket:
         peer = agent_hello(api, socket, direct_vps=True, direct_vps_allowed=False, probe=True)
         assert peer.unpack(socket.receive_text())["type"] == "terminal_ready"
         conn = api.service.agents[DEVICE]
-        assert conn.direct_vps is True and conn.direct_vps_allowed is False and conn.probe_supported is True
-        carrier_cap = api.owner.get("/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}).json()
+        assert (
+            conn.direct_vps is True
+            and conn.direct_vps_allowed is False
+            and conn.probe_supported is True
+        )
+        carrier_cap = api.owner.get(
+            "/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}
+        ).json()
         assert carrier_cap["available"] is True
         api.store.execute("UPDATE projects SET mode='read' WHERE id=?", (PROJECT,))
-        blocked_cap = api.owner.get("/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}).json()
+        blocked_cap = api.owner.get(
+            "/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}
+        ).json()
         assert not blocked_cap["available"] and blocked_cap["reason_code"] == "SHELL_DISABLED"
 
 
@@ -839,21 +867,44 @@ def test_project_free_session_creation_unassigned_admin_and_demotion_revocation(
     peer.direct_vps = True
     peer.direct_vps_allowed = True
     peer.probe_supported = True
-    unassigned = api.owner.post("/api/vps", json={
-        "name": "Direct Admin VPS", "host": "direct.invalid",
-        "username": "root", "password": VPS_PASSWORD, "project_ids": [], "host_key_policy": "strict",
-    }).json()
-    assert api.alice.get("/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}).status_code == 404
+    unassigned = api.owner.post(
+        "/api/vps",
+        json={
+            "name": "Direct Admin VPS",
+            "host": "direct.invalid",
+            "username": "root",
+            "password": VPS_PASSWORD,
+            "project_ids": [],
+            "host_key_policy": "strict",
+        },
+    ).json()
+    assert (
+        api.alice.get(
+            "/api/vps-terminal/capabilities", params={"vps_id": unassigned["id"]}
+        ).status_code
+        == 404
+    )
     member_cap = api.alice.get("/api/vps-terminal/capabilities", params={"vps_id": api.vps["id"]})
     assert member_cap.status_code == 200 and member_cap.json()["available"] is True
-    member_created = api.alice.post("/api/vps-terminal/sessions", json={
-        "vps_id": api.vps["id"], "project_id": "", "request_id": uuid.uuid4().hex, "mode": "direct",
-    })
+    member_created = api.alice.post(
+        "/api/vps-terminal/sessions",
+        json={
+            "vps_id": api.vps["id"],
+            "project_id": "",
+            "request_id": uuid.uuid4().hex,
+            "mode": "direct",
+        },
+    )
     assert member_created.status_code == 200 and member_created.json()["project_id"] == PROJECT
 
-    admin_created = api.owner.post("/api/vps-terminal/sessions", json={
-        "vps_id": unassigned["id"], "request_id": uuid.uuid4().hex, "mode": "direct",
-    })
+    admin_created = api.owner.post(
+        "/api/vps-terminal/sessions",
+        json={
+            "vps_id": unassigned["id"],
+            "request_id": uuid.uuid4().hex,
+            "mode": "direct",
+        },
+    )
     assert admin_created.status_code == 200, admin_created.text
     sid = admin_created.json()["session_id"]
     assert admin_created.json()["project_id"] == "" and admin_created.json()["direct_vps"] is True
@@ -861,10 +912,41 @@ def test_project_free_session_creation_unassigned_admin_and_demotion_revocation(
         if api.owner.get(f"/api/vps-terminal/sessions/{sid}").json()["state"] == "ready":
             break
 
-    api.store.execute("UPDATE memberships SET level='member' WHERE space_id='terminal-team' AND user_id='owner'")
-    denied_ticket = api.owner.post(f"/api/vps-terminal/sessions/{sid}/attach-ticket",
-                                   json={"renderer_id": uuid.uuid4().hex})
-    assert denied_ticket.status_code == 403 and denied_ticket.json()["error"]["code"] == "SSH_TERMINAL_FORBIDDEN"
+    api.store.execute(
+        "UPDATE memberships SET level='member' WHERE space_id='terminal-team' AND user_id='owner'"
+    )
+    denied_ticket = api.owner.post(
+        f"/api/vps-terminal/sessions/{sid}/attach-ticket", json={"renderer_id": uuid.uuid4().hex}
+    )
+    assert (
+        denied_ticket.status_code == 403
+        and denied_ticket.json()["error"]["code"] == "SSH_TERMINAL_FORBIDDEN"
+    )
     api.client.portal.call(api.service._renew_one, api.service.sessions[sid])
     assert api.service.sessions[sid].row["state"] == "failed"
     assert api.service.sessions[sid].row["reason_code"] == "AUTH_REVOKED"
+
+
+def test_terminal_agent_without_explicit_managed_vps_capability_cannot_create(terminal_api):
+    api = terminal_api
+    peer = api.install_terminal()
+    peer.saved_vps_password_only_supported = False
+    caps = api.capabilities().json()
+    assert not caps["available"]
+    assert caps["reason_code"] == "AGENT_UPGRADE_REQUIRED"
+    assert caps["saved_vps_host_verification"] is None
+    blocked = api.alice.post("/api/vps-terminal/sessions", json=api.body())
+    assert blocked.status_code == 409
+    assert peer.actions == []
+
+
+def test_stale_main_channel_cannot_dispatch_saved_vps_password(terminal_api):
+    api = terminal_api
+    peer = api.install_terminal()
+    assert api.capabilities().json()["saved_vps_host_verification"] == "skip"
+    api.install_main()
+    caps = api.capabilities().json()
+    assert not caps["available"] and caps["saved_vps_host_verification"] is None
+    blocked = api.alice.post("/api/vps-terminal/sessions", json=api.body())
+    assert blocked.status_code == 409
+    assert peer.actions == []

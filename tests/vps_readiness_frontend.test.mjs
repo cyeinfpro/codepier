@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../web/vps.js", import.meta.url), "utf8");
 const endpoint = "/api/vps/saved/readiness";
-const job = (state, fields = {}) => ({ id: "job-fixture", state, connection_revision: 3, ...fields });
+const job = (state, fields = {}) => ({ id: "job-fixture", state, connection_revision: 3, host_verification: "skip", ...fields });
 function fixture(api) {
   const requests = [];
   const query = { value: "" };
@@ -101,14 +101,14 @@ test("identity change discards result and permission failures do not retry POST"
   await denied.ctx.vpsReadinessWatch("saved", true);
   assert.deepEqual(denied.requests.map(x => x.method), ["POST"]);
   assert.equal(denied.status.textContent, "没有检查或安装权限");
-  assert.equal(denied.ctx.vpsReadinessText(job("failed", { reason_code: "HOST_KEY_UNVERIFIED" })), "主机指纹未核验；未安装");
+  assert.equal(denied.ctx.vpsReadinessText(job("failed", { reason_code: "HOST_KEY_UNVERIFIED" })), "旧版连接检查未完成，请更新面板和连接电脑后重试；未安装");
 });
 
 
 function seedBackfill(f, extras = {}) {
   f.ctx.backfillSeed = extras;
   return vm.runInContext(
-    'vpsReadinessBackfill = { owner: vpsTerminalIdentity(), available: true, ...backfillSeed }',
+    'vpsReadinessBackfill = { owner: vpsTerminalIdentity(), available: true, fleetPolicy: "skip", ...backfillSeed }',
     f.ctx,
   );
 }
@@ -123,7 +123,7 @@ test("API job envelope feeds the existing individual readiness display", async (
 test("fleet actions require exact negotiated capability", () => {
   const f = fixture(() => assert.fail("unexpected network operation"));
   assert.equal(f.ctx.vpsReadinessBackfillHTML({ available: false }), "");
-  const html = f.ctx.vpsReadinessBackfillHTML({ available: true });
+  const html = f.ctx.vpsReadinessBackfillHTML({ available: true, fleetPolicy: "skip" });
   assert.match(html, /扫描全部 SSH/);
   assert.match(html, /disabled>一键安装/);
   vm.runInContext("vpsReadinessBackfill = null", f.ctx);
@@ -171,7 +171,8 @@ test("summary separates positive missing from failed trust and shows each phase"
     { enabled: false, readiness_available: true, readiness: job("ready") },
   ]);
   assert.equal(result.counts, "就绪 1 · 缺少 1 · 排队 1 · 扫描中 1 · 安装中 1 · 失败 2 · 未检查 1");
-  assert.equal(result.reasons, "2 台：面板尚未核验主机指纹；未安装");
+  assert.equal(result.reasons, "2 台：旧版扫描未完成，请重新扫描");
+  assert.doesNotMatch(ctx.vpsReadinessBackfillHTML({ available: true, fleetPolicy: "skip", result }), /指纹|主机身份核验/);
   assert.equal(result.eligible, 1);
   assert.equal(result.staleMissing, 0);
   assert.equal(result.active, true);
@@ -182,14 +183,14 @@ test("known stale missing remains visible but cannot initiate installation", () 
   const result = ctx.vpsFleetResult([{ enabled: true, readiness_available: true, readiness: job("missing", { install_eligible: false }) }]);
   assert.equal(result.eligible, 0);
   assert.equal(result.staleMissing, 1);
-  assert.match(ctx.vpsReadinessBackfillHTML({ available: true, result }), /1 台的缺失结果已过期或不可安装/);
+  assert.match(ctx.vpsReadinessBackfillHTML({ available: true, fleetPolicy: "skip", result }), /1 台的缺失结果已过期或不可安装/);
   assert.equal(ctx.vpsFleetButtons({ result }).installDisabled, true);
 });
 
 test("fleet watcher follows inventory GETs, settles missing, and never installs", async () => {
   const missing = { id: "saved", enabled: true, readiness_available: true, readiness: job("missing", { install_eligible: true }) };
   const f = fixture(() => ({
-    readiness_manual_actions: true, vps: [missing], next_offset: null,
+    readiness_manual_actions: true, readiness_fleet_host_verification: "skip", vps: [missing], next_offset: null,
   }));
   const state = seedBackfill(f, { awaiting: true });
   const counts = { textContent: "" };
@@ -272,7 +273,7 @@ test("an uncertain POST reconciles a newer job with GET only", async () => {
   assert.equal(state.uncertain, true);
   await new Promise(setImmediate);
   release({
-    readiness_manual_actions: true, next_offset: null,
+    readiness_manual_actions: true, readiness_fleet_host_verification: "skip", next_offset: null,
     vps: [{id: "saved", enabled: true, readiness_available: true, readiness: job("ready", { updated: 7 })}],
   });
   await new Promise(setImmediate);
@@ -282,7 +283,7 @@ test("an uncertain POST reconciles a newer job with GET only", async () => {
 });
 
 test("ambiguous submission with unchanged inventory remains unknown after four GETs", async () => {
-  const f = fixture(() => ({readiness_manual_actions: true, next_offset: null, vps: []}));
+  const f = fixture(() => ({readiness_manual_actions: true, readiness_fleet_host_verification: "skip", next_offset: null, vps: []}));
   const state = seedBackfill(f, { uncertain: true, ambiguityBaseline: "" });
   f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? {textContent: ""} : null;
   await f.ctx.vpsObserveFleet(state);
@@ -294,11 +295,46 @@ test("ambiguous submission with unchanged inventory remains unknown after four G
 test("fleet polling tolerates a bounded transient inventory read failure", async () => {
   const f = fixture(() => {
     if (f.requests.length === 1) throw new Error("temporary network issue");
-    return {readiness_manual_actions: true, next_offset: null, vps: []};
+    return {readiness_manual_actions: true, readiness_fleet_host_verification: "skip", next_offset: null, vps: []};
   });
   const state = seedBackfill(f, { awaiting: true });
   f.ctx.$ = (selector) => selector === "[data-vps-fleet-counts]" ? {textContent: ""} : null;
   await f.ctx.vpsObserveFleet(state);
   assert.equal(state.awaiting, false);
   assert.deepEqual(f.requests.map(({method}) => method), ["GET", "GET"]);
+});
+
+test("a positive per-VPS or old scan must be confirmed by bulk scan before install", async () => {
+  const f = fixture(() => assert.fail("must not submit"));
+  const result = f.ctx.vpsFleetResult([{ enabled: true, readiness_available: true, readiness: job("missing", {
+    host_verification: "required", install_eligible: true,
+  }) }]);
+  assert.equal(result.needsBulkRescan, 1);
+  assert.equal(result.eligible, 0);
+  assert.equal(result.staleMissing, 0);
+  const state = seedBackfill(f, { result });
+  assert.match(f.ctx.vpsReadinessBackfillHTML(state), /需要批量重扫/);
+  await f.ctx.vpsReadinessBackfillStart(true);
+  assert.equal(f.requests.length, 0);
+});
+
+test("stale backend cannot silently run a differently scoped bulk scan", async () => {
+  const f = fixture(() => assert.fail("must not submit"));
+  const state = seedBackfill(f, { fleetPolicy: null });
+  assert.equal(f.ctx.vpsReadinessBackfillHTML(state), "");
+  await f.ctx.vpsReadinessBackfillStart();
+  assert.equal(f.requests.length, 0);
+});
+
+test("saved connection accepts only fixed managed-VPS capability and reports legacy refusals honestly", () => {
+  const { ctx } = fixture(() => assert.fail("unexpected request"));
+  assert.equal(ctx.vpsSavedSupportsConnection({host_key_policy: "accept-new"}), false);
+  assert.equal(ctx.vpsSavedSupportsConnection({saved_vps_host_verification: "skip"}), true);
+  const output = { textContent: "" }, status = { textContent: "" };
+  ctx.vpsPaintCheckReceipt({state: "failed", error: {code: "SSH_HOST_KEY_CHANGED"}, output: "raw obsolete refusal"}, false, output, status);
+  assert.match(status.textContent, /请更新后重试/);
+  assert.doesNotMatch(status.textContent + output.textContent, /指纹|raw obsolete refusal|成功/);
+  ctx.vpsPaintCheckReceipt({state: "succeeded", output: "real response"}, true, output, status);
+  assert.match(status.textContent, /成功/);
+  assert.equal(output.textContent, "real response");
 });

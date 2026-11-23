@@ -601,9 +601,6 @@ class TerminalSessionManager:
             or username.startswith("-")
         ):
             raise TerminalProtocolError("INVALID_ARGUMENT", "SSH 地址或账号格式无效")
-        policy = payload.get("host_key_policy", "strict")
-        if policy not in {"strict", "accept-new", CONFIRM_CHANGE}:
-            raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
         timeout = min(
             60, max(5, _integer(payload.get("timeout_seconds", 30), "timeout_seconds", 1, 86400))
         )
@@ -611,9 +608,16 @@ class TerminalSessionManager:
             "host": host,
             "port": _integer(payload.get("port", 22), "port", 1, 65535),
             "username": username,
-            "host_key_policy": policy,
-            "host_key_fingerprint": self._host_pin(policy, payload),
+            **self._host_trust_target(payload),
         }, timeout
+
+    def _host_trust_target(self, payload):
+        if payload.get("saved_vps_password_only") is True:
+            return {"saved_vps_password_only": True}
+        policy = payload.get("host_key_policy", "strict")
+        if policy not in {"strict", "accept-new", CONFIRM_CHANGE}:
+            raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
+        return {"host_key_policy": policy, "host_key_fingerprint": self._host_pin(policy, payload)}
 
     @staticmethod
     def _host_pin(policy, payload):
@@ -856,8 +860,16 @@ class TerminalSessionManager:
             raise TerminalProtocolError("AUTH_REVOKED", "恢复期间会话已被撤销或关闭")
         self._authorize(project)
 
+        self._apply_saved_vps_transport_mode(session, payload)
         self._restart_session(session, project, revision, password)
         return session.public()
+
+    @staticmethod
+    def _apply_saved_vps_transport_mode(session, payload):
+        # Recovery/close may authorize an existing session without changing
+        # saved VPS trust settings or affecting its attached SSH connection.
+        if payload.get("saved_vps_password_only") is True:
+            session.target["saved_vps_password_only"] = True
 
     def _needs_recovery(self, session):
         if session.mode != "tmux":
@@ -1049,13 +1061,10 @@ class TerminalSessionManager:
             "host": host,
             "port": _integer(payload.get("port", 22), "port", 1, 65535),
             "username": username,
-            "host_key_policy": payload.get("host_key_policy", "strict"),
+            **self._host_trust_target(payload),
             "cols": cols,
             "rows": rows,
         }
-        if target["host_key_policy"] not in {"strict", "accept-new", CONFIRM_CHANGE}:
-            raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
-        target["host_key_fingerprint"] = self._host_pin(target["host_key_policy"], payload)
         return target
 
     def _existing_creation(self, sid, payload, project, owner, space, target, create_key):
@@ -1867,6 +1876,7 @@ class TerminalSessionManager:
             session.state = "closing"
             session.close_authority_until = self.clock() + self.config.lease_seconds
             self._cancel_queued_input(session)
+            self._apply_saved_vps_transport_mode(session, payload)
             transport = self.connector()
             try:
                 # The fresh control-only connection is bounded by the same

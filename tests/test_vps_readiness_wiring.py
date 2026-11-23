@@ -114,7 +114,9 @@ def test_manual_scan_and_install_are_separate_and_space_scoped(tmp_path, monkeyp
         native.installed.add(ready["id"])
         assert missing["readiness"] is None
         assert disabled["readiness_available"] is False
-        assert owner.get("/api/vps").json()["readiness_manual_actions"]
+        owner_inventory = owner.get("/api/vps").json()
+        assert owner_inventory["readiness_manual_actions"]
+        assert owner_inventory["readiness_fleet_host_verification"] == "skip"
         assert not member.get("/api/vps").json()["readiness_manual_actions"]
 
         scan = "/api/vps/readiness/scan"
@@ -123,22 +125,39 @@ def test_manual_scan_and_install_are_separate_and_space_scoped(tmp_path, monkeyp
             assert member.post(route).status_code == 403
             assert owner.post(route, headers={"X-RD-CSRF": "wrong"}).status_code == 403
         assert owner.post(install).json() == {"queued_count": 0}
-        assert owner.post(scan).json()["queued_count"] == 3
+        assert (
+            owner.post("/api/vps/readiness/backfill", json={"host_verification": "skip"}).json()[
+                "queued_count"
+            ]
+            == 3
+        )
+        verified = wait_job(owner, missing["id"], state="missing")
+        assert verified["host_verification"] == "required"
+        blocked = wait_job(owner, old_trust["id"], state="failed")
+        assert blocked["reason_code"] == "HUB_SSH_TRUST_MIGRATION_REQUIRED"
+        assert wait_job(owner, ready["id"])["host_verification"] == "required"
+        # Positive evidence from the verified legacy path is not promotable.
+        assert owner.post(install).json() == {"queued_count": 0}
+        assert owner.post(scan, json={"host_verification": "required"}).json()["queued_count"] == 3
         queued = wait_job(owner, missing["id"], state="missing")
         assert queued["reason_code"] == "TMUX_MISSING"
+        assert queued["host_verification"] == "skip"
         assert wait_job(owner, ready["id"])["intent"] == "scan"
-        failed = wait_job(owner, old_trust["id"], state="failed")
-        assert failed["reason_code"] == "HUB_SSH_TRUST_MIGRATION_REQUIRED"
+        assert wait_job(owner, old_trust["id"], state="missing")["host_verification"] == "skip"
         assert other.get(f"/api/vps/{unrelated['id']}/readiness").json()["job"] is None
         assert native.install_calls == []
 
-        assert owner.post(install).json()["queued_count"] == 1
+        assert owner.post(install).json()["queued_count"] == 2
         ended = wait_job(owner, missing["id"])
+        assert wait_job(owner, old_trust["id"])["host_verification"] == "skip"
         assert ended["id"] == queued["id"]
         assert ended["intent"] == "install"
         assert owner.post(install).json()["queued_count"] == 0
-        assert [call.vps_id for call in native.install_calls] == [missing["id"]]
+        assert {call.vps_id for call in native.install_calls} == {missing["id"], old_trust["id"]}
+        assert len(native.install_calls) == 2
+        assert all(call.host_verification == "skip" for call in native.install_calls)
         assert all(call.space_id == "primary" for call in native.inspect_calls)
+        assert owner.get(f"/api/vps/{missing['id']}").json()["host_key_fingerprint"] == FIXED_PIN
 
 
 def test_readiness_is_unavailable_without_explicit_native_executor(tmp_path, monkeypatch):
@@ -169,6 +188,7 @@ def test_connection_change_invalidates_scan_before_fleet_install(tmp_path, monke
         assert owner.post(path).status_code == 200
         first = wait_job(owner, saved["id"], state="missing")
         assert first["intent"] == "scan"
+        assert first["host_verification"] == "skip"
         assert native.install_calls == []
         changed = owner.put(
             f"/api/vps/{saved['id']}",

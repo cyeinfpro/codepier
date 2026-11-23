@@ -48,7 +48,7 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
     chunk = bytes(range(256)) * 64
     bulk = chunk * 64 + b"\r\nbulk-complete\r\n"
     seen = {"input": [], "sizes": [], "passwords": [], "responses": []}
-    otp = "482916-synthetic-one-time-code"
+    saved_password = "synthetic-terminal-password"
     producers = set()
 
     class RemoteTerminal(asyncssh.SSHServerSession):
@@ -110,11 +110,11 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
             return authentication == "keyboard-interactive"
 
         def get_kbdint_challenge(self, username, lang, submethods):
-            return "Verification", "Enter a one-time code", "", [("Verification code: ", False)]
+            return "Login", "", "", [("Password: ", False)]
 
         def validate_kbdint_response(self, username, responses):
             seen["responses"].append(tuple(responses))
-            return username == "fixture" and responses == [otp]
+            return username == "fixture" and responses == [saved_password]
 
         def session_requested(self):
             return RemoteTerminal()
@@ -257,17 +257,9 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
             message = json.loads(raw)
             controls.append(message)
             assert message["type"] != "error", message
-            if message["type"] == "auth_challenge":
-                assert message["prompts"] == [{"text": "Verification code: ", "echo": False}]
-                await socket.send(
-                    json.dumps(
-                        {
-                            "type": "auth_answer",
-                            "challenge_id": message["challenge_id"],
-                            "responses": [otp],
-                        }
-                    )
-                )
+            assert message["type"] != "auth_challenge", (
+                "unverified host must not prompt the browser"
+            )
             return message
 
         url = f"ws://127.0.0.1:{port}/ws/vps-terminal"
@@ -390,7 +382,9 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
         assert seen["passwords"] == (
             ["synthetic-terminal-password"] if authentication == "password" else []
         )
-        assert seen["responses"] == ([(otp,)] if authentication == "keyboard-interactive" else [])
+        assert seen["responses"] == (
+            [(saved_password,)] if authentication == "keyboard-interactive" else []
+        )
         assert seen["input"].count(b"bulk\r") == 1
         assert (
             hashlib.sha256(output[: len(bulk) + len(b"synthetic-ready\r\n")]).digest()
@@ -400,7 +394,6 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
         audit = json.dumps(store.all("SELECT * FROM audit"))
         assert "synthetic-terminal-password" not in metadata + audit
         assert login["cookie"] not in metadata + audit
-        assert otp not in metadata + audit
         assert "bulk-complete" not in metadata + audit
         assert not store.all("SELECT * FROM operations WHERE tool LIKE '%terminal%'")
         assert store.one("SELECT id_hash FROM sessions WHERE id_hash=?", (digest(login["cookie"]),))
@@ -465,7 +458,7 @@ async def test_full_tcp_terminal_flow_control_reconnect_input_and_final_output(
             ["synthetic-terminal-password"] * 2 if authentication == "password" else []
         )
         assert seen["responses"] == (
-            [(otp,)] * 2 if authentication == "keyboard-interactive" else []
+            [(saved_password,)] * 2 if authentication == "keyboard-interactive" else []
         )
     finally:
         await client.aclose()

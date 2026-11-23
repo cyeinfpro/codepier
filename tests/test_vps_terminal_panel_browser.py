@@ -91,39 +91,25 @@ class PanelFixture:
         self.closes = []
         self.close_state = "closed"
         self.diagnostics_requests = []
-        self.capability = {"available": True, "protocol_version": 1, "limits": {}}
+        self.capability = {"available": True, "protocol_version": 1, "limits": {}, "saved_vps_host_verification": "skip"}
         self.projects = [
-            {
-                **project,
-                "mode": "write",
-                "allow_tasks": True,
-                "online": True,
-                "device_name": project.get("device_name", "Fixture Agent"),
-            }
-            for project in stack.projects[: 2 if multiple else 1]
+            {**project, "mode": "write", "allow_tasks": True, "online": True,
+             "device_name": project.get("device_name", "Fixture Agent")}
+            for project in stack.projects[:2 if multiple else 1]
         ]
         self.vps = {
-            "id": uuid.uuid4().hex,
-            "name": "终端路由测试",
-            "host": "fixture.invalid",
-            "port": 22,
-            "username": "fixture",
-            "enabled": True,
-            "host_key_policy": "strict",
-            "provider": "",
-            "region": "",
-            "system": "Linux",
-            "notes": "",
-            "project_ids": [project["id"] for project in self.projects],
+            "saved_vps_host_verification": "skip",
+            "id": uuid.uuid4().hex, "name": "终端路由测试", "host": "fixture.invalid",
+            "port": 22, "username": "fixture", "enabled": True,
+            "host_key_policy": "strict", "provider": "", "region": "", "system": "Linux",
+            "notes": "", "project_ids": [project["id"] for project in self.projects],
             "projects": self.projects,
         }
         self.servers = {self.vps["id"]: self.vps}
         if other_vps:
             other = {
-                **self.vps,
-                "id": uuid.uuid4().hex,
-                "name": "另一台测试 VPS",
-                "host": "other.fixture.invalid",
+                **self.vps, "id": uuid.uuid4().hex,
+                "name": "另一台测试 VPS", "host": "other.fixture.invalid",
             }
             self.servers[other["id"]] = other
         page.add_init_script(WIRE)
@@ -177,42 +163,23 @@ class PanelFixture:
             route.fulfill(json=result)
         elif path.endswith("/attach-ticket"):
             identifier = path.split("/")[4]
-            route.fulfill(
-                json={
-                    "ticket": "ticket-" + identifier,
-                    "ws_path": "/ws/vps-terminal",
-                    "expires_in": 20,
-                }
-            )
+            route.fulfill(json={"ticket": "ticket-" + identifier,
+                                "ws_path": "/ws/vps-terminal", "expires_in": 20})
         elif path.endswith("/diagnostics") and method == "GET":
             identifier = path.split("/")[4]
             assert identifier in self.sessions
             self.diagnostics_requests.append(identifier)
-            route.fulfill(
-                json={
-                    "session_id": identifier,
-                    "protocol_version": 1,
-                    "collected_at": 1805800000,
-                    "state": "ready",
-                    "mode": "tmux",
-                    "reason_code": None,
-                    "links": {
-                        "browser": {"connected": True, "status": "connected"},
-                        "agent": {"connected": True, "status": "connected", "control_rtt_ms": 0},
-                        "ssh": {"connected": True, "status": "connected"},
-                    },
-                    "bytes": {"input": "0", "output": "0"},
-                    "stages_ms": {"ssh_connect": 42, "pty_open": 1},
-                    "lifecycle": {
-                        "recover_count": 0,
-                        "version": {"hub": "fixture", "agent": "fixture", "protocol": 1},
-                    },
-                    "metrics": {
-                        "counters": {"reconnect_total": 0},
-                        "gauges": {"browser_buffer_bytes": 0},
-                    },
-                }
-            )
+            route.fulfill(json={
+                "session_id": identifier, "protocol_version": 1, "collected_at": 1805800000,
+                "state": "ready", "mode": "tmux", "reason_code": None,
+                "links": {"browser": {"connected": True, "status": "connected"},
+                          "agent": {"connected": True, "status": "connected", "control_rtt_ms": 0},
+                          "ssh": {"connected": True, "status": "connected"}},
+                "bytes": {"input": "0", "output": "0"},
+                "stages_ms": {"ssh_connect": 42, "pty_open": 1},
+                "lifecycle": {"recover_count": 0, "version": {"hub": "fixture", "agent": "fixture", "protocol": 1}},
+                "metrics": {"counters": {"reconnect_total": 0}, "gauges": {"browser_buffer_bytes": 0}},
+            })
         elif path.startswith("/api/vps-terminal/sessions/") and method == "GET":
             route.fulfill(json=self.sessions[path.split("/")[4]])
         else:
@@ -280,9 +247,7 @@ def test_terminal_route_preserves_dom_and_closed_tabs_do_not_reopen(stack, width
             page.get_by_role("button", name="诊断", exact=True).click()
             diagnostic = page.get_by_role("region", name="当前会话连接诊断", exact=True)
             expect(diagnostic.locator(".vt-diagnostics-link strong")).to_have_text(["已连接"] * 3)
-            expect(
-                diagnostic.locator(".vt-diagnostics-content > .vt-diagnostics-values dd").last
-            ).to_have_text("0 ms")
+            expect(diagnostic.locator(".vt-diagnostics-content > .vt-diagnostics-values dd").last).to_have_text("0 ms")
             assert fixture.diagnostics_requests == [route.split("session=")[1]]
             assert page.evaluate("document.querySelector('.xterm') === firstTerminalNode")
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
@@ -315,28 +280,21 @@ def test_terminal_route_preserves_dom_and_closed_tabs_do_not_reopen(stack, width
 
             close.click()
             fixture.close_state = "close_unknown"
-            with page.expect_response(
-                lambda response: response.url.endswith(f"/{identifier}/close")
-            ):
+            with page.expect_response(lambda response: response.url.endswith(f"/{identifier}/close")):
                 dialog.get_by_role("button", name="结束会话").click()
             expect(tab).to_have_attribute("data-state", "close_unknown")
             assert len(fixture.closes) == 1
             assert fixture.closes[0][0] == identifier
             fixture.close_state = "closed"
             close.click()
-            with page.expect_response(
-                lambda response: response.url.endswith(f"/{identifier}/close")
-            ):
+            with page.expect_response(lambda response: response.url.endswith(f"/{identifier}/close")):
                 dialog.get_by_role("button", name="结束会话").click()
             expect(tab).to_have_attribute("data-state", "closing")
             assert fixture.closes == [fixture.closes[0]] * 2
-            page.evaluate(
-                """id => {
+            page.evaluate("""id => {
               const socket = terminalFixtureSockets.find(s => s.id === id && s.readyState === 1);
               socket.emit({type:'exit', session_id:id, state:'closed', output_complete:true});
-            }""",
-                identifier,
-            )
+            }""", identifier)
             expect(tab).to_have_count(0)
             if width > 700:
                 assert page.evaluate("location.hash") == route
@@ -392,7 +350,7 @@ def test_project_picker_survives_refresh_and_old_agents_show_an_actionable_reaso
             capture_evidence(page, f"terminal-project-upgrade-{engine}.png")
 
             # Multi-project VPS connects directly without showing a project picker.
-            fixture.capability = {"available": True, "protocol_version": 1, "limits": {}}
+            fixture.capability = {"available": True, "protocol_version": 1, "limits": {}, "saved_vps_host_verification": "skip"}
             page.locator('[data-vps-action="terminal"]').click()
             expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
             expect(page.locator(".vt-state")).to_have_text("已连接")
@@ -470,7 +428,9 @@ def test_new_terminal_requires_explicit_server_selection(stack, engine):
         original, other = list(fixture.servers.values())
         try:
             login_panel(page, stack, "vps")
-            page.locator(f'[data-vps-action="terminal"][data-id="{original["id"]}"]').click()
+            page.locator(
+                f'[data-vps-action="terminal"][data-id="{original["id"]}"]'
+            ).click()
             expect(page.locator(".vt-state")).to_have_text("已连接")
             new = page.get_by_role("button", name="＋ 新建", exact=True)
             picker = page.get_by_role("dialog", name="快速连接服务器")
@@ -487,12 +447,10 @@ def test_new_terminal_requires_explicit_server_selection(stack, engine):
             expect(picker).to_be_visible()
             search.fill(other["name"])
             expect(picker.locator(".vt-quick-row")).to_have_count(1)
-            with page.expect_response(
-                lambda response: (
-                    response.request.method == "POST"
-                    and response.url.endswith("/api/vps-terminal/sessions")
-                )
-            ):
+            with page.expect_response(lambda response: (
+                response.request.method == "POST" and
+                response.url.endswith("/api/vps-terminal/sessions")
+            )):
                 picker.get_by_role("button", name=other["name"], exact=False).click()
             expect(picker).not_to_be_visible()
             expect(page.locator(".vt-tab")).to_have_count(2)
@@ -533,9 +491,7 @@ def test_terminal_output_survives_tabs_diagnostics_and_viewport_reflow(stack, en
             page.locator(f'[data-vps-action="terminal"][data-id="{original["id"]}"]').click()
             expect(page.locator(".vt-state")).to_have_text("已连接")
             first_id = next(iter(fixture.sessions))
-            page.evaluate(
-                "window.outputFirstRenderer = document.querySelector('.vt-primary-slot .xterm')"
-            )
+            page.evaluate("window.outputFirstRenderer = document.querySelector('.vt-primary-slot .xterm')")
             page.evaluate("location.hash = 'vps'")
             expect(page.locator("#vps-query")).to_be_visible()
             page.locator(f'[data-vps-action="terminal"][data-id="{other["id"]}"]').click()
@@ -544,9 +500,7 @@ def test_terminal_output_survives_tabs_diagnostics_and_viewport_reflow(stack, en
             second_id = list(fixture.sessions)[1]
             first_tab = page.get_by_role("tab", name=original["name"], exact=True)
             second_tab = page.get_by_role("tab", name=other["name"], exact=True)
-            page.evaluate(
-                "window.outputSecondRenderer = document.querySelector('.vt-primary-slot .xterm')"
-            )
+            page.evaluate("window.outputSecondRenderer = document.querySelector('.vt-primary-slot .xterm')")
 
             page.locator(".vt-settings > summary").click()
             page.get_by_role("checkbox", name="屏幕阅读器模式").check()
@@ -569,20 +523,14 @@ def test_terminal_output_survives_tabs_diagnostics_and_viewport_reflow(stack, en
             for _ in range(2):
                 second_tab.click()
                 expect(rows()).to_contain_text("other-session-only")
-                assert page.evaluate(
-                    "document.querySelector('.vt-primary-slot .xterm') === outputSecondRenderer"
-                )
+                assert page.evaluate("document.querySelector('.vt-primary-slot .xterm') === outputSecondRenderer")
                 first_tab.click()
                 expect(rows()).to_contain_text("连续中文最后一行")
-                assert page.evaluate(
-                    "document.querySelector('.vt-primary-slot .xterm') === outputFirstRenderer"
-                )
+                assert page.evaluate("document.querySelector('.vt-primary-slot .xterm') === outputFirstRenderer")
             text = rows().inner_text()
             labels = ["连续中文第一行", "连续中文第二行", "连续中文最后一行"]
             assert [text.count(label) for label in labels] == [1, 1, 1]
-            assert [text.index(label) for label in labels] == sorted(
-                text.index(label) for label in labels
-            )
+            assert [text.index(label) for label in labels] == sorted(text.index(label) for label in labels)
             assert "other-session-only" not in text
 
             page.locator(".vt-primary-slot .xterm-helper-textarea").focus()
@@ -594,10 +542,7 @@ def test_terminal_output_survives_tabs_diagnostics_and_viewport_reflow(stack, en
             for _ in range(4):
                 page.keyboard.press("Shift+PageDown")
             expect(rows()).to_contain_text("after-scrolling")
-            assert page.evaluate("terminalFixtureSockets.map(socket => socket.id)") == [
-                first_id,
-                second_id,
-            ]
+            assert page.evaluate("terminalFixtureSockets.map(socket => socket.id)") == [first_id, second_id]
             resizes = page.evaluate(
                 """terminalFixtureSockets.flatMap(
                     socket => socket.controls.filter(message => message.type === 'resize'))"""
@@ -606,6 +551,7 @@ def test_terminal_output_survives_tabs_diagnostics_and_viewport_reflow(stack, en
             assert page.evaluate("terminalFixtureErrors") == []
         finally:
             browser.close()
+
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -655,35 +601,21 @@ def test_mobile_reopens_existing_desktop_terminal_without_new_session(stack, eng
         mobile_admission_reads = []
         mobile_panel.servers = {
             identifier: {
-                **item,
-                "terminal": {
-                    "available": False,
-                    "eligible": True,
-                    "check_ready": False,
-                    "reason_code": "AGENT_UPGRADE_REQUIRED",
-                },
+                **item, "terminal": {"available": False, "eligible": True, "check_ready": False,
+                                    "reason_code": "AGENT_UPGRADE_REQUIRED"},
             }
             for identifier, item in desktop_panel.servers.items()
         }
 
         def pause_cold_discovery(route):
-            if (
-                route.request.method == "GET"
-                and urlsplit(route.request.url).path == "/api/vps-terminal/sessions"
-            ):
+            if route.request.method == "GET" and urlsplit(route.request.url).path == "/api/vps-terminal/sessions":
                 held_presence.append(route)
             else:
                 route.fallback()
 
         mobile.route("**/api/vps-terminal/sessions*", pause_cold_discovery)
-        mobile.on(
-            "request",
-            lambda request: (
-                mobile_admission_reads.append(request.url)
-                if "/api/vps-terminal/capabilities" in request.url
-                else None
-            ),
-        )
+        mobile.on("request", lambda request: mobile_admission_reads.append(request.url)
+                  if "/api/vps-terminal/capabilities" in request.url else None)
         try:
             login_panel(desktop, stack, "vps")
             desktop.locator('[data-vps-action="terminal"]').click()
@@ -691,17 +623,11 @@ def test_mobile_reopens_existing_desktop_terminal_without_new_session(stack, eng
             active_id = next(iter(desktop_panel.sessions))
             assert len(desktop_panel.creates) == 1
             desktop_panel.sessions[active_id].update(
-                {
-                    "direct_vps": True,
-                    "project_id": "direct:" + desktop_panel.vps["id"],
-                    "limits": {},
-                }
+                {"direct_vps": True, "project_id": "direct:" + desktop_panel.vps["id"], "limits": {}}
             )
 
             login_panel(mobile, stack, "vps")
-            card = mobile.locator(
-                f'[data-vps-action="terminal"][data-id="{desktop_panel.vps["id"]}"]'
-            )
+            card = mobile.locator(f'[data-vps-action="terminal"][data-id="{desktop_panel.vps["id"]}"]')
             expect(card).to_be_visible()
             expect(card).to_be_disabled()
             assert held_presence, "browser must request the saved session directory"
@@ -758,25 +684,16 @@ def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(sta
             body = route.request.post_data_json
             requests.append(body)
             prefix = "live---" if body.get("resume_from_live") else "gap----"
-            route.fulfill(
-                json={
-                    "ticket": prefix + session_id,
-                    "ws_path": "/ws/vps-terminal",
-                    "expires_in": 20,
-                }
-            )
+            route.fulfill(json={"ticket": prefix + session_id,
+                                "ws_path": "/ws/vps-terminal", "expires_in": 20})
 
         page.route("**/api/vps-terminal/sessions/*/attach-ticket", attach_ticket)
         try:
             login_panel(page, stack, "vps")
-            page.evaluate(
-                "id => { location.hash = 'vps?view=terminal&session=' + id; }", identifier
-            )
+            page.evaluate("id => { location.hash = 'vps?view=terminal&session=' + id; }", identifier)
             retry = page.get_by_role("button", name="继续原会话", exact=True)
             expect(retry).to_be_visible()
-            expect(
-                page.get_by_role("tabpanel").get_by_text(re.compile("旧画面无法完整恢复")).first
-            ).to_be_visible()
+            expect(page.get_by_role("tabpanel").get_by_text(re.compile("旧画面无法完整恢复")).first).to_be_visible()
             assert len(requests) == 1
             assert not requests[0].get("resume_from_live")
             assert fixture.creates == []
@@ -784,22 +701,17 @@ def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(sta
 
             retry.tap()
             expect(page.locator(".vt-state")).to_have_text("已连接")
-            expect(
-                page.get_by_text(
-                    "已继续原 SSH，会话未重建。旧画面和历史输出无法恢复，只显示之后的新输出。",
-                    exact=True,
-                )
-            ).to_be_visible()
+            expect(page.get_by_text(
+                "已继续原 SSH，会话未重建。旧画面和历史输出无法恢复，只显示之后的新输出。",
+                exact=True,
+            )).to_be_visible()
             assert len(requests) == 2
             assert requests[1]["resume_from_live"] is True
             assert requests[0]["renderer_id"] == requests[1]["renderer_id"]
             expect(page).to_have_url(re.compile(r"session=" + identifier + r"$"))
             expect(page.get_by_role("tab")).to_have_count(1)
             assert fixture.creates == []
-            assert page.evaluate("terminalFixtureSockets.map(socket => socket.id)") == [
-                identifier,
-                identifier,
-            ]
+            assert page.evaluate("terminalFixtureSockets.map(socket => socket.id)") == [identifier, identifier]
 
             # Observe the actual real xterm output after the accepted baseline.
             # The mock fails immediately on binary client input.

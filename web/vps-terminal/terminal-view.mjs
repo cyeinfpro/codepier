@@ -1,4 +1,4 @@
-import { binaryInput, reasonText } from './protocol.mjs';
+import { binaryInput, isSavedVpsLegacyError, reasonText } from './protocol.mjs';
 import { pasteInChunks, pasteSummary } from './paste.mjs';
 import { DiagnosticsPanel } from './diagnostics.mjs';
 
@@ -605,7 +605,7 @@ export class TerminalView {
   }
   showNotice(code, fallback, state, details = {}) {
     this.notice.hidden = false;
-    if (['HOST_KEY_CHANGED', 'AUTH_REVOKED'].includes(code)) {
+    if (code === 'AUTH_REVOKED') {
       this.notice.dataset.severity = 'danger';
     } else {
       delete this.notice.dataset.severity;
@@ -630,14 +630,7 @@ export class TerminalView {
       );
     } else if (['WRITER_CONFLICT', 'WRITER_REPLACED', 'STALE_WRITER'].includes(code))
       this.actions.append(button('接管', () => this.onTakeover?.()));
-    else if (
-      [
-        'SSH_AUTH_FAILED',
-        'HOST_KEY_UNKNOWN',
-        'HOST_KEY_CHANGED',
-        'TARGET_REVISION_CHANGED',
-      ].includes(code)
-    )
+    else if (['SSH_AUTH_FAILED', 'TARGET_REVISION_CHANGED'].includes(code))
       this.actions.append(button('编辑连接', () => this.onEdit?.()));
     else if (code === 'PERSISTENCE_UNAVAILABLE')
       this.actions.append(button('使用临时连接（不保留任务）', () => this.onTemporarySession?.()));
@@ -662,6 +655,7 @@ export class TerminalView {
       this.actions.append(button('检查状态', () => this.onRefreshState?.()));
     else if (
       ['blocked', 'disconnected', 'failed'].includes(state) &&
+      !isSavedVpsLegacyError(code) &&
       ![
         'AUTH_REVOKED',
         'FORBIDDEN',

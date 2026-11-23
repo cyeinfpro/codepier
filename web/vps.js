@@ -366,12 +366,12 @@ function vpsReadinessText(job) {
     TARGET_CHANGED: '服务器配置已变化，请重新检查',
     TARGET_OR_GRANT_CHANGED: '服务器配置或授权已变化；未继续安装',
     INSTALL_OUTCOME_UNCONFIRMED: '安装结果未确认，请再次检查实际环境',
-    HOST_KEY_UNKNOWN: '主机指纹未核验；未安装',
-    HOST_KEY_CHANGED: '主机指纹已变化；未安装',
+    HOST_KEY_UNKNOWN: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
+    HOST_KEY_CHANGED: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
     SSH_AUTH_FAILED: 'SSH 登录失败，请检查保存的凭据；未安装',
-    HOST_KEY_REVOKED: '主机指纹已撤销；未安装',
-    HOST_KEY_UNVERIFIED: '主机指纹未核验；未安装',
-    HUB_SSH_TRUST_MIGRATION_REQUIRED: '面板尚未核验主机指纹；未安装',
+    HOST_KEY_REVOKED: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
+    HOST_KEY_UNVERIFIED: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
+    HUB_SSH_TRUST_MIGRATION_REQUIRED: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
     VPS_AUTHORIZATION_CHANGED: '服务器授权已变化；未继续安装',
     DENIED: '没有检查或安装权限',
     FORBIDDEN: '没有检查或安装权限',
@@ -622,6 +622,25 @@ function vpsTerminalMessage(id, message, { error = false, action } = {}) {
     root.append(link);
   }
 }
+const VPS_SAVED_UPGRADE_NOTICE = '当前面板或连接电脑版本不兼容，请更新后重试。';
+const VPS_SAVED_LEGACY_CODES = new Set([
+  'AGENT_UPGRADE_REQUIRED',
+  'HOST_KEY_UNKNOWN',
+  'HOST_KEY_CHANGED',
+  'HOST_KEY_REVOKED',
+  'HOST_KEY_UNVERIFIED',
+  'HOST_TRUST_CONFIGURATION',
+  'HOST_TRUST_UNAVAILABLE',
+  'HOST_TRUST_BUSY',
+  'SSH_HOST_KEY_CHANGED',
+  'SSH_HOST_KEY_UNTRUSTED',
+]);
+function vpsSavedSupportsConnection(v) {
+  return v?.saved_vps_host_verification === 'skip';
+}
+function vpsSavedLegacyFailure(...values) {
+  return values.some((value) => VPS_SAVED_LEGACY_CODES.has(value));
+}
 async function vpsOpenTerminal(id, button, { newSession = false } = {}) {
   const current = vpsIntent();
   if (button) {
@@ -650,6 +669,11 @@ async function vpsOpenTerminal(id, button, { newSession = false } = {}) {
     }
     const v = await api('/api/vps/' + encodeURIComponent(id));
     if (!current()) return;
+    if (!vpsSavedSupportsConnection(v)) {
+      const error = new Error(VPS_SAVED_UPGRADE_NOTICE);
+      error.code = 'AGENT_UPGRADE_REQUIRED';
+      throw error;
+    }
     const unavailable = vpsTerminalReason(v);
     if (unavailable) {
       const error = new Error(unavailable);
@@ -664,16 +688,14 @@ async function vpsOpenTerminal(id, button, { newSession = false } = {}) {
   } catch (error) {
     if (!current()) return;
     const code = error.code || error.detail?.code || error.reason_code;
-    const upgrade = [
-        'AGENT_UPGRADE_REQUIRED',
-        'PROTOCOL_MISMATCH',
-        'SSH_DEPENDENCY_MISSING',
-      ].includes(code),
+    const upgrade =
+        vpsSavedLegacyFailure(code) ||
+        ['PROTOCOL_MISMATCH', 'SSH_DEPENDENCY_MISSING'].includes(code),
       offline = ['AGENT_OFFLINE', 'NODE_OFFLINE', 'NO_TERMINAL_AGENT'].includes(code),
       shellDisabled = code === 'SHELL_DISABLED',
       forbidden = ['FORBIDDEN', 'SSH_TERMINAL_FORBIDDEN'].includes(code);
     const message = upgrade
-      ? '连接电脑需要更新才能使用 Web SSH。前往电脑管理，更新后重试。'
+      ? VPS_SAVED_UPGRADE_NOTICE
       : code === 'NO_TERMINAL_AGENT'
         ? '当前空间暂无可用电脑，请先添加电脑或等待电脑上线。'
         : offline
@@ -790,6 +812,7 @@ function vpsFleetResult(items) {
     ready: 0,
     missing: 0,
     eligible: 0,
+    needsBulkRescan: 0,
     queued: 0,
     scanning: 0,
     installing: 0,
@@ -801,19 +824,33 @@ function vpsFleetResult(items) {
   for (const item of items) {
     if (!vpsReadinessEnabled(item)) continue;
     const job = vpsReadinessJob(item.readiness);
-    if (job) revisions.push(JSON.stringify([item.id, job.id, job.state, job.intent, job.updated]));
+    if (job)
+      revisions.push(
+        JSON.stringify([
+          item.id,
+          job.id,
+          job.state,
+          job.intent,
+          job.updated,
+          job.host_verification,
+        ]),
+      );
     if (!job) result.unchecked++;
     else if (job.state === 'ready') result.ready++;
     else if (job.state === 'missing') {
       result.missing++;
-      if (job.install_eligible === true) result.eligible++;
+      if (job.host_verification !== 'skip') result.needsBulkRescan++;
+      else if (job.install_eligible === true) result.eligible++;
     } else if (job.state === 'queued') result.queued++;
     else if (VPS_READINESS_ACTIVE.has(job.state)) {
       if (job.intent === 'install' || job.state === 'installing') result.installing++;
       else result.scanning++;
     } else {
       result.failed++;
-      const label = vpsReadinessText(job);
+      const label =
+        (job.reason_code || job.reason) === 'HUB_SSH_TRUST_MIGRATION_REQUIRED'
+          ? '旧版扫描未完成，请重新扫描'
+          : vpsReadinessText(job);
       reasons.set(label, (reasons.get(label) || 0) + 1);
     }
   }
@@ -825,23 +862,33 @@ function vpsFleetResult(items) {
       .join('；'),
     active: result.queued + result.scanning + result.installing > 0,
     eligible: result.eligible,
-    staleMissing: result.missing - result.eligible,
+    needsBulkRescan: result.needsBulkRescan,
+    staleMissing: result.missing - result.eligible - result.needsBulkRescan,
     revision: revisions.sort().join('\n'),
   };
 }
+function vpsFleetAvailable(view) {
+  return view?.available === true && view.fleetPolicy === 'skip';
+}
 function vpsFleetButtons(view) {
-  const busy = Boolean(view.pending || view.awaiting || view.result?.active || view.uncertain);
+  const busy =
+    !vpsFleetAvailable(view) ||
+    Boolean(view.pending || view.awaiting || view.result?.active || view.uncertain);
   return { scanDisabled: busy, installDisabled: busy || !(view.result?.eligible > 0) };
 }
 function vpsFleetMessage(view) {
   if (view.message) return view.message;
   const help = '扫描只检查 SSH 和 tmux，不会安装。一键安装只处理最近扫描确认缺少 tmux 的服务器。';
-  return view.result?.staleMissing
-    ? help + ' ' + view.result.staleMissing + ' 台的缺失结果已过期或不可安装，请重新扫描。'
-    : help;
+  const rescan = view.result?.needsBulkRescan;
+  const stale = view.result?.staleMissing;
+  return (
+    help +
+    (rescan ? ' ' + rescan + ' 台需要批量重扫。' : '') +
+    (stale ? ' ' + stale + ' 台的缺失结果已过期或不可安装，请重新扫描。' : '')
+  );
 }
 function vpsReadinessBackfillHTML(view) {
-  if (!view?.available) return '';
+  if (!vpsFleetAvailable(view)) return '';
   const { scanDisabled, installDisabled } = vpsFleetButtons(view);
   return `<details class="panel vps-backfill"><summary class="btn ghost small">批量终端环境 <small data-vps-fleet-counts role="status">${esc(view.result?.counts || '')}</small></summary><div class="vps-readiness"><button class="btn small" type="button" data-vps-action="readiness-backfill" ${scanDisabled ? 'disabled' : ''}>扫描全部 SSH</button><button class="btn small" type="button" data-vps-action="readiness-backfill-install" ${installDisabled ? 'disabled' : ''}>一键安装</button><small data-vps-backfill-status role="status">${esc(vpsFleetMessage(view))}</small></div><small data-vps-fleet-reasons ${view.result?.reasons ? '' : 'hidden'}>${esc(view.result?.reasons || '')}</small></details>`;
 }
@@ -868,7 +915,7 @@ function vpsReadinessBackfillPaint(view) {
 let vpsFleetWatch = null;
 async function vpsObserveFleet(view = vpsReadinessBackfill) {
   if (
-    !view?.available ||
+    !vpsFleetAvailable(view) ||
     (!view.awaiting && !view.uncertain && !view.result?.active) ||
     !vpsFleetVisible(view)
   )
@@ -903,14 +950,22 @@ async function vpsObserveFleet(view = vpsReadinessBackfill) {
       let items;
       try {
         items = await vpsInventory((first) => {
-          available = first.readiness_manual_actions === true;
+          available =
+            first.readiness_manual_actions === true &&
+            first.readiness_fleet_host_verification === 'skip';
         }, controller.signal);
       } catch (error) {
         if (!current()) break;
         if ([401, 403].includes(error?.status) || ++failures >= 3) throw error;
         continue;
       }
-      if (!current() || !available) break;
+      if (!current()) break;
+      if (!available) {
+        view.fleetPolicy = null;
+        view.message = '批量操作暂不可用，请刷新页面。';
+        vpsReadinessBackfillPaint(view);
+        break;
+      }
       failures = 0;
       const next = vpsFleetResult(items);
       view.result = next;
@@ -950,7 +1005,7 @@ function vpsFleetVisible(view) {
 }
 async function vpsReadinessBackfillStart(install = false) {
   const view = vpsReadinessBackfill;
-  if (!view?.available || view.owner !== vpsTerminalIdentity() || S.page !== 'vps') return;
+  if (!vpsFleetAvailable(view) || view.owner !== vpsTerminalIdentity() || S.page !== 'vps') return;
   const buttons = vpsFleetButtons(view);
   if (install ? buttons.installDisabled : buttons.scanDisabled) return;
   const session = S.session;
@@ -997,6 +1052,7 @@ async function vpsHTML(seq) {
       backfill = {
         owner,
         available: first.readiness_manual_actions === true,
+        fleetPolicy: first.readiness_fleet_host_verification,
       };
     }),
     loadBasics(),
@@ -1007,6 +1063,7 @@ async function vpsHTML(seq) {
     const previous = vpsReadinessBackfill;
     const result = vpsFleetResult(items);
     if (previous?.owner === owner) {
+      previous.fleetPolicy = backfill.fleetPolicy;
       previous.result = result;
     } else {
       vpsReadinessBackfill = { ...backfill, result };
@@ -1106,10 +1163,9 @@ async function vpsEdit(id = null) {
   const current = vpsIntent();
   const [v] = await Promise.all([id ? api('/api/vps/' + id) : Promise.resolve({}), loadBasics()]);
   if (!current()) return;
-  const policy = v.host_key_policy || (id ? 'strict' : 'accept-new');
   const dialog = modal(
     id ? '编辑 VPS · ' + v.name : '添加 VPS',
-    `<form id="vps-form" autocomplete="off"><div class="vps-form-grid"><section class="form-section vps-form-main"><div class="vps-section-head"><h3>SSH 连接凭据</h3><p class="form-note">密码在服务端加密存储，保存后即可一键打开浏览器终端。</p></div><div class="field"><label>VPS 名称</label><input name="name" required maxlength="80" value="${esc(v.name || '')}" placeholder="例如：香港面板、广州轻量"></div><div class="form-row"><div class="field"><label>IP / 主机名</label><input name="host" required maxlength="253" value="${esc(v.host || '')}" placeholder="服务器 IP 或域名" autocapitalize="off" spellcheck="false"></div><div class="field vps-port"><label>SSH 端口</label><input name="port" type="number" required min="1" max="65535" value="${v.port || 22}"></div></div><div class="form-row"><div class="field"><label>SSH 账号</label><input name="username" required maxlength="128" value="${esc(v.username || 'root')}" autocapitalize="off" spellcheck="false"></div><div class="field"><label>SSH 密码</label><input name="password" type="password" ${id ? '' : 'required'} maxlength="4096" autocomplete="new-password" placeholder="${id ? '已保存，留空保持原密码' : '仅用于连接服务器'}"><small>${id ? '填入新密码即可替换。' : '密码在服务端加密保存。'}</small></div></div><div class="field"><label>主机密钥验证</label><select name="host_key_policy"><option value="strict" ${policy === 'strict' ? 'selected' : ''}>严格验证已有主机密钥</option><option value="accept-new" ${policy === 'accept-new' ? 'selected' : ''}>信任首次连接，拒绝后续密钥变化</option><option value="confirm-change" ${policy === 'confirm-change' ? 'selected' : ''}>指纹变化时确认</option></select><small>首次信任会保存主机密钥，之后拒绝变化。</small></div><div data-vps-host-pin ${policy === 'confirm-change' ? '' : 'hidden'}><div class="field"><label for="vps-host-fingerprint">已核实的主机指纹</label><input id="vps-host-fingerprint" name="host_key_fingerprint" value="${esc(v.host_key_fingerprint || '')}" placeholder="SHA256:…" autocomplete="off" spellcheck="false" ${policy === 'confirm-change' ? 'required' : 'disabled'}><small>从云厂商提供的 VPS 控制台核实 SSH 主机的 SHA256 指纹。重装后，在这里填入新指纹再连接；不会自动信任网络返回的指纹。</small></div></div><label class="check"><input type="checkbox" name="enabled" ${v.enabled !== false ? 'checked' : ''}>启用此连接</label><details class="vps-extra" ${v.provider || v.region || v.system || v.notes ? 'open' : ''}><summary>服务商、地区与备注</summary><div class="form-row"><div class="field"><label>服务商</label><input name="provider" maxlength="120" value="${esc(v.provider || '')}" placeholder="可选"></div><div class="field"><label>地区</label><input name="region" maxlength="120" value="${esc(v.region || '')}" placeholder="可选"></div></div><div class="field"><label>系统 / 配置</label><input name="system" maxlength="160" value="${esc(v.system || '')}" placeholder="例如 Debian 13 · 2 核 4 GB"></div><div class="field"><label>备注</label><textarea name="notes" rows="2" maxlength="2000" placeholder="用途或部署目录，不要填写密码">${esc(v.notes || '')}</textarea></div></details></section><section class="form-section vps-form-side"><div class="vps-section-head"><h3>AI 项目授权 · 可选</h3><p class="form-note">打开终端无需分配项目；勾选后允许 AI 在所选项目中连接此服务器。</p></div><div class="field"><label>分配给项目（可多选）</label>${vpsProjectChoices(v.project_ids)}</div></section></div><p id="vps-form-error" class="vps-error" role="alert" hidden></p></form>`,
+    `<form id="vps-form" autocomplete="off"><div class="vps-form-grid"><section class="form-section vps-form-main"><div class="vps-section-head"><h3>SSH 连接凭据</h3><p class="form-note">密码在服务端加密存储，可用于检查连接或打开浏览器终端。</p></div><div class="field"><label>VPS 名称</label><input name="name" required maxlength="80" value="${esc(v.name || '')}" placeholder="例如：香港面板、广州轻量"></div><div class="form-row"><div class="field"><label>IP / 主机名</label><input name="host" required maxlength="253" value="${esc(v.host || '')}" placeholder="服务器 IP 或域名" autocapitalize="off" spellcheck="false"></div><div class="field vps-port"><label>SSH 端口</label><input name="port" type="number" required min="1" max="65535" value="${v.port || 22}"></div></div><div class="form-row"><div class="field"><label>SSH 账号</label><input name="username" required maxlength="128" value="${esc(v.username || 'root')}" autocapitalize="off" spellcheck="false"></div><div class="field"><label>SSH 密码</label><input name="password" type="password" ${id ? '' : 'required'} maxlength="4096" autocomplete="new-password" placeholder="${id ? '已保存，留空保持原密码' : '仅用于连接服务器'}"><small>${id ? '填入新密码即可替换。' : '密码在服务端加密保存。'}</small></div></div><label class="check"><input type="checkbox" name="enabled" ${v.enabled !== false ? 'checked' : ''}>启用此连接</label><details class="vps-extra" ${v.provider || v.region || v.system || v.notes ? 'open' : ''}><summary>服务商、地区与备注</summary><div class="form-row"><div class="field"><label>服务商</label><input name="provider" maxlength="120" value="${esc(v.provider || '')}" placeholder="可选"></div><div class="field"><label>地区</label><input name="region" maxlength="120" value="${esc(v.region || '')}" placeholder="可选"></div></div><div class="field"><label>系统 / 配置</label><input name="system" maxlength="160" value="${esc(v.system || '')}" placeholder="例如 Debian 13 · 2 核 4 GB"></div><div class="field"><label>备注</label><textarea name="notes" rows="2" maxlength="2000" placeholder="用途或部署目录，不要填写密码">${esc(v.notes || '')}</textarea></div></details></section><section class="form-section vps-form-side"><div class="vps-section-head"><h3>AI 项目授权 · 可选</h3><p class="form-note">打开终端无需分配项目；勾选后允许 AI 在所选项目中连接此服务器。</p></div><div class="field"><label>分配给项目（可多选）</label>${vpsProjectChoices(v.project_ids)}</div></section></div><p id="vps-form-error" class="vps-error" role="alert" hidden></p></form>`,
     `${id ? '<button class="btn danger" type="button" id="vps-delete">删除连接</button>' : ''}<button class="btn ghost" type="button" data-action="close-modal">取消</button><button class="btn" type="button" id="vps-save-terminal">保存并打开终端</button><button class="btn primary" type="button" id="vps-save">保存并检查</button>`,
   );
   dialog.classList.add('vps-edit-dialog');
@@ -1121,16 +1177,8 @@ async function vpsEdit(id = null) {
     page = S.page;
   const editCurrent = () =>
     dialog.isConnected && session === S.session && space === S.space_id && page === S.page;
-  const hostPin = form.elements.host_key_fingerprint;
-  const syncHostPin = () => {
-    const enabled = form.elements.host_key_policy.value === 'confirm-change';
-    hostPin.closest('[data-vps-host-pin]').hidden = !enabled;
-    hostPin.disabled = !enabled;
-    hostPin.required = enabled;
-  };
   form.addEventListener('change', (event) => {
     const input = event.target;
-    if (input.name === 'host_key_policy') syncHostPin();
     if (input.name === 'project_ids') {
       const hint = input
         .closest('.vps-project-choice')
@@ -1149,7 +1197,6 @@ async function vpsEdit(id = null) {
       try {
         const data = Object.fromEntries(new FormData(form));
         data.port = Number(data.port);
-        if (data.host_key_fingerprint) data.host_key_fingerprint = data.host_key_fingerprint.trim();
         data.enabled = form.elements.enabled.checked;
         data.project_ids = $$('input[name="project_ids"]:checked', form).map((x) => x.value);
         if (id) data.expected_version = v.version;
@@ -1258,6 +1305,31 @@ async function vpsAssignProject(projectId) {
       await renderPage(false);
     });
 }
+function vpsPaintCheckReceipt(receipt, success, output, status) {
+  const result = receipt.result;
+  const error = result?.error || receipt.error;
+  const legacy =
+    !success &&
+    vpsSavedLegacyFailure(
+      error?.code,
+      result?.data?.ssh_error,
+      receipt.ssh_error,
+      receipt.error_code,
+      receipt.reason_code,
+    );
+  const failure = legacy
+    ? VPS_SAVED_UPGRADE_NOTICE
+    : typeof error === 'string'
+      ? error
+      : error?.message;
+  status.textContent = success ? '连接检查成功' : failure || '检查未完成';
+  output.textContent = legacy
+    ? VPS_SAVED_UPGRADE_NOTICE
+    : receipt.output ||
+      result?.data?.output ||
+      failure ||
+      (success ? '连接检查完成，未返回输出。' : '检查已结束，未返回输出。');
+}
 async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {}) {
   const session = S.session,
     space = S.space_id,
@@ -1265,19 +1337,15 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
     v = saved || (await api('/api/vps/' + encodeURIComponent(id)));
   if (!current() || (dialog && !dialog.isConnected)) return;
   const projects = vpsTerminalProjects(v),
-    termReason = vpsTerminalReason(v),
-    eligible = vpsCheckReady(v, projects),
-    usesProject =
-      Boolean(projects[0]?.online) &&
-      (v.terminal?.check_ready === undefined || v.terminal.direct !== true);
+    termReason = vpsSavedSupportsConnection(v) ? vpsTerminalReason(v) : VPS_SAVED_UPGRADE_NOTICE,
+    eligible = vpsSavedSupportsConnection(v) && vpsCheckReady(v, projects);
   const title = '检查连接 · ' + v.name;
   const initialState = !v.enabled
     ? '连接已停用。'
     : !eligible
       ? termReason || '当前无法执行连接检查。'
       : '等待检查。';
-  const body = `<p class="form-note">${esc(vpsEndpoint(v))} · ${esc(v.username)}。读取主机名、系统和磁盘用量。</p><div class="field" hidden><label for="vps-check-project">通过项目连接</label><select id="vps-check-project">${projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)} · ${esc(p.device_name)} · ${p.online ? '在线' : '离线'}</option>`).join('')}</select></div>
-    <p id="vps-check-state" class="form-note" role="status">${esc(initialState)}</p><div class="code-box"><pre id="vps-check-output"></pre></div>`;
+  const body = `<p class="form-note">${esc(vpsEndpoint(v))} · ${esc(v.username)}。读取主机名、系统和磁盘用量。</p>    <p id="vps-check-state" class="form-note" role="status">${esc(initialState)}</p><div class="code-box"><pre id="vps-check-output"></pre></div>`;
   const footer = `<button class="btn ghost" type="button" data-action="close-modal">关闭</button><button class="btn" type="button" data-vps-action="check-terminal" data-id="${esc(id)}" ${termReason ? 'disabled' : ''}>打开终端</button><button class="btn primary" type="button" id="vps-check-run" ${eligible ? '' : 'disabled'}>开始检查</button>`;
   if (dialog) {
     dialog.classList.remove('modal-editor', 'vps-edit-dialog');
@@ -1292,65 +1360,36 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
   } else dialog = modal(title, body, footer);
   const button = $('#vps-check-run', dialog),
     status = $('#vps-check-state', dialog),
-    output = $('#vps-check-output', dialog),
-    select = $('#vps-check-project', dialog);
-  let args = null,
-    checkKey = null,
+    output = $('#vps-check-output', dialog);
+  let checkKey = null,
     operation = null,
     finished = false;
   button.onclick = async () => {
     if (finished) {
-      args = null;
       checkKey = null;
       operation = null;
       finished = false;
     }
     await busy(button, async () => {
-      select.disabled = true;
       try {
         if (!operation) {
-          if (usesProject) {
-            if (!args)
-              args = {
-                project: select.value || projects[0].id,
-                target: 'vps:' + id,
-                yield_seconds: 0,
-                command: "printf 'CODEPIER_VPS_OK\\n'; hostname; id -un; uname -sr; df -h /",
-                timeout_seconds: 30,
-                idempotency_key: 'vps-check-' + uid(),
-              };
-            const result = await tool('exec', args);
+          if (!checkKey) checkKey = 'vps-check-' + uid();
+          status.textContent = '正在检查…';
+          const result = await api('/api/vps/' + encodeURIComponent(id) + '/check', {
+            method: 'POST',
+            body: JSON.stringify({
+              timeout_seconds: 30,
+              idempotency_key: checkKey,
+            }),
+          });
+          if (!dialog.isConnected || session !== S.session || space !== S.space_id) return;
+          if (result.pending && result.operation_id) {
             operation = result.operation_id;
           } else {
-            if (!checkKey) checkKey = 'vps-check-' + uid();
-            status.textContent = '正在检查…';
-            const result = await api('/api/vps/' + encodeURIComponent(id) + '/check', {
-              method: 'POST',
-              body: JSON.stringify({
-                timeout_seconds: 30,
-                idempotency_key: checkKey,
-              }),
-            });
-            if (!dialog.isConnected || session !== S.session || space !== S.space_id) return;
-            if (result.pending && result.operation_id) {
-              operation = result.operation_id;
-            } else {
-              const errObj = result.result?.error;
-              const errText =
-                typeof result.error === 'string'
-                  ? result.error
-                  : result.error?.message || errObj?.message || '';
-              const succeeded =
-                result.state === 'succeeded' || (result.ok === true && !result.state);
-              output.textContent =
-                result.output ||
-                result.result?.data?.output ||
-                errText ||
-                (succeeded ? '连接检查完成，未返回输出。' : '检查已结束，未返回输出。');
-              finished = true;
-              status.textContent = succeeded ? '连接检查成功' : errText || '检查未完成';
-              return;
-            }
+            const success = result.state === 'succeeded' || (result.ok === true && !result.state);
+            vpsPaintCheckReceipt(result, success, output, status);
+            finished = true;
+            return;
           }
         }
         if (!dialog.isConnected) return;
@@ -1362,38 +1401,27 @@ async function vpsCheck(id, { dialog = null, saved = null, autoRun = false } = {
             output_limit: 12000,
           });
           if (!dialog.isConnected || session !== S.session || space !== S.space_id) return;
-          const error = op.result?.error;
-          output.textContent =
-            op.output ||
-            op.result?.data?.output ||
-            (op.pending
-              ? '等待 Agent 返回…'
-              : error?.message ||
-                op.error ||
-                (op.state === 'succeeded'
-                  ? '连接检查完成，未返回输出。'
-                  : '检查已结束，未返回输出。'));
-          status.textContent = op.pending ? '正在检查…' : '检查结束';
-          if (!op.pending) {
+          if (op.pending) {
+            status.textContent = '正在检查…';
+            output.textContent = '等待连接电脑返回…';
+          } else {
             finished = true;
-            status.textContent =
-              op.state === 'succeeded'
-                ? '连接检查成功'
-                : error?.message || op.error || '检查未完成';
+            vpsPaintCheckReceipt(op, op.state === 'succeeded', output, status);
             return;
           }
         }
       } catch (e) {
         if (e.operation_id) operation = e.operation_id;
         if (dialog.isConnected && session === S.session && space === S.space_id) {
-          status.textContent = e.message || '检查未完成。';
+          status.textContent = vpsSavedLegacyFailure(e.code, e.reason_code)
+            ? VPS_SAVED_UPGRADE_NOTICE
+            : e.message || '检查未完成。';
         }
       }
     });
     if (dialog.isConnected) {
       button.textContent = finished ? '重新检查' : '重试';
       button.disabled = false;
-      select.disabled = !finished;
     }
   };
   if (autoRun && eligible) button.click();

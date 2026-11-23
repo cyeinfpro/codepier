@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from hub import iam
 from shared.crypto import digest, token
 from shared.ssh_terminal_config import TerminalConfig
-from shared.ssh_host_pin import CONFIRM_CHANGE, host_pin_supported
 from shared.ssh_terminal_protocol import (
     FrameKind,
     TerminalFrame,
@@ -580,11 +579,10 @@ class TerminalService:
                 "SSH_TERMINAL_FORBIDDEN", "当前身份在该 VPS 关联项目上缺少写入与执行权限", 403
             )
         counts = self._active_device_counts()
-        requires_pin = vps["host_key_policy"] == CONFIRM_CHANGE
         best = min(
             eligible,
             key=lambda c: (
-                self._host_pin_rank(c["device_id"], requires_pin),
+                self._saved_vps_agent_rank(c["device_id"]),
                 -self._candidate_tier(c["device_id"], counts.get(c["device_id"], 0)),
                 counts.get(c["device_id"], 0),
                 c["alias_key"],
@@ -616,10 +614,14 @@ class TerminalService:
         )
         return {r["project_id"] for r in rows}, {r["device_id"] for r in rows}
 
-    def _host_pin_rank(self, device_id, requires_pin):
-        return int(requires_pin and not host_pin_supported(self.agents.get(device_id)))
+    def _saved_vps_agent_rank(self, device_id):
+        return int(not self._saved_vps_supported(self.agents.get(device_id)))
 
-    def _select_admin_direct_device(self, devices, affinity_devices, counts, *, requires_pin=False):
+    @staticmethod
+    def _saved_vps_supported(agent):
+        return getattr(agent, "saved_vps_password_only_supported", False) is True
+
+    def _select_admin_direct_device(self, devices, affinity_devices, counts):
         ready = []
         for dev in devices:
             agent = self.agents.get(dev["id"])
@@ -628,7 +630,7 @@ class TerminalService:
                 and not agent.closed
                 and getattr(agent, "direct_vps", False)
                 and getattr(agent, "direct_vps_allowed", True)
-                and (not requires_pin or host_pin_supported(agent))
+                and self._saved_vps_supported(agent)
             ):
                 ready.append(dev)
         if not ready:
@@ -643,9 +645,7 @@ class TerminalService:
             ),
         )
 
-    def _select_admin_carrier_project(
-        self, principal, bound_projects, affinity_devices, counts, *, requires_pin=False
-    ):
+    def _select_admin_carrier_project(self, principal, bound_projects, affinity_devices, counts):
         rows = self.store.all(
             """SELECT p.id, p.alias_key, p.device_id FROM projects p
             JOIN devices d ON d.id=p.device_id
@@ -658,7 +658,7 @@ class TerminalService:
             for row in rows
             if (agent := self.agents.get(row["device_id"])) is not None
             and not agent.closed
-            and (not requires_pin or host_pin_supported(agent))
+            and self._saved_vps_supported(agent)
         ]
         if not carriers:
             return None
@@ -684,7 +684,7 @@ class TerminalService:
             return 0 if getattr(agent, "direct_vps", False) else 1
         return 1 if self._device_online(device_id) else 2
 
-    def _select_admin_project(self, principal, vps_id, *, requires_pin=False):
+    def _select_admin_project(self, principal, vps_id):
         devices = self.store.all(
             "SELECT id, name FROM devices WHERE space_id=? AND enabled=1 ORDER BY created, id",
             (principal.space_id,),
@@ -693,13 +693,11 @@ class TerminalService:
             raise DevError("NO_TERMINAL_AGENT", "当前空间没有可用的启用节点", 409)
         bound_projects, affinity_devices = self._vps_affinity(vps_id, principal.space_id)
         counts = self._active_device_counts()
-        direct_dev = self._select_admin_direct_device(
-            devices, affinity_devices, counts, requires_pin=requires_pin
-        )
+        direct_dev = self._select_admin_direct_device(devices, affinity_devices, counts)
         if direct_dev is not None:
             return _direct_project(direct_dev["id"], direct_dev["name"], principal.space_id)
         carrier = self._select_admin_carrier_project(
-            principal, bound_projects, affinity_devices, counts, requires_pin=requires_pin
+            principal, bound_projects, affinity_devices, counts
         )
         if carrier is not None:
             return carrier
@@ -722,9 +720,7 @@ class TerminalService:
             raise DevError("VPS_NOT_FOUND", "未找到 VPS 连接", 404)
         if not vps["enabled"]:
             raise DevError("VPS_DISABLED", "该 VPS 已停用，请先启用后再连接", 409)
-        project = self._select_admin_project(
-            principal, vps["id"], requires_pin=vps["host_key_policy"] == CONFIRM_CHANGE
-        )
+        project = self._select_admin_project(principal, vps["id"])
         ref = {
             "id": vps["id"],
             "connection_revision": vps["connection_revision"],
@@ -797,17 +793,20 @@ class TerminalService:
                 )
         return connection
 
-    def _require_host_pin_agent(self, project, target, agent):
-        if target.get("host_key_policy") != CONFIRM_CHANGE:
-            return
-        if self.agents.get(project["device_id"]) is not agent or not host_pin_supported(agent):
+    def _require_saved_vps_agent(self, project, agent):
+        if not self._supports_current_saved_vps_agent(project, agent):
             raise DevError(
                 "AGENT_UPGRADE_REQUIRED",
-                "当前节点未声明支持控制台核验指纹，请升级 Agent 后重新连接",
+                "当前节点不支持保存密码连接，请升级 Agent 后重新连接",
                 409,
             )
 
-    def _capability_reason(self, project, agent, *, requires_pin=False):
+    def _supports_current_saved_vps_agent(self, project, agent):
+        return self._saved_vps_supported(agent) and self._current_terminal_agent(
+            project["device_id"], agent
+        )
+
+    def _capability_reason(self, project, agent):
         if not self.enabled or self.closing:
             return "FEATURE_DISABLED"
         if agent is None or agent.closed:
@@ -816,7 +815,7 @@ class TerminalService:
                 if not self._device_online(project["device_id"])
                 else "AGENT_UPGRADE_REQUIRED"
             )
-        if requires_pin and not host_pin_supported(agent):
+        if not self._supports_current_saved_vps_agent(project, agent):
             return "AGENT_UPGRADE_REQUIRED"
         if project.get("_direct_vps") is True:
             if not getattr(agent, "direct_vps", False):
@@ -836,13 +835,12 @@ class TerminalService:
             "modes": ["auto", "tmux", "direct"],
             "limits": self.config.public_limits(),
             "persistence": "probed_on_connect",
+            "saved_vps_host_verification": "skip" if available else None,
         }
 
     async def capabilities(self, principal, vps_id, project_id=None):
         try:
-            _, project, target = await self.store.run(
-                self._authorize, principal, project_id, vps_id
-            )
+            _, project, _ = await self.store.run(self._authorize, principal, project_id, vps_id)
         except DevError as exc:
             if exc.code == "NO_TERMINAL_AGENT":
                 reason = "FEATURE_DISABLED" if not self.enabled else "NO_TERMINAL_AGENT"
@@ -851,9 +849,7 @@ class TerminalService:
                 )
             raise
         agent = self.agents.get(project["device_id"])
-        reason = self._capability_reason(
-            project, agent, requires_pin=target.get("host_key_policy") == CONFIRM_CHANGE
-        )
+        reason = self._capability_reason(project, agent)
         generation = agent.generation if agent is not None and not agent.closed else None
         return self._capabilities_payload(
             available=reason is None, reason_code=reason, generation=generation
@@ -946,7 +942,7 @@ class TerminalService:
                     raise DevError("REQUEST_CONFLICT", "同一请求编号不能创建不同终端", 409)
                 return self.repository.public(old)
             agent = self._admit_agent(project)
-            self._require_host_pin_agent(project, target, agent)
+            self._require_saved_vps_agent(project, agent)
             await self._check_session_quota(
                 principal.space_id, principal.user_id, project["device_id"]
             )
@@ -1016,7 +1012,7 @@ class TerminalService:
             target = await self.authorize(session, credentials=True)
             self._guard_maintenance()
             agent = self.agent(session.row["device_id"])
-            self._require_host_pin_agent(session.project, target, agent)
+            self._require_saved_vps_agent(session.project, agent)
             if agent.generation != session.row["runtime_generation"]:
                 await self._sync_begin_generation(session, agent, recover=recover)
             self._guard_maintenance()
@@ -1035,8 +1031,7 @@ class TerminalService:
                 "port": target["port"],
                 "username": target["username"],
                 "password": target.pop("password"),
-                "host_key_policy": target["host_key_policy"],
-                "host_key_fingerprint": target.get("host_key_fingerprint", ""),
+                "saved_vps_password_only": True,
                 "mode": self._runtime_create_mode(session.row["requested_mode"], recover),
                 "cols": session.row["cols"],
                 "rows": session.row["rows"],
@@ -1048,7 +1043,7 @@ class TerminalService:
                 {"stage_timings_ms": {"hub_prepare": max(0, self.clock() - started) * 1000}},
             )
             self._guard_maintenance()
-            self._require_host_pin_agent(session.project, target, agent)
+            self._require_saved_vps_agent(session.project, agent)
             result = await agent.request("create", payload, session.project)
             # A ready event may arrive before the create receipt. Never regress
             # its lifecycle back to creating.
@@ -1230,8 +1225,12 @@ class TerminalService:
             self._guard_maintenance()
             session.authority_revision = uuid.uuid4().hex
             session.ready.clear()
-            payload = {**self.target_ref(session), "password": target.pop("password")}
-            self._require_host_pin_agent(session.project, target, agent)
+            payload = {
+                **self.target_ref(session),
+                "password": target.pop("password"),
+                "saved_vps_password_only": True,
+            }
+            self._require_saved_vps_agent(session.project, agent)
             recovered = await agent.request("recover", payload, session.project)
         finally:
             target.pop("password", None)
@@ -1482,9 +1481,13 @@ class TerminalService:
 
     async def _request_terminal_close(self, session, principal, agent):
         target = await self.authorize(session, credentials=True, principal=principal)
-        payload = {**self.target_ref(session), "password": target.pop("password")}
+        payload = {
+            **self.target_ref(session),
+            "password": target.pop("password"),
+            "saved_vps_password_only": True,
+        }
         try:
-            self._require_host_pin_agent(session.project, target, agent)
+            self._require_saved_vps_agent(session.project, agent)
             return await agent.request("close", payload, session.project)
         finally:
             payload.pop("password", None)

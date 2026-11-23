@@ -11,6 +11,7 @@ import socket
 
 from agent.ssh_terminal_transport import SSHTransportError, _ControlCapture, classify_error
 from shared.ssh_host_pin import normalize_host_pin
+from hub.vps_readiness_native import readiness_identity_pin
 from shared.ssh_terminal_config import TMUX_PROVISION_TIMEOUT_SECONDS, TerminalConfig
 
 
@@ -19,18 +20,18 @@ def _ip(value):
     return ipaddress.ip_address(value.split("%", 1)[0])
 
 
-class _PinnedClient:
+class _ReadinessClient:
     def __init__(self, target, peer, pin, verify_host, password):
         self.target, self.peer, self.pin = target, peer, pin
         self.verify_host, self.load_password = verify_host, password
         self.candidate = None
+        self.endpoint_accepted = False
         self.proved = False
         self.password_requested = False
         self.failure = None
 
     def validate_host_public_key(self, host, addr, port, key):
         try:
-            presented = normalize_host_pin(key.get_fingerprint("sha256"))
             correct_endpoint = (
                 host.casefold() == self.target.host.casefold()
                 and port == self.target.port
@@ -38,15 +39,27 @@ class _PinnedClient:
             )
         except (AttributeError, TypeError, ValueError):
             return False
-        if not correct_endpoint or not hmac.compare_digest(presented, self.pin):
-            self.failure = SSHTransportError("HOST_KEY_CHANGED", "目标 VPS 的 SSH 主机指纹不匹配")
+        if correct_endpoint and self._accept_key_if_required(key):
+            self.endpoint_accepted = True
+            return True
+        self.failure = SSHTransportError("HOST_KEY_CHANGED", "目标 VPS 的 SSH 主机指纹不匹配")
+        return False
+
+    def _accept_key_if_required(self, key):
+        if self.pin is None:
+            return True
+        try:
+            presented = normalize_host_pin(key.get_fingerprint("sha256"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if not hmac.compare_digest(presented, self.pin):
             return False
         self.candidate = presented
         return True
 
     def prove_authenticated_peer(self):
-        if self.candidate is None:
-            raise SSHTransportError("HOST_KEY_UNKNOWN", "连接未完成指定主机密钥的核验")
+        if not self.endpoint_accepted:
+            raise SSHTransportError("HOST_KEY_UNKNOWN", "连接未完成 SSH 目标核验")
         if not self.proved:
             self.verify_host(self.candidate)
             self.proved = True
@@ -55,8 +68,8 @@ class _PinnedClient:
         if self.password_requested:
             return None
         self.password_requested = True
-        # AsyncSSH requests user authentication only after proving possession
-        # of the exact pinned host key during key exchange.
+        # AsyncSSH proves possession of the negotiated host key before user
+        # authentication. Manual fleet proves only possession, not identity.
         provider, self.load_password = self.load_password, None
         try:
             self.prove_authenticated_peer()
@@ -150,7 +163,7 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
     connection = client = None
     try:
         try:
-            pin = normalize_host_pin(target.host_fingerprint)
+            pin = readiness_identity_pin(target)
         except ValueError:
             raise SSHTransportError("HOST_KEY_UNKNOWN", "缺少已独立核验的 SSH 主机指纹") from None
         peer, peer_port, *_ = sock.getpeername()
@@ -161,7 +174,7 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
         except ImportError:
             raise SSHTransportError("SSH_DEPENDENCY_MISSING", "Hub 未安装 SSH 依赖") from None
 
-        class Client(_PinnedClient, ssh.SSHClient):
+        class Client(_ReadinessClient, ssh.SSHClient):
             pass
 
         client = Client(target, _ip(peer), pin, verify_host, password)
@@ -201,7 +214,10 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
         )
         # Covers a successful SSH "none" user-auth without loading a password.
         client.prove_authenticated_peer()
-        result = ReadinessSSH(connection, ssh, config, (target.host, target.port, pin))
+        # Never promote an unverified peer to trusted identity or reset a
+        # verified installation fence from a manual fleet connection.
+        identity = (target.host, target.port, pin) if pin is not None else None
+        result = ReadinessSSH(connection, ssh, config, identity)
         connection = None
         return result
     except asyncio.CancelledError:

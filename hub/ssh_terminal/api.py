@@ -214,6 +214,9 @@ async def _agent_socket(socket, device_id, runtime, store, service):
         )
         connection.probe_supported = bool(hello_info.get("probe"))
         connection.host_pin_supported = hello_info.get("host_pin") is True
+        connection.saved_vps_password_only_supported = (
+            hello_info.get("saved_vps_password_only") is True
+        )
         await socket.send_text(
             await pack_channel(
                 channel,

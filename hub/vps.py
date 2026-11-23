@@ -19,12 +19,12 @@ from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator, model_validator
 
 from shared.contracts import Args, SSHExec, VPSList
-from shared.ssh_host_pin import CONFIRM_CHANGE, host_pin_supported, normalize_host_pin
+from shared.ssh_host_pin import CONFIRM_CHANGE, normalize_host_pin
 from shared.ssh_terminal_protocol import TerminalProtocolError
 from shared.util import DevError
 from hub import iam
+from hub.vps_readiness import HOST_VERIFICATION_SKIP
 
-_VPS_CHECK_COMMAND = "printf 'CODEPIER_VPS_OK\\n'; hostname; id -un; uname -sr; df -h /"
 _PUBLIC_PROJECT_KEYS = ("id", "alias", "device_id", "device_name", "mode", "allow_tasks")
 
 
@@ -151,10 +151,16 @@ def _member_actions(principal, perms, project_id):
     return set(perms.get(project_id, ())) & set(principal.scopes)
 
 
-def _agent_probe_ready(agent, project, *, requires_pin=False):
-    if requires_pin and not host_pin_supported(agent):
-        return False
-    if agent is None or agent.closed or not getattr(agent, "probe_supported", False):
+def _saved_vps_password_supported(agent):
+    return bool(
+        agent is not None
+        and not agent.closed
+        and getattr(agent, "saved_vps_password_only_supported", False) is True
+    )
+
+
+def _agent_probe_ready(agent, project):
+    if not _saved_vps_password_supported(agent) or not getattr(agent, "probe_supported", False):
         return False
     if project.get("_direct_vps") is True:
         return bool(
@@ -169,8 +175,7 @@ class VPSService:
         self.store = runtime.store
 
     def _admin_terminal_summary(self, row, all_projects, principal, terminal_service):
-        requires_pin = row.get("host_key_policy") == CONFIRM_CHANGE
-        exec_ready = not requires_pin and any(
+        exec_ready = any(
             p["online"] and p["device_enabled"] and p["mode"] == "write" and p["allow_tasks"]
             for p in all_projects
         )
@@ -184,11 +189,11 @@ class VPSService:
             )
         if terminal_service is None:
             dev_name = next((p["device_name"] for p in all_projects if p["online"]), None)
-            reason = "AGENT_UPGRADE_REQUIRED" if requires_pin or exec_ready else "AGENT_OFFLINE"
+            reason = "AGENT_UPGRADE_REQUIRED" if exec_ready else "AGENT_OFFLINE"
             return _terminal_state(
                 eligible=True,
                 available=False,
-                check_ready=exec_ready,
+                check_ready=False,
                 direct=True,
                 reason_code=reason,
                 device_name=dev_name,
@@ -197,21 +202,19 @@ class VPSService:
             return _terminal_state(
                 eligible=True,
                 available=False,
-                check_ready=exec_ready,
+                check_ready=False,
                 direct=True,
                 reason_code="FEATURE_DISABLED",
             )
         try:
-            project = terminal_service._select_admin_project(
-                principal, row["id"], requires_pin=requires_pin
-            )
+            project = terminal_service._select_admin_project(principal, row["id"])
         except DevError as exc:
             return _terminal_state(
                 eligible=True, available=False, check_ready=False, direct=True, reason_code=exc.code
             )
         agent = terminal_service.agents.get(project["device_id"])
-        reason = terminal_service._capability_reason(project, agent, requires_pin=requires_pin)
-        check_ready = _agent_probe_ready(agent, project, requires_pin=requires_pin) or exec_ready
+        reason = terminal_service._capability_reason(project, agent)
+        check_ready = _agent_probe_ready(agent, project)
         return _terminal_state(
             eligible=True,
             available=reason is None,
@@ -259,15 +262,13 @@ class VPSService:
                 reason_code="VPS_DISABLED",
                 device_name=eligible_projects[0]["device_name"],
             )
-        requires_pin = row.get("host_key_policy") == CONFIRM_CHANGE
-        exec_ready = not requires_pin and any(p["online"] for p in eligible_projects)
         if terminal_service is None:
             best = next((p for p in eligible_projects if p["online"]), eligible_projects[0])
-            reason = "AGENT_UPGRADE_REQUIRED" if requires_pin or exec_ready else "AGENT_OFFLINE"
+            reason = "AGENT_UPGRADE_REQUIRED" if best["online"] else "AGENT_OFFLINE"
             return _terminal_state(
                 eligible=True,
                 available=False,
-                check_ready=exec_ready,
+                check_ready=False,
                 direct=False,
                 reason_code=reason,
                 device_name=best["device_name"],
@@ -276,15 +277,15 @@ class VPSService:
         best = min(
             eligible_projects,
             key=lambda p: (
-                terminal_service._host_pin_rank(p["device_id"], requires_pin),
+                not _saved_vps_password_supported(terminal_service.agents.get(p["device_id"])),
                 -terminal_service._candidate_tier(p["device_id"], counts.get(p["device_id"], 0)),
                 counts.get(p["device_id"], 0),
                 p["id"],
             ),
         )
         agent = terminal_service.agents.get(best["device_id"])
-        reason = terminal_service._capability_reason(best, agent, requires_pin=requires_pin)
-        check_ready = _agent_probe_ready(agent, best, requires_pin=requires_pin) or exec_ready
+        reason = terminal_service._capability_reason(best, agent)
+        check_ready = _agent_probe_ready(agent, best)
         return _terminal_state(
             eligible=True,
             available=reason is None,
@@ -299,6 +300,7 @@ class VPSService:
         result["enabled"] = bool(result["enabled"])
         result["has_password"] = True
         result["target"] = "vps:" + row["id"]
+        result["saved_vps_host_verification"] = HOST_VERIFICATION_SKIP
         readiness = getattr(self.runtime, "vps_readiness", None)
         result.update(
             readiness.summary(principal, row["id"], result["enabled"])
@@ -463,6 +465,11 @@ class VPSService:
                     else old["secret"]
                 )
                 version = old["version"] + 1 if old else 1
+                if old and not {"host_key_policy", "host_key_fingerprint"} & body.model_fields_set:
+                    # New panel clients omit these legacy settings. Metadata
+                    # for separately verified tooling never changes implicitly.
+                    data["host_key_policy"] = old["host_key_policy"]
+                    data["host_key_fingerprint"] = old["host_key_fingerprint"]
                 connection_changed = old and (
                     body.password is not None
                     or any(
@@ -485,8 +492,8 @@ class VPSService:
                     body.port,
                     body.username,
                     secret,
-                    body.host_key_policy,
-                    body.host_key_fingerprint,
+                    data["host_key_policy"],
+                    data["host_key_fingerprint"],
                     body.provider,
                     body.region,
                     body.system,
@@ -677,55 +684,35 @@ class VPSService:
             )
         return {**row, "binding_id": expected_binding}
 
-    def _bound_exec_project(self, identifier, principal):
-        rows = self.store.all(
-            """SELECT p.id, p.device_id, d.name AS device_name
-            FROM vps_projects vp JOIN projects p ON p.id=vp.project_id
-            JOIN devices d ON d.id=p.device_id
-            WHERE vp.vps_id=? AND p.space_id=? AND d.enabled=1 AND p.mode='write' AND p.allow_tasks=1
-            ORDER BY p.alias_key, p.id""",
-            (identifier, principal.space_id),
-        )
-        if not (principal.admin and not principal.grant_id):
-            perms = iam.project_permissions(self.store, principal)
-            rows = [
-                r
-                for r in rows
-                if {"read", "write", "execute"} <= _member_actions(principal, perms, r["id"])
-            ]
-        if not rows:
-            return None
-        chosen = next((r for r in rows if self.runtime.online(r["device_id"])), rows[0])
-        return self.runtime.project(chosen["id"], principal)
-
     def _prepare_check(self, identifier, body, principal):
-        principal = iam.live_principal(self.store, principal)
-        if not principal.user_id or not principal.session_hash:
-            raise DevError("AUTH_REQUIRED", "请从面板登录后检查连接", 401)
         terminal_service = getattr(self.runtime, "ssh_terminal", None)
-        if terminal_service is not None:
-            principal, project, target = terminal_service._authorize(
-                principal,
-                body.project_id,
-                identifier,
-                credentials=True,
-            )
-            exec_project = (
-                project if body.project_id else self._bound_exec_project(identifier, principal)
-            )
-            return principal, project, target, exec_project
-        exec_project = (
-            self.runtime.project(body.project_id, principal)
-            if body.project_id
-            else self._bound_exec_project(identifier, principal)
+        if terminal_service is None:
+            raise DevError("AGENT_UPGRADE_REQUIRED", "请升级 Agent 后检查 VPS 连接", 409)
+        principal, project, target = terminal_service._authorize(
+            principal, body.project_id, identifier, credentials=False
         )
-        if exec_project is None:
-            raise DevError("NO_TERMINAL_AGENT", "当前没有可用于连接检查的关联项目或终端通道", 409)
-        self.runtime.authorize(principal, "write", project_id=exec_project["id"])
-        self.runtime.authorize(principal, "execute", project_id=exec_project["id"])
-        ref = self.reference({"vps": identifier}, exec_project)
-        target = self._authorized_row({"vps_ref": ref}, exec_project["id"], credential=False)
-        return principal, exec_project, target, exec_project
+        agent = terminal_service.agents.get(project["device_id"])
+        if not _agent_probe_ready(agent, project):
+            self._raise_check_unavailable(agent, project)
+        principal, current_project, current_target = terminal_service._authorize(
+            principal, body.project_id, identifier, credentials=True
+        )
+        if (
+            self._check_binding(terminal_service, project, target, agent)
+            != self._check_binding(terminal_service, current_project, current_target, agent)
+            or terminal_service.agents.get(project["device_id"]) is not agent
+        ):
+            current_target.pop("password", None)
+            raise DevError("VPS_CONFIGURATION_CHANGED", "连接或节点已变化，请重新检查", 409)
+        return principal, current_project, current_target, agent
+
+    @staticmethod
+    def _check_binding(service, project, target, agent):
+        return (
+            project["device_id"],
+            service.agents.get(project["device_id"]) is agent,
+            tuple(target.get(field) for field in ("id", "connection_revision", "binding_id")),
+        )
 
     async def _run_probe_check(
         self, identifier, agent, project, target, password, timeout_seconds, principal
@@ -736,8 +723,7 @@ class VPSService:
             "port": target["port"],
             "username": target["username"],
             "password": password,
-            "host_key_policy": target["host_key_policy"],
-            "host_key_fingerprint": target.get("host_key_fingerprint", ""),
+            "saved_vps_password_only": True,
             "timeout_seconds": timeout,
         }
         try:
@@ -774,46 +760,6 @@ class VPSService:
         )
         return result
 
-    async def _run_exec_check(self, identifier, exec_project, body, principal):
-        timeout = min(300, max(5, int(body.timeout_seconds)))
-        receipt = await self.runtime.invoke(
-            "exec",
-            {
-                "project": exec_project["id"],
-                "target": "vps:" + identifier,
-                "command": _VPS_CHECK_COMMAND,
-                "timeout_seconds": timeout,
-                "yield_seconds": min(8, timeout),
-                "idempotency_key": body.idempotency_key,
-            },
-            principal,
-        )
-        state = receipt.get("state") or "queued"
-        pending = bool(receipt.get("pending", state in {"queued", "running"}))
-        ok = state == "succeeded"
-        raw_res = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
-        error = (
-            None
-            if ok
-            else (
-                raw_res.get("error")
-                or (
-                    {"code": "EXEC_FAILED", "message": str(receipt["error"])}
-                    if receipt.get("error")
-                    else None
-                )
-            )
-        )
-        return {
-            "ok": ok,
-            "state": state,
-            "pending": pending,
-            "operation_id": receipt.get("operation_id") or receipt.get("id"),
-            "output": str(receipt.get("output") or ""),
-            "error": error,
-            "device_name": exec_project.get("device_name") or None,
-        }
-
     def _raise_check_unavailable(self, agent, project):
         if (
             agent is not None
@@ -827,44 +773,25 @@ class VPSService:
         if (agent is not None and not agent.closed) or self.runtime.online(project["device_id"]):
             raise DevError(
                 "AGENT_UPGRADE_REQUIRED",
-                "当前节点不支持免绑定连接检查，请升级 Agent 或先分配可写项目",
+                "当前节点不支持保存的 VPS 登录，请升级 Agent 后重试",
                 409,
             )
         raise DevError("AGENT_OFFLINE", "关联节点当前离线，无法执行连接检查", 409)
 
     async def check(self, identifier, body, principal):
-        principal, project, target, exec_project = await self.store.run(
-            self._prepare_check,
-            identifier,
-            body,
-            principal,
+        principal, project, target, agent = await self.store.run(
+            self._prepare_check, identifier, body, principal
         )
         password = target.pop("password", None)
+        terminal_service = self.runtime.ssh_terminal
         try:
-            terminal_service = getattr(self.runtime, "ssh_terminal", None)
-            agent = terminal_service.agents.get(project["device_id"]) if terminal_service else None
-            if _agent_probe_ready(
-                agent, project, requires_pin=target["host_key_policy"] == CONFIRM_CHANGE
-            ):
-                return await self._run_probe_check(
-                    identifier,
-                    agent,
-                    project,
-                    target,
-                    password,
-                    body.timeout_seconds,
-                    principal,
-                )
-            password = None
-            if target["host_key_policy"] == CONFIRM_CHANGE:
-                raise DevError(
-                    "AGENT_UPGRADE_REQUIRED",
-                    "指纹变化时确认模式需要支持 Web SSH 的新版 Agent，不会使用旧式连接检查",
-                    409,
-                )
-            if exec_project is None:
-                self._raise_check_unavailable(agent, project)
-            return await self._run_exec_check(identifier, exec_project, body, principal)
+            if not terminal_service._current_terminal_agent(
+                project["device_id"], agent
+            ) or not _agent_probe_ready(agent, project):
+                raise DevError("AGENT_UPGRADE_REQUIRED", "连接节点已变化，请重新检查", 409)
+            return await self._run_probe_check(
+                identifier, agent, project, target, password, body.timeout_seconds, principal
+            )
         finally:
             password = None
 
@@ -928,16 +855,20 @@ class VPSService:
 
 
 def _add_readiness_routes(router, auth, runtime):
-    @router.post("/api/vps/readiness/scan")
     @router.post("/api/vps/readiness/backfill")
-    async def scan_readiness(request: Request):
+    async def backfill_readiness(request: Request):
         principal = await runtime.store.run(auth.panel, request, True)
         return await runtime.vps_readiness.activate_space(principal)
+
+    @router.post("/api/vps/readiness/scan")
+    async def scan_readiness(request: Request):
+        principal = await runtime.store.run(auth.panel, request, True)
+        return await runtime.vps_readiness.activate_space(principal, HOST_VERIFICATION_SKIP)
 
     @router.post("/api/vps/readiness/install")
     async def install_readiness(request: Request):
         principal = await runtime.store.run(auth.panel, request, True)
-        return await runtime.vps_readiness.install_space(principal)
+        return await runtime.vps_readiness.install_space(principal, HOST_VERIFICATION_SKIP)
 
     @router.get("/api/vps/{identifier}/readiness")
     async def get_readiness(identifier: str, request: Request):
@@ -967,6 +898,7 @@ def make_vps_router(auth, runtime):
         args = VPSList(project=project, query=query, offset=offset, limit=limit).model_dump()
         result = service.list(args, principal)
         result.update(runtime.vps_readiness.fleet_summary(principal))
+        result["saved_vps_host_verification"] = HOST_VERIFICATION_SKIP
         return result
 
     @router.post("/api/vps")

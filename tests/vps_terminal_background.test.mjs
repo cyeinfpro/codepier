@@ -7,7 +7,7 @@ test("new defaults to tmux; explicit temporary fallback uses a distinct request 
   const attempts = [];
   const store = new TerminalStore({
     api: async (url, options) => {
-      if (url.includes("capabilities")) return { available: true, limits: {} };
+      if (url.includes("capabilities")) return { available: true, saved_vps_host_verification: 'skip', limits: {} };
       const body = JSON.parse(options.body);
       attempts.push(body);
       if (attempts.length === 1) throw Error("response lost");

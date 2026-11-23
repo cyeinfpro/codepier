@@ -235,6 +235,13 @@ export class TerminalStore {
         { code: capability.reason_code || 'AGENT_UPGRADE_REQUIRED' },
       );
     }
+    // A cached target can outlive a Hub rollback. The live capabilities receipt
+    // must advertise the managed-VPS method before we attempt a new connection.
+    // Restoring an existing session never passes through this creation gate.
+    if (capability.saved_vps_host_verification !== 'skip')
+      throw Object.assign(new Error('当前面板或连接电脑版本不兼容，请更新后重试。'), {
+        code: 'AGENT_UPGRADE_REQUIRED',
+      });
     const limits = limitsFrom(capability.limits);
     this.limits = limits;
     if (this.count() >= limits.max_user_sessions)

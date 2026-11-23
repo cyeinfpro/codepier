@@ -224,3 +224,80 @@ async def test_real_none_auth_still_cryptographically_checks_pin_without_reading
     finally:
         listener.close()
         await listener.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purpose", ["manual_fleet", "managed_vps"])
+async def test_real_managed_vps_uses_vetted_socket_without_adopting_the_key(purpose, monkeypatch):
+    ssh = pytest.importorskip("asyncssh")
+    host_key = ssh.generate_private_key("ssh-ed25519")
+    seen = []
+
+    class Peer(ssh.SSHServer):
+        def begin_auth(self, _username):
+            return True
+
+        def password_auth_supported(self):
+            return True
+
+        def validate_password(self, username, password):
+            seen.append((username, password))
+            return username == "fixture" and password == "only-test"
+
+    listener = await ssh.create_server(Peer, "127.0.0.1", 0, server_host_keys=[host_key])
+    target = SimpleNamespace(
+        host="only-in-vetted-socket.invalid",
+        port=listener.get_port(),
+        username="fixture",
+        host_fingerprint="",
+        host_verification="required",
+    )
+    observations = []
+
+    async def dial():
+        sock = socket.socket()
+        sock.setblocking(False)
+        await asyncio.get_running_loop().sock_connect(sock, ("127.0.0.1", target.port))
+        return sock
+
+    async def password():
+        observations.append("credential")
+        return "only-test"
+
+    args = {"verify_host": observations.append, "password": password}
+    try:
+        with pytest.raises(native.SSHTransportError) as missing:
+            await native.connect_readiness(target, await dial(), **args)
+        assert missing.value.code == "HOST_KEY_UNKNOWN"
+        assert observations == seen == []
+
+        target.host_verification = "invalid_mode"
+        with pytest.raises(native.SSHTransportError):
+            await native.connect_readiness(target, await dial(), **args)
+        assert observations == seen == []
+
+        target.host_verification = "required"
+        target.host_fingerprint = fingerprint(2)
+        with pytest.raises(native.SSHTransportError) as mismatch:
+            await native.connect_readiness(target, await dial(), **args)
+        assert mismatch.value.code == "HOST_KEY_CHANGED"
+        assert observations == seen == []
+
+        target.host_verification = "skip"
+        with pytest.raises(native.SSHTransportError):
+            await native.connect_readiness(target, await dial(), **args)
+        assert observations == seen == []
+
+        target.purpose = purpose
+
+        def forbid_fingerprint(*_, **__):
+            pytest.fail("skip mode derived a host fingerprint")
+
+        monkeypatch.setattr(ssh.SSHKey, "get_fingerprint", forbid_fingerprint)
+        async with await native.connect_readiness(target, await dial(), **args) as transport:
+            assert transport.verified_tmux_endpoint is None
+        assert observations == [None, "credential"]
+        assert seen == [("fixture", "only-test")]
+    finally:
+        listener.close()
+        await listener.wait_closed()

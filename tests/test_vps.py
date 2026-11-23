@@ -541,7 +541,7 @@ def _setup_vps_check_app(tmp_path, monkeypatch):
     return app, TestClient, device_id, project_id
 
 
-def test_vps_check_endpoint_stateless_probe_and_exec_fallback(tmp_path, monkeypatch):
+def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeypatch):
     app, TestClient, device_id, project_id = _setup_vps_check_app(tmp_path, monkeypatch)
     origin = 'https://testserver'
     with TestClient(app, base_url=origin, raise_server_exceptions=True) as client:
@@ -570,6 +570,7 @@ def test_vps_check_endpoint_stateless_probe_and_exec_fallback(tmp_path, monkeypa
             direct_vps = True
             direct_vps_allowed = True
             probe_supported = True
+            saved_vps_password_only_supported = True
 
             async def request(self, action, payload, project, **kwargs):
                 probed.append((action, dict(payload), dict(project)))
@@ -580,21 +581,69 @@ def test_vps_check_endpoint_stateless_probe_and_exec_fallback(tmp_path, monkeypa
 
         peer = ProbePeer()
         peer.device_id = device_id
+        class MainPeer:
+            unusable = False
+            last_seen = time.time()
+
+            def close(self):
+                pass
+
+        peer.main_connection = MainPeer()
+        app.state.runtime.connections[device_id] = peer.main_connection
         client.portal.call(app.state.runtime.ssh_terminal.register_agent, peer)
         res = client.post(f"/api/vps/{unassigned['id']}/check", headers=headers, json={'idempotency_key': 'probe-key-001'})
         assert res.status_code == 200 and res.json()['ok'] is True and res.json()['operation_id'] is None
         assert 'CODEPIER_VPS_OK' in res.json()['output'] and res.json()['device_name'] == 'Check Agent'
         assert probed[0][0] == 'probe' and probed[0][2]['_direct_vps'] is True and PASSWORD not in res.text
 
-        peer.probe_supported = False
-        app.state.runtime.connections[device_id] = SimpleNamespace(unusable=False)
-        monkeypatch.setattr(app.state.runtime, 'online', lambda did: did == device_id)
 
-        async def fake_invoke(tool, args, principal):
-            return {'operation_id': 'ee' * 16, 'state': 'succeeded', 'pending': False, 'output': 'CODEPIER_VPS_OK\nfallback\n', 'result': {'ok': True}}
+        assert probed[0][1]["saved_vps_password_only"] is True
+        assert "host_key_policy" not in probed[0][1]
+        assert "host_key_fingerprint" not in probed[0][1]
+        assert unassigned["saved_vps_host_verification"] == "skip"
 
-        monkeypatch.setattr(app.state.runtime, 'invoke', fake_invoke)
-        no_bound = client.post(f"/api/vps/{unassigned['id']}/check", headers=headers, json={'idempotency_key': 'exec-key-001'})
-        assert no_bound.status_code == 409 and no_bound.json()['error']['code'] == 'AGENT_UPGRADE_REQUIRED'
-        fallback = client.post(f"/api/vps/{assigned['id']}/check", headers=headers, json={'idempotency_key': 'exec-key-002'})
-        assert fallback.status_code == 200 and fallback.json()['ok'] is True and fallback.json()['operation_id'] == 'ee' * 16
+        check_prepare = app.state.runtime.vps._prepare_check
+
+        def replace_main_after_prepare(*args):
+            result = check_prepare(*args)
+            app.state.runtime.connections[device_id] = MainPeer()
+            return result
+
+        with monkeypatch.context() as disconnected:
+            disconnected.setattr(app.state.runtime.vps, "_prepare_check", replace_main_after_prepare)
+            try:
+                stale = client.post(
+                    f"/api/vps/{unassigned['id']}/check", headers=headers,
+                    json={"idempotency_key": "stale-main-peer"},
+                )
+                assert stale.status_code == 409
+                assert stale.json()["error"]["code"] == "AGENT_UPGRADE_REQUIRED"
+                assert len(probed) == 1
+            finally:
+                app.state.runtime.connections[device_id] = peer.main_connection
+
+        peer.saved_vps_password_only_supported = False
+
+        async def unexpected_invoke(*_args, **_kwargs):
+            raise AssertionError("Managed VPS probe must not use the generic SSH execution fallback")
+
+        monkeypatch.setattr(app.state.runtime, "invoke", unexpected_invoke)
+        for selected in (unassigned, assigned):
+            old_agent = client.post(
+                f"/api/vps/{selected['id']}/check", headers=headers,
+                json={"idempotency_key": "check-old-agent"},
+            )
+            assert old_agent.status_code == 409
+            assert old_agent.json()["error"]["code"] == "AGENT_UPGRADE_REQUIRED"
+        assert len(probed) == 1
+
+        existing = client.post("/api/vps", headers=headers, json={
+            "name": "Previously pinned", "host": "pinned.invalid", "password": PASSWORD,
+            "host_key_policy": "confirm-change", "host_key_fingerprint": "SHA256:" + "A" * 43,
+        }).json()
+        edited = client.put(f"/api/vps/{existing['id']}", headers=headers, json={
+            "name": "Renamed pinned", "host": existing["host"], "expected_version": existing["version"],
+        }).json()
+        assert edited["host_key_policy"] == "confirm-change"
+        assert edited["host_key_fingerprint"] == existing["host_key_fingerprint"]
+        assert edited["connection_revision"] == existing["connection_revision"]

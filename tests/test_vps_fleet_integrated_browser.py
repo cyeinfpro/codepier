@@ -34,6 +34,7 @@ class TestExecutor:
 
     def __init__(self):
         self.ready = set()
+        self.auth_denied = set()
         self.scan_gate = Event()
         self.install_gate = Event()
         self.inspect_calls = []
@@ -42,6 +43,8 @@ class TestExecutor:
     async def inspect(self, target):
         self.inspect_calls.append(target.vps_id)
         assert await asyncio.to_thread(self.scan_gate.wait, 20)
+        if target.vps_id in self.auth_denied:
+            return "ssh_auth_failed"
         return "ready" if target.vps_id in self.ready else "missing"
 
     async def provision(self, target):
@@ -61,42 +64,24 @@ def controlled_live_stack(tmp_path, monkeypatch):
         app = create_app(str(tmp_path / "hub"), readiness_executor_factory=lambda _: native)
         store = app.state.store
         seed_owner(store, "fleet-owner", "admin")
-        store.execute(
-            "UPDATE users SET password_hash=? WHERE id=?", (password_hash(LOGIN), "fleet-owner")
-        )
+        store.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash(LOGIN), "fleet-owner"))
         server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
         thread = Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
         thread.start()
         try:
             with fixture_http_client(url) as client:
                 wait_for(lambda: client.get("/healthz", timeout=1).is_success, timeout=15)
-                login = client.post(
-                    "/api/login",
-                    json={"username": "admin", "password": LOGIN},
-                    headers={"Origin": url},
-                )
+                login = client.post("/api/login", json={"username": "admin", "password": LOGIN},
+                                    headers={"Origin": url})
                 assert login.is_success, login.text
                 client.cookies.clear()
                 with store.transaction() as db:
-                    db.execute(
-                        "INSERT INTO spaces (id,label,kind,created) VALUES ('fleet-space','Fleet','team',?)",
-                        (time.time(),),
-                    )
-                    db.execute(
-                        "INSERT INTO memberships (space_id,user_id,level) VALUES ('fleet-space','fleet-owner','owner')"
-                    )
-                owner = LoopbackIdentity(
-                    client, login.cookies["rd_session"], login.json()["csrf"], "fleet-space"
-                )
+                    db.execute("INSERT INTO spaces (id,label,kind,created) VALUES ('fleet-space','Fleet','team',?)", (time.time(),))
+                    db.execute("INSERT INTO memberships (space_id,user_id,level) VALUES ('fleet-space','fleet-owner','owner')")
+                owner = LoopbackIdentity(client, login.cookies["rd_session"], login.json()["csrf"], "fleet-space")
                 owner.origin = url
-                yield SimpleNamespace(
-                    url=url,
-                    password=LOGIN,
-                    store=store,
-                    executor=native,
-                    client=client,
-                    owner=owner,
-                )
+                yield SimpleNamespace(url=url, password=LOGIN, store=store, executor=native,
+                                      client=client, owner=owner)
         finally:
             native.scan_gate.set()
             native.install_gate.set()
@@ -106,9 +91,7 @@ def controlled_live_stack(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("synthetic_space", ["fleet-space"])
-def test_two_phase_through_real_browser_hub_queue_and_executor(
-    browser, controlled_live_stack, synthetic_space
-):
+def test_two_phase_through_real_browser_hub_queue_and_executor(browser, controlled_live_stack, synthetic_space):
     engine, browser_name = browser
     native = controlled_live_stack.executor
     s = controlled_live_stack
@@ -116,24 +99,17 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(
         "ready": add(s.owner, "ready")["id"],
         "fresh": add(s.owner, "fresh")["id"],
         "expired": add(s.owner, "expired")["id"],
-        "untrusted": add(s.owner, "untrusted", pin=False)["id"],
+        "denied": add(s.owner, "denied", pin=False)["id"],
         "disabled": add(s.owner, "disabled", enabled=False)["id"],
     }
     native.ready.add(labels["ready"])
+    native.auth_denied.add(labels["denied"])
     assert not native.inspect_calls and not native.install_calls
 
-    page = engine.new_page(
-        viewport={"width": 1440 if browser_name == "chromium" else 390, "height": 844}
-    )
+    page = engine.new_page(viewport={"width": 1440 if browser_name == "chromium" else 390, "height": 844})
     posts = []
-    page.on(
-        "request",
-        lambda req: (
-            posts.append(req.url.split("/")[-1])
-            if req.method == "POST" and "/api/vps/readiness/" in req.url
-            else None
-        ),
-    )
+    page.on("request", lambda req: posts.append(req.url.split("/")[-1])
+            if req.method == "POST" and "/api/vps/readiness/" in req.url else None)
     try:
         page.goto(s.url + "/#overview")
         page.fill("#username", "admin")
@@ -143,9 +119,7 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(
         if browser_name == "webkit":
             page.locator(".mobile-menu").click()
         page.locator("#iam-active-space").select_option(synthetic_space)
-        page.wait_for_function(
-            "(id) => S.space_id === id && S.page === 'overview'", arg=synthetic_space
-        )
+        page.wait_for_function("(id) => S.space_id === id && S.page === 'overview'", arg=synthetic_space)
         if browser_name == "webkit" and not page.locator('.sidebar [data-nav="vps"]').is_visible():
             page.locator(".mobile-menu").click()
         page.locator('.sidebar [data-nav="vps"]').click()
@@ -167,18 +141,14 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(
         native.scan_gate.set()
         expect(counts).to_contain_text("缺少 2", timeout=12000)
         expect(counts).to_contain_text("就绪 1")
-        expect(reasons).to_contain_text("1 台：面板尚未核验主机指纹")
+        expect(reasons).to_contain_text("1 台：SSH 登录失败")
         assert posts == ["scan"]
         assert not native.install_calls
-        assert Counter(native.inspect_calls) == Counter(
-            [labels["ready"], labels["fresh"], labels["expired"]]
-        )
+        assert Counter(native.inspect_calls) == Counter([labels["ready"], labels["fresh"], labels["expired"], labels["denied"]])
 
         # Repeatable test-only clock seam: age just one authoritative scan result.
-        s.store.execute(
-            "UPDATE vps_readiness_jobs SET updated=? WHERE vps_id=?",
-            (time.time() - 1801, labels["expired"]),
-        )
+        s.store.execute("UPDATE vps_readiness_jobs SET updated=? WHERE vps_id=?",
+                        (time.time() - 1801, labels["expired"]))
         page.reload()
         expect(counts).to_contain_text("缺少 2")
         summary.click()

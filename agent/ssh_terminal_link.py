@@ -57,6 +57,7 @@ class AgentTerminalLink:
             "direct_vps_allowed": self._direct_vps_allowed(),
             "probe": True,
             "host_pin": True,
+            "saved_vps_password_only": True,
         }
 
     async def emit(self, event):

@@ -380,7 +380,13 @@ async def test_upgrade_defaults_legacy_queued_job_to_scan_and_never_replays_old_
     store, steps = FakeStore(), []
     for name in ("legacy", "running-install"):
         store.target(name)
-    store.execute("\n".join(line for line in _SCHEMA.splitlines() if "intent TEXT" not in line))
+    store.execute(
+        "\n".join(
+            line
+            for line in _SCHEMA.splitlines()
+            if "intent TEXT" not in line and "host_verification" not in line
+        )
+    )
     for name, state, held in (("legacy", "queued", 0), ("running-install", "installing", 1)):
         store.execute(
             """INSERT INTO vps_readiness_jobs
@@ -396,6 +402,7 @@ async def test_upgrade_defaults_legacy_queued_job_to_scan_and_never_replays_old_
     assert (await queue.status("space", "legacy"))["state"] == "missing"
     old = await queue.status("space", "running-install")
     assert old["intent"] == "scan"
+    assert old["host_verification"] == "required"
     assert old["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
     assert not any(kind == "install" for kind, _ in steps)
 
@@ -495,3 +502,86 @@ async def test_upgrade_clears_only_definitively_ready_historical_fences():
     for name, expected in (("verified", 0), ("uncertain", 1), ("installing", 1)):
         row = store.one("SELECT verify_only FROM vps_readiness_jobs WHERE vps_id=?", (name,))
         assert row["verify_only"] == expected
+
+
+@pytest.mark.asyncio
+async def test_install_matches_scan_mode_without_overwriting_an_active_job():
+    db, steps = FakeStore(), []
+    db.target("target")
+    queue = service(db, steps)
+    admin = dict(authorized_user_id="administrator")
+    assert await queue.backfill("space", "verified", **admin) == 1
+    db.execute("UPDATE vps_readiness_jobs SET attempts=1")
+    assert (
+        await queue.backfill("space", "skip", refresh=True, host_verification="skip", **admin) == 0
+    )
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["host_verification"] == "required"
+    assert (
+        await queue.install_missing("space", "skip-install", host_verification="skip", **admin) == 0
+    )
+    assert (
+        await queue.backfill("space", "skip", refresh=True, host_verification="skip", **admin) == 1
+    )
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["host_verification"] == "skip"
+    assert await queue.install_missing("space", "verified-install", **admin) == 0
+    assert (
+        await queue.install_missing("space", "skip-install", host_verification="skip", **admin) == 1
+    )
+    assert await queue.run_one()
+    assert [kind for kind, _ in steps].count("install") == 1
+
+
+@pytest.mark.asyncio
+async def test_mode_change_cannot_clear_prior_unconfirmed_install():
+    db, steps = FakeStore(), []
+    db.target("target")
+    queue = service(db, steps)
+    admin = dict(authorized_user_id="administrator")
+    await queue.backfill("space", "verified", **admin)
+    db.execute(
+        """UPDATE vps_readiness_jobs SET state='failed',verify_only=1,
+            reason_code='INSTALL_OUTCOME_UNCONFIRMED'"""
+    )
+    assert (
+        await queue.backfill("space", "skip", refresh=True, host_verification="skip", **admin) == 0
+    )
+    old = await queue.enqueue(
+        "space",
+        "target",
+        "skip",
+        expected_revision=1,
+        refresh=True,
+        host_verification="skip",
+        **admin,
+    )
+    assert old["host_verification"] == "required"
+    assert old["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
+    assert not await queue.run_one()
+    assert await queue.backfill("space", "verified", refresh=True, **admin) == 1
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
+    assert not any(kind == "install" for kind, _ in steps)
+
+
+@pytest.mark.asyncio
+async def test_explicit_fleet_scan_rebinds_only_own_old_unsent_read_only_job():
+    db, steps = FakeStore(), []
+    for target in ("legacy", "fenced", "retried", "foreign-admin", "queued-install"):
+        db.target(target)
+    queue = service(db, steps)
+    admin = dict(authorized_user_id="administrator")
+    assert await queue.backfill("space", "verified", **admin) == 5
+    db.execute("UPDATE vps_readiness_jobs SET verify_only=1 WHERE vps_id='fenced'")
+    db.execute("UPDATE vps_readiness_jobs SET attempts=1 WHERE vps_id='retried'")
+    db.execute(
+        "UPDATE vps_readiness_jobs SET authorized_user_id='second' WHERE vps_id='foreign-admin'"
+    )
+    db.execute("UPDATE vps_readiness_jobs SET intent='install' WHERE vps_id='queued-install'")
+    assert (
+        await queue.backfill("space", "skip", refresh=True, host_verification="skip", **admin) == 1
+    )
+    assert (await queue.status("space", "legacy"))["host_verification"] == "skip"
+    for target in ("fenced", "retried", "foreign-admin", "queued-install"):
+        assert (await queue.status("space", target))["host_verification"] == "required"

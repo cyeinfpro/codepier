@@ -662,7 +662,7 @@ test('uncertain create response retains one idempotency request id for retry', a
     identity: 'user:space',
     runtime: {},
     api: async (path, args) => {
-      if (path.includes('capabilities')) return { available: true, limits: {} };
+      if (path.includes('capabilities')) return { available: true, saved_vps_host_verification: 'skip', limits: {} };
       bodies.push(JSON.parse(args.body));
       if (++attempts === 1)
         throw Object.assign(new Error('response lost'), { code: 'NETWORK_UNCERTAIN' });
@@ -810,8 +810,9 @@ test('paste handles Unicode boundaries, byte limits and cancellation without app
 test('shows actionable Web SSH failures and a bounded unknown reason code', () => {
   assert.match(reasonText('SSH_CONNECT_FAILED'), /面板未能启动 SSH 会话/);
   assert.match(reasonText('SSH_CONNECTION_FAILED'), /检查服务器和网络/);
-  assert.match(reasonText('HOST_TRUST_CONFIGURATION'), /SSH 信任配置/);
-  assert.match(reasonText('HOST_KEY_REVOKED'), /可信渠道/);
+  assert.match(reasonText('HOST_TRUST_CONFIGURATION'), /版本不兼容/);
+  assert.match(reasonText('HOST_KEY_REVOKED'), /版本不兼容/);
+  assert.match(reasonText('HOST_KEY_CHANGED'), /请更新后重试/);
   assert.match(reasonText('PERSISTENCE_PROBE_FAILED'), /恢复能力/);
   assert.match(reasonText('VPS_CREDENTIAL_UNAVAILABLE'), /连接设置/);
   assert.equal(reasonText('UNMAPPED_PUBLIC_CODE'), '终端连接暂不可用（UNMAPPED_PUBLIC_CODE）');
@@ -842,7 +843,7 @@ test('direct VPS open works without project_id, backfills host metadata, and sup
           username: 'debian',
         };
       if (path.startsWith('/api/vps-terminal/capabilities'))
-        return { available: true, protocol_version: 1, limits: {} };
+        return { available: true, saved_vps_host_verification: 'skip', protocol_version: 1, limits: {} };
       if (path === '/api/vps-terminal/sessions' && args?.method === 'POST') {
         const id = (++seq).toString(16).padStart(32, '0');
         return { session_id: id, state: 'connecting', mode: 'tmux', direct_vps: true };
@@ -899,7 +900,7 @@ test('duplicate opens a project-free session when session is direct or project a
           username: 'root',
           projects: [],
         };
-      if (path.startsWith('/api/vps-terminal/capabilities')) return { available: true, limits: {} };
+      if (path.startsWith('/api/vps-terminal/capabilities')) return { available: true, saved_vps_host_verification: 'skip', limits: {} };
       if (path === '/api/vps-terminal/sessions' && args?.method === 'POST') {
         const body = JSON.parse(args.body);
         bodies.push(body);
@@ -1042,4 +1043,26 @@ test('direct reason codes and VPS catalog refresh degrade cleanly', async () => 
   });
   assert.deepEqual(await fallbackStore.refreshVpsCatalog(), []);
   fallbackStore.dispose();
+});
+
+test('new terminal tab refuses stale Hub before sending create, even with cached capability', async () => {
+  const calls = [];
+  const store = new TerminalStore({
+    identity: 'user:space',
+    runtime: {},
+    api: async (path, options) => {
+      calls.push({ path, method: options?.method });
+      if (path.startsWith('/api/vps-terminal/capabilities'))
+        return { available: true, protocol_version: 1, limits: {} };
+      throw new Error("Unexpected request after stale capability");
+    },
+  });
+  await assert.rejects(store.open({
+    vps: { id: 'vps-1', name: 'VPS', saved_vps_host_verification: 'skip' },
+    newSession: true,
+  }), { code: 'AGENT_UPGRADE_REQUIRED' });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /capabilities/);
+  assert.notEqual(calls[0].method, 'POST');
+  store.dispose();
 });

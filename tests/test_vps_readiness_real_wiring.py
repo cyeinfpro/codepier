@@ -61,7 +61,7 @@ class LoopbackScenario:
             return process.exit(127)
         if process.command == _INSTALL:
             self.calls.append("install")
-            if self.result == "install":
+            if self.result in {"install", "historical_pin", "unpinned"}:
                 self.installed = True
             return process.exit({"denied": 77, "unsupported": 69}.get(self.result, 0))
         self.unexpected.append("other-command")
@@ -112,48 +112,57 @@ def _app(tmp_path, monkeypatch, fixture):
         ("denied", "failed", "VPS_PRIVILEGE_REQUIRED"),
         ("unsupported", "failed", "VPS_ENV_UNSUPPORTED"),
         ("false_success", "failed", "INSTALL_OUTCOME_UNCONFIRMED"),
-        ("wrong_pin", "failed", "HOST_KEY_CHANGED"),
+        ("historical_pin", "ready", None),
+        ("unpinned", "ready", None),
         ("wrong_credential", "failed", "SSH_AUTH_FAILED"),
     ],
 )
-def test_manual_scan_and_install_run_real_pinned_ssh(tmp_path, monkeypatch, result, ended, reason):
+def test_managed_scan_and_install_run_real_password_only_ssh(
+    tmp_path, monkeypatch, result, ended, reason
+):
     asyncssh = pytest.importorskip("asyncssh")
     key = asyncssh.generate_private_key("ssh-ed25519")
-    saved_key = asyncssh.generate_private_key("ssh-ed25519") if result == "wrong_pin" else key
+    saved_key = asyncssh.generate_private_key("ssh-ed25519") if result == "historical_pin" else key
     fixture = LoopbackScenario(result)
     app = _app(tmp_path, monkeypatch, fixture)
     with TestClient(app, base_url=ORIGIN) as client:
         client.portal.call(fixture.start, asyncssh, key)
         try:
             owner = wiring_fixture.identity(client)
-            saved = owner.post(
-                "/api/vps",
-                json={
-                    "name": "real-fixture",
-                    "host": HOST,
-                    "port": fixture.port,
-                    "username": "fixture",
-                    "password": "incorrect-test-password"
-                    if result == "wrong_credential"
-                    else LOGIN,
-                    "project_ids": [],
-                    "host_key_policy": "confirm-change",
-                    "host_key_fingerprint": saved_key.get_fingerprint("sha256"),
-                },
-            )
+            payload = {
+                "name": "real-fixture",
+                "host": HOST,
+                "port": fixture.port,
+                "username": "fixture",
+                "password": "incorrect-test-password" if result == "wrong_credential" else LOGIN,
+                "project_ids": [],
+            }
+            if result != "unpinned":
+                payload.update(
+                    host_key_policy="confirm-change",
+                    host_key_fingerprint=saved_key.get_fingerprint("sha256"),
+                )
+            saved = owner.post("/api/vps", json=payload)
             assert saved.status_code == 200, saved.text
             vps = saved.json()["id"]
             scan, install = "/api/vps/readiness/scan", "/api/vps/readiness/install"
             assert owner.post(install).json() == {"queued_count": 0}
+            if result == "historical_pin":
+                assert owner.post("/api/vps/readiness/backfill").json()["queued_count"] == 1
+                legacy = wiring_fixture.wait_job(owner, vps, state="failed")
+                assert legacy["reason_code"] == "HOST_KEY_CHANGED"
+                assert legacy["host_verification"] == "required"
+                assert fixture.auth_count == 0 and fixture.calls == []
             assert owner.post(scan).json()["queued_count"] == 1
-            if result in {"wrong_pin", "wrong_credential"}:
+            if result == "wrong_credential":
                 rejected = wiring_fixture.wait_job(owner, vps, state="failed")
                 assert rejected["reason_code"] == reason
-                assert fixture.auth_count == (result == "wrong_credential") and fixture.calls == []
+                assert fixture.auth_count == 1 and fixture.calls == []
                 assert owner.post(install).json() == {"queued_count": 0}
                 return
             previous = wiring_fixture.wait_job(owner, vps, state="missing")
             assert previous["reason_code"] == "TMUX_MISSING"
+            assert previous["host_verification"] == "skip"
             assert fixture.calls == ["probe"]
             assert owner.post(install).json()["queued_count"] == 1
             final = wiring_fixture.wait_job(owner, vps, state=ended)
@@ -165,5 +174,9 @@ def test_manual_scan_and_install_run_real_pinned_ssh(tmp_path, monkeypatch, resu
             assert fixture.auth_count == 4
             assert fixture.unexpected == []
             assert owner.post(install).json() == {"queued_count": 0}
+            if result == "historical_pin":
+                public = owner.get(f"/api/vps/{vps}").json()
+                assert public["host_key_policy"] == "confirm-change"
+                assert public["host_key_fingerprint"] == saved_key.get_fingerprint("sha256")
         finally:
             client.portal.call(fixture.close)

@@ -126,12 +126,9 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
             return RemoteTerminal()
 
     peer = await asyncssh.create_server(
-        SSHPeer,
-        "127.0.0.1",
-        0,
+        SSHPeer, "127.0.0.1", 0,
         server_host_keys=[asyncssh.generate_private_key("ssh-ed25519")],
-        encoding=None,
-        line_editor=False,
+        encoding=None, line_editor=False,
     )
     listener = bind_listener()
     port = listener.getsockname()[1]
@@ -142,20 +139,11 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
     app = create_app(str(tmp_path / "hub"))
     store, auth, runtime = app.state.store, app.state.auth, app.state.runtime
     seed_owner(store)
-    store.execute(
-        "UPDATE users SET password_hash=? WHERE id='owner'", (password_hash(panel_password),)
-    )
+    store.execute("UPDATE users SET password_hash=? WHERE id='owner'", (password_hash(panel_password),))
     device_id, secret = uuid.uuid4().hex, token()
     store.execute(
         "INSERT INTO devices(id,name,secret,created,space_id,owner_user_id) VALUES (?,?,?,?,?,?)",
-        (
-            device_id,
-            "Synthetic browser SSH Agent",
-            store.encrypt(secret),
-            time.time(),
-            "legacy",
-            "owner",
-        ),
+        (device_id, "Synthetic browser SSH Agent", store.encrypt(secret), time.time(), "legacy", "owner"),
     )
     project_ids, allowed_roots = [], []
     for index in range(2):
@@ -167,47 +155,24 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
         store.execute(
             "INSERT INTO projects(id,alias,alias_key,device_id,root,mode,allow_tasks,created,space_id,owner_user_id) "
             "VALUES (?,?,?,?,?,'write',1,?,'legacy','owner')",
-            (
-                project_id,
-                f"BrowserFixture{index}",
-                f"browserfixture{index}",
-                device_id,
-                str(project_root),
-                time.time(),
-            ),
+            (project_id, f"BrowserFixture{index}", f"browserfixture{index}", device_id, str(project_root), time.time()),
         )
     with store.lock:
         setup_login = auth.new_session("owner")
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host="127.0.0.1",
-            port=port,
-            log_level="error",
-            ws=TerminalAwareWebSocketProtocol,
-            access_log=False,
-            timeout_graceful_shutdown=3,
-        )
-    )
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=port, log_level="error",
+        ws=TerminalAwareWebSocketProtocol, access_log=False, timeout_graceful_shutdown=3,
+    ))
     hub_task = asyncio.create_task(server.serve(sockets=[listener]))
     config_path = tmp_path / "agent.json"
-    atomic_json(
-        config_path,
-        {
-            "device_id": device_id,
-            "name": "Synthetic browser SSH Agent",
-            "secret": secret,
-            "hub_url": base,
-            "state_dir": str(tmp_path / "agent-state"),
-            "allowed_roots": allowed_roots,
-            "tasks": {},
-            "shell": {"enabled": True, "projects": ["*"]},
-        },
-    )
+    atomic_json(config_path, {
+        "device_id": device_id, "name": "Synthetic browser SSH Agent", "secret": secret,
+        "hub_url": base, "state_dir": str(tmp_path / "agent-state"),
+        "allowed_roots": allowed_roots, "tasks": {}, "shell": {"enabled": True, "projects": ["*"]},
+    })
     agent = Agent(config_path)
     agent.ssh_terminal.manager.connector = lambda: AsyncSSHTransport(
-        agent.ssh_terminal.config,
-        trust_sources=[tmp_path / "synthetic_known_hosts"],
+        agent.ssh_terminal.config, trust_sources=[tmp_path / "synthetic_known_hosts"],
     )
     # Observe real errors before the production reconnect loop deliberately
     # suppresses them. Calls, retries, deadlines, and transport are unchanged.
@@ -216,24 +181,13 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
 
     def safe_error(error):
         message = str(error)
-        for private in (
-            ssh_password,
-            panel_password,
-            secret,
-            setup_login["cookie"],
-            setup_login["csrf"],
-            str(tmp_path),
-            str(config_path),
-        ):
+        for private in (ssh_password, panel_password, secret, setup_login["cookie"],
+                        setup_login["csrf"], str(tmp_path), str(config_path)):
             message = message.replace(private, "<redacted>")
         code = getattr(error, "code", None)
-        return {
-            "type": type(error).__name__,
-            "code": code
-            if type(code) is int or type(code) is str and re.fullmatch(r"[A-Z0-9_]{1,64}", code)
-            else None,
-            "message": redact_text(message)[:400],
-        }
+        return {"type": type(error).__name__,
+                "code": code if type(code) is int or type(code) is str and re.fullmatch(r"[A-Z0-9_]{1,64}", code) else None,
+                "message": redact_text(message)[:400]}
 
     async def observed_terminal_connect(config, main_socket):
         try:
@@ -245,15 +199,11 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
 
     agent.ssh_terminal._connect = observed_terminal_connect
     client = httpx.AsyncClient(
-        base_url=base,
-        trust_env=False,
-        cookies={"rd_session": setup_login["cookie"]},
+        base_url=base, trust_env=False, cookies={"rd_session": setup_login["cookie"]},
         headers={"Origin": base, "x-rd-csrf": setup_login["csrf"], "x-codepier-space": "legacy"},
     )
     agent_task = browser = playwright = page = None
-    evidence = Path(
-        os.environ.get("CODEPIER_BROWSER_EVIDENCE_DIR", str(tmp_path / "browser-evidence"))
-    )
+    evidence = Path(os.environ.get("CODEPIER_BROWSER_EVIDENCE_DIR", str(tmp_path / "browser-evidence")))
     await asyncio.to_thread(evidence.mkdir, parents=True, exist_ok=True)
     try:
         await until(lambda: server.started)
@@ -266,61 +216,37 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
                 name = getattr(task.get_coro(), "__qualname__", "")
                 if name in {"Agent.connect_once", "Agent.heartbeat", "AgentTerminalLink.run"}:
                     frames = task.get_stack(limit=1)
-                    tasks.append(
-                        {
-                            "coroutine": name,
-                            "done": task.done(),
-                            "line": frames[-1].f_lineno if frames else None,
-                        }
-                    )
-            return {
-                "reason": reason,
-                "wait_elapsed_seconds": round(time.monotonic() - ready_started, 3),
-                "agent_task_done": agent_task.done(),
-                "agent_task_cancelled": agent_task.cancelled(),
-                "main_socket_present": agent.socket is not None,
-                "terminal_socket_present": agent.ssh_terminal.socket is not None,
-                "hub_main_registered": device_id in runtime.connections,
-                "hub_terminal_registered": device_id in runtime.ssh_terminal.agents,
-                "connection_number": agent.connection_number,
-                "runtime_generation": agent.ssh_terminal.manager.generation,
-                "terminal_connect_errors": terminal_connect_errors,
-                "pending_tasks": tasks[:6],
-            }
+                    tasks.append({"coroutine": name, "done": task.done(),
+                                  "line": frames[-1].f_lineno if frames else None})
+            return {"reason": reason, "wait_elapsed_seconds": round(time.monotonic() - ready_started, 3),
+                    "agent_task_done": agent_task.done(), "agent_task_cancelled": agent_task.cancelled(),
+                    "main_socket_present": agent.socket is not None,
+                    "terminal_socket_present": agent.ssh_terminal.socket is not None,
+                    "hub_main_registered": device_id in runtime.connections,
+                    "hub_terminal_registered": device_id in runtime.ssh_terminal.agents,
+                    "connection_number": agent.connection_number,
+                    "runtime_generation": agent.ssh_terminal.manager.generation,
+                    "terminal_connect_errors": terminal_connect_errors, "pending_tasks": tasks[:6]}
 
         try:
             async with asyncio.timeout(15):
                 while device_id not in runtime.ssh_terminal.agents:  # noqa: ASYNC110 -- bounded readiness observation
                     if agent_task.done():
                         snapshot = agent_snapshot("AGENT_TASK_FINISHED_BEFORE_TERMINAL_READY")
-                        if (
-                            not agent_task.cancelled()
-                            and (error := agent_task.exception()) is not None
-                        ):
+                        if not agent_task.cancelled() and (error := agent_task.exception()) is not None:
                             snapshot["agent_error"] = safe_error(error)
                         raise AssertionError(json.dumps(snapshot, ensure_ascii=False)) from None
                     await asyncio.sleep(0.02)
         except TimeoutError:
             snapshot = agent_snapshot("AGENT_TERMINAL_READY_TIMEOUT")
-            if (
-                agent_task.done()
-                and not agent_task.cancelled()
-                and (error := agent_task.exception()) is not None
-            ):
+            if agent_task.done() and not agent_task.cancelled() and (error := agent_task.exception()) is not None:
                 snapshot["agent_error"] = safe_error(error)
             raise AssertionError(json.dumps(snapshot, ensure_ascii=False)) from None
-        created = await client.post(
-            "/api/vps",
-            json={
-                "name": "Synthetic real-chain VPS",
-                "host": "127.0.0.1",
-                "port": peer.get_port(),
-                "username": "fixture",
-                "password": ssh_password,
-                "host_key_policy": "accept-new",
-                "project_ids": project_ids,
-            },
-        )
+        created = await client.post("/api/vps", json={
+            "name": "Synthetic real-chain VPS", "host": "127.0.0.1", "port": peer.get_port(),
+            "username": "fixture", "password": ssh_password,
+            "project_ids": project_ids,
+        })
         assert created.status_code == 200, created.text
         vps_id = created.json()["id"]
         playwright = await async_playwright().start()
@@ -368,11 +294,8 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
         await until(lambda: seen["shells"] == 1)
         assert seen["probes"] == 1
         assert len(browser_terminal_sockets) == 2
-        (sid,) = (
-            sid
-            for sid, session in runtime.ssh_terminal.sessions.items()
-            if session.row["requested_mode"] == "direct"
-        )
+        sid, = (sid for sid, session in runtime.ssh_terminal.sessions.items() if
+                session.row["requested_mode"] == "direct")
         assert runtime.ssh_terminal.sessions[sid].row["mode"] == "direct"
         # Enable the real accessibility renderer through the actual settings UI.
         await page.locator(".vt-settings summary").click()
@@ -398,9 +321,7 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
         await expect(page.locator(f'[data-vps-card="{vps_id}"]')).to_be_visible()
         await page.evaluate("hash => { location.hash = hash; }", terminal_hash)
         await expect(page.locator(".vt-state")).to_have_text("已连接")
-        assert await page.evaluate(
-            "window.acceptanceTerminalNode === document.querySelector('.xterm')"
-        )
+        assert await page.evaluate("window.acceptanceTerminalNode === document.querySelector('.xterm')")
         second_probe = "retained_" + uuid.uuid4().hex[:12]
         await page.locator(".xterm-helper-textarea").focus()
         await page.keyboard.type(second_probe)
@@ -408,9 +329,8 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
         await expect(page.locator(".xterm-accessibility")).to_contain_text("REPLY_" + second_probe)
         assert seen["commands"].count(second_probe) == 1
         assert seen["shells"] == 1
-        old_cookie = next(
-            item["value"] for item in await context.cookies() if item["name"] == "rd_session"
-        )
+        assert not (tmp_path / "synthetic_known_hosts").exists()
+        old_cookie = next(item["value"] for item in await context.cookies() if item["name"] == "rd_session")
         await page.locator('[data-action="logout"]').click()
         await expect(page.locator("#login-form")).to_be_visible()
         await asyncio.wait_for(browser_socket_closed.wait(), 10)
@@ -420,27 +340,14 @@ async def test_real_panel_terminal_through_real_agent_and_ssh(tmp_path, monkeypa
         # A physical keyboard after logout has no terminal receiver.
         await page.keyboard.type("blocked_after_logout_" + uuid.uuid4().hex[:8])
         await page.keyboard.press("Enter")
-        async with httpx.AsyncClient(
-            base_url=base, trust_env=False, cookies={"rd_session": old_cookie}
-        ) as stale:
+        async with httpx.AsyncClient(base_url=base, trust_env=False, cookies={"rd_session": old_cookie}) as stale:
             denied = await stale.get(f"/api/vps-terminal/sessions/{sid}")
         assert denied.status_code == 401
         assert bytes(seen["input"]) == before_logout_probe
         await page.screenshot(path=str(evidence / "real-chain-logged-out.png"), full_page=True)
-        print(
-            json.dumps(
-                {
-                    "real_browser_chain": "passed",
-                    "engine": "chromium",
-                    "ssh_shells": seen["shells"],
-                    "forwarded_input_acks": len(forwarded_acks),
-                    "resize_events": len(seen["sizes"]),
-                    "retained_terminal_dom": True,
-                    "logout_socket_closed": True,
-                    "old_cookie_status": 401,
-                }
-            )
-        )
+        print(json.dumps({"real_browser_chain": "passed", "engine": "chromium", "ssh_shells": seen["shells"],
+                          "forwarded_input_acks": len(forwarded_acks), "resize_events": len(seen["sizes"]),
+                          "retained_terminal_dom": True, "logout_socket_closed": True, "old_cookie_status": 401}))
     except BaseException:
         if page is not None and not page.is_closed():
             with contextlib.suppress(Exception):
