@@ -1,5 +1,5 @@
 {
-  "version": "1.34.8",
+  "version": "1.34.9",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -251,8 +251,8 @@
       "bytes": 8731
     },
     "vps.js": {
-      "sha256": "6f90d01385660391959bcfdd967ece5b8f65c01af0dc6aea9a57fb52041ab75a",
-      "bytes": 69081
+      "sha256": "7a52932b7d108a48a7ebc46228b6b4e18ccdfac55aab2c5abee92a87b44ed594",
+      "bytes": 72118
     },
     "workflows.js": {
       "sha256": "681001d14df5b01d99548a282ced85d12f3211cf37cc8af713b5c24897d55d19",

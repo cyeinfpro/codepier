@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.ssh_terminal_tmux import provision_tmux
 from agent.ssh_terminal_transport import SSHTransportError
 from hub.vps_readiness_native import (
     NativeSSHTarget,
@@ -13,6 +14,10 @@ from hub.vps_readiness_native import (
     PrivateSSHEndpoint,
     ReadinessNativeError,
 )
+
+
+async def allow_dispatch():
+    return True
 
 
 _PIN = "SHA256:" + "A" * 43
@@ -146,7 +151,7 @@ class World:
     [
         ("TMUX_INSTALL_PERMISSION", "install_not_started_denied"),
         ("TMUX_INSTALL_UNAVAILABLE", "install_not_started_unsupported"),
-        ("TMUX_INSTALL_FAILED", "failed"),
+        ("TMUX_INSTALL_FAILED", "install_failed"),
         ("TMUX_INSTALL_UNCERTAIN", "uncertain"),
     ],
 )
@@ -158,7 +163,7 @@ def test_provision_marks_only_precise_pre_install_transport_results(code, expect
         raise SSHTransportError(code, "test")
 
     adapter = world.adapter(provisioner=provision)
-    assert asyncio.run(adapter.provision(world.job)) == expected
+    assert asyncio.run(adapter.provision(world.job, before_install=allow_dispatch)) == expected
 
 
 def test_valid_saved_target_uses_vetted_socket_and_fixed_probe_without_agent():
@@ -175,7 +180,12 @@ def test_valid_saved_target_uses_vetted_socket_and_fixed_probe_without_agent():
 def test_absent_dependencies_and_unmigrated_host_trust_fail_without_connection():
     world = World()
     assert asyncio.run(world.adapter(connector=None).inspect(world.job)) == "unsupported"
-    assert asyncio.run(world.adapter(provisioner=None).provision(world.job)) == "unsupported"
+    assert (
+        asyncio.run(
+            world.adapter(provisioner=None).provision(world.job, before_install=allow_dispatch)
+        )
+        == "unsupported"
+    )
     world.target = replace(world.target, host_fingerprint="")
     adapter = world.adapter()
     with pytest.raises(ReadinessNativeError) as raised:
@@ -233,7 +243,9 @@ def test_current_scope_must_match_the_immutable_queue_job(field, value):
     world = World()
     world.target = replace(world.target, **{field: value})
     assert asyncio.run(world.adapter().authorize(world.job, "install")) is False
-    assert asyncio.run(world.adapter().provision(world.job)) == "denied"
+    assert (
+        asyncio.run(world.adapter().provision(world.job, before_install=allow_dispatch)) == "denied"
+    )
     assert set(world.calls) == {"install"}
 
 
@@ -269,7 +281,10 @@ def test_target_or_grant_change_fences_dns_dial_and_authenticated_control():
             hook_name,
             lambda: setattr(world, "target", replace(world.target, host="other.example.com")),
         )
-        assert asyncio.run(world.adapter().provision(world.job)) == "denied"
+        assert (
+            asyncio.run(world.adapter().provision(world.job, before_install=allow_dispatch))
+            == "denied"
+        )
         assert forbidden not in world.calls
         assert world.socket is None or world.socket.closed
 
@@ -277,18 +292,19 @@ def test_target_or_grant_change_fences_dns_dial_and_authenticated_control():
 def test_live_install_grant_is_rechecked_after_open_before_package_action():
     world = World()
     world.install_hook = lambda: setattr(world, "target", replace(world.target, grant_id="revoked"))
-    assert asyncio.run(world.adapter().provision(world.job)) == "denied"
+    assert (
+        asyncio.run(world.adapter().provision(world.job, before_install=allow_dispatch)) == "denied"
+    )
     assert "secret" in world.calls and "installed" not in world.calls
     assert world.transport.closed and world.socket.closed
 
     world = World()
-    assert asyncio.run(world.adapter().provision(world.job)) == "ok"
+    assert asyncio.run(world.adapter().provision(world.job, before_install=allow_dispatch)) == "ok"
     assert world.calls[-2:] == ["install", "installed"]
 
 
 @pytest.mark.parametrize("answer", [False, None, RuntimeError("revoked"), asyncio.CancelledError()])
 def test_real_tmux_helper_fences_async_authorization_before_package_dispatch(answer):
-    from agent.ssh_terminal_tmux import provision_tmux
     from agent.ssh_terminal_transport import SSHTransportError
 
     class Missing:
@@ -316,3 +332,37 @@ def test_real_tmux_helper_fences_async_authorization_before_package_dispatch(ans
             )
         )
     assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("during_install", [False, True])
+def test_initial_ssh_control_interruption_is_retryable_without_dispatch(during_install):
+    world = World()
+    dispatched = []
+
+    async def interrupt(*_args, **_kwargs):
+        raise SSHTransportError("SSH_CONTROL_UNCERTAIN", "fictional error")
+
+    async def try_dispatch():
+        dispatched.append(True)
+        return True
+
+    world.transport.run_control = interrupt
+    adapter = world.adapter(provisioner=provision_tmux)
+    if during_install:
+        actual = asyncio.run(adapter.provision(world.job, before_install=try_dispatch))
+    else:
+        actual = asyncio.run(adapter.inspect(world.job))
+    assert actual == "probe_interrupted"
+    assert not dispatched
+
+
+def test_grant_change_during_checkpoint_blocks_package_dispatch():
+    world = World()
+
+    async def checkpoint():
+        world.target = replace(world.target, grant_id="revoked")
+        return True
+
+    result = asyncio.run(world.adapter().provision(world.job, before_install=checkpoint))
+    assert result == "install_not_started_authorization_changed"
+    assert "installed" not in world.calls

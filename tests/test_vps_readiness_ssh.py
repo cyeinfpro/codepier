@@ -301,3 +301,33 @@ async def test_real_managed_vps_uses_vetted_socket_without_adopting_the_key(purp
     finally:
         listener.close()
         await listener.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_channel_capacity_and_connection_loss_get_a_typed_reason():
+    import asyncssh
+
+    from agent.ssh_terminal_transport import SSHTransportError
+    from shared.ssh_terminal_config import DEFAULT_CONFIG
+
+    class Connection:
+        async def create_session(self, *_args, **_kwargs):
+            raise self.error
+
+    connection = Connection()
+    transport = native.ReadinessSSH(connection, asyncssh, DEFAULT_CONFIG, None)
+    for error in (
+        asyncssh.ConnectionLost("fictional reason"),
+        asyncssh.ChannelOpenError(asyncssh.OPEN_RESOURCE_SHORTAGE, "fictional reason"),
+    ):
+        connection.error = error
+        with pytest.raises(SSHTransportError) as normalized:
+            await transport.run_control("fixed-readonly-probe")
+        assert normalized.value.code == "SSH_CHANNEL_CLOSED"
+        assert "fictional reason" not in str(normalized.value)
+
+    connection.error = asyncssh.ChannelOpenError(
+        asyncssh.OPEN_ADMINISTRATIVELY_PROHIBITED, "fixture policy"
+    )
+    with pytest.raises(asyncssh.ChannelOpenError):
+        await transport.run_control("fixed-readonly-probe")

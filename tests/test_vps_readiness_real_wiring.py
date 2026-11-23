@@ -125,6 +125,8 @@ def test_managed_scan_and_install_run_real_password_only_ssh(
     saved_key = asyncssh.generate_private_key("ssh-ed25519") if result == "historical_pin" else key
     fixture = LoopbackScenario(result)
     app = _app(tmp_path, monkeypatch, fixture)
+    app.state.runtime.vps_readiness.queue.retry_delays = (0.02, 0.04)
+    app.state.runtime.vps_readiness.queue.poll_seconds = 0.02
     with TestClient(app, base_url=ORIGIN) as client:
         client.portal.call(fixture.start, asyncssh, key)
         try:
@@ -170,8 +172,13 @@ def test_managed_scan_and_install_run_real_password_only_ssh(
             if reason:
                 assert final["reason_code"] == reason
             assert fixture.calls.count("install") == 1
-            assert fixture.calls[-1] == "probe"
-            assert fixture.auth_count == 4
+            if result in {"denied", "unsupported"}:
+                assert fixture.calls[-1] == "install"
+            else:
+                assert fixture.calls[-1] == "probe"
+            # Successful provision verifies on the same SSH connection. A
+            # lost receipt instead consumes the explicit read-only retry budget.
+            assert fixture.auth_count == (6 if result == "false_success" else 3)
             assert fixture.unexpected == []
             assert owner.post(install).json() == {"queued_count": 0}
             if result == "historical_pin":

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { esc } from "../web/core/ui.mjs";
 
 const source = readFileSync(new URL("../web/vps.js", import.meta.url), "utf8");
 const endpoint = "/api/vps/saved/readiness";
@@ -24,7 +25,7 @@ function fixture(api) {
   };
   const document = { hidden: false, addEventListener() {} };
   const ctx = vm.createContext({
-    S, document, window: {}, AbortController, setTimeout, clearTimeout, esc: String,
+    S, document, window: {}, AbortController, setTimeout, clearTimeout, esc,
     $$: () => [card], $: (selector) => selector === "#vps-query" ? query : null, icon: () => "",
     api: async (url, opts) => {
       requests.push({ url, method: opts?.method || "GET", signal: opts?.signal });
@@ -124,6 +125,8 @@ test("fleet actions require exact negotiated capability", () => {
   const f = fixture(() => assert.fail("unexpected network operation"));
   assert.equal(f.ctx.vpsReadinessBackfillHTML({ available: false }), "");
   const html = f.ctx.vpsReadinessBackfillHTML({ available: true, fleetPolicy: "skip" });
+  assert.match(html, /当前空间 · 批量终端环境/);
+  assert.match(html, /不受项目筛选影响/);
   assert.match(html, /扫描全部 SSH/);
   assert.match(html, /disabled>一键安装/);
   vm.runInContext("vpsReadinessBackfill = null", f.ctx);
@@ -178,6 +181,77 @@ test("summary separates positive missing from failed trust and shows each phase"
   assert.equal(result.active, true);
 });
 
+test("verification-only retries and unchecked install outcomes remain distinct from installs", () => {
+  const { ctx } = fixture(() => assert.fail("unexpected request"));
+  const awaiting = job("failed", { reason_code: "INSTALL_OUTCOME_UNCONFIRMED" });
+  const queued = job("queued", { intent: "install", reason_code: "INSTALL_OUTCOME_UNCONFIRMED" });
+  const checking = job("running", { intent: "install", verification_only: true });
+  const installing = job("installing", { intent: "install", verification_only: true });
+  const transient = job("queued", { intent: "install", reason_code: "VPS_PROBE_INTERRUPTED" });
+  const failed = job("failed", { reason_code: "TMUX_INSTALL_FAILED", verification_only: true });
+  const onlyVerify = job("missing", { verification_only: true, install_eligible: true });
+  const items = [awaiting, queued, checking, installing, transient, failed, onlyVerify].map((readiness, i) => ({
+    id: `server-${i}`, name: `VPS ${i}`, enabled: true, readiness,
+  }));
+  const result = ctx.vpsFleetResult(items);
+  assert.equal(result.counts, "就绪 0 · 缺少 0 · 排队 1 · 扫描中 0 · 安装中 1 · 复查 2 · 待核验 2 · 失败 1 · 未检查 0");
+  assert.match(result.reasons, /安装结果待核验.*（VPS 0、VPS 6）/);
+  assert.match(result.reasons, /tmux 安装失败.*（VPS 5）/);
+  assert.equal(result.active, true);
+  assert.equal(result.eligible, 0);
+  assert.match(ctx.vpsReadinessText(queued), /已排队复查安装结果/);
+  assert.match(ctx.vpsReadinessText(checking), /正在复查安装结果/);
+  assert.match(ctx.vpsReadinessText(installing), /正在安装 tmux/);
+  assert.match(ctx.vpsReadinessText(transient), /中断，已排队重试/);
+
+  const terminalResult = ctx.vpsFleetResult([items[0], items[6]]);
+  const buttons = ctx.vpsFleetButtons({ available: true, fleetPolicy: "skip", result: terminalResult });
+  assert.equal(buttons.installDisabled, true);
+  assert.equal(buttons.scanDisabled, false);
+});
+
+test("specific readiness outcomes identify an interrupted check, unsupported path, or old tmux", () => {
+  const { ctx } = fixture(() => assert.fail("unexpected request"));
+  for (const [reason_code, expected] of [
+    ["TMUX_LOCATION_UNSUPPORTED", /不支持其安装路径/],
+    ["TMUX_VERSION_UNSUPPORTED", /低于 2\.6/],
+    ["VPS_PROBE_INTERRUPTED", /检查超时或中断/],
+    ["VPS_ENV_UNSUPPORTED", /包管理器不支持自动安装/],
+  ]) {
+    assert.match(ctx.vpsReadinessText(job("failed", { reason_code })), expected);
+  }
+});
+
+test("fleet failure details expose bounded, escaped names and no connection details", () => {
+  const f = fixture(() => assert.fail("unexpected request"));
+  const longName = "長".repeat(80);
+  const unsafeName = '<img src=x onerror="alert(1)">&';
+  const reason_code = "VPS_PROBE_INTERRUPTED";
+  const items = [unsafeName, longName, ...Array.from({ length: 8 }, (_, i) => `Probe-${i}`)].map((name, i) => ({
+    id: `stored-${i}`, name, username: "secret-user", host: "secret-host", notes: "secret-notes",
+    readiness: job("failed", { reason_code }),
+  }));
+  items.push(...Array.from({ length: 9 }, (_, i) => ({
+    name: `Installer-${i}`, readiness: job("failed", { reason_code: "TMUX_INSTALL_FAILED" }),
+  })), { name: "Hidden by fleet name cap", readiness: job("failed", { reason_code: "SSH_AUTH_FAILED" }) });
+  const result = f.ctx.vpsFleetResult(items);
+  const html = f.ctx.vpsReadinessBackfillHTML({ available: true, fleetPolicy: "skip", result });
+  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;&amp;/);
+  assert.doesNotMatch(html, /<img|secret-|Hidden by fleet name cap/);
+  assert.match(result.reasons, /Probe-3、另 4 台/);
+  assert.doesNotMatch(result.reasons, /Probe-4|Installer-6/);
+  assert.match(result.reasons, /Installer-5、另 3 台/);
+  assert.ok(result.reasons.includes("長".repeat(47) + "…"));
+  assert.doesNotMatch(result.reasons, /stored-0|secret-/);
+
+  const state = seedBackfill(f, { result });
+  const reasonElement = { textContent: "", hidden: true };
+  f.ctx.$ = (selector) => selector === "[data-vps-fleet-reasons]" ? reasonElement : null;
+  f.ctx.vpsReadinessBackfillPaint(state);
+  assert.equal(reasonElement.textContent, result.reasons);
+  assert.equal(reasonElement.hidden, false);
+});
+
 test("known stale missing remains visible but cannot initiate installation", () => {
   const { ctx } = fixture(() => assert.fail("unexpected request"));
   const result = ctx.vpsFleetResult([{ enabled: true, readiness_available: true, readiness: job("missing", { install_eligible: false }) }]);
@@ -200,6 +274,76 @@ test("fleet watcher follows inventory GETs, settles missing, and never installs"
   assert.equal(state.awaiting, false);
   assert.equal(state.result.eligible, 1);
   assert.match(counts.textContent, /缺少 1/);
+});
+
+function virtualReadinessClock(f) {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map();
+  f.ctx.setTimeout = (callback, delay) => {
+    const id = ++nextId;
+    timers.set(id, { callback, at: now + delay });
+    return id;
+  };
+  f.ctx.clearTimeout = (id) => timers.delete(id);
+  f.ctx.vpsReadinessDelay = async (delay, signal) => {
+    now += delay;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+    return !signal.aborted;
+  };
+  return { now: () => now, timers };
+}
+
+test("a visible per-VPS observer can see success after the default retry backoff and probe time", async () => {
+  const f = fixture(() => clock.now() < 375_000
+    ? job("queued", { reason_code: "VPS_PROBE_INTERRUPTED" })
+    : job("ready"));
+  const clock = virtualReadinessClock(f);
+  await f.ctx.vpsReadinessWatch("saved");
+  assert.ok(clock.now() >= 375_000);
+  assert.equal(f.status.textContent, "tmux 已就绪");
+  assert.equal(f.button.disabled, false);
+  assert.equal(clock.timers.size, 0);
+  assert.ok(f.requests.every(({ method, signal }) => method === "GET" && !signal.aborted));
+});
+
+test("fleet observation stops at its deadline without unlocking unsafe actions; a fresh read can recover", async () => {
+  const installing = { id: "saved", readiness: job("installing", { intent: "install" }) };
+  const ready = { id: "saved", readiness: job("ready") };
+  let items = [installing];
+  const f = fixture(() => ({
+    readiness_manual_actions: true, readiness_fleet_host_verification: "skip", vps: items, next_offset: null,
+  }));
+  const clock = virtualReadinessClock(f);
+  const state = seedBackfill(f, { result: f.ctx.vpsFleetResult(items) });
+  const counts = { textContent: "" };
+  const scan = { disabled: false };
+  const install = { disabled: false };
+  f.ctx.$ = (selector) => ({
+    "[data-vps-fleet-counts]": counts,
+    '[data-vps-action="readiness-backfill"]': scan,
+    '[data-vps-action="readiness-backfill-install"]': install,
+  })[selector] || null;
+  await f.ctx.vpsObserveFleet(state);
+  assert.ok(clock.now() >= 720_000 && clock.now() < 727_000);
+  assert.match(state.message, /刷新页面查看最新进度/);
+  assert.equal(scan.disabled, true);
+  assert.equal(install.disabled, true);
+  assert.equal(clock.timers.size, 0);
+  assert.ok(f.requests.every(({ method, signal }) => method === "GET" && signal.aborted));
+  const previousRequests = f.requests.length;
+  items = [ready];
+  await f.ctx.vpsObserveFleet(state);
+  assert.equal(f.requests.length, previousRequests + 1);
+  assert.equal(f.requests.at(-1).method, "GET");
+  assert.match(counts.textContent, /就绪 1/);
+  assert.equal(scan.disabled, false);
+  assert.equal(install.disabled, true);
 });
 
 test("fleet drops a result from another Space or unknown submission outcome", async () => {

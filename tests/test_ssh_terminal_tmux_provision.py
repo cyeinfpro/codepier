@@ -307,3 +307,44 @@ async def test_ready_readonly_probe_reconciles_only_exact_verified_install_ident
     assert (await provision_tmux(removed_later, endpoint, authorize=lambda: True))[
         "available"
     ] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_symlink", [False, True])
+async def test_macos_login_local_tmux_uses_one_controlled_path(tmp_path, unsafe_symlink):
+    from agent.ssh_terminal_tmux import _TMUX_PATHS
+
+    home = tmp_path / "home with spaces"
+    private = home / ".local" / "bin"
+    private.mkdir(parents=True)
+    external = tmp_path / "other-binary"
+    external.write_text("#!/bin/sh\nprintf 'tmux 3.8\\n'\n")
+    external.chmod(0o700)
+    if unsafe_symlink:
+        (private / "tmux").symlink_to(external)
+    else:
+        (private / "tmux").write_bytes(external.read_bytes())
+        (private / "tmux").chmod(0o700)
+
+    class IsolatedShell:
+        async def run_control(self, command, **_options):
+            for path in sorted(_TMUX_PATHS, key=len, reverse=True):
+                command = command.replace(path, path.replace("tmux", "codepier-absent"))
+            # The finite system-path rewrite must not touch the login path.
+            command = command.replace(".local/bin/codepier-absent", ".local/bin/tmux")
+            command = command.replace("/usr/bin/uname -s", "printf Darwin")
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["/bin/sh", "-c", command],
+                capture_output=True,
+                env={"PATH": str(private), "HOME": str(home)},
+                timeout=5,
+            )
+            return result.returncode, result.stdout + result.stderr
+
+    item = controller(IsolatedShell())
+    if unsafe_symlink:
+        assert await item.probe() == {"available": False, "reason": "TMUX_LOCATION_UNSUPPORTED"}
+    else:
+        assert await item.probe() == {"available": True, "version": "3.8"}
+        assert '&& "$HOME/.local/bin/tmux" -u -L ' in item.attach_command()

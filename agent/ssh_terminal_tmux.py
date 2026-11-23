@@ -18,6 +18,17 @@ from .ssh_terminal_transport import SSHTransportError
 
 
 _TMUX_PATHS = ("/usr/bin/tmux", "/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux")
+# This token represents exactly one verified per-login macOS path, never a
+# path supplied by remote output or a binary discovered through arbitrary PATH.
+_USER_TMUX_TOKEN = "$HOME/.local/bin/tmux"
+_USER_TMUX_BINARY = '"$HOME/.local/bin/tmux"'
+_USER_TMUX_CHECK = (
+    'test "$(/usr/bin/uname -s)" = Darwin && test -n "${HOME:-}" '
+    '&& test ! -L "$HOME/.local" && test -O "$HOME/.local" '
+    '&& test ! -L "$HOME/.local/bin" && test -O "$HOME/.local/bin" '
+    '&& test ! -L "$HOME/.local/bin/tmux" && test -O "$HOME/.local/bin/tmux" '
+    '&& test -f "$HOME/.local/bin/tmux" && test -x "$HOME/.local/bin/tmux"'
+)
 _PROBE = (
     "located=$(command -v tmux 2>/dev/null) || located=; "
     + 'for candidate in "$located" '
@@ -28,6 +39,11 @@ _PROBE = (
     + ") ;; *) continue ;; esac; "
     + 'if test -f "$candidate" && test -x "$candidate"; then '
     + 'printf \'%s\\n\' "$candidate"; exec "$candidate" -V; fi; done; '
+    + f"if {_USER_TMUX_CHECK}; then "
+    + "printf '%s\n' "
+    + shlex.quote(_USER_TMUX_TOKEN)
+    + "; "
+    + f"exec {_USER_TMUX_BINARY} -V; fi; "
     # A PATH-visible but unverified executable/function is not absence. Never
     # execute it or start a package transaction on that evidence.
     + 'test -z "$located" || exit 78; exit 127'
@@ -45,7 +61,9 @@ uid=$(/usr/bin/id -u) || exit 70
 case "$system" in
 Linux)
     test -f /etc/debian_version && test -x /usr/bin/apt-get || exit 69
-    set -- /usr/bin/apt-get -y --no-install-recommends -o DPkg::Lock::Timeout=30 -o Dpkg::Use-Pty=0 install tmux
+    set -- /usr/bin/apt-get -y --no-install-recommends \
+        -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+        -o DPkg::Lock::Timeout=45 -o Dpkg::Use-Pty=0 install tmux
     if test "$uid" = 0; then
         DEBIAN_FRONTEND=noninteractive "$@" </dev/null >/dev/null 2>&1 || exit 70
     else
@@ -59,7 +77,8 @@ Darwin)
     for brew in /opt/homebrew/bin/brew /usr/local/bin/brew; do
         test -f "$brew" && test -x "$brew" || continue
         test -O "${brew%/bin/brew}" || exit 77
-        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 "$brew" install tmux </dev/null >/dev/null 2>&1 || exit 70
+        HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
+            "$brew" install tmux </dev/null >/dev/null 2>&1 || exit 70
         exit 0
     done
     exit 69
@@ -87,7 +106,8 @@ async def _probe_tmux(transport):
     fields = output.strip().splitlines()
     match = (
         re.fullmatch(rb"tmux (\d+)\.(\d+)[a-z]?(?:[^\r\n]*)", fields[1])
-        if len(fields) == 2 and fields[0] in tuple(x.encode() for x in _TMUX_PATHS)
+        if len(fields) == 2
+        and fields[0] in tuple(x.encode() for x in (*_TMUX_PATHS, _USER_TMUX_TOKEN))
         else None
     )
     if not match:
@@ -236,7 +256,12 @@ class TmuxReference:
             r"cp_[0-9a-f]{32}", self.session
         ):
             raise SSHTransportError("INVALID_TMUX_REFERENCE", "持久会话引用无效")
-        return shlex.quote(binary) + " -u -L " + shlex.quote(self.socket) + " -f /dev/null"
+        executable = (
+            f"{_USER_TMUX_CHECK} && {_USER_TMUX_BINARY}"
+            if binary == _USER_TMUX_TOKEN
+            else shlex.quote(binary)
+        )
+        return executable + " -u -L " + shlex.quote(self.socket) + " -f /dev/null"
 
     def public(self):
         return {"socket": self.socket, "session": self.session}

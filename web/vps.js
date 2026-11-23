@@ -328,7 +328,10 @@ function vpsChannelLabel(v) {
   return '待授权执行权限';
 }
 const VPS_READINESS_ACTIVE = new Set(['queued', 'checking', 'running', 'installing']);
-const VPS_READINESS_BUDGET_MS = 220_000;
+// Include 255s of default server backoff plus connection and probe time.
+const VPS_READINESS_BUDGET_MS = 540_000;
+// A batch may also spend time installing or waiting for another VPS's slot.
+const VPS_FLEET_READINESS_BUDGET_MS = 720_000;
 const vpsReadinessWatches = new Map();
 
 function vpsReadinessEnabled(v) {
@@ -348,10 +351,24 @@ function vpsReadinessJob(payload) {
     return null;
   return job;
 }
+function vpsReadinessVerificationOnly(job) {
+  return (
+    job.state !== 'ready' &&
+    (job.verification_only === true ||
+      (job.reason_code || job.reason) === 'INSTALL_OUTCOME_UNCONFIRMED')
+  );
+}
 function vpsReadinessText(job) {
   if (!job) return '尚未检查';
-  if (job.state === 'missing') return '已确认缺少 tmux；未安装';
   const code = job.reason_code || job.reason;
+  const verifying = vpsReadinessVerificationOnly(job);
+  if (verifying && job.state !== 'installing' && VPS_READINESS_ACTIVE.has(job.state)) {
+    return job.state === 'queued' ? '已排队复查安装结果' : '正在复查安装结果…';
+  }
+  const needsVerification = '安装结果待核验，请检查实际环境后重新扫描';
+  if (job.state === 'missing') {
+    return verifying ? needsVerification : '已确认缺少 tmux；未安装';
+  }
   const messages = {
     TMUX_MISSING: '已确认缺少 tmux；未安装',
     ALREADY_INSTALLED: 'tmux 已就绪',
@@ -361,11 +378,15 @@ function vpsReadinessText(job) {
     VPS_OFFLINE: '服务器暂时不可达',
     OFFLINE: '服务器暂时不可达',
     VPS_PRIVILEGE_REQUIRED: '无可用安装权限；未安装',
-    VPS_ENV_UNSUPPORTED: '暂不支持此服务器的安装环境',
-    UNSUPPORTED: '暂不支持此服务器的安装环境',
+    VPS_ENV_UNSUPPORTED: '当前系统或包管理器不支持自动安装',
+    UNSUPPORTED: '当前系统或包管理器不支持自动安装',
+    TMUX_LOCATION_UNSUPPORTED: '检测到 tmux，但不支持其安装路径',
+    TMUX_VERSION_UNSUPPORTED: 'tmux 版本低于 2.6，请升级后重新扫描',
+    TMUX_INSTALL_FAILED: 'tmux 安装失败，请检查服务器的包管理器后再扫描',
+    VPS_PROBE_INTERRUPTED: 'SSH 环境检查超时或中断，请重新扫描',
     TARGET_CHANGED: '服务器配置已变化，请重新检查',
     TARGET_OR_GRANT_CHANGED: '服务器配置或授权已变化；未继续安装',
-    INSTALL_OUTCOME_UNCONFIRMED: '安装结果未确认，请再次检查实际环境',
+    INSTALL_OUTCOME_UNCONFIRMED: needsVerification,
     HOST_KEY_UNKNOWN: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
     HOST_KEY_CHANGED: '旧版连接检查未完成，请更新面板和连接电脑后重试；未安装',
     SSH_AUTH_FAILED: 'SSH 登录失败，请检查保存的凭据；未安装',
@@ -378,6 +399,9 @@ function vpsReadinessText(job) {
     INSTALL_NOT_AUTHORIZED: '没有安装授权；未安装',
     ENV_CHECK_FAILED: '检查未完成，请稍后重试',
   };
+  if (job.state === 'queued' && code === 'VPS_PROBE_INTERRUPTED') {
+    return 'SSH 环境检查中断，已排队重试';
+  }
   const active = {
     queued:
       code === 'VPS_OFFLINE' || code === 'OFFLINE'
@@ -399,7 +423,10 @@ function vpsReadinessText(job) {
     : Object.hasOwn(messages, code)
       ? messages[code]
       : '';
-  if (!message) message = job.state === 'ready' ? 'tmux 已就绪' : '检查未完成，请稍后重试';
+  if (!message) {
+    if (job.state === 'ready') message = 'tmux 已就绪';
+    else message = verifying ? needsVerification : '检查未完成，请稍后重试';
+  }
   const version = String(job.tmux_version || '');
   return job.state === 'ready' && /^[0-9][a-zA-Z0-9.+-]{0,23}$/.test(version)
     ? `${message} · ${version}`
@@ -806,6 +833,14 @@ function vpsCardHTML(v, _sessions, pinned = false, pinEnabled = Boolean(vpsPinKe
   return `<article class="panel vps-card" data-vps-card="${esc(v.id)}"><header><div class="vps-title-block"><h2>${esc(v.name)}</h2></div><div class="vps-badges"><span class="badge ${!v.enabled ? 'offline' : 'neutral'}">${!v.enabled ? '已停用' : ready ? '<span class="dot online" aria-hidden="true"></span>就绪' : blockedLabel}</span></div>${pinEnabled ? `<button class="icon-btn vps-pin" type="button" data-vps-action="toggle-pin" data-id="${esc(v.id)}" title="${pinned ? '取消置顶' : '置顶'}" aria-label="置顶 ${esc(v.name)}" aria-pressed="${pinned}"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l5 5-3 2-3 5v3l-3 1-7-7 1-3h3l5-3 2-3zM9 15l-6 6"/></svg></button>` : ''}</header><div class="vps-projects" role="group" aria-label="关联项目">${projects.map((p) => `<span class="badge neutral">${esc(p.alias)}</span>`).join('') || '<span class="muted tiny">未关联（仅人工终端）</span>'}</div>${vpsActionsHTML(v)}</article>`;
 }
 let vpsReadinessBackfill = null;
+const VPS_FLEET_NAMES_PER_REASON = 6;
+const VPS_FLEET_VISIBLE_NAMES = 12;
+
+function vpsFleetName(value) {
+  if (typeof value !== 'string') return '';
+  const chars = [...value.trim().replace(/\s+/gu, ' ')];
+  return chars.length > 48 ? chars.slice(0, 47).join('') + '…' : chars.join('');
+}
 
 function vpsFleetResult(items) {
   const result = {
@@ -816,6 +851,8 @@ function vpsFleetResult(items) {
     queued: 0,
     scanning: 0,
     installing: 0,
+    verifying: 0,
+    awaitingVerification: 0,
     failed: 0,
     unchecked: 0,
   };
@@ -824,6 +861,7 @@ function vpsFleetResult(items) {
   for (const item of items) {
     if (!vpsReadinessEnabled(item)) continue;
     const job = vpsReadinessJob(item.readiness);
+    const verificationOnly = job && vpsReadinessVerificationOnly(job);
     if (job)
       revisions.push(
         JSON.stringify([
@@ -833,35 +871,66 @@ function vpsFleetResult(items) {
           job.intent,
           job.updated,
           job.host_verification,
+          job.reason_code,
+          verificationOnly,
         ]),
       );
     if (!job) result.unchecked++;
     else if (job.state === 'ready') result.ready++;
-    else if (job.state === 'missing') {
+    else if (job.state === 'missing' && !verificationOnly) {
       result.missing++;
       if (job.host_verification !== 'skip') result.needsBulkRescan++;
       else if (job.install_eligible === true) result.eligible++;
-    } else if (job.state === 'queued') result.queued++;
-    else if (VPS_READINESS_ACTIVE.has(job.state)) {
-      if (job.intent === 'install' || job.state === 'installing') result.installing++;
+    } else if (VPS_READINESS_ACTIVE.has(job.state)) {
+      if (job.state === 'installing') result.installing++;
+      else if (verificationOnly) result.verifying++;
+      else if (job.state === 'queued') result.queued++;
+      else if (job.intent === 'install') result.installing++;
       else result.scanning++;
     } else {
-      result.failed++;
+      const reason = job.reason_code || job.reason;
+      if (verificationOnly && reason !== 'TMUX_INSTALL_FAILED') result.awaitingVerification++;
+      else result.failed++;
       const label =
-        (job.reason_code || job.reason) === 'HUB_SSH_TRUST_MIGRATION_REQUIRED'
+        reason === 'HUB_SSH_TRUST_MIGRATION_REQUIRED'
           ? '旧版扫描未完成，请重新扫描'
           : vpsReadinessText(job);
-      reasons.set(label, (reasons.get(label) || 0) + 1);
+      const group = reasons.get(label) || { count: 0, names: [] };
+      group.count++;
+      if (group.names.length < VPS_FLEET_NAMES_PER_REASON) {
+        const name = vpsFleetName(item.name);
+        if (name) group.names.push(name);
+      }
+      reasons.set(label, group);
     }
   }
+  const counts = [
+    `就绪 ${result.ready}`,
+    `缺少 ${result.missing}`,
+    `排队 ${result.queued}`,
+    `扫描中 ${result.scanning}`,
+    `安装中 ${result.installing}`,
+  ];
+  if (result.verifying) counts.push(`复查 ${result.verifying}`);
+  if (result.awaitingVerification) counts.push(`待核验 ${result.awaitingVerification}`);
+  counts.push(`失败 ${result.failed}`, `未检查 ${result.unchecked}`);
+  let namesLeft = VPS_FLEET_VISIBLE_NAMES;
   return {
-    counts: `就绪 ${result.ready} · 缺少 ${result.missing} · 排队 ${result.queued} · 扫描中 ${result.scanning} · 安装中 ${result.installing} · 失败 ${result.failed} · 未检查 ${result.unchecked}`,
+    counts: counts.join(' · '),
     reasons: [...reasons]
-      .sort((a, b) => b[1] - a[1])
-      .map(([label, count]) => `${count} 台：${label}`)
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([label, { count, names }]) => {
+        const shown = names.slice(0, namesLeft);
+        namesLeft -= shown.length;
+        const remaining = count - shown.length;
+        if (shown.length && remaining) shown.push(`另 ${remaining} 台`);
+        const detail = shown.length ? `（${shown.join('、')}）` : '';
+        return `${count} 台：${label}${detail}`;
+      })
       .join('；'),
-    active: result.queued + result.scanning + result.installing > 0,
+    active: result.queued + result.scanning + result.installing + result.verifying > 0,
     eligible: result.eligible,
+    verifying: result.verifying,
     needsBulkRescan: result.needsBulkRescan,
     staleMissing: result.missing - result.eligible - result.needsBulkRescan,
     revision: revisions.sort().join('\n'),
@@ -878,11 +947,13 @@ function vpsFleetButtons(view) {
 }
 function vpsFleetMessage(view) {
   if (view.message) return view.message;
-  const help = '扫描只检查 SSH 和 tmux，不会安装。一键安装只处理最近扫描确认缺少 tmux 的服务器。';
+  const help =
+    '扫描当前空间中启用的 VPS，不受项目筛选影响。扫描只检查 SSH 和 tmux；一键安装只处理近期扫描确认缺少 tmux 的服务器。';
   const rescan = view.result?.needsBulkRescan;
   const stale = view.result?.staleMissing;
   return (
     help +
+    (view.result?.verifying ? ' 正在复查前次安装的结果。' : '') +
     (rescan ? ' ' + rescan + ' 台需要批量重扫。' : '') +
     (stale ? ' ' + stale + ' 台的缺失结果已过期或不可安装，请重新扫描。' : '')
   );
@@ -890,7 +961,7 @@ function vpsFleetMessage(view) {
 function vpsReadinessBackfillHTML(view) {
   if (!vpsFleetAvailable(view)) return '';
   const { scanDisabled, installDisabled } = vpsFleetButtons(view);
-  return `<details class="panel vps-backfill"><summary class="btn ghost small">批量终端环境 <small data-vps-fleet-counts role="status">${esc(view.result?.counts || '')}</small></summary><div class="vps-readiness"><button class="btn small" type="button" data-vps-action="readiness-backfill" ${scanDisabled ? 'disabled' : ''}>扫描全部 SSH</button><button class="btn small" type="button" data-vps-action="readiness-backfill-install" ${installDisabled ? 'disabled' : ''}>一键安装</button><small data-vps-backfill-status role="status">${esc(vpsFleetMessage(view))}</small></div><small data-vps-fleet-reasons ${view.result?.reasons ? '' : 'hidden'}>${esc(view.result?.reasons || '')}</small></details>`;
+  return `<details class="panel vps-backfill"><summary class="btn ghost small">当前空间 · 批量终端环境 <small data-vps-fleet-counts role="status">${esc(view.result?.counts || '')}</small></summary><div class="vps-readiness"><button class="btn small" type="button" data-vps-action="readiness-backfill" ${scanDisabled ? 'disabled' : ''}>扫描全部 SSH</button><button class="btn small" type="button" data-vps-action="readiness-backfill-install" ${installDisabled ? 'disabled' : ''}>一键安装</button><small data-vps-backfill-status role="status">${esc(vpsFleetMessage(view))}</small></div><small data-vps-fleet-reasons ${view.result?.reasons ? '' : 'hidden'}>${esc(view.result?.reasons || '')}</small></details>`;
 }
 function vpsReadinessBackfillPaint(view) {
   if (S.page !== 'vps' || view !== vpsReadinessBackfill) return;
@@ -938,7 +1009,7 @@ async function vpsObserveFleet(view = vpsReadinessBackfill) {
       vpsReadinessBackfillPaint(view);
     }
     controller.abort();
-  }, VPS_READINESS_BUDGET_MS);
+  }, VPS_FLEET_READINESS_BUDGET_MS);
   try {
     let delay = 1600;
     let failures = 0;

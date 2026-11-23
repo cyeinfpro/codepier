@@ -393,26 +393,54 @@ class NativeVPSReadiness:
             return "uncertain"
         return "failed"
 
+    @staticmethod
+    def _capability_status(result):
+        if result.get("available") is True:
+            return "ready"
+        return {
+            "TMUX_NOT_INSTALLED": "missing",
+            "TMUX_LOCATION_UNSUPPORTED": "location_unsupported",
+            "TMUX_VERSION_UNSUPPORTED": "version_unsupported",
+        }.get(result.get("reason"), "unsupported")
+
+    @classmethod
+    def _probe_transport_status(cls, error):
+        if error.code in {"SSH_CONTROL_UNCERTAIN", "SSH_CHANNEL_CLOSED"}:
+            return "probe_interrupted"
+        result = cls._transport_status(error)
+        return "failed" if result == "uncertain" else result
+
     async def inspect(self, job):
         try:
             async with self._connection(job, "inspect") as (_, transport):
-                result = await probe_tmux(transport)
-                if result.get("available") is True:
-                    return "ready"
-                if result.get("reason") == "TMUX_NOT_INSTALLED":
-                    return "missing"
-                return "unsupported"
+                return self._capability_status(await probe_tmux(transport))
         except ReadinessNativeError as error:
             return error.result
         except (TimeoutError, OSError):
             return "offline"
         except SSHTransportError as error:
-            result = self._transport_status(error)
-            return "failed" if result == "uncertain" else result
+            return self._probe_transport_status(error)
         except Exception:
             return "failed"
 
-    async def provision(self, job):
+    @classmethod
+    def _install_transport_status(cls, error, *, dispatched):
+        # Built-in installer exit 77/69 proves the package manager was
+        # never invoked; generic failures may have partially changed it.
+        status = {
+            "TMUX_INSTALL_PERMISSION": "install_not_started_denied",
+            "TMUX_INSTALL_UNAVAILABLE": "install_not_started_unsupported",
+            "TMUX_INSTALL_AUTH_CHANGED": "install_not_started_authorization_changed",
+            "TMUX_INSTALL_FAILED": "install_failed",
+        }.get(error.code)
+        if status is not None:
+            return status
+        if not dispatched and error.code != "TMUX_INSTALL_UNCERTAIN":
+            return cls._probe_transport_status(error)
+        return cls._transport_status(error)
+
+    async def provision(self, job, *, before_install):
+        dispatched = False
         try:
             if self._provision is None:
                 await self.require_target(job, "install")
@@ -420,7 +448,19 @@ class NativeVPSReadiness:
             async with self._connection(job, "install") as (target, transport):
 
                 async def authorize_install():
+                    nonlocal dispatched
                     await self._current(job, "install", target)
+                    if await before_install() is not True:
+                        return False
+                    # The durable checkpoint awaited SQLite. Re-read the live
+                    # grant before the package channel can be opened.
+                    try:
+                        await self._current(job, "install", target)
+                    except ReadinessNativeError:
+                        raise SSHTransportError(
+                            "TMUX_INSTALL_AUTH_CHANGED", "tmux 安装授权已失效"
+                        ) from None
+                    dispatched = True
                     return True
 
                 result = await self._provision(
@@ -428,19 +468,13 @@ class NativeVPSReadiness:
                     (target.host, target.port, target.username),
                     authorize=authorize_install,
                 )
-                return "ok" if result.get("available") is True else "unsupported"
+                status = self._capability_status(result)
+                return "ok" if status == "ready" else status
         except ReadinessNativeError as error:
-            return "failed" if error.result == "offline" else error.result
+            return error.result
         except (TimeoutError, OSError):
-            return "failed"
+            return "uncertain" if dispatched else "offline"
         except SSHTransportError as error:
-            # Built-in installer exit 77/69 proves the package manager was
-            # never invoked; generic failures may have partially changed it.
-            if error.code == "TMUX_INSTALL_PERMISSION":
-                return "install_not_started_denied"
-            if error.code == "TMUX_INSTALL_UNAVAILABLE":
-                return "install_not_started_unsupported"
-            result = self._transport_status(error)
-            return "failed" if result == "offline" else result
+            return self._install_transport_status(error, dispatched=dispatched)
         except Exception:
-            return "failed"
+            return "uncertain" if dispatched else "failed"

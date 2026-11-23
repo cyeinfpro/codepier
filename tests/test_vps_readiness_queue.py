@@ -53,7 +53,8 @@ def service(store, steps, *, allowed=None, **settings):
         steps.append(("probe", target.id))
         return "ready" if ("install", target.id) in steps else "missing"
 
-    async def provision(target):
+    async def provision(target, *, before_install):
+        assert await before_install()
         steps.append(("install", target.id))
         return "ok"
 
@@ -106,7 +107,6 @@ async def test_backfill_is_read_only_and_install_requires_its_current_positive_r
             "install:authorize",
             "install",
             "inspect:authorize",
-            "probe",
         )
     ]
     await queue.enqueue(
@@ -162,10 +162,11 @@ async def test_target_or_grant_change_between_inspection_and_install_is_blocked(
 async def test_interrupted_install_persists_checkpoint_and_restart_only_rechecks():
     store, steps = FakeStore(), []
     store.target("target")
-    queue = service(store, steps)
+    queue = service(store, steps, retry_delays=())
     reached = asyncio.Event()
 
-    async def interrupted(target):
+    async def interrupted(target, *, before_install):
+        assert await before_install()
         reached.set()
         await asyncio.Future()
 
@@ -184,7 +185,7 @@ async def test_interrupted_install_persists_checkpoint_and_restart_only_rechecks
     assert store.one("SELECT verify_only FROM vps_readiness_jobs WHERE id=?", (job["id"],)) == {
         "verify_only": 1
     }
-    restarted = service(store, steps)
+    restarted = service(store, steps, retry_delays=())
     assert await restarted.run_one()
     result = await restarted.status("space", "target")
     assert result["state"] == "failed"
@@ -206,23 +207,24 @@ async def test_interrupted_install_persists_checkpoint_and_restart_only_rechecks
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome,verified,reason",
+    "outcome,reason",
     [
-        ("install_not_started_denied", "missing", "VPS_PRIVILEGE_REQUIRED"),
-        ("install_not_started_unsupported", "offline", "VPS_ENV_UNSUPPORTED"),
+        ("install_not_started_denied", "VPS_PRIVILEGE_REQUIRED"),
+        ("install_not_started_unsupported", "VPS_ENV_UNSUPPORTED"),
     ],
 )
-async def test_definite_no_install_receipt_allows_manual_recheck_only(outcome, verified, reason):
+async def test_definite_no_install_receipt_allows_manual_recheck_only(outcome, reason):
     store, steps = FakeStore(), []
     store.target("target")
     queue = service(store, steps)
-    probes = iter(("missing", "missing", verified, "missing", "missing", "ready"))
+    probes = iter(("missing", "missing", "missing", "missing"))
     provisions = iter((outcome, "ok"))
 
     async def inspect(_target):
         return next(probes)
 
-    async def provision(target):
+    async def provision(target, *, before_install):
+        assert await before_install()
         steps.append(("install", target.id))
         return next(provisions)
 
@@ -281,11 +283,15 @@ async def test_two_workers_deduplicate_same_target_while_other_target_can_progre
     hit, unblock = asyncio.Event(), asyncio.Event()
     previous = queue.provision
 
-    async def block_first(target):
-        if target.vps_id == "first":
-            hit.set()
-            await unblock.wait()
-        return await previous(target)
+    async def block_first(target, *, before_install):
+        async def before_and_hold():
+            assert await before_install()
+            if target.vps_id == "first":
+                hit.set()
+                await unblock.wait()
+            return True
+
+        return await previous(target, before_install=before_and_hold)
 
     queue.provision = block_first
     job = await queue.enqueue(
@@ -335,7 +341,8 @@ async def test_fleet_install_skips_stale_and_non_missing_and_continues_after_fai
             return "trust_missing"
         return await previous(target)
 
-    async def provision(target):
+    async def provision(target, *, before_install):
+        assert await before_install()
         if target.vps_id == "bad":
             raise RuntimeError("no receipt")
         steps.append(("install", target.id))
@@ -368,8 +375,11 @@ async def test_fleet_install_skips_stale_and_non_missing_and_continues_after_fai
         "reason_code"
     ] == "HUB_SSH_TRUST_MIGRATION_REQUIRED"
     assert await queue.status("space", "changed") is None
+    assert (await queue.status("space", "bad"))["state"] == "queued"
+    # The other four targets may be rescanned while the bad target waits for
+    # its scheduled read-only retry. Do not reset or replace its checkpoint.
     assert (
-        await queue.backfill("space", "scan", authorized_user_id="administrator", refresh=True) == 5
+        await queue.backfill("space", "scan", authorized_user_id="administrator", refresh=True) == 4
     )
 
 
@@ -585,3 +595,92 @@ async def test_explicit_fleet_scan_rebinds_only_own_old_unsent_read_only_job():
     assert (await queue.status("space", "legacy"))["host_verification"] == "skip"
     for target in ("fenced", "retried", "foreign-admin", "queued-install"):
         assert (await queue.status("space", target))["host_verification"] == "required"
+
+
+@pytest.mark.asyncio
+async def test_read_only_ssh_interruption_recovers_without_install():
+    now, steps, store = [100.0], [], FakeStore()
+    store.target("target")
+    queue = service(store, steps, clock=lambda: now[0], retry_delays=(3,))
+    probes = iter(("probe_interrupted", "ready"))
+
+    async def inspect(_target):
+        return next(probes)
+
+    queue.inspect = inspect
+    await queue.backfill("space", "scan", authorized_user_id="administrator")
+    assert await queue.run_one()
+    first = await queue.status("space", "target")
+    assert (first["state"], first["reason_code"], first["verification_only"]) == (
+        "queued",
+        "VPS_PROBE_INTERRUPTED",
+        False,
+    )
+    assert not await queue.run_one()
+    now[0] += 3
+    assert await queue.run_one()
+    assert (await queue.status("space", "target"))["state"] == "ready"
+    assert all(kind != "install" for kind, _ in steps)
+
+
+@pytest.mark.asyncio
+async def test_retry_before_package_dispatch_and_verify_after_lost_receipt():
+    now, steps, store = [100.0], [], FakeStore()
+    store.target("target")
+    queue = service(store, steps, clock=lambda: now[0], retry_delays=(3,))
+    admin = {"authorized_user_id": "administrator"}
+    probes = iter(("missing", "missing", "missing", "missing", "ready"))
+    calls = []
+
+    async def inspect(_target):
+        return next(probes)
+
+    async def provision(_target, *, before_install):
+        calls.append("preflight")
+        if len(calls) == 1:
+            return "probe_interrupted"
+        assert await before_install()
+        calls.append("dispatched")
+        return "uncertain"
+
+    queue.inspect, queue.provision = inspect, provision
+    await queue.backfill("space", "scan", **admin)
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", **admin) == 1
+    assert await queue.run_one()
+    early = await queue.status("space", "target")
+    assert early["state"] == "queued" and not early["verification_only"]
+    now[0] += 3
+    assert await queue.run_one()
+    late = await queue.status("space", "target")
+    assert late["state"] == "queued" and late["verification_only"]
+    assert late["reason_code"] == "INSTALL_OUTCOME_UNCONFIRMED"
+    assert await queue.install_missing("space", "install", **admin) == 0
+    assert not await queue.run_one()
+    now[0] += 3
+    assert await queue.run_one()
+    result = await queue.status("space", "target")
+    assert result["state"] == "ready" and not result["verification_only"]
+    assert calls == ["preflight", "preflight", "dispatched"]
+
+
+@pytest.mark.asyncio
+async def test_reported_package_failure_is_distinct_and_stays_fenced():
+    steps, store = [], FakeStore()
+    store.target("target")
+    queue = service(store, steps)
+    admin = {"authorized_user_id": "administrator"}
+
+    async def provision(_target, *, before_install):
+        assert await before_install()
+        return "install_failed"
+
+    queue.provision = provision
+    await queue.backfill("space", "scan", **admin)
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", **admin) == 1
+    assert await queue.run_one()
+    status = await queue.status("space", "target")
+    assert status["state"] == "failed" and status["verification_only"]
+    assert status["reason_code"] == "TMUX_INSTALL_FAILED"
+    assert await queue.install_missing("space", "install", **admin) == 0

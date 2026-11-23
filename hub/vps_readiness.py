@@ -9,12 +9,15 @@ and revision immediately before any network action.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from uuid import uuid4
 
 
+_LOGGER = logging.getLogger(__name__)
 _INSTALL_ELIGIBILITY_SECONDS = 30 * 60
+_PROBE_FAILURE_CODES = {"offline": "VPS_OFFLINE", "probe_interrupted": "VPS_PROBE_INTERRUPTED"}
 HOST_VERIFICATION_REQUIRED = "required"
 HOST_VERIFICATION_SKIP = "skip"
 _HOST_VERIFICATION_MODES = (HOST_VERIFICATION_REQUIRED, HOST_VERIFICATION_SKIP)
@@ -199,6 +202,7 @@ class VPSReadiness:
         # existing SQLite CHECK-constrained table on upgraded servers.
         if public["state"] == "failed" and public["reason_code"] == "TMUX_MISSING":
             public["state"] = "missing"
+        public["verification_only"] = bool(row["verify_only"])
         if now is None:
             now = time.time()
         public["install_eligible"] = (
@@ -478,7 +482,7 @@ class VPSReadiness:
     def _begin_install(self, identifier):
         return (
             self.store.execute(
-                f"""UPDATE vps_readiness_jobs SET state='installing',verify_only=1,updated=?
+                f"""UPDATE vps_readiness_jobs SET state='installing',verify_only=1,attempts=1,updated=?
                 WHERE id=? AND state='running' AND intent='install'
                   AND verify_only=0 AND {_CURRENT_TARGET}""",
                 (self.clock(), identifier),
@@ -504,6 +508,8 @@ class VPSReadiness:
 
     async def _finish(self, target, state, reason=None, delay=0, *, clear_install_fence=False):
         await self.store.run(self._update, target.id, state, reason, delay, clear_install_fence)
+        if reason and reason != "TMUX_MISSING":
+            _LOGGER.info("VPS readiness job=%s state=%s reason=%s", target.id, state, reason)
         if not delay:
             self._wake.set()
 
@@ -512,7 +518,7 @@ class VPSReadiness:
             value = await asyncio.wait_for(self.inspect(target), self.check_timeout)
             return value if isinstance(value, str) else "failed"
         except TimeoutError:
-            return "offline"
+            return "probe_interrupted"
         except Exception:
             return "failed"
 
@@ -523,16 +529,21 @@ class VPSReadiness:
             # A successful authorized probe resolves an earlier interrupted or
             # completed install. Retain the fence only while the outcome is unknown.
             return await self._finish(target, "ready", clear_install_fence=verify_only)
-        if result == "offline" and attempts <= len(self.retry_delays):
-            return await self._finish(
-                target, "queued", "VPS_OFFLINE", self.retry_delays[attempts - 1]
-            )
+        retry_reason = _PROBE_FAILURE_CODES.get(result)
         if result == "missing" and verify_only:
-            return await self._finish(target, "failed", "INSTALL_OUTCOME_UNCONFIRMED")
+            retry_reason = "INSTALL_OUTCOME_UNCONFIRMED"
+        if retry_reason:
+            if attempts <= len(self.retry_delays):
+                return await self._finish(
+                    target, "queued", retry_reason, self.retry_delays[attempts - 1]
+                )
+            return await self._finish(target, "failed", retry_reason)
         codes = {
-            "offline": "VPS_OFFLINE",
             "missing": "TMUX_MISSING",
             "unsupported": "VPS_ENV_UNSUPPORTED",
+            "location_unsupported": "TMUX_LOCATION_UNSUPPORTED",
+            "version_unsupported": "TMUX_VERSION_UNSUPPORTED",
+            "install_failed": "TMUX_INSTALL_FAILED",
             "denied": "VPS_PRIVILEGE_REQUIRED",
             "failed": "ENV_CHECK_FAILED",
             "trust_missing": "HUB_SSH_TRUST_MIGRATION_REQUIRED",
@@ -555,50 +566,58 @@ class VPSReadiness:
             )
         await self._install_after_probe(target, row["attempts"])
 
+    def _install_fenced(self, identifier):
+        row = self.store.one("SELECT verify_only FROM vps_readiness_jobs WHERE id=?", (identifier,))
+        return bool(row and row["verify_only"])
+
     async def _install_after_probe(self, target, attempts):
         if not await self._dispatch_allowed(target, "install"):
             return await self._finish(target, "failed", "TARGET_OR_GRANT_CHANGED")
-        if not await self.store.run(self._begin_install, target.id):
-            return await self._finish(target, "failed", "TARGET_CHANGED")
+
+        async def before_install():
+            # Called by the native executor only after its SSH preflight and
+            # immediately before sending a package command. Restart can never
+            # replay a write once this checkpoint has been committed.
+            return await self.store.run(self._begin_install, target.id)
+
         try:
-            outcome = await asyncio.wait_for(self.provision(target), self.install_timeout)
+            outcome = await asyncio.wait_for(
+                self.provision(target, before_install=before_install), self.install_timeout
+            )
+        except TimeoutError:
+            outcome = "probe_interrupted"
         except Exception:
-            outcome = "uncertain"
+            outcome = "failed"
+        # Read the committed flag even if the coroutine timed out while
+        # waiting for the checkpoint write; an in-memory flag could be stale.
+        fenced = await self.store.run(self._install_fenced, target.id)
         no_install_reason = (
             {
                 "install_not_started_denied": "VPS_PRIVILEGE_REQUIRED",
                 "install_not_started_unsupported": "VPS_ENV_UNSUPPORTED",
+                "install_not_started_authorization_changed": "TARGET_OR_GRANT_CHANGED",
             }.get(outcome)
             if isinstance(outcome, str)
             else None
         )
-        if not await self._dispatch_allowed(target, "inspect"):
-            return await self._finish(
-                target,
-                "failed",
-                "TARGET_OR_GRANT_CHANGED",
-                clear_install_fence=bool(no_install_reason),
-            )
-        verified = await self._probe(target)
         if no_install_reason:
-            # Only explicit no-write receipts may clear the fence. Finish rather
-            # than queueing an automatic retry if the follow-up probe went offline.
-            if not await self.store.run(self._current, target.id):
-                return await self._finish(target, "failed", "TARGET_CHANGED")
-            if verified == "ready":
-                return await self._finish(target, "ready", clear_install_fence=True)
-            return await self._finish(target, "failed", no_install_reason, clear_install_fence=True)
-        if verified == "missing" and outcome in (
-            "denied",
-            "unsupported",
-            "failed",
-            "host_key_unknown",
-            "host_key_changed",
-            "host_key_revoked",
-            "ssh_auth_failed",
-        ):
-            verified = outcome
-        return await self._resolve_probe(target, verified, attempts, verify_only=True)
+            return await self._finish(
+                target, "failed", no_install_reason, clear_install_fence=fenced
+            )
+        if not await self._dispatch_allowed(target, "inspect"):
+            return await self._finish(target, "failed", "TARGET_OR_GRANT_CHANGED")
+        if outcome == "ok":
+            # The native executor has already checked tmux on the live SSH
+            # connection. Do not discard this proof if a new connection fails.
+            return await self._resolve_probe(target, "ready", attempts, verify_only=fenced)
+        if not fenced:
+            return await self._resolve_probe(target, outcome, attempts, verify_only=False)
+        verified = await self._probe(target)
+        if verified == "missing" and outcome == "install_failed":
+            verified = "install_failed"
+        # A write may still complete after a lost receipt. The separate retry
+        # budget starts at dispatch, and every retry is inspection only.
+        return await self._resolve_probe(target, verified, 1, verify_only=True)
 
     async def run_one(self):
         row = await self.store.run(self._claim)

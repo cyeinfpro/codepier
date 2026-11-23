@@ -33,7 +33,8 @@ class SyntheticExecutor:
         self.inspect_calls.append(target)
         return "ready" if target.vps_id in self.installed else "missing"
 
-    async def provision(self, target):
+    async def provision(self, target, *, before_install):
+        assert await before_install()
         self.install_calls.append(target)
         self.installed.add(target.vps_id)
         return "ok"
@@ -228,13 +229,17 @@ def test_other_admin_scan_does_not_revoke_explicit_install(tmp_path, monkeypatch
     async def manual_start():
         await wiring.store.run(wiring.queue._initialize)
 
-    async def gated_provision(target):
-        if when == "installing":
-            entered.set()
-            assert await asyncio.to_thread(resume.wait, 10)
+    async def gated_provision(target, *, before_install):
+        async def blocked_checkpoint():
+            assert await before_install()
+            if when == "installing":
+                entered.set()
+                assert await asyncio.to_thread(resume.wait, 10)
+            return await wiring.authorize(target, "install")
+
         if not await wiring.authorize(target, "install"):
             return "denied"
-        return await original(target)
+        return await original(target, before_install=blocked_checkpoint)
 
     monkeypatch.setattr(wiring.queue, "start", manual_start)
     monkeypatch.setattr(wiring.queue, "provision", gated_provision)

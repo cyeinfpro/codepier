@@ -47,7 +47,8 @@ class TestExecutor:
             return "ssh_auth_failed"
         return "ready" if target.vps_id in self.ready else "missing"
 
-    async def provision(self, target):
+    async def provision(self, target, *, before_install):
+        assert await before_install()
         self.install_calls.append(target.vps_id)
         assert await asyncio.to_thread(self.install_gate.wait, 20)
         self.ready.add(target.vps_id)
@@ -129,6 +130,7 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(browser, controll
         install = page.get_by_role("button", name="一键安装")
         counts = page.locator("[data-vps-fleet-counts]")
         reasons = page.locator("[data-vps-fleet-reasons]")
+        expect(summary).to_contain_text("当前空间")
         expect(counts).to_contain_text("未检查 4")
         summary.click()
         expect(install).to_be_disabled()
@@ -142,6 +144,7 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(browser, controll
         expect(counts).to_contain_text("缺少 2", timeout=12000)
         expect(counts).to_contain_text("就绪 1")
         expect(reasons).to_contain_text("1 台：SSH 登录失败")
+        expect(reasons).to_contain_text("denied")
         assert posts == ["scan"]
         assert not native.install_calls
         assert Counter(native.inspect_calls) == Counter([labels["ready"], labels["fresh"], labels["expired"], labels["denied"]])
@@ -163,7 +166,7 @@ def test_two_phase_through_real_browser_hub_queue_and_executor(browser, controll
         expect(install).to_be_disabled()
         assert posts == ["scan", "install"]
         assert native.install_calls == [labels["fresh"]]
-        assert Counter(native.inspect_calls)[labels["fresh"]] == 3
+        assert Counter(native.inspect_calls)[labels["fresh"]] == 2
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     finally:
         page.close()

@@ -149,6 +149,13 @@ class ReadinessSSH:
             raise SSHTransportError(
                 "SSH_CONTROL_UNCERTAIN", "SSH 控制命令超时，不能确定远端结果"
             ) from None
+        except Exception as error:
+            if isinstance(error, (ConnectionError, self._ssh.ConnectionLost)) or (
+                isinstance(error, self._ssh.ChannelOpenError)
+                and error.code == self._ssh.OPEN_RESOURCE_SHORTAGE
+            ):
+                raise SSHTransportError("SSH_CHANNEL_CLOSED", "SSH 检查通道暂时中断") from None
+            raise
         finally:
             channel = channel or protocol.channel
             if channel is not None:
