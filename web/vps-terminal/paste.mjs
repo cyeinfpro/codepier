@@ -13,13 +13,13 @@ export function pasteSummary(text, maxBytes) {
 // Split by Unicode scalar boundaries. Each xterm.paste call completes its own
 // bracketed-paste sequence, so cancellation never leaves a remote parser inside it.
 export function* pasteChunks(text, maxBytes = 4096) {
-  let chunk = '',
+  let chunk = "",
     bytes = 0;
   for (const char of text) {
     const size = encoder.encode(char).byteLength;
     if (bytes && bytes + size > maxBytes) {
       yield chunk;
-      chunk = '';
+      chunk = "";
       bytes = 0;
     }
     chunk += char;
@@ -46,13 +46,13 @@ export async function pasteInChunks(
     const required = encoder.encode(chunk).byteLength + 16;
     while (!writable(required)) {
       if (signal?.aborted) return { sent, total, cancelled: true };
-      if (!connected()) throw new Error('连接已中断，剩余内容未发送');
+      if (!connected()) throw new Error("连接已中断，剩余内容未发送");
       await delay(25);
     }
     if (signal?.aborted) return { sent, total, cancelled: true };
-    if (!connected()) throw new Error('连接已中断，剩余内容未发送');
+    if (!connected()) throw new Error("连接已中断，剩余内容未发送");
     const accepted = paste(chunk);
-    if (accepted === false) throw new Error('粘贴已停止，剩余内容未发送');
+    if (accepted === false) throw new Error("粘贴已停止，剩余内容未发送");
     sent += encoder.encode(chunk).byteLength;
     onProgress?.(sent, total);
     await delay(0);

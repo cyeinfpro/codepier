@@ -139,7 +139,7 @@
   contain-intrinsic-size: auto 72px;
 }
 .chat-session::after {
-  content: '→';
+  content: "→";
   display: grid;
   place-items: center;
   position: absolute;
@@ -172,8 +172,8 @@
   font-size: var(--ui-text-xs, 12px);
   line-height: 1.4;
 }
-.chat-session[data-state='running'] small::before {
-  content: '';
+.chat-session[data-state="running"] small::before {
+  content: "";
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -270,4 +270,42 @@
   background: none;
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-new-button {
+    transition:
+      filter var(--chat-motion-fast, 140ms) var(--chat-ease),
+      background-color var(--chat-motion-fast, 140ms) var(--chat-ease),
+      transform var(--chat-motion-press, 80ms) var(--chat-ease);
+  }
+  .chat-new-button:not(:disabled):active {
+    transform: scale(0.98);
+  }
+  .chat-session,
+  .chat-sidebar-action,
+  .chat-history-pages button,
+  .chat-sidebar-preferences button {
+    transition:
+      background-color var(--chat-motion-fast, 140ms) var(--chat-ease),
+      color var(--chat-motion-fast, 140ms) var(--chat-ease);
+  }
+  .chat-session::after {
+    transition:
+      opacity var(--chat-motion-fast, 140ms) var(--chat-ease),
+      transform var(--chat-motion-fast, 140ms) var(--chat-ease);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-new-button,
+  .chat-session,
+  .chat-session::after,
+  .chat-sidebar-action,
+  .chat-history-pages button,
+  .chat-sidebar-preferences button {
+    transition: none;
+  }
+  .chat-new-button:not(:disabled):active {
+    transform: none;
+  }
 }

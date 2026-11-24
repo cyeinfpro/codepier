@@ -1,7 +1,7 @@
-import * as runtime from './xterm-runtime.mjs';
-import { TerminalStore } from './store.mjs';
-import { TerminalLayout } from './layout.mjs';
-import { normalizeUuid } from './protocol.mjs';
+import * as runtime from "./xterm-runtime.mjs";
+import { TerminalStore } from "./store.mjs";
+import { TerminalLayout } from "./layout.mjs";
+import { normalizeUuid } from "./protocol.mjs";
 
 let options = null,
   store = null,
@@ -10,21 +10,22 @@ let options = null,
   mountVersion = 0;
 
 function ensure() {
-  if (!options?.api || !options.getIdentity) throw new Error('VPS 终端尚未初始化');
+  if (!options?.api || !options.getIdentity)
+    throw new Error("VPS 终端尚未初始化");
   const current = options.getIdentity();
-  if (typeof current !== 'string' || !current) throw new Error('请先登录');
+  if (typeof current !== "string" || !current) throw new Error("请先登录");
   if (store && (identity !== current || store.disposed)) reset();
   if (!store) {
     identity = current;
     const guardedApi = async (...args) => {
       if (options.getIdentity() !== current)
-        throw Object.assign(new Error('登录状态已变化'), {
-          code: 'AUTH_REVOKED',
+        throw Object.assign(new Error("登录状态已变化"), {
+          code: "AUTH_REVOKED",
         });
       const response = await options.api(...args);
       if (options.getIdentity() !== current)
-        throw Object.assign(new Error('登录状态已变化'), {
-          code: 'AUTH_REVOKED',
+        throw Object.assign(new Error("登录状态已变化"), {
+          code: "AUTH_REVOKED",
         });
       return response;
     };
@@ -49,8 +50,11 @@ function ensure() {
 }
 
 export function configure(config) {
-  if (typeof config?.api !== 'function' || typeof config.getIdentity !== 'function')
-    throw new Error('Missing terminal integration');
+  if (
+    typeof config?.api !== "function" ||
+    typeof config.getIdentity !== "function"
+  )
+    throw new Error("Missing terminal integration");
   options = config;
   if (store && identity !== options.getIdentity()) reset();
   return api;
@@ -62,7 +66,8 @@ export async function open(request) {
 export async function mount(container, { sessionId } = {}) {
   const current = ensure();
   const version = ++mountVersion;
-  if (!(container instanceof HTMLElement)) throw new Error('Missing terminal container');
+  if (!(container instanceof HTMLElement))
+    throw new Error("Missing terminal container");
   layout.mount(container);
   if (sessionId) {
     try {
@@ -73,7 +78,8 @@ export async function mount(container, { sessionId } = {}) {
         await current.restore(requested, {
           isCurrent: () => version === mountVersion && container.isConnected,
         });
-      if (!current.vpsCatalog.length) current.refreshVpsCatalog().catch(() => {});
+      if (!current.vpsCatalog.length)
+        current.refreshVpsCatalog().catch(() => {});
     } catch (error) {
       if (layout && version === mountVersion && container.isConnected) {
         layout.error.textContent = error.message;

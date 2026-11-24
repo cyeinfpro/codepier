@@ -424,28 +424,28 @@
 }
 
 /* Work detail is a reading inspector, not a centered onboarding flow. */
-.cr-panel[data-panel='work'] [data-cr-work-view] {
+.cr-panel[data-panel="work"] [data-cr-work-view] {
   display: flex;
   flex-direction: column;
   gap: 20px;
 }
-.cr-panel[data-panel='work'] [data-cr-work-view] > * {
+.cr-panel[data-panel="work"] [data-cr-work-view] > * {
   margin-block: 0;
 }
-.cr-panel[data-panel='work'] .cr-flow-state {
+.cr-panel[data-panel="work"] .cr-flow-state {
   text-align: left;
   padding: 0 0 16px;
   border-bottom: 1px solid var(--cr-line);
 }
-.cr-panel[data-panel='work'] .cr-work-summary p {
+.cr-panel[data-panel="work"] .cr-work-summary p {
   margin: 0;
   line-height: 1.65;
 }
-.cr-panel[data-panel='work'] .cr-work-evidence {
+.cr-panel[data-panel="work"] .cr-work-evidence {
   padding-block: 16px;
   border-block: 1px solid var(--cr-line);
 }
-.cr-panel[data-panel='work'] [data-cr-work-view] > p > .cr-text-button {
+.cr-panel[data-panel="work"] [data-cr-work-view] > p > .cr-text-button {
   padding-inline: 0;
 }
 
@@ -463,27 +463,27 @@
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.cr-panel [data-cr-form='permissions'] {
+.cr-panel [data-cr-form="permissions"] {
   gap: 16px;
 }
-.cr-panel [data-cr-form='permissions'] > h3 {
+.cr-panel [data-cr-form="permissions"] > h3 {
   margin: 0;
 }
-.cr-panel [data-cr-form='permissions'] > .cr-inspection-section,
-.cr-panel [data-cr-form='permissions'] > .cr-continuation {
+.cr-panel [data-cr-form="permissions"] > .cr-inspection-section,
+.cr-panel [data-cr-form="permissions"] > .cr-continuation {
   margin: 0;
 }
-.cr-panel [data-cr-form='permissions'] > .cr-continuation {
+.cr-panel [data-cr-form="permissions"] > .cr-continuation {
   padding-block: 0;
   border: 0;
 }
-.cr-panel [data-cr-form='permissions'] .cr-choice {
+.cr-panel [data-cr-form="permissions"] .cr-choice {
   padding-block: 12px;
 }
 .cr-panel [data-cr-continuation-result]:empty {
   display: none;
 }
-.cr-panel [data-cr-form='permissions'] [hidden] {
+.cr-panel [data-cr-form="permissions"] [hidden] {
   display: none;
 }
 .cr-scope [data-permission-lifetime]:not([hidden]) {

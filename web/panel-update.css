@@ -120,7 +120,13 @@
 .panel-update-popover .panel-body {
   padding: 16px;
 }
-:where(.btn, .icon-btn, .quick-jump, .panel-update-entry, .settings-groups button) {
+:where(
+  .btn,
+  .icon-btn,
+  .quick-jump,
+  .panel-update-entry,
+  .settings-groups button
+) {
   transition:
     background-color var(--ui-motion-fast) var(--ui-ease),
     border-color var(--ui-motion-fast) var(--ui-ease),
@@ -146,7 +152,7 @@
 .panel-update-entry:focus-visible {
   outline-color: var(--ui-focus);
 }
-.panel-update-entry[data-state='available'] {
+.panel-update-entry[data-state="available"] {
   background: var(--ui-accent-soft);
   color: var(--ui-accent);
   border-color: var(--ui-accent-line);

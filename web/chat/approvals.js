@@ -1,31 +1,31 @@
 function chatBuildClaudeQuestionField(q) {
-  const field = document.createElement('fieldset'),
-    legend = document.createElement('legend');
+  const field = document.createElement("fieldset"),
+    legend = document.createElement("legend");
   legend.textContent = q.question;
   field.append(legend);
-  const other = document.createElement('input');
-  other.placeholder = '其他答案';
+  const other = document.createElement("input");
+  other.placeholder = "其他答案";
   other.maxLength = 10000;
-  other.setAttribute('aria-label', q.question + ' · 其他答案');
+  other.setAttribute("aria-label", q.question + " · 其他答案");
   if (q.multiSelect) {
-    const list = document.createElement('div'),
+    const list = document.createElement("div"),
       checkboxes = [];
-    list.className = 'check-list approval-option-list';
-    list.setAttribute('role', 'group');
-    list.setAttribute('aria-label', q.question);
+    list.className = "check-list approval-option-list";
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", q.question);
     for (const o of q.options || []) {
-      const card = document.createElement('label'),
-        checkbox = document.createElement('input'),
-        textWrap = document.createElement('div'),
-        title = document.createElement('strong');
-      card.className = 'approval-option-card';
-      checkbox.type = 'checkbox';
+      const card = document.createElement("label"),
+        checkbox = document.createElement("input"),
+        textWrap = document.createElement("div"),
+        title = document.createElement("strong");
+      card.className = "approval-option-card";
+      checkbox.type = "checkbox";
       checkbox.value = o.label;
       checkbox.checked = !!(o.selected || o.default);
       title.textContent = o.label;
       textWrap.append(title);
       if (o.description) {
-        const desc = document.createElement('small');
+        const desc = document.createElement("small");
         desc.textContent = o.description;
         textWrap.append(desc);
       }
@@ -45,16 +45,16 @@ function chatBuildClaudeQuestionField(q) {
           .filter(Boolean),
     };
   }
-  const select = document.createElement('select');
-  select.setAttribute('aria-label', q.question);
-  const empty = document.createElement('option');
-  empty.value = '';
-  empty.textContent = '请选择，或填写其他答案';
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", q.question);
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "请选择，或填写其他答案";
   select.append(empty);
   for (const o of q.options || []) {
-    const option = document.createElement('option');
+    const option = document.createElement("option");
     option.value = o.label;
-    option.textContent = o.label + (o.description ? ' — ' + o.description : '');
+    option.textContent = o.label + (o.description ? " — " + o.description : "");
     select.append(option);
   }
   field.append(select, other);
@@ -62,40 +62,44 @@ function chatBuildClaudeQuestionField(q) {
     field,
     q,
     other,
-    getSelected: () => [...select.selectedOptions].map((o) => o.value).filter(Boolean),
+    getSelected: () =>
+      [...select.selectedOptions].map((o) => o.value).filter(Boolean),
   };
 }
 function chatApproval(item) {
   if (!item.node) return;
   item.node
-    .querySelectorAll('.chat-approval-actions, .chat-approval-kv')
+    .querySelectorAll(".chat-approval-actions, .chat-approval-kv")
     .forEach((node) => node.remove());
   const data = item.data;
   const cmd = data.details?.command || data.command;
   const cwd = data.details?.cwd || data.cwd;
   const risk = data.details?.risk || data.details?.reason;
   if (cmd || cwd || risk) {
-    const kv = document.createElement('dl');
-    kv.className = 'chat-approval-kv';
+    const kv = document.createElement("dl");
+    kv.className = "chat-approval-kv";
     for (const [label, val] of [
-      ['执行命令', cmd],
-      ['作用目录', cwd],
-      ['风险提示', risk],
+      ["执行命令", cmd],
+      ["作用目录", cwd],
+      ["风险提示", risk],
     ]) {
       if (!val) continue;
-      const dt = document.createElement('dt'),
-        dd = document.createElement('dd');
+      const dt = document.createElement("dt"),
+        dd = document.createElement("dd");
       dt.textContent = label;
-      dd.textContent = typeof val === 'string' ? val : JSON.stringify(val);
+      dd.textContent = typeof val === "string" ? val : JSON.stringify(val);
       kv.append(dt, dd);
     }
     if (kv.childElementCount) item.node.append(kv);
   }
-  const box = document.createElement('div');
-  box.className = 'chat-approval-actions';
+  const box = document.createElement("div");
+  box.className = "chat-approval-actions";
   if (data.resolved || item.answered) {
-    box.textContent = data.resolution === 'closed' ? '此请求已结束' : '回答已提交，等待原生处理';
-    box.setAttribute('role', 'status');
+    box.textContent =
+      data.resolution === "closed"
+        ? "此请求已结束"
+        : "回答已提交，等待原生处理";
+    box.setAttribute("role", "status");
     item.node.append(box);
     return;
   }
@@ -115,15 +119,15 @@ function chatApproval(item) {
       op.identity !== S.session ||
       item.data.resolved ||
       item.answered ||
-      !['running', 'starting'].includes(op.view.sessionStatus)
+      !["running", "starting"].includes(op.view.sessionStatus)
     )
       return;
     op.busy = true;
-    op.error = '';
+    op.error = "";
     chatApproval(item);
     try {
       const result = await chatAPI(
-        'chat_answer',
+        "chat_answer",
         {
           id: op.id,
           receipt: op.receipt,
@@ -133,17 +137,25 @@ function chatApproval(item) {
         op.project,
       );
       if (op.identity !== S.session) return;
-      if (['error', 'uncertain', 'cancelled', 'interrupted'].includes(result.state))
-        throw new Error('回答还未确认送达，点“重试”。');
+      if (
+        ["error", "uncertain", "cancelled", "interrupted"].includes(
+          result.state,
+        )
+      )
+        throw new Error("回答还未确认送达，点“重试”。");
       item.answered = true;
     } catch (error) {
       if (op.identity === S.session) {
         op.error = error.message;
-        if (chatViewVisible(op.view, op.identity)) chatStatus(error.message, true);
+        if (chatViewVisible(op.view, op.identity))
+          chatStatus(error.message, true);
       }
     } finally {
       op.busy = false;
-      if (op.identity === S.session && [...ChatUI.views.values()].includes(op.view)) {
+      if (
+        op.identity === S.session &&
+        [...ChatUI.views.values()].includes(op.view)
+      ) {
         chatApproval(item);
         if (chatViewVisible(op.view, op.identity)) chatSyncChrome();
       }
@@ -153,14 +165,14 @@ function chatApproval(item) {
   // A retry always retains the user's original answer and receipt.
   if (item.answerRequest) {
     const op = item.answerRequest,
-      note = document.createElement('span');
-    note.setAttribute('role', 'status');
-    note.textContent = op.busy ? '正在提交回答…' : op.error || '回答仍待确认';
+      note = document.createElement("span");
+    note.setAttribute("role", "status");
+    note.textContent = op.busy ? "正在提交回答…" : op.error || "回答仍待确认";
     box.append(note);
     if (!op.busy) {
-      const retry = document.createElement('button');
-      retry.type = 'button';
-      retry.textContent = '重试';
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试";
       retry.onclick = () => answer(op.value);
       box.append(retry);
     }
@@ -168,124 +180,137 @@ function chatApproval(item) {
     return;
   }
   function button(label, value) {
-    const b = document.createElement('button');
-    b.type = 'button';
+    const b = document.createElement("button");
+    b.type = "button";
     b.textContent = label;
     b.onclick = () => {
       try {
-        answer(typeof value === 'function' ? value() : value);
+        answer(typeof value === "function" ? value() : value);
       } catch (e) {
         chatStatus(e.message, true);
       }
     };
     box.append(b);
   }
-  if (data.method === 'confirm') {
-    button('允许本次', true);
-    button('拒绝', false);
-  } else if (['input', 'editor'].includes(data.method)) {
-    const input = document.createElement('textarea');
-    input.setAttribute('aria-label', data.text || '回答');
-    input.value = data.details?.prefill || '';
+  if (data.method === "confirm") {
+    button("允许本次", true);
+    button("拒绝", false);
+  } else if (["input", "editor"].includes(data.method)) {
+    const input = document.createElement("textarea");
+    input.setAttribute("aria-label", data.text || "回答");
+    input.value = data.details?.prefill || "";
     box.append(input);
-    button('提交回答', () => input.value);
-    button('取消', null);
-  } else if (data.method === 'claude/question') {
+    button("提交回答", () => input.value);
+    button("取消", null);
+  } else if (data.method === "claude/question") {
     const inputs = (data.details?.questions || []).map((q) => {
       const entry = chatBuildClaudeQuestionField(q);
       box.append(entry.field);
       return entry;
     });
-    button('提交回答', () =>
+    button("提交回答", () =>
       Object.fromEntries(
         inputs.map(({ q, getSelected, other }) => {
           let values = getSelected(),
             custom = other.value.trim();
           if (custom) values = q.multiSelect ? [...values, custom] : [custom];
-          if (!values.length) throw new Error('请回答：' + q.question);
+          if (!values.length) throw new Error("请回答：" + q.question);
           return [q.id, values];
         }),
       ),
     );
-    button('取消', null);
-  } else if (typeof chatExtraApproval === 'function' && chatExtraApproval(data, box, button)) {
+    button("取消", null);
+  } else if (
+    typeof chatExtraApproval === "function" &&
+    chatExtraApproval(data, box, button)
+  ) {
   } else if (data.details?.questions?.length) {
     const inputs = [];
     for (const q of data.details.questions) {
-      const label = document.createElement('label');
+      const label = document.createElement("label");
       label.textContent = q.question || q.header || q.id;
       let input;
       if (q.options?.length) {
-        input = document.createElement('select');
+        input = document.createElement("select");
         for (const o of q.options) {
-          const option = document.createElement('option');
+          const option = document.createElement("option");
           option.value = o.label || o.value;
-          option.textContent = (o.label || o.value) + (o.description ? ' — ' + o.description : '');
+          option.textContent =
+            (o.label || o.value) + (o.description ? " — " + o.description : "");
           input.append(option);
         }
       } else {
-        input = document.createElement('input');
+        input = document.createElement("input");
         if (q.isSecret) {
-          input.type = 'password';
-          input.setAttribute('autocapitalize', 'none');
-          input.setAttribute('autocorrect', 'off');
+          input.type = "password";
+          input.setAttribute("autocapitalize", "none");
+          input.setAttribute("autocorrect", "off");
           input.spellcheck = false;
         }
       }
-      input.setAttribute('aria-label', label.textContent);
+      input.setAttribute("aria-label", label.textContent);
       label.append(input);
       box.append(label);
       inputs.push([q.id, input]);
     }
-    button('提交回答', () => Object.fromEntries(inputs.map(([id, input]) => [id, [input.value]])));
+    button("提交回答", () =>
+      Object.fromEntries(inputs.map(([id, input]) => [id, [input.value]])),
+    );
   } else {
     const choices = data.choices || data.options || [];
     for (const choice of choices) {
-      const value = typeof choice === 'string' ? choice : (choice.value ?? choice.id ?? choice);
+      const value =
+        typeof choice === "string"
+          ? choice
+          : (choice.value ?? choice.id ?? choice);
       const label =
-        typeof choice === 'string'
+        typeof choice === "string"
           ? {
-              accept: '允许本次',
-              acceptForSession: '本会话允许',
-              decline: '拒绝',
-              cancel: '取消',
+              accept: "允许本次",
+              acceptForSession: "本会话允许",
+              decline: "拒绝",
+              cancel: "取消",
             }[choice] || choice
           : choice.label || JSON.stringify(value);
       button(label, value);
     }
     if (!choices.length) {
-      const note = document.createElement('p');
-      note.textContent = '此原生请求没有可用选项。可中断当前任务后，在电脑本机 CLI 处理此操作。';
+      const note = document.createElement("p");
+      note.textContent =
+        "此原生请求没有可用选项。可中断当前任务后，在电脑本机 CLI 处理此操作。";
       box.append(note);
     }
   }
   item.node.append(box);
 }
 function chatOutbox() {
-  const holder = $('#chat-outbox');
+  const holder = $("#chat-outbox");
   if (!holder) return;
   holder.replaceChildren();
-  if (chatView().recoveredQueueDrafts?.length || chatView().recoveredQueueDraft) {
-    const recover = document.createElement('button');
-    recover.type = 'button';
-    recover.className = 'chat-text-button';
-    recover.id = 'chat-recover-queue-draft';
-    recover.textContent = '取回已撤回消息';
+  if (
+    chatView().recoveredQueueDrafts?.length ||
+    chatView().recoveredQueueDraft
+  ) {
+    const recover = document.createElement("button");
+    recover.type = "button";
+    recover.className = "chat-text-button";
+    recover.id = "chat-recover-queue-draft";
+    recover.textContent = "取回已撤回消息";
     recover.onclick = () => chatRestoreQueueDraft();
     holder.append(recover);
   }
   for (const item of chatView().outbox.values()) {
-    const row = document.createElement('div');
-    row.className = 'chat-queued';
-    const status = document.createElement('span'),
-      text = document.createElement('span');
+    const row = document.createElement("div");
+    row.className = "chat-queued";
+    const status = document.createElement("span"),
+      text = document.createElement("span");
     status.textContent = chatStateName(item.state);
-    text.textContent = item.text || '图片与文件';
+    text.textContent = item.text || "图片与文件";
     row.append(status, text);
-    if (item.state === 'queued') {
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.textContent = '撤回';
+    if (item.state === "queued") {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "撤回";
       cancel.onclick = async () => {
         cancel.disabled = true;
         try {
@@ -304,17 +329,18 @@ async function chatCancelQueued(receipt, text) {
     id = ChatUI.selected?.id,
     v = chatView();
   if (!id) return;
-  const key = 'cancel:' + receipt;
+  const key = "cancel:" + receipt;
   v.cancelOps = v.cancelOps || new Map();
   if (!v.cancelOps.has(key)) v.cancelOps.set(key, uid());
   try {
-    const result = await chatAPI('chat_cancel', {
+    const result = await chatAPI("chat_cancel", {
       id,
       receipt: v.cancelOps.get(key),
       target: receipt,
     });
-    if (result.state !== 'completed') {
-      if (chatCurrent(gen, v)) chatStatus('撤回仍待确认，消息暂时保留在队列中。');
+    if (result.state !== "completed") {
+      if (chatCurrent(gen, v))
+        chatStatus("撤回仍待确认，消息暂时保留在队列中。");
       return;
     }
     v.outbox.delete(receipt);
@@ -322,8 +348,8 @@ async function chatCancelQueued(receipt, text) {
     v.queue = v.queue.filter((item) => item.receipt !== receipt);
     if (chatCurrent(gen, v)) {
       chatOutbox();
-      chatStatus('已撤回尚未执行的消息');
-      if (ChatUI.inspector === 'queue') chatLoadQueue();
+      chatStatus("已撤回尚未执行的消息");
+      if (ChatUI.inspector === "queue") chatLoadQueue();
     }
   } catch (e) {
     if (chatCurrent(gen, v)) chatStatus(e.message, true);

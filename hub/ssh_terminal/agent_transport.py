@@ -35,6 +35,8 @@ class TerminalAgentConnection:
         self.direct_vps = False
         self.direct_vps_allowed = True
         self.probe_supported = False
+        self.agent_vps_ssh = None
+        self.vps_ssh_v2_supported = False
         self.host_pin_supported = False
         self.saved_vps_password_only_supported = False
 

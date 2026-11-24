@@ -12,7 +12,7 @@ import {
   normalizeUuid,
   reasonText,
   uuid,
-} from './protocol.mjs';
+} from "./protocol.mjs";
 
 const RETRIES = 8;
 const ACK_INTERVAL_MS = 16;
@@ -23,15 +23,21 @@ const encoder = new TextEncoder();
 
 export function websocketUrl(path, base = globalThis.location?.href) {
   const origin = new URL(base),
-    url = new URL(path || '/ws/vps-terminal', origin);
-  if (url.origin !== origin.origin || url.search || url.hash || url.username || url.password)
-    throw new Error('Invalid terminal websocket URL');
-  url.protocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
+    url = new URL(path || "/ws/vps-terminal", origin);
   if (
-    origin.protocol !== 'https:' &&
-    !['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)
+    url.origin !== origin.origin ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password
   )
-    throw new Error('SSH 终端需要 HTTPS 连接');
+    throw new Error("Invalid terminal websocket URL");
+  url.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+  if (
+    origin.protocol !== "https:" &&
+    !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)
+  )
+    throw new Error("SSH 终端需要 HTTPS 连接");
   return url.href;
 }
 
@@ -72,7 +78,7 @@ export class TerminalTransport {
     this.pendingAck = null;
     this.ackTimer = null;
     this.sentAckOffset = 0n;
-    this.state = 'idle';
+    this.state = "idle";
     this.live = false;
     this.disposed = false;
     this.retryAttempts = 0;
@@ -86,22 +92,26 @@ export class TerminalTransport {
   bindLifecycleListeners() {
     this.lifecycleDisposers = [];
     const onVisibility = () => {
-      if (globalThis.document?.visibilityState === 'visible') this.resumeOnForeground();
+      if (globalThis.document?.visibilityState === "visible")
+        this.resumeOnForeground();
     };
     const onWake = () => this.resumeOnForeground();
-    if (typeof globalThis.document?.addEventListener === 'function') {
-      globalThis.document.addEventListener('visibilitychange', onVisibility);
+    if (typeof globalThis.document?.addEventListener === "function") {
+      globalThis.document.addEventListener("visibilitychange", onVisibility);
       this.lifecycleDisposers.push(() =>
-        globalThis.document?.removeEventListener?.('visibilitychange', onVisibility),
+        globalThis.document?.removeEventListener?.(
+          "visibilitychange",
+          onVisibility,
+        ),
       );
     }
     const win = globalThis.window || globalThis;
-    if (typeof win?.addEventListener === 'function') {
-      win.addEventListener('pageshow', onWake);
-      win.addEventListener('online', onWake);
+    if (typeof win?.addEventListener === "function") {
+      win.addEventListener("pageshow", onWake);
+      win.addEventListener("online", onWake);
       this.lifecycleDisposers.push(() => {
-        win.removeEventListener?.('pageshow', onWake);
-        win.removeEventListener?.('online', onWake);
+        win.removeEventListener?.("pageshow", onWake);
+        win.removeEventListener?.("online", onWake);
       });
     }
   }
@@ -117,18 +127,18 @@ export class TerminalTransport {
       this.pauseReconnect ||
       (this.lastFailureCode && STOP_RETRY_CODES.has(this.lastFailureCode)) ||
       [
-        'idle',
-        'exited',
-        'closed',
-        'failed',
-        'revoked',
-        'detached',
-        'closing',
-        'close_unknown',
+        "idle",
+        "exited",
+        "closed",
+        "failed",
+        "revoked",
+        "detached",
+        "closing",
+        "close_unknown",
       ].includes(this.state)
     )
       return false;
-    if (globalThis.document?.visibilityState === 'hidden') return false;
+    if (globalThis.document?.visibilityState === "hidden") return false;
     if (!this.socket && !this.connecting) {
       this.clearRetry();
       this.retryAttempts = 0;
@@ -140,13 +150,13 @@ export class TerminalTransport {
       const baselineSeen = this.lastSeen;
       const version = this.connectionVersion;
       if (!this.sendPing()) {
-        this.fail('NETWORK_ERROR');
+        this.fail("NETWORK_ERROR");
         return true;
       }
       this.probeTimer = setTimeout(() => {
         this.probeTimer = null;
         if (!this.current(version) || !this.isOpen()) return;
-        if (this.lastSeen <= baselineSeen) this.fail('NETWORK_ERROR');
+        if (this.lastSeen <= baselineSeen) this.fail("NETWORK_ERROR");
       }, FOREGROUND_PROBE_TIMEOUT_MS);
       return true;
     }
@@ -157,7 +167,11 @@ export class TerminalTransport {
     return this.live && this.isOpen() && !!this.attachment;
   }
   get canReply() {
-    return this.isOpen() && !!this.attachment && this.resumeStrategy !== 'history_replay';
+    return (
+      this.isOpen() &&
+      !!this.attachment &&
+      this.resumeStrategy !== "history_replay"
+    );
   }
   isOpen() {
     return !!this.socket && this.socket.readyState === 1;
@@ -168,7 +182,7 @@ export class TerminalTransport {
 
   changeState(state, details = {}) {
     this.state = state;
-    if (state !== 'ready') this.live = false;
+    if (state !== "ready") this.live = false;
     this.callbacks.onState?.({
       state,
       input_uncertain: this.inputUncertain,
@@ -177,7 +191,12 @@ export class TerminalTransport {
   }
 
   resumeAfterHistoryGap() {
-    if (this.lastFailureCode !== 'HISTORY_GAP' || this.disposed || this.connecting || this.socket)
+    if (
+      this.lastFailureCode !== "HISTORY_GAP" ||
+      this.disposed ||
+      this.connecting ||
+      this.socket
+    )
       return;
     this.resumeFromLive = true;
     return this.connect({ manual: true });
@@ -197,7 +216,7 @@ export class TerminalTransport {
     this.connecting = true;
     this.live = false;
     this.attachment = null;
-    this.changeState(this.runtimeGeneration ? 'reconnecting' : 'connecting');
+    this.changeState(this.runtimeGeneration ? "reconnecting" : "connecting");
     try {
       // Finish bytes already delivered to xterm before advertising the cursor.
       // A socket disappearing must not turn a consumed chunk into duplicate input
@@ -212,29 +231,34 @@ export class TerminalTransport {
           known_epoch: this.streamEpoch.toString(),
           rendered_offset: this.renderedOffset.toString(),
         });
-      const ticket = await this.api(`/api/vps-terminal/sessions/${this.sessionId}/attach-ticket`, {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
+      const ticket = await this.api(
+        `/api/vps-terminal/sessions/${this.sessionId}/attach-ticket`,
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+        },
+      );
       if (!this.current(version)) return;
-      if (!ticket?.ticket || typeof ticket.ticket !== 'string')
-        throw Object.assign(new Error('终端凭据无效'), {
-          code: 'PROTOCOL_MISMATCH',
+      if (!ticket?.ticket || typeof ticket.ticket !== "string")
+        throw Object.assign(new Error("终端凭据无效"), {
+          code: "PROTOCOL_MISMATCH",
         });
-      const socket = new this.WebSocketImpl(websocketUrl(ticket.ws_path, this.baseUrl));
+      const socket = new this.WebSocketImpl(
+        websocketUrl(ticket.ws_path, this.baseUrl),
+      );
       this.socket = socket;
-      socket.binaryType = 'arraybuffer';
+      socket.binaryType = "arraybuffer";
       let authTicket = ticket.ticket;
       socket.onopen = () => {
         if (!this.current(version)) return socket.close();
         this.lastSeen = this.now();
         this.sendControl({
-          type: 'authenticate',
+          type: "authenticate",
           ticket: authTicket,
           renderer_id: this.rendererId,
           protocol_version: PROTOCOL_VERSION,
         });
-        authTicket = '';
+        authTicket = "";
         this.startHeartbeat(version);
       };
       socket.onmessage = (event) => {
@@ -242,20 +266,22 @@ export class TerminalTransport {
         this.lastSeen = this.now();
         this.clearProbe();
         try {
-          if (typeof event.data === 'string') {
-            if (encoder.encode(event.data).byteLength > this.limits.control_bytes)
-              throw new Error('Oversized control');
+          if (typeof event.data === "string") {
+            if (
+              encoder.encode(event.data).byteLength > this.limits.control_bytes
+            )
+              throw new Error("Oversized control");
             this.handleControl(JSON.parse(event.data), version);
           } else this.handleOutput(event.data, version);
         } catch {
-          this.fail('INVALID_FRAME', {}, true);
+          this.fail("INVALID_FRAME", {}, true);
         }
       };
       socket.onerror = () => {
         /* onclose owns retry; never start two reconnect loops. */
       };
       socket.onclose = (event) => {
-        authTicket = '';
+        authTicket = "";
         if (!this.current(version)) return;
         this.stopHeartbeat();
         this.socket = null;
@@ -265,22 +291,23 @@ export class TerminalTransport {
         if (this.pauseReconnect) return;
         const code =
           event.code === 4401
-            ? 'AUTH_REQUIRED'
+            ? "AUTH_REQUIRED"
             : event.code === 4403
-              ? 'AUTH_REVOKED'
+              ? "AUTH_REVOKED"
               : event.code === 4409
-                ? 'WRITER_CONFLICT'
-                : 'NETWORK_ERROR';
+                ? "WRITER_CONFLICT"
+                : "NETWORK_ERROR";
         this.fail(code, {}, STOP_RETRY_CODES.has(code));
       };
       this.openTimer = setTimeout(() => {
-        if (this.current(version) && !this.attachment) this.fail('SSH_CONNECT_TIMEOUT');
+        if (this.current(version) && !this.attachment)
+          this.fail("SSH_CONNECT_TIMEOUT");
       }, 30000);
     } catch (error) {
       if (this.current(version)) {
         const code =
           this.resumeFromLive && error.status === 422
-            ? 'HISTORY_RECOVERY_UNSUPPORTED'
+            ? "HISTORY_RECOVERY_UNSUPPORTED"
             : errorCode(error);
         this.fail(code, { message: error.message }, STOP_RETRY_CODES.has(code));
       }
@@ -290,19 +317,28 @@ export class TerminalTransport {
   }
 
   handleControl(message, version) {
-    if (!message || typeof message.type !== 'string') throw new Error('Missing message type');
-    if (message.session_id && normalizeUuid(message.session_id) !== this.sessionId)
-      throw new Error('Wrong terminal');
-    if (message.type === 'ping') {
+    if (!message || typeof message.type !== "string")
+      throw new Error("Missing message type");
+    if (
+      message.session_id &&
+      normalizeUuid(message.session_id) !== this.sessionId
+    )
+      throw new Error("Wrong terminal");
+    if (message.type === "ping") {
       this.sendControl({
-        type: 'pong',
+        type: "pong",
         nonce: message.nonce,
-        ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {}),
+        ...(message.timestamp !== undefined
+          ? { timestamp: message.timestamp }
+          : {}),
       });
       return;
     }
-    if (message.type === 'pong') {
-      if (typeof message.nonce === 'string' && this.pendingPings.has(message.nonce)) {
+    if (message.type === "pong") {
+      if (
+        typeof message.nonce === "string" &&
+        this.pendingPings.has(message.nonce)
+      ) {
         const sentAt = this.pendingPings.get(message.nonce);
         this.pendingPings.delete(message.nonce);
         const rtt = Math.max(0, Math.round(this.now() - sentAt));
@@ -311,42 +347,56 @@ export class TerminalTransport {
       }
       return;
     }
-    if (message.type === 'authenticated') return;
-    if (message.type === 'attached') {
+    if (message.type === "authenticated") return;
+    if (message.type === "attached") {
       clearTimeout(this.openTimer);
       this.clearOutputAck();
       const generation = normalizeUuid(message.runtime_generation),
         epoch = counter(message.stream_epoch),
         writer = counter(message.writer_epoch);
-      const start = counter(message.start_offset ?? '0');
-      const strategy = message.resume_strategy || 'live';
-      const liveTail = message.history_recovery === 'live_tail';
-      if (liveTail && (!this.resumeFromLive || message.mode !== 'direct' || strategy !== 'live'))
-        throw new Error('Unexpected history recovery');
-      if (this.resumeFromLive && !liveTail && (message.mode !== 'tmux' || strategy !== 'redraw')) {
-        this.fail('HISTORY_RECOVERY_UNSUPPORTED', {}, true);
+      const start = counter(message.start_offset ?? "0");
+      const strategy = message.resume_strategy || "live";
+      const liveTail = message.history_recovery === "live_tail";
+      if (
+        liveTail &&
+        (!this.resumeFromLive ||
+          message.mode !== "direct" ||
+          strategy !== "live")
+      )
+        throw new Error("Unexpected history recovery");
+      if (
+        this.resumeFromLive &&
+        !liveTail &&
+        (message.mode !== "tmux" || strategy !== "redraw")
+      ) {
+        this.fail("HISTORY_RECOVERY_UNSUPPORTED", {}, true);
         return;
       }
       this.resumeFromLive = false;
       this.lastFailureCode = null;
-      if (!['live', 'redraw', 'resume_unconsumed', 'history_replay'].includes(strategy))
-        throw new Error('Unknown resume strategy');
-      if (!message.attachment_id || !message.render_epoch) throw new Error('Missing attachment');
       if (
-        strategy === 'resume_unconsumed' &&
+        !["live", "redraw", "resume_unconsumed", "history_replay"].includes(
+          strategy,
+        )
+      )
+        throw new Error("Unknown resume strategy");
+      if (!message.attachment_id || !message.render_epoch)
+        throw new Error("Missing attachment");
+      if (
+        strategy === "resume_unconsumed" &&
         (this.runtimeGeneration !== generation ||
           this.streamEpoch !== epoch ||
           start !== this.renderedOffset)
       )
-        throw new Error('Invalid resume boundary');
-      const preserve = strategy === 'resume_unconsumed';
+        throw new Error("Invalid resume boundary");
+      const preserve = strategy === "resume_unconsumed";
       this.runtimeGeneration = generation;
       this.streamEpoch = epoch;
       this.writerEpoch = writer;
       this.attachment = message.attachment_id;
       this.renderEpoch = message.render_epoch;
       this.resumeStrategy = strategy;
-      this.nextInputSeq = counter(message.next_input_seq ?? '1');
+      this.nextInputSeq = counter(message.next_input_seq ?? "1");
       this.receivedOffset = start;
       this.renderedOffset = start;
       this.sentAckOffset = start;
@@ -358,93 +408,107 @@ export class TerminalTransport {
       this.session.mode = message.mode;
       this.retryAttempts = 0;
       this.callbacks.onAttached?.({ ...message, preserve });
-      this.changeState(strategy === 'live' ? 'connecting' : 'restoring', {
+      this.changeState(strategy === "live" ? "connecting" : "restoring", {
         mode: message.mode,
       });
       // The attachment boundary can precede its output frames. It is a target,
       // not evidence of a gap merely because the following bytes have not arrived.
-      if (strategy !== 'history_replay' && message.state === 'ready')
+      if (strategy !== "history_replay" && message.state === "ready")
         this.completeReplay(message, version);
       this.queueOutputAck(true);
       if (this.lastSize) this.sendResize(this.lastSize);
       return;
     }
-    if (message.type === 'input_ack') {
+    if (message.type === "input_ack") {
       if (
         !this.attachment ||
         counter(message.writer_epoch) !== this.writerEpoch ||
         (message.attachment_id && message.attachment_id !== this.attachment) ||
-        (message.render_epoch !== undefined && message.render_epoch !== this.renderEpoch) ||
+        (message.render_epoch !== undefined &&
+          message.render_epoch !== this.renderEpoch) ||
         (message.stream_epoch !== undefined &&
           counter(message.stream_epoch) !== this.streamEpoch) ||
         (message.runtime_generation !== undefined &&
           normalizeUuid(message.runtime_generation) !== this.runtimeGeneration)
       )
         return;
-      if (!['claimed', 'forwarded', 'uncertain', 'already_claimed'].includes(message.status))
-        throw new Error('Invalid input acknowledgment status');
+      if (
+        !["claimed", "forwarded", "uncertain", "already_claimed"].includes(
+          message.status,
+        )
+      )
+        throw new Error("Invalid input acknowledgment status");
       const seq = counter(message.input_seq),
         pending = this.pendingInputs.get(seq.toString());
-      if (seq >= this.nextInputSeq) throw new Error('Invalid input acknowledgment');
+      if (seq >= this.nextInputSeq)
+        throw new Error("Invalid input acknowledgment");
       // A claim fences retries but does not confirm forwarding to the SSH
       // channel. Keep it pending so a disconnect still surfaces uncertainty.
-      if (pending !== undefined && message.status !== 'claimed') {
+      if (pending !== undefined && message.status !== "claimed") {
         this.pendingInputBytes -= pending;
         this.pendingInputs.delete(seq.toString());
       }
-      if (message.status === 'uncertain' || message.status === 'already_claimed') {
+      if (
+        message.status === "uncertain" ||
+        message.status === "already_claimed"
+      ) {
         this.inputUncertain = true;
-        this.callbacks.onNotice?.('INPUT_UNCERTAIN');
+        this.callbacks.onNotice?.("INPUT_UNCERTAIN");
       }
       this.callbacks.onWritable?.();
       return;
     }
-    if (message.type === 'replay_complete') {
+    if (message.type === "replay_complete") {
       this.completeReplay(message, version);
       return;
     }
-    if (message.type === 'auth_challenge') {
+    if (message.type === "auth_challenge") {
       clearTimeout(this.openTimer);
       this.openTimer = setTimeout(
         () => {
-          if (this.current(version)) this.fail('SSH_AUTH_FAILED', { message: '认证已超时' }, true);
+          if (this.current(version))
+            this.fail("SSH_AUTH_FAILED", { message: "认证已超时" }, true);
         },
         Math.min(180, Math.max(1, message.deadline_seconds || 60)) * 1000,
       );
       this.live = false;
-      this.changeState('authenticating');
+      this.changeState("authenticating");
       this.callbacks.onAuthChallenge?.(message);
       return;
     }
-    if (message.type === 'history_gap') {
-      this.fail('HISTORY_GAP', message, true);
+    if (message.type === "history_gap") {
+      this.fail("HISTORY_GAP", message, true);
       return;
     }
-    if (message.type === 'state') {
-      if (message.reason_code === 'HISTORY_GAP') {
-        this.fail('HISTORY_GAP', message, true);
+    if (message.type === "state") {
+      if (message.reason_code === "HISTORY_GAP") {
+        this.fail("HISTORY_GAP", message, true);
         return;
       }
       Object.assign(this.session, message);
-      if (message.state === 'ready' || message.state === 'live')
+      if (message.state === "ready" || message.state === "live")
         this.completeReplay(message, version);
-      else if (['exited', 'closed', 'failed', 'revoked', 'close_unknown'].includes(message.state))
+      else if (
+        ["exited", "closed", "failed", "revoked", "close_unknown"].includes(
+          message.state,
+        )
+      )
         this.finish(message);
-      else this.changeState(message.state || 'connecting', message);
+      else this.changeState(message.state || "connecting", message);
       return;
     }
-    if (message.type === 'error') {
-      const code = message.reason_code || message.code || 'NETWORK_ERROR';
+    if (message.type === "error") {
+      const code = message.reason_code || message.code || "NETWORK_ERROR";
       this.fail(
         code,
         message,
         STOP_RETRY_CODES.has(code) ||
-          message.recoverability === 'none' ||
+          message.recoverability === "none" ||
           message.recoverable === false,
       );
       return;
     }
-    if (message.type === 'exit') {
+    if (message.type === "exit") {
       this.finish(message);
       return;
     }
@@ -455,14 +519,24 @@ export class TerminalTransport {
     if (!this.attachment) return;
     // A generic ready/state notification is not proof that history has ended.
     // Keep terminal responses and user input fenced until its explicit barrier.
-    if (this.resumeStrategy === 'history_replay' && message.type !== 'replay_complete') return;
-    if (message.attachment_id && message.attachment_id !== this.attachment) return;
-    if (message.render_epoch && message.render_epoch !== this.renderEpoch) return;
-    if (message.stream_epoch !== undefined && counter(message.stream_epoch) !== this.streamEpoch)
+    if (
+      this.resumeStrategy === "history_replay" &&
+      message.type !== "replay_complete"
+    )
+      return;
+    if (message.attachment_id && message.attachment_id !== this.attachment)
+      return;
+    if (message.render_epoch && message.render_epoch !== this.renderEpoch)
+      return;
+    if (
+      message.stream_epoch !== undefined &&
+      counter(message.stream_epoch) !== this.streamEpoch
+    )
       return;
     const renderVersion = this.renderVersion,
       boundary = message.final_offset ?? message.output_end_offset;
-    const target = boundary === undefined ? this.receivedOffset : counter(boundary);
+    const target =
+      boundary === undefined ? this.receivedOffset : counter(boundary);
     const previous = this.pendingBarrier?.target || 0n;
     this.pendingBarrier = {
       version,
@@ -473,7 +547,7 @@ export class TerminalTransport {
       .then(() => {
         this.tryCompleteBarrier();
       })
-      .catch(() => this.fail('INVALID_FRAME', {}, true));
+      .catch(() => this.fail("INVALID_FRAME", {}, true));
   }
 
   tryCompleteBarrier() {
@@ -488,14 +562,14 @@ export class TerminalTransport {
       return;
     this.pendingBarrier = null;
     this.flushOutputAck();
-    this.resumeStrategy = 'live';
+    this.resumeStrategy = "live";
     this.live = true;
-    this.changeState('ready', { mode: this.session.mode });
+    this.changeState("ready", { mode: this.session.mode });
     this.callbacks.onReady?.();
   }
 
   handleOutput(value, version) {
-    if (!this.attachment) throw new Error('Output before attachment');
+    if (!this.attachment) throw new Error("Output before attachment");
     const frame = decodeFrame(value, this.limits.frame_bytes);
     if (
       frame.kind !== OUTPUT ||
@@ -504,16 +578,21 @@ export class TerminalTransport {
       frame.stream_epoch !== this.streamEpoch ||
       frame.writer_epoch !== this.writerEpoch
     )
-      throw new Error('Stale terminal frame');
+      throw new Error("Stale terminal frame");
     const end = frame.sequence + BigInt(frame.payload.byteLength);
     if (end <= this.receivedOffset) return;
     if (frame.sequence > this.receivedOffset) {
-      this.fail('HISTORY_GAP', {}, true);
+      this.fail("HISTORY_GAP", {}, true);
       return;
     }
-    const payload = frame.payload.subarray(Number(this.receivedOffset - frame.sequence));
-    if (this.pendingOutputBytes + payload.byteLength > this.limits.output_pending_bytes) {
-      this.fail('OUTPUT_BACKPRESSURE');
+    const payload = frame.payload.subarray(
+      Number(this.receivedOffset - frame.sequence),
+    );
+    if (
+      this.pendingOutputBytes + payload.byteLength >
+      this.limits.output_pending_bytes
+    ) {
+      this.fail("OUTPUT_BACKPRESSURE");
       return;
     }
     this.receivedOffset = end;
@@ -530,7 +609,7 @@ export class TerminalTransport {
         this.tryCompleteBarrier();
       })
       .catch(() => {
-        if (this.current(version)) this.fail('INVALID_FRAME', {}, true);
+        if (this.current(version)) this.fail("INVALID_FRAME", {}, true);
       });
   }
 
@@ -544,9 +623,15 @@ export class TerminalTransport {
       offset: this.renderedOffset,
     };
     const finalReplay =
-      (this.pendingBarrier && this.renderedOffset >= this.pendingBarrier.target) ||
-      (this.resumeStrategy === 'history_replay' && this.renderedOffset >= this.recoveryBoundary);
-    if (immediate || finalReplay || this.renderedOffset - this.sentAckOffset >= BigInt(ACK_BYTES)) {
+      (this.pendingBarrier &&
+        this.renderedOffset >= this.pendingBarrier.target) ||
+      (this.resumeStrategy === "history_replay" &&
+        this.renderedOffset >= this.recoveryBoundary);
+    if (
+      immediate ||
+      finalReplay ||
+      this.renderedOffset - this.sentAckOffset >= BigInt(ACK_BYTES)
+    ) {
       this.flushOutputAck();
       return;
     }
@@ -554,7 +639,8 @@ export class TerminalTransport {
       const version = this.connectionVersion,
         attachment = this.attachment;
       this.ackTimer = setTimeout(() => {
-        if (this.current(version) && this.attachment === attachment) this.flushOutputAck();
+        if (this.current(version) && this.attachment === attachment)
+          this.flushOutputAck();
       }, ACK_INTERVAL_MS);
     }
   }
@@ -574,7 +660,7 @@ export class TerminalTransport {
     // The offset is captured only after xterm's write callback, never from its
     // accepted/queued byte count. Timers from an old socket cannot ACK a new one.
     const sent = this.sendControl({
-      type: 'output_ack',
+      type: "output_ack",
       attachment_id: pending.attachment,
       render_epoch: pending.renderEpoch,
       stream_epoch: pending.streamEpoch.toString(),
@@ -594,14 +680,22 @@ export class TerminalTransport {
     if (!(bytes instanceof Uint8Array) || !bytes.byteLength) return false;
     if (!(automatic ? this.canReply : this.canInput)) return false;
     if (
-      bytes.byteLength + this.pendingInputBytes > this.limits.pending_input_bytes ||
+      bytes.byteLength + this.pendingInputBytes >
+        this.limits.pending_input_bytes ||
       this.socket.bufferedAmount > this.limits.pending_input_bytes
     ) {
-      this.callbacks.onNotice?.('INPUT_BACKPRESSURE');
+      this.callbacks.onNotice?.("INPUT_BACKPRESSURE");
       return false;
     }
-    for (let offset = 0; offset < bytes.byteLength; offset += this.limits.input_frame_bytes) {
-      const payload = bytes.subarray(offset, offset + this.limits.input_frame_bytes),
+    for (
+      let offset = 0;
+      offset < bytes.byteLength;
+      offset += this.limits.input_frame_bytes
+    ) {
+      const payload = bytes.subarray(
+          offset,
+          offset + this.limits.input_frame_bytes,
+        ),
         sequence = this.nextInputSeq++;
       this.pendingInputs.set(sequence.toString(), payload.byteLength);
       this.pendingInputBytes += payload.byteLength;
@@ -622,7 +716,7 @@ export class TerminalTransport {
         );
       } catch {
         this.markUncertain();
-        this.fail('NETWORK_ERROR');
+        this.fail("NETWORK_ERROR");
         return false;
       }
     }
@@ -632,7 +726,8 @@ export class TerminalTransport {
   sendControl(message) {
     if (!this.isOpen()) return false;
     const serialized = JSON.stringify(message);
-    if (encoder.encode(serialized).byteLength > this.limits.control_bytes) return false;
+    if (encoder.encode(serialized).byteLength > this.limits.control_bytes)
+      return false;
     try {
       this.socket.send(serialized);
       return true;
@@ -644,10 +739,17 @@ export class TerminalTransport {
   resize(cols, rows, { coalesceMs } = {}) {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     const size = {
-      cols: Math.max(this.limits.min_cols, Math.min(this.limits.max_cols, Math.floor(cols))),
-      rows: Math.max(this.limits.min_rows, Math.min(this.limits.max_rows, Math.floor(rows))),
+      cols: Math.max(
+        this.limits.min_cols,
+        Math.min(this.limits.max_cols, Math.floor(cols)),
+      ),
+      rows: Math.max(
+        this.limits.min_rows,
+        Math.min(this.limits.max_rows, Math.floor(rows)),
+      ),
     };
-    if (this.lastSize?.cols === size.cols && this.lastSize?.rows === size.rows) return;
+    if (this.lastSize?.cols === size.cols && this.lastSize?.rows === size.rows)
+      return;
     this.lastSize = size;
     const delay =
       Number.isFinite(coalesceMs) && coalesceMs > 0
@@ -658,10 +760,15 @@ export class TerminalTransport {
   }
 
   sendResize(size) {
-    if (!this.attachment || !this.isOpen() || this.resumeStrategy === 'history_replay') return;
+    if (
+      !this.attachment ||
+      !this.isOpen() ||
+      this.resumeStrategy === "history_replay"
+    )
+      return;
     this.resizeSeq = (this.resizeSeq || 0n) + 1n;
     this.sendControl({
-      type: 'resize',
+      type: "resize",
       attachment_id: this.attachment,
       runtime_generation: this.runtimeGeneration,
       stream_epoch: this.streamEpoch.toString(),
@@ -674,11 +781,11 @@ export class TerminalTransport {
   answerAuth(challengeId, responses) {
     if (
       !Array.isArray(responses) ||
-      responses.some((x) => typeof x !== 'string' || x.length > 4096)
+      responses.some((x) => typeof x !== "string" || x.length > 4096)
     )
       return false;
     return this.sendControl({
-      type: 'auth_answer',
+      type: "auth_answer",
       challenge_id: challengeId,
       responses,
     });
@@ -687,7 +794,7 @@ export class TerminalTransport {
   markUncertain() {
     if (this.pendingInputs.size) {
       this.inputUncertain = true;
-      this.callbacks.onNotice?.('INPUT_UNCERTAIN');
+      this.callbacks.onNotice?.("INPUT_UNCERTAIN");
     }
     this.pendingInputs.clear();
     this.pendingInputBytes = 0;
@@ -701,7 +808,7 @@ export class TerminalTransport {
     this.lastFailureCode = code;
     if (this.pauseReconnect) this.resumeFromLive = false;
     this.closeSocket();
-    this.changeState(this.pauseReconnect ? 'blocked' : 'reconnecting', {
+    this.changeState(this.pauseReconnect ? "blocked" : "reconnecting", {
       ...details,
       reason_code: code,
       message: reasonText(code, details.message),
@@ -716,9 +823,9 @@ export class TerminalTransport {
     if (this.disposed || this.pauseReconnect || this.retryTimer) return;
     if (this.retryAttempts >= RETRIES) {
       this.pauseReconnect = true;
-      this.changeState('disconnected', {
-        reason_code: 'NETWORK_ERROR',
-        message: '仍未连接，请检查网络后重试',
+      this.changeState("disconnected", {
+        reason_code: "NETWORK_ERROR",
+        message: "仍未连接，请检查网络后重试",
       });
       return;
     }
@@ -744,7 +851,7 @@ export class TerminalTransport {
     }
     const timestamp = this.now();
     this.pendingPings.set(nonce, timestamp);
-    if (!this.sendControl({ type: 'ping', nonce, timestamp })) {
+    if (!this.sendControl({ type: "ping", nonce, timestamp })) {
       this.pendingPings.delete(nonce);
       return null;
     }
@@ -754,8 +861,11 @@ export class TerminalTransport {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
       if (!this.current(version)) return;
-      if (this.now() - this.lastSeen > this.limits.heartbeat_timeout_seconds * 1000) {
-        this.fail('NETWORK_ERROR');
+      if (
+        this.now() - this.lastSeen >
+        this.limits.heartbeat_timeout_seconds * 1000
+      ) {
+        this.fail("NETWORK_ERROR");
         return;
       }
       this.sendPing();
@@ -800,17 +910,19 @@ export class TerminalTransport {
       this.closeSocket();
       Object.assign(this.session, message);
       if (
-        this.session.mode === 'tmux' &&
-        message.recoverability === 'reauthenticate' &&
-        !['missing', 'ended'].includes(message.remote_session_state) &&
-        !['USER_CLOSED', 'REMOTE_SESSION_MISSING', 'AUTH_REVOKED'].includes(message.reason_code)
+        this.session.mode === "tmux" &&
+        message.recoverability === "reauthenticate" &&
+        !["missing", "ended"].includes(message.remote_session_state) &&
+        !["USER_CLOSED", "REMOTE_SESSION_MISSING", "AUTH_REVOKED"].includes(
+          message.reason_code,
+        )
       ) {
         // The Hub has retained the logical session. Reattach exactly that id;
         // this branch never calls create and never replays uncertain input.
         this.pauseReconnect = false;
-        this.changeState('reconnecting', {
-          reason_code: message.reason_code || 'SSH_CHANNEL_CLOSED',
-          message: 'SSH 已断开，正在恢复原会话',
+        this.changeState("reconnecting", {
+          reason_code: message.reason_code || "SSH_CHANNEL_CLOSED",
+          message: "SSH 已断开，正在恢复原会话",
           output_complete: message.output_complete,
           retry_attempt: this.retryAttempts + 1,
           max_retries: RETRIES,
@@ -818,12 +930,12 @@ export class TerminalTransport {
         this.scheduleRetry();
         return;
       }
-      this.changeState(message.state || 'exited', {
+      this.changeState(message.state || "exited", {
         ...message,
         ...(message.output_complete === false && !message.reason_code
           ? {
-              reason_code: 'OUTPUT_INCOMPLETE',
-              message: reasonText('OUTPUT_INCOMPLETE'),
+              reason_code: "OUTPUT_INCOMPLETE",
+              message: reasonText("OUTPUT_INCOMPLETE"),
             }
           : {}),
       });
@@ -833,9 +945,9 @@ export class TerminalTransport {
     if (this.disposed) return;
     this.flushOutputAck();
     this.sendControl({
-      type: 'detach',
+      type: "detach",
       request_id: uuid(),
-      reason: 'view_closed',
+      reason: "view_closed",
     });
     this.dispose();
   }

@@ -55,10 +55,12 @@ def test_global_layer_tokens_and_local_bounds():
 
 def test_explicit_and_system_dark_tokens_are_identical():
     rules = list(declarations((ROOT / 'web/tokens.css').read_text()))
-    explicit = {prop: value for _, selector, prop, value in rules
-                if selector == "html[data-appearance='dark']"}
-    system = {prop: value for _, selector, prop, value in rules
-              if selector == 'html:not([data-appearance])'}
+    dark_selectors = {"html[data-appearance='dark']", 'html[data-appearance="dark"]'}
+    explicit = {prop: value for context, selector, prop, value in rules
+                if not context and selector in dark_selectors}
+    system = {prop: value for context, selector, prop, value in rules
+              if context == ('@media (prefers-color-scheme: dark)',)
+              and selector == 'html:not([data-appearance])'}
     assert explicit and explicit == system
 
 
@@ -101,6 +103,10 @@ def test_audit_rejects_unlisted_and_duplicated_fallbacks(tmp_path):
     assert metrics(tmp_path, allowed)['unapproved_hex'] == 0
     assert metrics(tmp_path, allowed)['font_px_below_11'] == 1
     path.write_text(css + css)
+    assert metrics(tmp_path, allowed)['unapproved_hex'] == 1
+    path.write_text(css.replace('#272727', '#282828'))
+    assert metrics(tmp_path, allowed)['unapproved_hex'] == 1
+    path.write_text(css.replace('.sample', '.different'))
     assert metrics(tmp_path, allowed)['unapproved_hex'] == 1
 
 

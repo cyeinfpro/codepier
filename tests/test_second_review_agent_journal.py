@@ -18,6 +18,88 @@ from tests.test_core_tools import agent, request
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_target", [False, True])
+@pytest.mark.parametrize("deadline_case", ["expires_during_auth", "valid", "legacy_without_header"])
+async def test_vps_handler_rechecks_start_deadline_before_dispatch(
+    agent, monkeypatch, saved_target, deadline_case
+):
+    from types import SimpleNamespace
+
+    instance, project, _ = agent
+    instance.config["shell"].update(enabled=True, projects=[project["alias"]])
+    monkeypatch.setattr("agent.project_runtime.selected", lambda *_: {"mode": "native_compat"})
+    inline_call = request(
+        project,
+        "ssh_exec",
+        host="fixture.invalid",
+        username="fixture",
+        password="fixture-only-not-used",
+        command="true",
+        timeout_seconds=10,
+        idempotency_key=uuid.uuid4().hex,
+    )
+    call = inline_call
+    if saved_target:
+        call = request(
+            project,
+            "exec",
+            target="vps:" + uuid.uuid4().hex,
+            command="true",
+            timeout_seconds=10,
+            idempotency_key=uuid.uuid4().hex,
+        )
+        # Simulate the already authenticated Hub delivery, not public arguments.
+        call["core_ssh"] = inline_call["args"]
+    deadline = time.time() + 600
+    if deadline_case != "legacy_without_header":
+        call["not_after"] = deadline
+
+    connected = []
+    dispatched = []
+
+    async def fake_transport(**kwargs):
+        connected.append(kwargs["operation_id"])
+        assert instance.journal.durable_status(call["id"]) == "running"
+        after_auth = kwargs.get("require_authority")
+        if deadline_case == "expires_during_auth":
+            # Advance only the runner's wall clock while the authenticated
+            # transport is about to send. The original journal keeps real time.
+            with monkeypatch.context() as clock:
+                clock.setattr(
+                    "agent.runner.time",
+                    SimpleNamespace(time=lambda: deadline + 1),
+                )
+                if after_auth is not None:
+                    after_auth()
+        elif after_auth is not None:
+            after_auth()
+        dispatched.append(kwargs["operation_id"])
+        return {"exit_code": 0, "output": "", "transport_runtime": "asyncssh"}
+
+    monkeypatch.setattr("agent.vps_exec.execute_vps_command", fake_transport)
+    await instance.handle(call)
+    receipt = instance.journal.status(call["id"])
+    assert receipt["status"] == "done"
+    assert connected == [call["id"]]
+    if deadline_case == "expires_during_auth":
+        assert not dispatched, "remote command entered send window after the start deadline"
+        assert receipt["result"]["error"]["code"] == "QUEUE_EXPIRED"
+    else:
+        assert receipt["result"]["ok"]
+        runtime = receipt["result"]["data"]["transport_runtime"]
+        assert runtime["engine"] == "asyncssh"
+        assert runtime["mode"] == "native_ssh_transport"
+        assert runtime.get("target") == (call["args"]["target"] if saved_target else None)
+        assert runtime["grants_authority"] is False
+        assert dispatched == [call["id"]]
+
+    # A repeated delivery returns the saved receipt without a second connection.
+    await instance.handle(call)
+    assert instance.journal.status(call["id"])["result"] == receipt["result"]
+    assert connected == [call["id"]]
+
+
+@pytest.mark.asyncio
 async def test_real_write_is_not_replayed_from_durable_start_receipt(agent, tmp_path, monkeypatch):
     instance, project, root = agent
     operation = request(

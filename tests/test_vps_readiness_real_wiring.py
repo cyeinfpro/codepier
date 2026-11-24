@@ -149,13 +149,10 @@ def test_managed_scan_and_install_run_real_password_only_ssh(
             vps = saved.json()["id"]
             scan, install = "/api/vps/readiness/scan", "/api/vps/readiness/install"
             assert owner.post(install).json() == {"queued_count": 0}
-            if result == "historical_pin":
-                assert owner.post("/api/vps/readiness/backfill").json()["queued_count"] == 1
-                legacy = wiring_fixture.wait_job(owner, vps, state="failed")
-                assert legacy["reason_code"] == "HOST_KEY_CHANGED"
-                assert legacy["host_verification"] == "required"
-                assert fixture.auth_count == 0 and fixture.calls == []
-            assert owner.post(scan).json()["queued_count"] == 1
+            # Legacy stored pin is metadata only for managed readiness. Backfill
+            # must perform the same bounded scan as the explicit manual control.
+            scan_route = "/api/vps/readiness/backfill" if result == "historical_pin" else scan
+            assert owner.post(scan_route).json()["queued_count"] == 1
             if result == "wrong_credential":
                 rejected = wiring_fixture.wait_job(owner, vps, state="failed")
                 assert rejected["reason_code"] == reason
@@ -183,7 +180,11 @@ def test_managed_scan_and_install_run_real_password_only_ssh(
             assert owner.post(install).json() == {"queued_count": 0}
             if result == "historical_pin":
                 public = owner.get(f"/api/vps/{vps}").json()
-                assert public["host_key_policy"] == "confirm-change"
-                assert public["host_key_fingerprint"] == saved_key.get_fingerprint("sha256")
+                assert public["host_identity_verification"] == "disabled"
+                assert public["legacy_host_trust"] == {
+                    "ignored": True,
+                    "host_key_policy": "confirm-change",
+                    "host_key_fingerprint": saved_key.get_fingerprint("sha256"),
+                }
         finally:
             client.portal.call(fixture.close)

@@ -1,5 +1,8 @@
-import { assertSafeNonNegativeInt, decodeAndVerifyBatch } from './native-contracts.mjs';
-import { applyNativeBatch, installNativeSnapshot } from './native-state.mjs';
+import {
+  assertSafeNonNegativeInt,
+  decodeAndVerifyBatch,
+} from "./native-contracts.mjs";
+import { applyNativeBatch, installNativeSnapshot } from "./native-state.mjs";
 
 const DEFAULT_CATCHUP_MAX_ROWS = 500;
 const DEFAULT_CATCHUP_MAX_BYTES = 2 * 1024 * 1024;
@@ -10,9 +13,9 @@ const DEFAULT_TOOL_TAIL_MAX_BYTES = 256 * 1024;
 const TEXT_ENCODER = new TextEncoder();
 
 const NON_RETRYABLE_RESET_REASONS = new Set([
-  'SOURCE_GAP',
-  'PROJECTION_BUILDING',
-  'SOURCE_CORRUPT',
+  "SOURCE_GAP",
+  "PROJECTION_BUILDING",
+  "SOURCE_CORRUPT",
 ]);
 
 function splitLinesPreserveRemainder(buffer, endOfStream = false) {
@@ -32,7 +35,7 @@ function splitLinesPreserveRemainder(buffer, endOfStream = false) {
 }
 
 function createSseEventState() {
-  return { event: 'message', id: null, dataLines: [], retry: null };
+  return { event: "message", id: null, dataLines: [], retry: null };
 }
 
 async function dispatchSseState(state, onFrame) {
@@ -40,35 +43,36 @@ async function dispatchSseState(state, onFrame) {
     !state.dataLines.length &&
     state.id === null &&
     state.retry === null &&
-    state.event === 'message'
+    state.event === "message"
   ) {
     return;
   }
   const frame = {
-    event: state.event || 'message',
+    event: state.event || "message",
     id: state.id,
-    data: state.dataLines.join('\n'),
+    data: state.dataLines.join("\n"),
     retry: state.retry,
   };
   await onFrame(frame);
 }
 
 function applySseField(state, line) {
-  if (!line || line.startsWith(':')) return;
-  const colon = line.indexOf(':');
+  if (!line || line.startsWith(":")) return;
+  const colon = line.indexOf(":");
   const field = colon === -1 ? line : line.slice(0, colon);
-  let value = colon === -1 ? '' : line.slice(colon + 1);
-  if (value.startsWith(' ')) value = value.slice(1);
-  if (field === 'event') state.event = value || 'message';
-  else if (field === 'data') state.dataLines.push(value);
-  else if (field === 'id' && !value.includes('\0')) state.id = value;
-  else if (field === 'retry' && /^\d+$/.test(value)) state.retry = Number(value);
+  let value = colon === -1 ? "" : line.slice(colon + 1);
+  if (value.startsWith(" ")) value = value.slice(1);
+  if (field === "event") state.event = value || "message";
+  else if (field === "data") state.dataLines.push(value);
+  else if (field === "id" && !value.includes("\0")) state.id = value;
+  else if (field === "retry" && /^\d+$/.test(value))
+    state.retry = Number(value);
 }
 
 export class NativeTransportReadError extends Error {
   constructor(cause) {
-    super('Native stream interrupted', { cause });
-    this.name = 'NativeTransportReadError';
+    super("Native stream interrupted", { cause });
+    this.name = "NativeTransportReadError";
   }
 }
 
@@ -81,7 +85,7 @@ async function readStreamChunk(reader) {
 }
 
 async function* iterateChunks(chunkStream, signal) {
-  if (chunkStream && typeof chunkStream.getReader === 'function') {
+  if (chunkStream && typeof chunkStream.getReader === "function") {
     const reader = chunkStream.getReader();
     try {
       while (!signal?.aborted) {
@@ -95,7 +99,7 @@ async function* iterateChunks(chunkStream, signal) {
       } catch {
         // Ignore reader cancel errors during cleanup.
       }
-      if (typeof reader.releaseLock === 'function') {
+      if (typeof reader.releaseLock === "function") {
         try {
           reader.releaseLock();
         } catch {
@@ -112,22 +116,25 @@ async function* iterateChunks(chunkStream, signal) {
 }
 
 export async function parseSseFrames(chunkStream, onFrame, signal = null) {
-  if (typeof onFrame !== 'function') {
-    throw new TypeError('onFrame must be a function');
+  if (typeof onFrame !== "function") {
+    throw new TypeError("onFrame must be a function");
   }
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
   let state = createSseEventState();
 
   for await (const chunk of iterateChunks(chunkStream, signal)) {
     if (signal?.aborted) return;
-    const text = typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+    const text =
+      typeof chunk === "string"
+        ? chunk
+        : decoder.decode(chunk, { stream: true });
     buffer += text;
     const split = splitLinesPreserveRemainder(buffer);
     buffer = split.remainder;
     for (const line of split.lines) {
       if (signal?.aborted) return;
-      if (line === '') {
+      if (line === "") {
         await dispatchSseState(state, onFrame);
         state = createSseEventState();
       } else {
@@ -141,7 +148,7 @@ export async function parseSseFrames(chunkStream, onFrame, signal = null) {
   if (tail) {
     const split = splitLinesPreserveRemainder(tail, true);
     for (const line of split.lines) {
-      if (line === '') {
+      if (line === "") {
         await dispatchSseState(state, onFrame);
         state = createSseEventState();
       } else {
@@ -161,9 +168,13 @@ export function defaultRetryDelay(
     DEFAULT_MAX_RETRY_MS,
     DEFAULT_BASE_RETRY_MS * 2 ** Math.max(0, failures - 1),
   );
-  const upper = Math.min(DEFAULT_MAX_RETRY_MS, Math.max(DEFAULT_BASE_RETRY_MS, prevDelayMs * 3));
+  const upper = Math.min(
+    DEFAULT_MAX_RETRY_MS,
+    Math.max(DEFAULT_BASE_RETRY_MS, prevDelayMs * 3),
+  );
   const cap = Math.max(exp, upper);
-  const jittered = DEFAULT_BASE_RETRY_MS + random() * (cap - DEFAULT_BASE_RETRY_MS);
+  const jittered =
+    DEFAULT_BASE_RETRY_MS + random() * (cap - DEFAULT_BASE_RETRY_MS);
   return Math.round(Math.min(DEFAULT_MAX_RETRY_MS, jittered));
 }
 
@@ -183,25 +194,29 @@ export function delayAbortable(ms, signal) {
       resolve(false);
     };
     const cleanup = () => {
-      signal?.removeEventListener?.('abort', onAbort);
+      signal?.removeEventListener?.("abort", onAbort);
     };
-    signal?.addEventListener?.('abort', onAbort, { once: true });
+    signal?.addEventListener?.("abort", onAbort, { once: true });
   });
 }
 
 export function resetFingerprint(outcome) {
-  if (!outcome || typeof outcome !== 'object') return '';
+  if (!outcome || typeof outcome !== "object") return "";
   return [
-    outcome.reason ?? '',
-    outcome.stream_epoch ?? outcome.epoch ?? '',
-    outcome.min_revision ?? '',
-    outcome.min_cursor ?? '',
-    outcome.target_revision ?? '',
-    outcome.retained_from_cursor ?? '',
-  ].join('::');
+    outcome.reason ?? "",
+    outcome.stream_epoch ?? outcome.epoch ?? "",
+    outcome.min_revision ?? "",
+    outcome.min_cursor ?? "",
+    outcome.target_revision ?? "",
+    outcome.retained_from_cursor ?? "",
+  ].join("::");
 }
 
-export function createCatchUpBuffer(authoritative, budget = {}, now = () => Date.now()) {
+export function createCatchUpBuffer(
+  authoritative,
+  budget = {},
+  now = () => Date.now(),
+) {
   const maxRows = budget.maxRows ?? DEFAULT_CATCHUP_MAX_ROWS;
   const maxBytes = budget.maxBytes ?? DEFAULT_CATCHUP_MAX_BYTES;
   const maxMs = budget.maxMs ?? DEFAULT_CATCHUP_MAX_MS;
@@ -222,15 +237,19 @@ export function stageCatchUpBatch(buffer, verifiedBatch, rawBytes = 0) {
   const nextRows = buffer.rows + 1;
   const nextBytes = buffer.bytes + rawBytes;
   const elapsed = buffer.now() - buffer.startedAt;
-  if (nextRows > buffer.maxRows || nextBytes > buffer.maxBytes || elapsed > buffer.maxMs) {
-    return { kind: 'budget_exceeded', reason: 'catchup_budget_exceeded' };
+  if (
+    nextRows > buffer.maxRows ||
+    nextBytes > buffer.maxBytes ||
+    elapsed > buffer.maxMs
+  ) {
+    return { kind: "budget_exceeded", reason: "catchup_budget_exceeded" };
   }
   const applied = applyNativeBatch(buffer.working, verifiedBatch);
-  if (applied.kind === 'applied') {
+  if (applied.kind === "applied") {
     buffer.working = applied.value;
     buffer.rows = nextRows;
     buffer.bytes = nextBytes;
-  } else if (applied.kind === 'duplicate') {
+  } else if (applied.kind === "duplicate") {
     buffer.rows = nextRows;
     buffer.bytes = nextBytes;
   }
@@ -247,10 +266,13 @@ function defaultCommitApplied(scope, next, owner) {
 
 function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
   const decodeAndVerify =
-    io.decodeAndVerify || ((wire, identity) => decodeAndVerifyBatch(wire, identity));
+    io.decodeAndVerify ||
+    ((wire, identity) => decodeAndVerifyBatch(wire, identity));
   const commit = io.commitApplied || defaultCommitApplied;
   let synchronized = Boolean(scope.initiallySynchronized);
-  let catchUp = synchronized ? null : createCatchUpBuffer(scope.authoritative, catchUpBudget, now);
+  let catchUp = synchronized
+    ? null
+    : createCatchUpBuffer(scope.authoritative, catchUpBudget, now);
 
   const stagedSummary = [];
   const onVerified = (verified, rawBytes) => {
@@ -258,26 +280,26 @@ function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
     if (!owns()) return;
     if (synchronized) {
       const outcome = applyNativeBatch(scope.authoritative, verified);
-      if (outcome.kind === 'applied') {
+      if (outcome.kind === "applied") {
         commit(scope, outcome.value, owner, summary ? [summary] : []);
         return;
       }
-      if (outcome.kind === 'duplicate') return;
+      if (outcome.kind === "duplicate") return;
       const err = new Error(outcome.reason || outcome.kind);
       err.streamOutcome = outcome;
       throw err;
     }
 
     const staged = stageCatchUpBatch(catchUp, verified, rawBytes);
-    if (staged.kind === 'applied') {
+    if (staged.kind === "applied") {
       if (summary) stagedSummary.push(summary);
       return;
     }
-    if (staged.kind === 'duplicate') return;
+    if (staged.kind === "duplicate") return;
     const err = new Error(staged.reason || staged.kind);
     err.streamOutcome =
-      staged.kind === 'budget_exceeded'
-        ? { kind: 'reset', reason: 'catchup_budget_exceeded' }
+      staged.kind === "budget_exceeded"
+        ? { kind: "reset", reason: "catchup_budget_exceeded" }
         : staged;
     throw err;
   };
@@ -290,9 +312,9 @@ function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
       wire.projection_revision !== expected.revision ||
       wire.applied_cursor !== expected.appliedCursor
     ) {
-      const err = new Error('synchronized_watermark_mismatch');
+      const err = new Error("synchronized_watermark_mismatch");
       err.streamOutcome = {
-        kind: 'reset',
+        kind: "reset",
         reason: err.message,
         stream_epoch: expected.streamEpoch,
         target_revision: expected.revision,
@@ -313,21 +335,23 @@ function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
   return {
     onFrame: async (wire) => {
       if (!owns()) return;
-      if (wire && wire.kind === 'synchronized') {
+      if (wire && wire.kind === "synchronized") {
         markSynchronized(wire);
         return;
       }
-      if (wire && wire.kind === 'reset_required') {
-        const err = new Error(wire.reason || 'reset_required');
-        err.streamOutcome = { ...wire, kind: 'reset' };
+      if (wire && wire.kind === "reset_required") {
+        const err = new Error(wire.reason || "reset_required");
+        err.streamOutcome = { ...wire, kind: "reset" };
         throw err;
       }
-      if (wire && wire.kind === 'blocked') {
-        const err = new Error(wire.reason || 'blocked');
-        err.streamOutcome = { ...wire, kind: 'blocked' };
+      if (wire && wire.kind === "blocked") {
+        const err = new Error(wire.reason || "blocked");
+        err.streamOutcome = { ...wire, kind: "blocked" };
         throw err;
       }
-      const rawBytes = wire?._rawBytes ?? TEXT_ENCODER.encode(JSON.stringify(wire ?? {})).length;
+      const rawBytes =
+        wire?._rawBytes ??
+        TEXT_ENCODER.encode(JSON.stringify(wire ?? {})).length;
       const verified = await decodeAndVerify(wire, scope.identity);
       if (!owns()) return;
       onVerified(verified, rawBytes);
@@ -338,7 +362,7 @@ function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
 
 export function startNativeTransport(scope, io, options = {}) {
   scope.stopNative?.();
-  const owner = Symbol('native-subscription');
+  const owner = Symbol("native-subscription");
   const life = new AbortController();
   scope.owner = owner;
   const owns = () => scope.owner === owner && !life.signal.aborted;
@@ -382,32 +406,40 @@ export function startNativeTransport(scope, io, options = {}) {
           if (err?.streamOutcome) {
             outcome = err.streamOutcome;
           } else if (err instanceof NativeTransportReadError) {
-            outcome = { kind: 'resume', stablySynchronized: false };
+            outcome = { kind: "resume", stablySynchronized: false };
           } else {
             throw err;
           }
         }
         if (!owns()) return;
 
-        if (outcome?.kind === 'blocked') {
+        if (outcome?.kind === "blocked") {
           io.publishBlocked?.(scope, outcome);
           return;
         }
-        if (outcome?.kind === 'reset') {
+        if (outcome?.kind === "reset") {
           const fp = resetFingerprint(outcome);
           const mustHalt =
-            NON_RETRYABLE_RESET_REASONS.has(outcome.reason) || (fp && seenResets.has(fp));
+            NON_RETRYABLE_RESET_REASONS.has(outcome.reason) ||
+            (fp && seenResets.has(fp));
           if (mustHalt) {
             io.publishResetHalted?.(scope, outcome);
             return;
           }
           if (fp) seenResets.add(fp);
-          const replaced = await io.replaceSnapshotBounded(scope, owner, life.signal, outcome);
+          const replaced = await io.replaceSnapshotBounded(
+            scope,
+            owner,
+            life.signal,
+            outcome,
+          );
           if (!owns() || replaced === false) return;
           continue;
         }
 
-        const healthy = Boolean(outcome?.stablySynchronized && runtimeAdapter.isSynchronized());
+        const healthy = Boolean(
+          outcome?.stablySynchronized && runtimeAdapter.isSynchronized(),
+        );
         if (healthy) {
           failures = 0;
           prevDelay = DEFAULT_BASE_RETRY_MS;
@@ -462,10 +494,13 @@ function trimUtf8Tail(text, maxBytes) {
   const sliced = encoded.slice(encoded.length - maxBytes);
   // Advance past UTF-8 continuation bytes (10xxxxxx) to keep valid char boundary.
   let offset = 0;
-  while (offset < sliced.length && (sliced[offset] & 0b1100_0000) === 0b1000_0000) {
+  while (
+    offset < sliced.length &&
+    (sliced[offset] & 0b1100_0000) === 0b1000_0000
+  ) {
     offset += 1;
   }
-  const clean = new TextDecoder('utf-8').decode(sliced.subarray(offset));
+  const clean = new TextDecoder("utf-8").decode(sliced.subarray(offset));
   return { text: clean, bytes: sliced.length - offset, trimmed: true };
 }
 
@@ -475,23 +510,23 @@ export class ToolOutputSubscriptionManager {
     onSubscribe = null,
     onUnsubscribe = null,
   } = {}) {
-    this.maxTailBytes = assertSafeNonNegativeInt(maxTailBytes, 'maxTailBytes');
+    this.maxTailBytes = assertSafeNonNegativeInt(maxTailBytes, "maxTailBytes");
     this.onSubscribe = onSubscribe;
     this.onUnsubscribe = onUnsubscribe;
     this.channels = new Map();
   }
 
   open(toolKey, spec = {}) {
-    if (typeof toolKey !== 'string' || !toolKey) {
-      throw new TypeError('toolKey must be a non-empty string');
+    if (typeof toolKey !== "string" || !toolKey) {
+      throw new TypeError("toolKey must be a non-empty string");
     }
     if (!this.channels.has(toolKey)) {
       this.channels.set(toolKey, {
         toolKey,
-        outputEpoch: spec.outputEpoch ?? '',
+        outputEpoch: spec.outputEpoch ?? "",
         fromOffset: 0,
         toOffset: 0,
-        text: '',
+        text: "",
         bytes: 0,
         truncatedBefore: false,
         running: Boolean(spec.running ?? true),
@@ -523,18 +558,24 @@ export class ToolOutputSubscriptionManager {
   receiveFrame(toolKey, frame) {
     const channel = this.channels.get(toolKey);
     if (!channel) return null;
-    if (!frame || typeof frame !== 'object') {
-      throw new TypeError('Tool output frame must be an object');
+    if (!frame || typeof frame !== "object") {
+      throw new TypeError("Tool output frame must be an object");
     }
-    const fromOffset = assertSafeNonNegativeInt(frame.from_offset, 'frame.from_offset');
-    const toOffset = assertSafeNonNegativeInt(frame.to_offset, 'frame.to_offset');
+    const fromOffset = assertSafeNonNegativeInt(
+      frame.from_offset,
+      "frame.from_offset",
+    );
+    const toOffset = assertSafeNonNegativeInt(
+      frame.to_offset,
+      "frame.to_offset",
+    );
     if (toOffset < fromOffset) {
-      throw new RangeError('Tool output frame to_offset < from_offset');
+      throw new RangeError("Tool output frame to_offset < from_offset");
     }
-    const epoch = String(frame.output_epoch ?? '');
-    const text = typeof frame.text === 'string' ? frame.text : '';
+    const epoch = String(frame.output_epoch ?? "");
+    const text = typeof frame.text === "string" ? frame.text : "";
 
-    if (frame.kind === 'replace') {
+    if (frame.kind === "replace") {
       const bounded = trimUtf8Tail(text, this.maxTailBytes);
       channel.outputEpoch = epoch;
       channel.fromOffset = toOffset - bounded.bytes;
@@ -549,7 +590,7 @@ export class ToolOutputSubscriptionManager {
       return channel;
     }
 
-    if (frame.kind === 'append') {
+    if (frame.kind === "append") {
       if (channel.outputEpoch && epoch && channel.outputEpoch !== epoch) {
         channel.needsReplace = true;
         return channel;
@@ -572,6 +613,8 @@ export class ToolOutputSubscriptionManager {
       return channel;
     }
 
-    throw new TypeError(`Unsupported tool output frame kind: ${String(frame.kind)}`);
+    throw new TypeError(
+      `Unsupported tool output frame kind: ${String(frame.kind)}`,
+    );
   }
 }

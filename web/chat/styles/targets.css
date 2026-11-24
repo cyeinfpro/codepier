@@ -59,7 +59,7 @@
 .chat-new-context .chat-cli-segmented button:hover {
   color: var(--chat-fg);
 }
-.chat-new-context .chat-cli-segmented button[aria-pressed='true'] {
+.chat-new-context .chat-cli-segmented button[aria-pressed="true"] {
   background: var(--chat-raised);
   color: var(--chat-fg);
   font-weight: var(--ui-weight-semibold, 600);
@@ -92,7 +92,7 @@
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-soft);
 }
-.chat-new-context[data-unavailable='true'] #chat-target-info {
+.chat-new-context[data-unavailable="true"] #chat-target-info {
   white-space: normal;
   color: var(--chat-warning);
 }

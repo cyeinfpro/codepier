@@ -45,10 +45,41 @@ export function mountReview(parent, value, ctx) {
   function addFiles(items) {
     for (const item of items) {
       const details = el('details');
-      const summary = el('summary');
+      const summary = el('summary', undefined, 'file-summary');
+      const path = item.path;
+      const boundary = path.lastIndexOf('/') + 1;
+      const name = el('span', undefined, 'file-path');
+      name.dir = 'ltr';
+      name.append(el('span', path.slice(0, boundary), 'file-path-folder'),
+        el('span', path.slice(boundary), 'file-path-basename'));
+      summary.title = path;
       const names = {added: '新增', modified: '修改', deleted: '删除', unverified: '未完整捕获'};
-      summary.append(el('span', item.path), el('small', names[item.status] || item.status || ''));
-      details.append(summary);
+      summary.append(name, el('small', names[item.status] || item.status || ''));
+
+      // Sandbox hosts can deny clipboard access. Keep the original text visible
+      // and select it for manual copy when the browser refuses the write.
+      const pathControls = el('div', undefined, 'file-path-controls');
+      const original = el('code', path);
+      original.dir = 'ltr';
+      const copyStatus = el('span', undefined, 'muted');
+      copyStatus.setAttribute('role', 'status');
+      const copyPath = button('复制路径', async () => {
+        try {
+          await navigator.clipboard.writeText(path);
+          copyStatus.textContent = '已复制路径';
+        } catch {
+          const selection = window.getSelection();
+          if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(original);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          copyStatus.textContent = selection ? '已选中路径，请使用系统复制。' : '可选中完整路径后复制。';
+        }
+      });
+      pathControls.append(original, copyPath, copyStatus);
+      details.append(summary, pathControls);
       files.append(details);
       let loaded = false;
       details.addEventListener('toggle', () => {

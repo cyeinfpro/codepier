@@ -16,14 +16,30 @@
   font-weight: var(--ui-weight-medium);
   line-height: 1.3;
   transition:
-    background var(--ui-motion-fast) var(--ui-ease),
-    border-color var(--ui-motion-fast) var(--ui-ease),
-    color var(--ui-motion-fast) var(--ui-ease);
+    background var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),
+    border-color var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),
+    color var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),
+    transform var(--ui-motion-press, 80ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1));
 }
 
 .cr-button:hover:not(:disabled) {
   border-color: var(--ui-border);
   background: var(--ui-hover);
+}
+
+.cr-button:active:not(:disabled),
+.cr-send:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.cr-button:focus-visible,
+.cr-send:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
 }
 
 .cr-button svg {

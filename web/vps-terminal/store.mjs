@@ -1,4 +1,4 @@
-import { TerminalTransport } from './transport.mjs';
+import { TerminalTransport } from "./transport.mjs";
 import {
   DEFAULT_LIMITS,
   errorCode,
@@ -6,10 +6,25 @@ import {
   normalizeUuid,
   reasonText,
   uuid,
-} from './protocol.mjs';
-import { TerminalView } from './terminal-view.mjs';
+} from "./protocol.mjs";
+import { TerminalView } from "./terminal-view.mjs";
 
-const ENDED = new Set(['exited', 'closed', 'failed', 'revoked']);
+const ENDED = new Set(["exited", "closed", "failed", "revoked"]);
+
+function supportsVpsSshV2(capability) {
+  if (!capability || typeof capability !== "object") return false;
+  if (
+    Object.hasOwn(capability, "connection_contract") ||
+    Object.hasOwn(capability, "host_identity_verification")
+  ) {
+    return (
+      capability.connection_contract === "vps_ssh_v2" &&
+      capability.host_identity_verification === "disabled" &&
+      capability.capabilities?.terminal?.supported === true
+    );
+  }
+  return capability.saved_vps_host_verification === "skip";
+}
 
 // This store belongs to one authenticated user/Space identity. Nothing here is
 // persisted in browser storage: no transcript, credentials, tickets or keystrokes.
@@ -104,17 +119,21 @@ export class TerminalStore {
     let offset = 0;
     try {
       while (true) {
-        const result = await this.api('/api/vps?limit=200&offset=' + offset);
+        const result = await this.api("/api/vps?limit=200&offset=" + offset);
         if (this.disposed || version !== this.version) return [];
         const items = result.vps ?? result.items ?? result;
         for (const item of items) {
-          if (item?.id && item.enabled !== false && item.terminal?.eligible !== false)
+          if (
+            item?.id &&
+            item.enabled !== false &&
+            item.terminal?.eligible !== false
+          )
             catalog.set(item.id, item);
         }
         const next = result.next_offset;
         if (next == null) break;
         if (!Number.isSafeInteger(next) || next <= offset)
-          throw new Error('Invalid VPS catalog cursor');
+          throw new Error("Invalid VPS catalog cursor");
         offset = next;
       }
       this.vpsCatalog = [...catalog.values()];
@@ -129,16 +148,19 @@ export class TerminalStore {
   async refreshSessions() {
     const version = this.version;
     try {
-      const result = await this.api('/api/vps-terminal/sessions');
+      const result = await this.api("/api/vps-terminal/sessions");
       if (this.disposed || version !== this.version) return [];
       this.remoteSessions = (result.sessions || []).slice(0, 100);
       this.changed();
       return this.remoteSessions;
     } catch (error) {
       if (
-        ['AUTH_REQUIRED', 'LOGIN_REQUIRED', 'SESSION_EXPIRED', 'UNAUTHORIZED'].includes(
-          errorCode(error),
-        )
+        [
+          "AUTH_REQUIRED",
+          "LOGIN_REQUIRED",
+          "SESSION_EXPIRED",
+          "UNAUTHORIZED",
+        ].includes(errorCode(error))
       )
         this.dispose();
       throw error;
@@ -150,14 +172,14 @@ export class TerminalStore {
     vpsId,
     project = null,
     projectId = null,
-    mode = 'tmux',
+    mode = "tmux",
     newSession = false,
     split = false,
     isCurrent = this.isCurrent,
   } = {}) {
-    if (this.disposed) throw new Error('登录状态已变化');
+    if (this.disposed) throw new Error("登录状态已变化");
     const resolvedVpsId = vps?.id || vpsId;
-    if (!resolvedVpsId) throw new Error('请选择要连接的 VPS');
+    if (!resolvedVpsId) throw new Error("请选择要连接的 VPS");
     const resolvedProjectId = project?.id || projectId || null;
     const key = JSON.stringify([resolvedVpsId, resolvedProjectId, mode]);
     if (!newSession) {
@@ -166,7 +188,8 @@ export class TerminalStore {
         .find(
           (record) =>
             record.session.vps_id === resolvedVpsId &&
-            (!resolvedProjectId || record.session.project_id === resolvedProjectId) &&
+            (!resolvedProjectId ||
+              record.session.project_id === resolvedProjectId) &&
             !ENDED.has(record.state),
         );
       if (recent) {
@@ -176,7 +199,8 @@ export class TerminalStore {
     }
     if (this.creating.has(key)) {
       const session = await this.creating.get(key);
-      if (!this.disposed && isCurrent()) this.activate(session.session_id || session.id, { split });
+      if (!this.disposed && isCurrent())
+        this.activate(session.session_id || session.id, { split });
       return session;
     }
     const version = this.version;
@@ -203,16 +227,19 @@ export class TerminalStore {
 
   async capability(vpsId, projectId) {
     if (!vpsId)
-      throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
-        code: 'PROTOCOL_MISMATCH',
+      throw Object.assign(new Error(reasonText("PROTOCOL_MISMATCH")), {
+        code: "PROTOCOL_MISMATCH",
       });
     const query = projectId
       ? `?vps_id=${encodeURIComponent(vpsId)}&project_id=${encodeURIComponent(projectId)}`
       : `?vps_id=${encodeURIComponent(vpsId)}`;
     const capability = await this.api(`/api/vps-terminal/capabilities${query}`);
-    if (capability.protocol_version !== undefined && capability.protocol_version !== 1)
-      throw Object.assign(new Error(reasonText('PROTOCOL_MISMATCH')), {
-        code: 'PROTOCOL_MISMATCH',
+    if (
+      capability.protocol_version !== undefined &&
+      capability.protocol_version !== 1
+    )
+      throw Object.assign(new Error(reasonText("PROTOCOL_MISMATCH")), {
+        code: "PROTOCOL_MISMATCH",
       });
     return capability;
   }
@@ -222,17 +249,21 @@ export class TerminalStore {
     vpsId,
     project,
     resolvedProjectId,
-    mode = 'tmux',
+    mode = "tmux",
     key,
     version,
     split,
     isCurrent,
   }) {
-    const targetVps = vps?.id ? vps : await this.api(`/api/vps/${encodeURIComponent(vpsId)}`);
-    if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
-    if (!targetVps?.id) throw new Error('请选择要连接的 VPS');
+    const targetVps = vps?.id
+      ? vps
+      : await this.api(`/api/vps/${encodeURIComponent(vpsId)}`);
+    if (this.disposed || version !== this.version)
+      throw new Error("登录状态已变化");
+    if (!targetVps?.id) throw new Error("请选择要连接的 VPS");
     const capability = await this.capability(targetVps.id, resolvedProjectId);
-    if (this.disposed || version !== this.version) throw new Error('登录状态已变化');
+    if (this.disposed || version !== this.version)
+      throw new Error("登录状态已变化");
     if (
       capability.available === false ||
       capability.supported === false ||
@@ -240,29 +271,40 @@ export class TerminalStore {
     ) {
       throw Object.assign(
         new Error(
-          reasonText(capability.reason_code || 'AGENT_UPGRADE_REQUIRED', capability.message),
+          reasonText(
+            capability.reason_code || "AGENT_UPGRADE_REQUIRED",
+            capability.message,
+          ),
         ),
-        { code: capability.reason_code || 'AGENT_UPGRADE_REQUIRED' },
+        { code: capability.reason_code || "AGENT_UPGRADE_REQUIRED" },
       );
     }
     // A cached target can outlive a Hub rollback. The live capabilities receipt
     // must advertise the managed-VPS method before we attempt a new connection.
     // Restoring an existing session never passes through this creation gate.
-    if (capability.saved_vps_host_verification !== 'skip')
-      throw Object.assign(new Error('当前面板或连接电脑版本不兼容，请更新后重试。'), {
-        code: 'AGENT_UPGRADE_REQUIRED',
+    if (!supportsVpsSshV2(capability)) {
+      const upgradeCode =
+        capability.capabilities?.terminal?.reason_code ||
+        capability.reason_code ||
+        "VPS_TRANSPORT_UPGRADE_REQUIRED";
+      throw Object.assign(new Error(reasonText(upgradeCode)), {
+        code: upgradeCode,
       });
+    }
     const limits = limitsFrom(capability.limits);
     this.limits = limits;
     if (this.count() >= limits.max_user_sessions)
-      throw Object.assign(new Error(reasonText('SESSION_LIMIT')), {
-        code: 'SESSION_LIMIT',
+      throw Object.assign(new Error(reasonText("SESSION_LIMIT")), {
+        code: "SESSION_LIMIT",
       });
     // The Hub binds idempotency to the entire request, not only the ID.
     // Keep the initial dimensions across a lost response, even after rotation.
     let intent = this.creationIntents.get(key);
     if (!intent) {
-      intent = { requestId: uuid(), initialGrid: this.resolveInitialGrid(limits) };
+      intent = {
+        requestId: uuid(),
+        initialGrid: this.resolveInitialGrid(limits),
+      };
       this.creationIntents.set(key, intent);
     }
     const { requestId, initialGrid } = intent;
@@ -270,12 +312,12 @@ export class TerminalStore {
       vps_id: targetVps.id,
       ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
       request_id: requestId,
-      mode: mode || 'tmux',
+      mode: mode || "tmux",
       cols: initialGrid.cols,
       rows: initialGrid.rows,
     };
-    const session = await this.api('/api/vps-terminal/sessions', {
-      method: 'POST',
+    const session = await this.api("/api/vps-terminal/sessions", {
+      method: "POST",
       body: JSON.stringify(body),
     });
     if (this.disposed || version !== this.version) return session;
@@ -314,8 +356,8 @@ export class TerminalStore {
       session: { ...session, session_id: id },
       vps,
       project,
-      state: session.state || 'connecting',
-      label: session.vps_name || session.name || 'VPS',
+      state: session.state || "connecting",
+      label: session.vps_name || session.name || "VPS",
       rttMs: null,
       closing: false,
     };
@@ -328,8 +370,8 @@ export class TerminalStore {
         onAttached: (message) => record.view.attached(message),
         onState: (details) => {
           // The Agent attempted no working shell on this definite failure.
-          if (details.reason_code === 'PERSISTENCE_UNAVAILABLE')
-            details = { ...details, state: 'failed' };
+          if (details.reason_code === "PERSISTENCE_UNAVAILABLE")
+            details = { ...details, state: "failed" };
           record.state = details.state;
           record.lastState = details;
           record.view.stateChanged(details);
@@ -358,13 +400,14 @@ export class TerminalStore {
         }
       },
       onEdit: () => this.onEdit?.(record.session.vps_id),
-      onDiagnostics: () => this.api(`/api/vps-terminal/sessions/${record.id}/diagnostics`),
+      onDiagnostics: () =>
+        this.api(`/api/vps-terminal/sessions/${record.id}/diagnostics`),
       onNewSession: () =>
         this.duplicate(record).catch((error) =>
           record.view.showNotice(errorCode(error), error.message),
         ),
       onTemporarySession: () =>
-        this.duplicate(record, false, { mode: 'direct' }).catch((error) =>
+        this.duplicate(record, false, { mode: "direct" }).catch((error) =>
           record.view.showNotice(errorCode(error), error.message),
         ),
       onTakeover: () =>
@@ -400,7 +443,7 @@ export class TerminalStore {
     record.view.show();
     if (
       !ENDED.has(record.state) &&
-      (['idle', 'connecting', 'detached'].includes(record.transport.state) ||
+      (["idle", "connecting", "detached"].includes(record.transport.state) ||
         (!record.transport.socket && !record.transport.pauseReconnect))
     )
       record.transport.connect();
@@ -422,20 +465,28 @@ export class TerminalStore {
     if (isCurrent()) this.activate(id, { split });
     return record.session;
   }
-  async duplicate(record = this.focused || this.active, split = false, { mode = 'tmux' } = {}) {
-    if (!record) throw new Error('请选择要连接的 VPS');
+  async duplicate(
+    record = this.focused || this.active,
+    split = false,
+    { mode = "tmux" } = {},
+  ) {
+    if (!record) throw new Error("请选择要连接的 VPS");
     const vps =
       record.vps ||
       (record.session?.vps_id
-        ? await this.api(`/api/vps/${encodeURIComponent(record.session.vps_id)}`)
+        ? await this.api(
+            `/api/vps/${encodeURIComponent(record.session.vps_id)}`,
+          )
         : null);
-    if (!vps?.id) throw new Error('请选择要连接的 VPS');
+    if (!vps?.id) throw new Error("请选择要连接的 VPS");
     const isDirect =
       !!record.session?.direct_vps ||
       !!record.session?._direct_vps ||
-      String(record.session?.binding_id || '').startsWith('direct:');
+      String(record.session?.binding_id || "").startsWith("direct:");
     const sessionProjectId =
-      !isDirect && record.session?.project_id ? record.session.project_id : null;
+      !isDirect && record.session?.project_id
+        ? record.session.project_id
+        : null;
     const project = sessionProjectId
       ? Array.isArray(vps.projects)
         ? vps.projects.find((item) => item.id === sessionProjectId) || null
@@ -448,7 +499,8 @@ export class TerminalStore {
   rename(id, name) {
     const record = this.records.get(id);
     if (record) {
-      record.label = name.trim().slice(0, 40) || record.session.vps_name || 'VPS';
+      record.label =
+        name.trim().slice(0, 40) || record.session.vps_name || "VPS";
       this.changed();
     }
   }
@@ -460,7 +512,8 @@ export class TerminalStore {
       measured = null;
     }
     const clampAxis = (value, min, max, fallback) => {
-      const target = Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+      const target =
+        Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
       return Math.max(min, Math.min(max, target));
     };
     return {
@@ -493,9 +546,9 @@ export class TerminalStore {
     const current = await this.api(`/api/vps-terminal/sessions/${record.id}`);
     Object.assign(record.session, current);
     await this.api(`/api/vps-terminal/sessions/${record.id}/takeover`, {
-      method: 'POST',
+      method: "POST",
       body: JSON.stringify({
-        expected_writer_epoch: String(current.writer_epoch || '0'),
+        expected_writer_epoch: String(current.writer_epoch || "0"),
         request_id: uuid(),
       }),
     });
@@ -516,7 +569,7 @@ export class TerminalStore {
       return;
     }
     record.state = current.state;
-    if (['exited', 'closed', 'failed', 'revoked'].includes(current.state))
+    if (["exited", "closed", "failed", "revoked"].includes(current.state))
       record.transport.finish(current);
     else record.view.stateChanged(current);
     this.changed();
@@ -525,7 +578,8 @@ export class TerminalStore {
   hasStreamingAttachment(record) {
     const transport = record.transport;
     return (
-      !transport.disposed && !!(transport.socket || transport.attachment || transport.connecting)
+      !transport.disposed &&
+      !!(transport.socket || transport.attachment || transport.connecting)
     );
   }
 
@@ -552,7 +606,8 @@ export class TerminalStore {
       );
     if (this.secondaryId === id) this.secondaryId = null;
     if (this.activeId === id) {
-      this.activeId = this.secondaryId || [...this.records.keys()].at(-1) || null;
+      this.activeId =
+        this.secondaryId || [...this.records.keys()].at(-1) || null;
       this.secondaryId = null;
     }
     const moved = this.focusedId === id;
@@ -571,9 +626,9 @@ export class TerminalStore {
     }
     if (dismiss) record.dismissOnEnd = true;
     record.closing = true;
-    record.state = 'closing';
+    record.state = "closing";
     record.transport.live = false;
-    record.view.stateChanged({ state: 'closing' });
+    record.view.stateChanged({ state: "closing" });
     this.changed();
     record.closeRequestId ||= uuid();
     try {
@@ -581,7 +636,7 @@ export class TerminalStore {
       if (record.transport.runtimeGeneration)
         body.runtime_generation = record.transport.runtimeGeneration;
       const result = await this.api(`/api/vps-terminal/sessions/${id}/close`, {
-        method: 'POST',
+        method: "POST",
         body: JSON.stringify(body),
       });
       if (this.records.get(id) !== record || ENDED.has(record.state)) return;
@@ -589,21 +644,22 @@ export class TerminalStore {
       if (ENDED.has(result.state)) {
         // The ordered WS exit/state closes an active renderer after its tail.
         // A confirmed HTTP result can close only an already offline view.
-        if (!this.hasStreamingAttachment(record)) record.transport.finish(result);
-      } else if (result.state === 'close_unknown') {
-        record.state = 'close_unknown';
+        if (!this.hasStreamingAttachment(record))
+          record.transport.finish(result);
+      } else if (result.state === "close_unknown") {
+        record.state = "close_unknown";
         record.view.stateChanged({
-          state: 'close_unknown',
-          reason_code: 'CLOSE_UNKNOWN',
+          state: "close_unknown",
+          reason_code: "CLOSE_UNKNOWN",
         });
       }
       // Otherwise the live control stream delivers the authoritative exit.
     } catch (error) {
       if (this.records.get(id) !== record || ENDED.has(record.state)) return;
-      record.state = 'close_unknown';
+      record.state = "close_unknown";
       record.view.stateChanged({
-        state: 'close_unknown',
-        reason_code: 'CLOSE_UNKNOWN',
+        state: "close_unknown",
+        reason_code: "CLOSE_UNKNOWN",
       });
       throw error;
     } finally {

@@ -13,7 +13,13 @@ import uuid
 from dataclasses import dataclass, field
 
 from hub import iam
+from hub.vps_connection import build_resolved_target, supports_vps_ssh_v2
 from shared.crypto import digest, token
+from shared.vps_transport import (
+    VPS_HOST_IDENTITY_VERIFICATION,
+    VPS_SSH_PROTOCOL,
+    capability_entry,
+)
 from shared.ssh_terminal_config import TerminalConfig
 from shared.ssh_terminal_protocol import (
     FrameKind,
@@ -564,7 +570,7 @@ class TerminalService:
 
     def _authorize_member_auto(self, principal, vps_id, *, credentials):
         vps = self.store.one(
-            "SELECT id, connection_revision, enabled, host_key_policy FROM vps_connections WHERE id=? AND space_id=?",
+            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
             (vps_id, principal.space_id),
         )
         if not vps:
@@ -619,7 +625,7 @@ class TerminalService:
 
     @staticmethod
     def _saved_vps_supported(agent):
-        return getattr(agent, "saved_vps_password_only_supported", False) is True
+        return supports_vps_ssh_v2(agent, "terminal")
 
     def _select_admin_direct_device(self, devices, affinity_devices, counts):
         ready = []
@@ -713,7 +719,7 @@ class TerminalService:
 
     def _authorize_admin_auto(self, principal, vps_id, *, credentials):
         vps = self.store.one(
-            "SELECT id, connection_revision, enabled, host_key_policy FROM vps_connections WHERE id=? AND space_id=?",
+            "SELECT id, connection_revision, enabled FROM vps_connections WHERE id=? AND space_id=?",
             (vps_id, principal.space_id),
         )
         if not vps:
@@ -796,8 +802,8 @@ class TerminalService:
     def _require_saved_vps_agent(self, project, agent):
         if not self._supports_current_saved_vps_agent(project, agent):
             raise DevError(
-                "AGENT_UPGRADE_REQUIRED",
-                "当前节点不支持保存密码连接，请升级 Agent 后重新连接",
+                "VPS_TRANSPORT_UPGRADE_REQUIRED",
+                "当前节点缺少 vps_ssh_v2 终端能力，请升级 Agent 后重新连接",
                 409,
             )
 
@@ -816,7 +822,7 @@ class TerminalService:
                 else "AGENT_UPGRADE_REQUIRED"
             )
         if not self._supports_current_saved_vps_agent(project, agent):
-            return "AGENT_UPGRADE_REQUIRED"
+            return "VPS_TRANSPORT_UPGRADE_REQUIRED"
         if project.get("_direct_vps") is True:
             if not getattr(agent, "direct_vps", False):
                 return "AGENT_UPGRADE_REQUIRED"
@@ -835,7 +841,11 @@ class TerminalService:
             "modes": ["auto", "tmux", "direct"],
             "limits": self.config.public_limits(),
             "persistence": "probed_on_connect",
-            "saved_vps_host_verification": "skip" if available else None,
+            "connection_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+            "capabilities": {
+                "terminal": capability_entry(available, reason_code),
+            },
         }
 
     async def capabilities(self, principal, vps_id, project_id=None):
@@ -1023,15 +1033,28 @@ class TerminalService:
                 wait_seconds=self.config.write_timeout,
             )
             self._guard_maintenance()
+            source = (
+                "direct"
+                if str(target.get("binding_id", "")).startswith("direct:")
+                else "project_bound"
+            )
+            resolved = build_resolved_target(
+                target,
+                source=source,
+                project_id=session.project.get("id") or None,
+                binding_id=target.get("binding_id"),
+            )
             payload = {
                 **self.target_ref(session),
                 "owner_user_id": session.principal.user_id,
                 "space_id": session.principal.space_id,
-                "host": target["host"],
-                "port": target["port"],
-                "username": target["username"],
+                "host": resolved.host,
+                "port": resolved.port,
+                "username": resolved.username,
                 "password": target.pop("password"),
-                "saved_vps_password_only": True,
+                "transport_contract": VPS_SSH_PROTOCOL,
+                "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+                "vps_target": resolved.model_dump(),
                 "mode": self._runtime_create_mode(session.row["requested_mode"], recover),
                 "cols": session.row["cols"],
                 "rows": session.row["rows"],
@@ -1053,7 +1076,13 @@ class TerminalService:
             code = exc.code
             state = (
                 "frozen"
-                if code in {"AGENT_RESPONSE_UNKNOWN", "AGENT_OFFLINE", "AGENT_UPGRADE_REQUIRED"}
+                if code
+                in {
+                    "AGENT_RESPONSE_UNKNOWN",
+                    "AGENT_OFFLINE",
+                    "AGENT_UPGRADE_REQUIRED",
+                    "VPS_TRANSPORT_UPGRADE_REQUIRED",
+                }
                 else "failed"
             )
             await self.update(session, {"state": state, "reason_code": code})
@@ -1225,10 +1254,23 @@ class TerminalService:
             self._guard_maintenance()
             session.authority_revision = uuid.uuid4().hex
             session.ready.clear()
+            source = (
+                "direct"
+                if str(target.get("binding_id", "")).startswith("direct:")
+                else "project_bound"
+            )
+            resolved = build_resolved_target(
+                target,
+                source=source,
+                project_id=session.project.get("id") or None,
+                binding_id=target.get("binding_id"),
+            )
             payload = {
                 **self.target_ref(session),
                 "password": target.pop("password"),
-                "saved_vps_password_only": True,
+                "transport_contract": VPS_SSH_PROTOCOL,
+                "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+                "vps_target": resolved.model_dump(),
             }
             self._require_saved_vps_agent(session.project, agent)
             recovered = await agent.request("recover", payload, session.project)

@@ -1,8 +1,183 @@
-'use strict';
+"use strict";
 // Presentation-only helpers. No credentials, commands or writes are cached here.
 // Navigation filtering is local presentation only; capability checks remain authoritative.
 // Async action confirmations capture their originating session, space and view.
 const uiPendingConfirmations = new WeakSet();
+const uiFallbackEdgeFadeBindings = new WeakMap();
+
+function uiBindScrollEdgeFade(el) {
+  if (!el || typeof el.addEventListener !== "function") return () => {};
+  if (typeof CP?.ui?.bindScrollEdgeFade === "function")
+    return CP.ui.bindScrollEdgeFade(el);
+  const existing = uiFallbackEdgeFadeBindings.get(el);
+  if (existing) {
+    existing.sync();
+    return existing.dispose;
+  }
+  el.classList.add("scroll-edge-fade");
+  let frame = 0;
+  let disposed = false;
+  let wasConnected = el.isConnected;
+  const sync = () => {
+    frame = 0;
+    if (disposed) return;
+    if (!el.isConnected) {
+      if (wasConnected) dispose();
+      return;
+    }
+    wasConnected = true;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const canScroll = maxScroll > 2;
+    el.dataset.fadeTop = String(canScroll && el.scrollTop > 2);
+    el.dataset.fadeBottom = String(canScroll && el.scrollTop < maxScroll - 2);
+  };
+  const schedule = () => {
+    if (disposed || frame) return;
+    frame =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(sync)
+        : (sync(), 0);
+  };
+  const resize =
+    typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+  const mutations =
+    typeof MutationObserver === "function"
+      ? new MutationObserver(schedule)
+      : null;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (frame && typeof cancelAnimationFrame === "function")
+      cancelAnimationFrame(frame);
+    frame = 0;
+    el.removeEventListener("scroll", schedule);
+    el.removeEventListener("load", schedule, true);
+    el.removeEventListener("error", schedule, true);
+    resize?.disconnect();
+    mutations?.disconnect();
+    if (!resize && typeof window !== "undefined")
+      window.removeEventListener("resize", schedule);
+    delete el.dataset.fadeTop;
+    delete el.dataset.fadeBottom;
+    uiFallbackEdgeFadeBindings.delete(el);
+  };
+  uiFallbackEdgeFadeBindings.set(el, { sync: schedule, dispose });
+  el.addEventListener("scroll", schedule, { passive: true });
+  el.addEventListener("load", schedule, true);
+  el.addEventListener("error", schedule, true);
+  if (resize) resize.observe(el);
+  else if (typeof window !== "undefined")
+    window.addEventListener("resize", schedule, { passive: true });
+  // A fixed-size viewport can gain or lose overflow without a resize.
+  mutations?.observe(el, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["class", "style", "hidden", "open"],
+  });
+  schedule();
+  return dispose;
+}
+
+function uiSyncShellEdgeFades(root = document) {
+  const navEl =
+    root.querySelector?.(".sidebar .nav") ||
+    document.querySelector(".sidebar .nav");
+  if (navEl) uiBindScrollEdgeFade(navEl);
+  const modalBody =
+    root.querySelector?.(".modal-body") ||
+    document.querySelector(".modal-body");
+  if (modalBody) uiBindScrollEdgeFade(modalBody);
+}
+
+// Backward-compatible Toast wrapper supporting Undo Toast options
+// ({ actionLabel, onAction, duration }) and graceful exit transitions.
+function uiToast(message, errorOrOptions = false, extraOptions = null) {
+  const opts =
+    errorOrOptions && typeof errorOrOptions === "object"
+      ? errorOrOptions
+      : extraOptions && typeof extraOptions === "object"
+        ? extraOptions
+        : {};
+  const error =
+    typeof errorOrOptions === "boolean"
+      ? errorOrOptions
+      : Boolean(opts.error || opts.tone === "error");
+  const actionLabel =
+    typeof opts.actionLabel === "string" ? opts.actionLabel.trim() : "";
+  const onAction = typeof opts.onAction === "function" ? opts.onAction : null;
+  const hasAction = Boolean(actionLabel && onAction);
+  const customDuration = Number(opts.duration);
+  const duration =
+    Number.isFinite(customDuration) && customDuration > 0
+      ? customDuration
+      : hasAction
+        ? 6000
+        : 4700;
+  if (typeof CP?.ui?.toast === "function") {
+    const node = CP.ui.toast(message, error, {
+      ...opts,
+      error,
+      actionLabel,
+      onAction,
+      duration,
+    });
+    if (node && hasAction && !node.querySelector(".toast-action")) {
+      const dismissBtn = node.querySelector(".toast-dismiss");
+      const actionBtn = document.createElement("button");
+      actionBtn.type = "button";
+      actionBtn.className = "toast-action";
+      actionBtn.textContent = actionLabel;
+      const triggerLeave = () => {
+        if (node.dataset.leaving === "true") return;
+        const reduced =
+          typeof window !== "undefined" &&
+          window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+        if (reduced) {
+          node.remove();
+          return;
+        }
+        node.dataset.leaving = "true";
+        setTimeout(() => node.remove(), 150);
+      };
+      let actionInvoked = false;
+      actionBtn.onclick = () => {
+        if (
+          actionInvoked ||
+          node.dataset.leaving === "true" ||
+          !node.isConnected
+        )
+          return;
+        actionInvoked = true;
+        actionBtn.setAttribute("aria-disabled", "true");
+        try {
+          onAction();
+        } finally {
+          triggerLeave();
+        }
+      };
+      if (dismissBtn) dismissBtn.before(actionBtn);
+      else node.append(actionBtn);
+    }
+    if (
+      node &&
+      (!error || (Number.isFinite(customDuration) && customDuration > 0)) &&
+      !node.querySelector(".toast-progress")
+    ) {
+      const progress = document.createElement("span");
+      progress.className = "toast-progress";
+      progress.setAttribute("aria-hidden", "true");
+      progress.style.setProperty("--toast-duration", `${duration}ms`);
+      node.append(progress);
+    }
+    return node;
+  }
+  return undefined;
+}
+function showToast(message, errorOrOptions = false, extraOptions = null) {
+  return uiToast(message, errorOrOptions, extraOptions);
+}
 async function uiConfirmAction(
   options,
   { owner = document.activeElement, current = () => true } = {},
@@ -28,30 +203,30 @@ async function uiConfirmAction(
   }
 }
 function uiLoadingPage(page) {
-  const title = nav.find((item) => item[0] === page)?.[2] || '页面';
+  const title = nav.find((item) => item[0] === page)?.[2] || "页面";
   return `<section class="page-loading" role="status" aria-label="正在加载${esc(title)}"><strong>${esc(title)}</strong><span>正在读取最新内容…</span><div class="skeleton" aria-hidden="true"></div></section>`;
 }
 function uiPageError(message, page) {
-  const root = $('#page');
+  const root = $("#page");
   if (!root) return;
-  root.removeAttribute('aria-busy');
-  const title = nav.find((item) => item[0] === page)?.[2] || '页面';
-  root.innerHTML = `<section class="page-error">${heading(title, '', '暂时无法读取内容，请重试。')}<div role="alert">${notice(esc(message))}</div><button class="btn primary" data-action="refresh">${icon('refresh')}重新加载</button></section>`;
-  $('h1', root)?.setAttribute('tabindex', '-1');
+  root.removeAttribute("aria-busy");
+  const title = nav.find((item) => item[0] === page)?.[2] || "页面";
+  root.innerHTML = `<section class="page-error">${heading(title, "", "暂时无法读取内容，请重试。")}<div role="alert">${notice(esc(message))}</div><button class="btn primary" data-action="refresh">${icon("refresh")}重新加载</button></section>`;
+  $("h1", root)?.setAttribute("tabindex", "-1");
 }
 function uiHelp(title, body) {
-  return `<details class="page-help"><summary>${icon('shield')}${esc(title)}</summary><div class="page-help-body">${body}</div></details>`;
+  return `<details class="page-help"><summary>${icon("shield")}${esc(title)}</summary><div class="page-help-body">${body}</div></details>`;
 }
 function uiMenu(label, body) {
-  return `<details class="tool-menu"><summary class="btn ghost">${icon('menu')}${esc(label)}</summary><div class="tool-menu-items">${body}</div></details>`;
+  return `<details class="tool-menu"><summary class="btn ghost">${icon("menu")}${esc(label)}</summary><div class="tool-menu-items">${body}</div></details>`;
 }
 function uiFocusable(root) {
   return CP.ui.focusable(root);
 }
 function uiTrapTab(e, root, extraRoots = []) {
-  if (e.key !== 'Tab' || e.defaultPrevented) return;
+  if (e.key !== "Tab" || e.defaultPrevented) return;
   const roots = [root, ...extraRoots].filter(
-    (node) => node?.isConnected && !node.closest('[inert]'),
+    (node) => node?.isConnected && !node.closest("[inert]"),
   );
   const items = [...new Set(roots.flatMap((node) => uiFocusable(node)))];
   e.preventDefault();
@@ -70,16 +245,16 @@ function uiTrapTab(e, root, extraRoots = []) {
 }
 // Re-evaluate open native details menus after viewport changes and scrolling.
 function uiPositionMenu(menu) {
-  if (!menu?.open || !menu.matches('.tool-menu')) return;
-  const list = menu.querySelector('.tool-menu-items');
+  if (!menu?.open || !menu.matches(".tool-menu")) return;
+  const list = menu.querySelector(".tool-menu-items");
   if (!list) return;
   const scrollTop = list.scrollTop;
   delete list.dataset.placement;
   delete list.dataset.align;
-  list.style.removeProperty('max-height');
-  list.style.removeProperty('max-width');
-  list.style.removeProperty('translate');
-  list.style.boxSizing = 'border-box';
+  list.style.removeProperty("max-height");
+  list.style.removeProperty("max-width");
+  list.style.removeProperty("translate");
+  list.style.boxSizing = "border-box";
   const viewport = window.visualViewport;
   const viewportHeight = viewport?.height || innerHeight;
   let top = viewport?.offsetTop || 0,
@@ -101,132 +276,150 @@ function uiPositionMenu(menu) {
     const box = parent.getBoundingClientRect();
     if (clipX) {
       left = Math.max(left, box.left + parent.clientLeft);
-      right = Math.min(right, box.left + parent.clientLeft + parent.clientWidth);
+      right = Math.min(
+        right,
+        box.left + parent.clientLeft + parent.clientWidth,
+      );
     }
     if (clipY) {
       top = Math.max(top, box.top + parent.clientTop);
-      bottom = Math.min(bottom, box.top + parent.clientTop + parent.clientHeight);
+      bottom = Math.min(
+        bottom,
+        box.top + parent.clientTop + parent.clientHeight,
+      );
     }
   }
 
-  const page = menu.closest('#page');
-  if (page?.parentElement?.matches('.main')) {
-    const chrome = page.parentElement.querySelectorAll(':scope > .topbar, :scope > .mobile-dock');
+  const page = menu.closest("#page");
+  if (page?.parentElement?.matches(".main")) {
+    const chrome = page.parentElement.querySelectorAll(
+      ":scope > .topbar, :scope > .mobile-dock",
+    );
     for (const bar of chrome) {
       const style = getComputedStyle(bar);
-      if (style.visibility !== 'visible' || !['sticky', 'fixed'].includes(style.position)) continue;
+      if (
+        style.visibility !== "visible" ||
+        !["sticky", "fixed"].includes(style.position)
+      )
+        continue;
       const box = bar.getBoundingClientRect();
       if (box.height && box.bottom > top && box.top < bottom) {
-        if (bar.matches('.topbar')) top = Math.max(top, box.bottom);
+        if (bar.matches(".topbar")) top = Math.max(top, box.bottom);
         else bottom = Math.min(bottom, box.top);
       }
     }
   }
 
-  const availableWidth = Math.max(0, right - left - 16) + 'px';
-  list.style.setProperty('--ui-menu-available-width', availableWidth);
+  const availableWidth = Math.max(0, right - left - 16) + "px";
+  list.style.setProperty("--ui-menu-available-width", availableWidth);
   list.style.maxWidth = availableWidth;
   const rect = list.getBoundingClientRect(),
     anchor = menu.getBoundingClientRect();
   const below = bottom - anchor.bottom - 16,
     above = anchor.top - top - 16;
   const flip = rect.bottom > bottom - 8 && above > below;
-  if (flip) list.dataset.placement = 'top';
+  if (flip) list.dataset.placement = "top";
   list.style.maxHeight =
-    Math.max(0, Math.min(420, viewportHeight * 0.6, flip ? above : below)) + 'px';
-  if (rect.left < left + 8) list.dataset.align = 'start';
+    Math.max(0, Math.min(420, viewportHeight * 0.6, flip ? above : below)) +
+    "px";
+  if (rect.left < left + 8) list.dataset.align = "start";
   const positioned = list.getBoundingClientRect();
   const shift =
     positioned.left < left + 8
       ? left + 8 - positioned.left
       : Math.min(0, right - 8 - positioned.right);
-  if (shift) list.style.translate = shift + 'px 0';
+  if (shift) list.style.translate = shift + "px 0";
   list.scrollTop = scrollTop;
 }
 // Close only sibling floating menus before native summary activation. Doing this
 // synchronously avoids delayed toggle events closing a newly selected peer.
 function uiCloseMenuPeers(menu) {
   if (!(menu instanceof HTMLDetailsElement)) return;
-  const group = menu.matches('.tool-menu')
-    ? menu.closest('.work-controls .actions')
-    : menu.parentElement?.matches('.chat-history-chips')
+  const group = menu.matches(".tool-menu")
+    ? menu.closest(".work-controls .actions")
+    : menu.parentElement?.matches(".chat-history-chips")
       ? menu.parentElement
       : null;
   if (!group) return;
-  for (const peer of group.querySelectorAll(':scope > details[open]')) {
+  for (const peer of group.querySelectorAll(":scope > details[open]")) {
     if (peer !== menu) peer.open = false;
   }
 }
 document.addEventListener(
-  'click',
+  "click",
   (event) => {
-    const menu = event.target.closest?.('summary')?.parentElement;
+    const menu = event.target.closest?.("summary")?.parentElement;
     if (menu && !menu.open) uiCloseMenuPeers(menu);
   },
   true,
 );
 document.addEventListener(
-  'toggle',
+  "toggle",
   (event) => {
-    if (event.target instanceof HTMLDetailsElement) uiPositionMenu(event.target);
+    if (event.target instanceof HTMLDetailsElement)
+      uiPositionMenu(event.target);
   },
   true,
 );
 let uiMenuFrame = 0;
 function uiRepositionMenus() {
-  if (uiMenuFrame || !document.querySelector('.tool-menu[open]')) return;
+  if (uiMenuFrame || !document.querySelector(".tool-menu[open]")) return;
   uiMenuFrame = requestAnimationFrame(() => {
     uiMenuFrame = 0;
     // ui.js loads before app.js supplies its global DOM helpers.
-    document.querySelectorAll('.tool-menu[open]').forEach(uiPositionMenu);
+    document.querySelectorAll(".tool-menu[open]").forEach(uiPositionMenu);
   });
 }
-window.addEventListener('pagehide', () => {
+window.addEventListener("pagehide", () => {
   if (uiMenuFrame) cancelAnimationFrame(uiMenuFrame);
   uiMenuFrame = 0;
 });
-window.addEventListener('pageshow', uiRepositionMenus);
-window.addEventListener('resize', uiRepositionMenus);
+window.addEventListener("pageshow", uiRepositionMenus);
+window.addEventListener("resize", uiRepositionMenus);
 document.addEventListener(
-  'scroll',
+  "scroll",
   (event) => {
-    if (!event.target.closest?.('.tool-menu-items')) uiRepositionMenus();
+    if (!event.target.closest?.(".tool-menu-items")) uiRepositionMenus();
   },
   true,
 );
-window.visualViewport?.addEventListener('resize', uiRepositionMenus);
-window.visualViewport?.addEventListener('scroll', uiRepositionMenus);
-const uiMobileMedia = matchMedia('(max-width:900px)');
-const uiCompactSheetMedia = matchMedia('(max-width:640px)');
-const uiDockPages = new Set(['overview', 'projects', 'vps', 'native']);
-function uiSyncDockSpace(keyboardOpen = document.body?.classList.contains('ui-keyboard-open')) {
+window.visualViewport?.addEventListener("resize", uiRepositionMenus);
+window.visualViewport?.addEventListener("scroll", uiRepositionMenus);
+const uiMobileMedia = matchMedia("(max-width:900px)");
+const uiCompactSheetMedia = matchMedia("(max-width:640px)");
+const uiDockPages = new Set(["overview", "projects", "vps", "native"]);
+function uiSyncDockSpace(
+  keyboardOpen = document.body?.classList.contains("ui-keyboard-open"),
+) {
   const root = document.documentElement;
   if (!uiMobileMedia.matches) {
-    root.style.setProperty('--ui-dock-space', '0px');
+    root.style.setProperty("--ui-dock-space", "0px");
     return;
   }
   const immersed =
     Boolean(keyboardOpen) ||
-    Boolean(document.body?.classList.contains('chat-mode')) ||
-    Boolean(document.body?.classList.contains('cr-immersion')) ||
-    Boolean(document.querySelector('.vt-expanded')) ||
-    Boolean(document.querySelector('.modal'));
+    Boolean(document.body?.classList.contains("chat-mode")) ||
+    Boolean(document.body?.classList.contains("cr-immersion")) ||
+    Boolean(document.querySelector(".vt-expanded")) ||
+    Boolean(document.querySelector(".modal"));
   root.style.setProperty(
-    '--ui-dock-space',
-    immersed ? 'var(--safe-bottom)' : 'calc(84px + var(--safe-bottom))',
+    "--ui-dock-space",
+    immersed ? "var(--safe-bottom)" : "calc(84px + var(--safe-bottom))",
   );
 }
 function uiSyncTopbarBack() {
-  const backBtn = document.querySelector('.topbar-back');
-  if (!backBtn || typeof S === 'undefined') return;
-  let target = '';
+  const backBtn = document.querySelector(".topbar-back");
+  if (!backBtn || typeof S === "undefined") return;
+  let target = "";
   if (uiMobileMedia.matches && S.session) {
-    if (S.page === 'workbench') {
-      const prev = typeof mainPathContext === 'function' ? mainPathContext().previous : '';
-      if (prev && prev !== 'workbench' && CodePierIdentity?.canNavigate?.(prev)) target = prev;
-      else if (CodePierIdentity?.canNavigate?.('projects')) target = 'projects';
+    if (S.page === "workbench") {
+      const prev =
+        typeof mainPathContext === "function" ? mainPathContext().previous : "";
+      if (prev && prev !== "workbench" && CodePierIdentity?.canNavigate?.(prev))
+        target = prev;
+      else if (CodePierIdentity?.canNavigate?.("projects")) target = "projects";
     } else if (
-      typeof tabParent !== 'undefined' &&
+      typeof tabParent !== "undefined" &&
       tabParent[S.page] &&
       tabParent[S.page] !== S.page &&
       CodePierIdentity?.canNavigate?.(tabParent[S.page])
@@ -236,10 +429,12 @@ function uiSyncTopbarBack() {
   }
   if (target) {
     const label =
-      (typeof nav !== 'undefined' && nav.find((item) => item[0] === target)?.[2]) || '上一级';
+      (typeof nav !== "undefined" &&
+        nav.find((item) => item[0] === target)?.[2]) ||
+      "上一级";
     backBtn.hidden = false;
     backBtn.dataset.backTarget = target;
-    backBtn.setAttribute('aria-label', `返回${label}`);
+    backBtn.setAttribute("aria-label", `返回${label}`);
   } else {
     backBtn.hidden = true;
     delete backBtn.dataset.backTarget;
@@ -249,63 +444,65 @@ function uiSyncVpsDockBadge() {
   const vpsBtn = document.querySelector('.mobile-dock [data-nav="vps"]');
   if (!vpsBtn) return;
   const activeCount = (window.CodePierVpsTerminal?.list?.() || []).filter(
-    (item) => item && !['closed', 'exited', 'failed', 'revoked'].includes(item.state),
+    (item) =>
+      item && !["closed", "exited", "failed", "revoked"].includes(item.state),
   ).length;
-  let badgeNode = vpsBtn.querySelector('.dock-badge');
+  let badgeNode = vpsBtn.querySelector(".dock-badge");
   if (activeCount > 0) {
     if (!badgeNode) {
-      badgeNode = document.createElement('span');
-      badgeNode.className = 'dock-badge';
-      badgeNode.setAttribute('aria-hidden', 'true');
+      badgeNode = document.createElement("span");
+      badgeNode.className = "dock-badge";
+      badgeNode.setAttribute("aria-hidden", "true");
       vpsBtn.append(badgeNode);
     }
     badgeNode.textContent = String(activeCount);
-    vpsBtn.setAttribute('aria-label', `VPS，${activeCount} 个活跃终端`);
+    vpsBtn.setAttribute("aria-label", `VPS，${activeCount} 个活跃终端`);
   } else {
     badgeNode?.remove();
-    vpsBtn.setAttribute('aria-label', 'VPS');
+    vpsBtn.setAttribute("aria-label", "VPS");
   }
 }
 function uiSyncNavigation() {
-  $$('[data-nav]').forEach((b) => {
-    const inDock = Boolean(b.closest('.mobile-dock'));
+  uiSyncShellEdgeFades();
+  $$("[data-nav]").forEach((b) => {
+    const inDock = Boolean(b.closest(".mobile-dock"));
     const chosen =
-      inDock && b.dataset.nav === 'projects'
-        ? S.page === 'projects' || S.page === 'workbench'
+      inDock && b.dataset.nav === "projects"
+        ? S.page === "projects" || S.page === "workbench"
         : b.dataset.navGroup
           ? b.dataset.navGroup === (tabParent[S.page] || S.page)
           : b.dataset.nav === S.page;
-    b.classList.toggle('active', chosen);
-    if (chosen) b.setAttribute('aria-current', 'page');
-    else b.removeAttribute('aria-current');
+    b.classList.toggle("active", chosen);
+    if (chosen) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
   });
-  $$('[data-sheet-nav]').forEach((b) => {
-    b.classList.toggle('active', b.dataset.sheetNav === S.page);
+  $$("[data-sheet-nav]").forEach((b) => {
+    b.classList.toggle("active", b.dataset.sheetNav === S.page);
   });
   const more = $('.mobile-dock [data-action="toggle-menu"]');
-  const onDockRoute = uiDockPages.has(S.page) || S.page === 'workbench';
-  if (more) more.classList.toggle('active', !onDockRoute);
+  const onDockRoute = uiDockPages.has(S.page) || S.page === "workbench";
+  if (more) more.classList.toggle("active", !onDockRoute);
   uiSyncVpsDockBadge();
   uiSyncTopbarBack();
   uiSyncDockSpace();
-  if (typeof navActivitySync === 'function') navActivitySync();
+  if (typeof navActivitySync === "function") navActivitySync();
 }
 function uiResetNavSheetFilter(side) {
   if (!side) return;
-  const search = side.querySelector('.nav-sheet-search');
-  if (search) search.value = '';
-  side.querySelectorAll('.nav button, .nav-group').forEach((el) => {
+  const search = side.querySelector(".nav-sheet-search");
+  if (search) search.value = "";
+  side.querySelectorAll(".nav button, .nav-group").forEach((el) => {
     el.hidden = false;
   });
 }
 function uiFilterNavSheet(side, rawQuery) {
   if (!side) return;
-  const q = String(rawQuery || '')
+  const q = String(rawQuery || "")
     .trim()
     .toLocaleLowerCase();
-  side.querySelectorAll('.nav-group').forEach((group) => {
+  side.querySelectorAll(".nav-group").forEach((group) => {
     let visibleCount = 0;
-    group.querySelectorAll('button').forEach((btn) => {
+    group.querySelectorAll("button").forEach((btn) => {
       const match = !q || btn.textContent.toLocaleLowerCase().includes(q);
       btn.hidden = !match;
       if (match) visibleCount++;
@@ -314,16 +511,18 @@ function uiFilterNavSheet(side, rawQuery) {
   });
 }
 function uiBindSidebarSheetGestures(side, scrim) {
-  if (!side || side.dataset.sheetGestureBound === 'true') return;
-  side.dataset.sheetGestureBound = 'true';
-  const search = side.querySelector('.nav-sheet-search');
+  if (!side || side.dataset.sheetGestureBound === "true") return;
+  side.dataset.sheetGestureBound = "true";
+  const search = side.querySelector(".nav-sheet-search");
   if (search) {
-    search.addEventListener('input', () => uiFilterNavSheet(side, search.value));
+    search.addEventListener("input", () =>
+      uiFilterNavSheet(side, search.value),
+    );
   }
-  if (scrim && scrim.dataset.touchBound !== 'true') {
-    scrim.dataset.touchBound = 'true';
+  if (scrim && scrim.dataset.touchBound !== "true") {
+    scrim.dataset.touchBound = "true";
     scrim.addEventListener(
-      'touchmove',
+      "touchmove",
       (ev) => {
         if (ev.cancelable) ev.preventDefault();
       },
@@ -334,28 +533,30 @@ function uiBindSidebarSheetGestures(side, scrim) {
     startY = 0,
     canSwipeSheet = false;
   side.addEventListener(
-    'touchstart',
+    "touchstart",
     (ev) => {
       const t = ev.touches?.[0];
-      if (!t || !side.classList.contains('open')) return;
+      if (!t || !side.classList.contains("open")) return;
       startX = t.clientX;
       startY = t.clientY;
-      const navEl = side.querySelector('.nav');
+      const navEl = side.querySelector(".nav");
       const atTop =
-        side.scrollTop <= 2 && (!navEl || !navEl.contains(ev.target) || navEl.scrollTop <= 2);
+        side.scrollTop <= 2 &&
+        (!navEl || !navEl.contains(ev.target) || navEl.scrollTop <= 2);
       canSwipeSheet = !uiCompactSheetMedia.matches || atTop;
     },
     { passive: true },
   );
   side.addEventListener(
-    'touchend',
+    "touchend",
     (ev) => {
       const t = ev.changedTouches?.[0];
-      if (!t || !side.classList.contains('open')) return;
+      if (!t || !side.classList.contains("open")) return;
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       if (uiCompactSheetMedia.matches) {
-        if (canSwipeSheet && dy > 56 && dy > Math.abs(dx) * 1.35) uiSetMenu(false);
+        if (canSwipeSheet && dy > 56 && dy > Math.abs(dx) * 1.35)
+          uiSetMenu(false);
       } else if (dx < -56 && Math.abs(dx) > Math.abs(dy) * 1.35) {
         uiSetMenu(false);
       }
@@ -364,69 +565,75 @@ function uiBindSidebarSheetGestures(side, scrim) {
   );
 }
 function uiSetMenu(value, restore = true, origin = null) {
-  const side = $('.sidebar'),
-    main = $('.main'),
-    scrim = $('.sidebar-scrim');
+  const side = $(".sidebar"),
+    main = $(".main"),
+    scrim = $(".sidebar-scrim");
   if (!side) return;
   uiBindSidebarSheetGestures(side, scrim);
   const mobile = uiMobileMedia.matches;
-  const open = mobile && (value === undefined ? !side.classList.contains('open') : !!value);
+  const open =
+    mobile &&
+    (value === undefined ? !side.classList.contains("open") : !!value);
   if (open) {
-    const trigger = origin || document.activeElement?.closest?.('[data-action="toggle-menu"]');
+    const trigger =
+      origin ||
+      document.activeElement?.closest?.('[data-action="toggle-menu"]');
     if (trigger?.isConnected) S.uiMenuTrigger = trigger;
   } else {
     uiResetNavSheetFilter(side);
   }
-  side.classList.toggle('open', open);
+  side.classList.toggle("open", open);
   side.inert = mobile && !open;
-  side.setAttribute('aria-hidden', String(mobile && !open));
+  side.setAttribute("aria-hidden", String(mobile && !open));
   if (scrim) scrim.hidden = !open;
   if (main) main.inert = open;
   $$('[data-action="toggle-menu"][aria-controls="sidebar"]').forEach((button) =>
-    button.setAttribute('aria-expanded', String(open)),
+    button.setAttribute("aria-expanded", String(open)),
   );
-  document.body.style.overflow = open || $('.modal') ? 'hidden' : '';
+  document.body.style.overflow = open || $(".modal") ? "hidden" : "";
   if (open) {
-    side.setAttribute('role', 'dialog');
-    side.setAttribute('aria-modal', 'true');
+    side.setAttribute("role", "dialog");
+    side.setAttribute("aria-modal", "true");
+    uiSyncShellEdgeFades(side);
     requestAnimationFrame(() => {
-      if (side.isConnected && side.classList.contains('open') && !$('.modal'))
-        $('.mobile-close', side)?.focus({ preventScroll: true });
+      if (side.isConnected && side.classList.contains("open") && !$(".modal"))
+        $(".mobile-close", side)?.focus({ preventScroll: true });
     });
   } else {
-    side.removeAttribute('role');
-    side.removeAttribute('aria-modal');
+    side.removeAttribute("role");
+    side.removeAttribute("aria-modal");
     const trigger =
       S.uiMenuTrigger?.isConnected && S.uiMenuTrigger.getClientRects().length
         ? S.uiMenuTrigger
-        : $('.mobile-menu');
-    if (restore && mobile && trigger?.isConnected) trigger.focus({ preventScroll: true });
+        : $(".mobile-menu");
+    if (restore && mobile && trigger?.isConnected)
+      trigger.focus({ preventScroll: true });
     S.uiMenuTrigger = null;
   }
 }
 function uiSetPane(pane, focus = false) {
-  if (!['files', 'editor', 'output'].includes(pane)) return;
+  if (!["files", "editor", "output"].includes(pane)) return;
   S.work.pane = pane;
-  if ($('#page')) $('#page').dataset.workPane = pane;
-  const area = $('.workspace');
+  if ($("#page")) $("#page").dataset.workPane = pane;
+  const area = $(".workspace");
   if (area) area.dataset.pane = pane;
-  $$('[data-ui-pane]').forEach((b) => {
+  $$("[data-ui-pane]").forEach((b) => {
     const selected = b.dataset.uiPane === pane;
-    b.classList.toggle('active', selected);
-    b.setAttribute('aria-pressed', String(selected));
+    b.classList.toggle("active", selected);
+    b.setAttribute("aria-pressed", String(selected));
   });
   if (focus && uiMobileMedia.matches) {
     const target =
-      pane === 'output'
-        ? $('#task-output')
-        : pane === 'editor'
-          ? $('#code-editor')
+      pane === "output"
+        ? $("#task-output")
+        : pane === "editor"
+          ? $("#code-editor")
           : $('[data-action="tree-home"]');
     target?.focus({ preventScroll: true });
   }
 }
 function uiApplyInputSemantics(root) {
-  if (typeof CP?.ui?.applyKeyboardHygiene === 'function') {
+  if (typeof CP?.ui?.applyKeyboardHygiene === "function") {
     CP.ui.applyKeyboardHygiene(root);
     return;
   }
@@ -436,60 +643,62 @@ function uiApplyInputSemantics(root) {
       'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea',
     )
     .forEach((control) => {
-      const type = (control.getAttribute('type') || 'text').toLowerCase();
-      const key = [control.name, control.id].filter(Boolean).join(' ');
+      const type = (control.getAttribute("type") || "text").toLowerCase();
+      const key = [control.name, control.id].filter(Boolean).join(" ");
       const labelEl =
         control.labels?.[0] ||
-        control.closest('.field')?.querySelector(':scope > label, .field-label');
+        control
+          .closest(".field")
+          ?.querySelector(":scope > label, .field-label");
       const hint = [
-        labelEl?.textContent || '',
-        control.getAttribute('aria-label') || '',
-        control.getAttribute('placeholder') || '',
-      ].join(' ');
+        labelEl?.textContent || "",
+        control.getAttribute("aria-label") || "",
+        control.getAttribute("placeholder") || "",
+      ].join(" ");
       const setAttr = (attr, val) => {
         if (!control.hasAttribute(attr)) control.setAttribute(attr, val);
       };
       if (
-        type === 'search' ||
+        type === "search" ||
         /(?:^|[_-])(query|search|filter)(?:$|[_-])/i.test(key) ||
         /(搜索|筛选|查找)/.test(hint)
       ) {
-        setAttr('autocapitalize', 'none');
-        setAttr('autocorrect', 'off');
-        setAttr('spellcheck', 'false');
-        setAttr('enterkeyhint', 'search');
+        setAttr("autocapitalize", "none");
+        setAttr("autocorrect", "off");
+        setAttr("spellcheck", "false");
+        setAttr("enterkeyhint", "search");
         return;
       }
       if (
-        type === 'url' ||
+        type === "url" ||
         /(?:^|[_-])(url|uri|endpoint|webhook|callback|redirect|origin|issuer)(?:$|[_-])/i.test(
           key,
         ) ||
         /(回调地址|连接地址|服务地址|网关地址|Webhook|URL)/i.test(hint)
       ) {
-        setAttr('inputmode', 'url');
-        setAttr('autocapitalize', 'none');
-        setAttr('autocorrect', 'off');
-        setAttr('spellcheck', 'false');
+        setAttr("inputmode", "url");
+        setAttr("autocapitalize", "none");
+        setAttr("autocorrect", "off");
+        setAttr("spellcheck", "false");
         return;
       }
       if (
-        control.tagName === 'INPUT' &&
-        (type === 'number' ||
+        control.tagName === "INPUT" &&
+        (type === "number" ||
           /(?:^|[_-])(port|timeout|ttl|seconds|days|limit|offset|quota|retries|interval)(?:$|[_-])/i.test(
             key,
           ) ||
           /(端口|超时|秒数|配额|阈值|上限)/.test(hint))
       ) {
-        setAttr('inputmode', 'numeric');
-        setAttr('autocapitalize', 'none');
-        setAttr('autocorrect', 'off');
-        setAttr('spellcheck', 'false');
+        setAttr("inputmode", "numeric");
+        setAttr("autocapitalize", "none");
+        setAttr("autocorrect", "off");
+        setAttr("spellcheck", "false");
         return;
       }
       if (
-        type === 'password' ||
-        type === 'email' ||
+        type === "password" ||
+        type === "email" ||
         /(user|account|login|email|host|ip|domain|addr|path|root|dir|file|glob|slug|token|secret|bearer|cmd|command|shell|arg|env|repo|branch|sha|hash|bundle|app|network|group|issuer|client|audience|scope|key_id)/i.test(
           key,
         ) ||
@@ -497,102 +706,111 @@ function uiApplyInputSemantics(root) {
           hint,
         )
       ) {
-        setAttr('autocapitalize', 'none');
-        setAttr('autocorrect', 'off');
-        setAttr('spellcheck', 'false');
+        setAttr("autocapitalize", "none");
+        setAttr("autocorrect", "off");
+        setAttr("spellcheck", "false");
       }
     });
 }
 function uiLabelFields(root) {
-  $$('.field', root).forEach((field) => {
-    const label = field.matches('label') ? field : $(':scope > label', field);
-    if (!label || label.classList.contains('check')) return;
+  $$(".field", root).forEach((field) => {
+    const label = field.matches("label") ? field : $(":scope > label", field);
+    if (!label || label.classList.contains("check")) return;
     let caption = label;
     if (label === field) {
-      caption = $(':scope > .field-label', label);
+      caption = $(":scope > .field-label", label);
       if (!caption) {
-        caption = document.createElement('span');
-        caption.className = 'field-label';
-        const text = [...label.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE);
+        caption = document.createElement("span");
+        caption.className = "field-label";
+        const text = [...label.childNodes].filter(
+          (node) => node.nodeType === Node.TEXT_NODE,
+        );
         caption.append(...text);
         label.prepend(caption);
       }
     }
-    const group = $(':scope > .check-list', field);
+    const group = $(":scope > .check-list", field);
     if (group && !label.control) {
-      if (!label.id) label.id = 'group-' + uid();
-      group.setAttribute('role', 'group');
-      group.setAttribute('aria-labelledby', label.id);
+      if (!label.id) label.id = "group-" + uid();
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-labelledby", label.id);
       return;
     }
-    const control = label.control || $('input:not([type="hidden"]),select,textarea', field);
+    const control =
+      label.control || $('input:not([type="hidden"]),select,textarea', field);
     if (!control) return;
-    if (!control.id) control.id = 'field-' + uid();
+    if (!control.id) control.id = "field-" + uid();
     if (!label.contains(control)) label.htmlFor = control.id;
-    if (control.required && !$('.field-required', caption)) {
-      const mark = document.createElement('span');
-      mark.className = 'field-required';
-      mark.textContent = '必填';
-      mark.setAttribute('aria-hidden', 'true');
+    if (control.required && !$(".field-required", caption)) {
+      const mark = document.createElement("span");
+      mark.className = "field-required";
+      mark.textContent = "必填";
+      mark.setAttribute("aria-hidden", "true");
       caption.append(mark);
     }
     const descriptions = new Set(
-      (control.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean),
+      (control.getAttribute("aria-describedby") || "")
+        .split(/\s+/)
+        .filter(Boolean),
     );
-    $$(':scope > small,:scope > .field-hint', field).forEach((hint) => {
-      if (!hint.id) hint.id = 'hint-' + uid();
+    $$(":scope > small,:scope > .field-hint", field).forEach((hint) => {
+      if (!hint.id) hint.id = "hint-" + uid();
       descriptions.add(hint.id);
     });
-    if (descriptions.size) control.setAttribute('aria-describedby', [...descriptions].join(' '));
+    if (descriptions.size)
+      control.setAttribute("aria-describedby", [...descriptions].join(" "));
   });
   uiApplyInputSemantics(root);
 }
 // Native constraints remain authoritative. No validation request or global DOM scan.
 document.addEventListener(
-  'invalid',
+  "invalid",
   (e) => {
     const control = e.target;
-    if (control.matches?.('.field input,.field select,.field textarea')) {
-      control.setAttribute('aria-invalid', 'true');
-      let disclosure = control.closest('details:not([open])');
+    if (control.matches?.(".field input,.field select,.field textarea")) {
+      control.setAttribute("aria-invalid", "true");
+      let disclosure = control.closest("details:not([open])");
       while (disclosure) {
         disclosure.open = true;
-        disclosure = disclosure.parentElement?.closest('details:not([open])');
+        disclosure = disclosure.parentElement?.closest("details:not([open])");
       }
     }
   },
   true,
 );
-document.addEventListener('input', (e) => {
+document.addEventListener("input", (e) => {
   const control = e.target;
-  if (control.matches?.('.field input,.field select,.field textarea') && control.validity.valid)
-    control.removeAttribute('aria-invalid');
+  if (
+    control.matches?.(".field input,.field select,.field textarea") &&
+    control.validity.valid
+  )
+    control.removeAttribute("aria-invalid");
 });
 function uiFilterProjects() {
-  const input = $('#project-query');
+  const input = $("#project-query");
   if (!input) return;
   const query = input.value.trim().toLocaleLowerCase();
   S.uiProjectQuery = input.value;
   let count = 0;
-  $$('[data-project-row]').forEach((row) => {
+  $$("[data-project-row]").forEach((row) => {
     row.hidden = !row.dataset.projectSearch.includes(query);
     if (!row.hidden) count++;
   });
-  const status = $('#project-count');
+  const status = $("#project-count");
   if (status) status.textContent = `${count} / ${S.projects.length} 个项目`;
-  const empty = $('#project-no-match');
+  const empty = $("#project-no-match");
   if (empty) empty.hidden = count > 0;
 }
 function uiFilterTools() {
-  const input = $('#tool-query');
+  const input = $("#tool-query");
   if (!input) return;
   const query = input.value.trim().toLocaleLowerCase();
   let count = 0;
-  $$('[data-tool-name]').forEach((chip) => {
+  $$("[data-tool-name]").forEach((chip) => {
     chip.hidden = !chip.dataset.toolName.includes(query);
     if (!chip.hidden) count++;
   });
-  const countNode = $('#tool-count');
+  const countNode = $("#tool-count");
   if (countNode) countNode.textContent = `${count} 项`;
 }
 // Preserve the original click target until a held pointer gesture finishes.
@@ -600,38 +818,41 @@ function uiFilterTools() {
 const uiPagePointers = new Set(),
   uiPagePointerWaiters = new Set();
 document.addEventListener(
-  'pointerdown',
+  "pointerdown",
   (event) => {
-    if (event.button === 0 && event.target.closest('#page')) {
+    if (event.button === 0 && event.target.closest("#page")) {
       uiPagePointers.add(event.pointerId);
-      document.body.classList.add('ui-page-press');
+      document.body.classList.add("ui-page-press");
     }
   },
   true,
 );
 function uiReleasePagePointer(event) {
-  if (event.type === 'blur') uiPagePointers.clear();
+  if (event.type === "blur") uiPagePointers.clear();
   else uiPagePointers.delete(event.pointerId);
   if (!uiPagePointers.size)
     setTimeout(() => {
       if (uiPagePointers.size) return;
-      document.body.classList.remove('ui-page-press');
+      document.body.classList.remove("ui-page-press");
       for (const resolve of uiPagePointerWaiters) resolve();
       uiPagePointerWaiters.clear();
     }, 0); // Let the matching click dispatch before a background render resumes.
 }
-for (const type of ['pointerup', 'pointercancel'])
+for (const type of ["pointerup", "pointercancel"])
   window.addEventListener(type, uiReleasePagePointer, true);
-window.addEventListener('blur', uiReleasePagePointer);
+window.addEventListener("blur", uiReleasePagePointer);
 async function uiWaitForPagePointer() {
-  while (uiPagePointers.size) await new Promise((resolve) => uiPagePointerWaiters.add(resolve));
+  while (uiPagePointers.size)
+    await new Promise((resolve) => uiPagePointerWaiters.add(resolve));
 }
 function uiCapturePage() {
-  const page = $('#page');
+  const page = $("#page");
   if (!page) return null;
   const active = document.activeElement;
   return {
-    opened: $$('details[open]', page).map((d) => d.id || $('summary', d)?.textContent),
+    opened: $$("details[open]", page).map(
+      (d) => d.id || $("summary", d)?.textContent,
+    ),
     field:
       page.contains(active) && active.id
         ? {
@@ -647,25 +868,25 @@ const UI_FULL_SPAN_HEADER_RE =
   /(路径|目录|哈希|摘要|指纹|地址|链接|作用域|范围|命令|参数|目标|说明|备注|公钥|凭据|sha|hash|token|url|uri|host|endpoint|path|scope|command|fingerprint)/i;
 
 function uiEnhanceResponsiveTables(page) {
-  $$('.data-table', page).forEach((table) => {
-    table.classList.add('responsive-table');
-    table.setAttribute('role', 'table');
-    const headers = $$('thead th', table);
-    headers.forEach((th) => th.setAttribute('scope', 'col'));
-    $$('tbody tr', table).forEach((row) => {
-      row.setAttribute('role', 'row');
+  $$(".data-table", page).forEach((table) => {
+    table.classList.add("responsive-table");
+    table.setAttribute("role", "table");
+    const headers = $$("thead th", table);
+    headers.forEach((th) => th.setAttribute("scope", "col"));
+    $$("tbody tr", table).forEach((row) => {
+      row.setAttribute("role", "row");
       [...row.cells].forEach((cell, i) => {
-        const label = headers[i]?.textContent?.trim() || '';
+        const label = headers[i]?.textContent?.trim() || "";
         cell.dataset.label = label;
-        cell.setAttribute('role', 'cell');
-        const textLen = (cell.textContent || '').trim().length;
+        cell.setAttribute("role", "cell");
+        const textLen = (cell.textContent || "").trim().length;
         if (
-          cell.classList.contains('mono') ||
-          cell.querySelector('code, .mono, .actions, pre') ||
+          cell.classList.contains("mono") ||
+          cell.querySelector("code, .mono, .actions, pre") ||
           textLen > 28 ||
           UI_FULL_SPAN_HEADER_RE.test(label)
         ) {
-          cell.dataset.span = 'full';
+          cell.dataset.span = "full";
         } else {
           delete cell.dataset.span;
         }
@@ -675,45 +896,45 @@ function uiEnhanceResponsiveTables(page) {
 }
 
 function uiBindTabScrollFades(page) {
-  $$('.page-tabs, .management-tabs', page).forEach((bar) => {
+  $$(".page-tabs, .management-tabs", page).forEach((bar) => {
     const syncFade = () => {
       bar.dataset.scrollFade = String(
         bar.scrollWidth > bar.clientWidth + 4 &&
           bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 4,
       );
     };
-    bar.addEventListener('scroll', syncFade, { passive: true });
+    bar.addEventListener("scroll", syncFade, { passive: true });
     requestAnimationFrame(syncFade);
   });
 }
 
 function uiEnhanceArtifactCards(page) {
-  if (S.page !== 'artifacts') return;
-  $$('.artifact-card', page).forEach((card) => {
-    if (!card.querySelector('.artifact-type-badge')) {
-      const rawName = (card.querySelector('h2')?.textContent || '').trim();
+  if (S.page !== "artifacts") return;
+  $$(".artifact-card", page).forEach((card) => {
+    if (!card.querySelector(".artifact-type-badge")) {
+      const rawName = (card.querySelector("h2")?.textContent || "").trim();
       const ext = /\.tar\.(?:gz|xz|bz2)$/i.test(rawName)
-        ? 'TAR'
-        : (rawName.includes('.') ? rawName.split('.').pop() : 'FILE')
-            .replace(/[^a-z0-9]/gi, '')
+        ? "TAR"
+        : (rawName.includes(".") ? rawName.split(".").pop() : "FILE")
+            .replace(/[^a-z0-9]/gi, "")
             .slice(0, 4)
-            .toUpperCase() || 'FILE';
-      const badgeEl = document.createElement('span');
-      badgeEl.className = 'artifact-type-badge';
-      badgeEl.setAttribute('aria-hidden', 'true');
+            .toUpperCase() || "FILE";
+      const badgeEl = document.createElement("span");
+      badgeEl.className = "artifact-type-badge";
+      badgeEl.setAttribute("aria-hidden", "true");
       badgeEl.textContent = ext;
       card.prepend(badgeEl);
     }
-    const shaCode = card.querySelector('.artifact-hash code');
-    const sha = shaCode?.textContent?.trim() || '';
+    const shaCode = card.querySelector(".artifact-hash code");
+    const sha = shaCode?.textContent?.trim() || "";
     if (shaCode && sha && !shaCode.dataset.copy) {
       shaCode.dataset.copy = sha;
-      shaCode.classList.add('artifact-sha-copy');
-      shaCode.setAttribute('role', 'button');
+      shaCode.classList.add("artifact-sha-copy");
+      shaCode.setAttribute("role", "button");
       shaCode.tabIndex = 0;
-      shaCode.setAttribute('title', '点击复制 SHA-256');
+      shaCode.setAttribute("title", "点击复制 SHA-256");
       shaCode.onkeydown = (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') {
+        if (ev.key === "Enter" || ev.key === " ") {
           ev.preventDefault();
           shaCode.click();
         }
@@ -723,16 +944,16 @@ function uiEnhanceArtifactCards(page) {
 }
 
 function uiPageReady(animate = false, presentation = null) {
-  const page = $('#page');
+  const page = $("#page");
   if (!page) return;
-  document.title = `${nav.find((n) => n[0] === S.page)?.[2] || '控制台'} · CodePier`;
+  document.title = `${nav.find((n) => n[0] === S.page)?.[2] || "控制台"} · CodePier`;
   page.dataset.page = S.page;
-  page.removeAttribute('aria-busy');
-  page.classList.remove('management-page');
+  page.removeAttribute("aria-busy");
+  page.classList.remove("management-page");
   if (animate) {
-    page.classList.remove('page-arrive');
+    page.classList.remove("page-arrive");
     void page.offsetWidth;
-    page.classList.add('page-arrive');
+    page.classList.add("page-arrive");
   }
   uiSyncNavigation();
   uiEnhanceResponsiveTables(page);
@@ -740,60 +961,68 @@ function uiPageReady(animate = false, presentation = null) {
   uiBindTabScrollFades(page);
   uiEnhanceArtifactCards(page);
   uiLabelFields(page);
-  const projectInput = $('#project-query');
+  const projectInput = $("#project-query");
   if (projectInput) {
-    projectInput.value = S.uiProjectQuery || '';
+    projectInput.value = S.uiProjectQuery || "";
     projectInput.oninput = uiFilterProjects;
     uiFilterProjects();
   }
-  const tools = $('#tool-query');
+  const tools = $("#tool-query");
   if (tools) {
     tools.oninput = uiFilterTools;
     uiFilterTools();
   }
-  if (S.page === 'workbench') uiSetPane(S.work.pane || (S.work.path ? 'editor' : 'files'));
-  const heading = $('h1', page);
+  if (S.page === "workbench")
+    uiSetPane(S.work.pane || (S.work.path ? "editor" : "files"));
+  const heading = $("h1", page);
   if (heading) heading.tabIndex = -1;
   if (presentation) {
-    $$('details', page).forEach((d) => {
-      if (presentation.opened.includes(d.id || $('summary', d)?.textContent)) d.open = true;
+    $$("details", page).forEach((d) => {
+      if (presentation.opened.includes(d.id || $("summary", d)?.textContent))
+        d.open = true;
     });
     const saved = presentation.field,
       field = saved && document.getElementById(saved.id);
     if (field && page.contains(field)) {
       if (saved.value !== undefined) field.value = saved.value;
       field.focus({ preventScroll: true });
-      if (typeof saved.start === 'number' && typeof field.setSelectionRange === 'function')
+      if (
+        typeof saved.start === "number" &&
+        typeof field.setSelectionRange === "function"
+      )
         try {
           field.setSelectionRange(saved.start, saved.end);
         } catch {}
-      if (field.id === 'project-query') uiFilterProjects();
+      if (field.id === "project-query") uiFilterProjects();
     }
   }
 }
 async function uiCommand() {
-  if (!S.session || $('.modal')) return;
+  if (!S.session || $(".modal")) return;
   // One entry point for keyboard and buttons; chat adds session actions to global routes.
-  if ($('#chat-root') && typeof chatPalette === 'function') return chatPalette();
+  if ($("#chat-root") && typeof chatPalette === "function")
+    return chatPalette();
   uiSetMenu(false, false);
   const session = S.session;
   const dialog = modal(
-    '快速前往',
-    `<div class="command-search">${icon('search')}<input id="command-query" autofocus role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="搜索页面或项目" placeholder="搜索页面或项目" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-controls="command-results"></div><div class="command-results" id="command-results" role="listbox" aria-label="页面与项目"></div><p class="command-hint">↑ ↓ 选择 · Enter 打开 · Esc 关闭</p>`,
+    "快速前往",
+    `<div class="command-search">${icon("search")}<input id="command-query" autofocus role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="搜索页面或项目" placeholder="搜索页面或项目" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-controls="command-results"></div><div class="command-results" id="command-results" role="listbox" aria-label="页面与项目"></div><p class="command-hint">↑ ↓ 选择 · Enter 打开 · Esc 关闭</p>`,
   );
-  dialog.classList.add('command-dialog');
-  const input = $('#command-query', dialog),
-    results = $('#command-results', dialog);
+  dialog.classList.add("command-dialog");
+  const input = $("#command-query", dialog),
+    results = $("#command-results", dialog);
   let projects = [...S.projects],
     filtered = [],
     active = -1;
   const entries = () => {
-    const canVps = CodePierIdentity.canNavigate('vps');
+    const canVps = CodePierIdentity.canNavigate("vps");
     const vpsList = canVps && Array.isArray(S.vps) ? S.vps : [];
     const activeSessions =
-      canVps && typeof window !== 'undefined'
+      canVps && typeof window !== "undefined"
         ? (window.CodePierVpsTerminal?.list?.() || []).filter(
-            (item) => item && !['closed', 'exited', 'failed', 'revoked'].includes(item.state),
+            (item) =>
+              item &&
+              !["closed", "exited", "failed", "revoked"].includes(item.state),
           )
         : [];
     return [
@@ -803,100 +1032,117 @@ async function uiCommand() {
           id,
           ico,
           label,
-          kind: 'page',
-          hint: '页面',
+          kind: "page",
+          hint: "页面",
         })),
       ...activeSessions.map((item) => {
         const vps = vpsList.find((v) => v.id === item.vps_id);
-        const name = item.vps_name || item.title || vps?.name || 'SSH 终端';
-        const host = item.host || vps?.host || '';
-        const region = vps?.region || '';
-        const sid = item.session_id || item.id || '';
+        const name = item.vps_name || item.title || vps?.name || "SSH 终端";
+        const host = item.host || vps?.host || "";
+        const region = vps?.region || "";
+        const sid = item.session_id || item.id || "";
         return {
-          id: sid || item.vps_id || 'vps-terminal',
+          id: sid || item.vps_id || "vps-terminal",
           sessionId: sid,
-          ico: 'terminal',
+          ico: "terminal",
           label: `终端 · ${name}`,
-          kind: 'vps-session',
-          hint: [host, region, '活跃 SSH 终端'].filter(Boolean).join(' · '),
+          kind: "vps-session",
+          hint: [host, region, "活跃 SSH 终端"].filter(Boolean).join(" · "),
           search: [
             name,
             host,
             region,
-            item.username || vps?.username || '',
-            'ssh',
-            'terminal',
-          ].join(' '),
+            item.username || vps?.username || "",
+            "ssh",
+            "terminal",
+          ].join(" "),
         };
       }),
       ...projects.map((p) => ({
         id: p.id,
-        ico: 'folder',
+        ico: "folder",
         label: p.alias,
-        kind: 'project',
-        hint: p.device_name || '项目',
+        kind: "project",
+        hint: p.device_name || "项目",
       })),
       ...vpsList.map((v) => {
-        const canTerminal = v.enabled !== false && (!v.terminal || v.terminal.eligible !== false);
+        const canTerminal =
+          v.enabled !== false && (!v.terminal || v.terminal.eligible !== false);
         return {
           id: v.id,
-          ico: 'cloud',
+          ico: "cloud",
           label: v.name,
-          kind: 'vps',
+          kind: "vps",
           canTerminal,
           hint: [
             v.username ? `${v.username}@${v.host}` : v.host,
             v.region,
             v.provider,
-            v.enabled === false ? 'VPS · 已停用' : 'VPS · 打开终端',
+            v.enabled === false ? "VPS · 已停用" : "VPS · 打开终端",
           ]
             .filter(Boolean)
-            .join(' · '),
-          search: [v.name, v.host, v.region, v.provider, v.username, v.system, 'vps', 'ssh']
+            .join(" · "),
+          search: [
+            v.name,
+            v.host,
+            v.region,
+            v.provider,
+            v.username,
+            v.system,
+            "vps",
+            "ssh",
+          ]
             .filter(Boolean)
-            .join(' '),
+            .join(" "),
         };
       }),
     ];
   };
-  const itemKey = (item) => item && item.kind + ':' + item.id;
+  const itemKey = (item) => item && item.kind + ":" + item.id;
   function sync() {
-    $$('[data-command-index]', results).forEach((el, i) =>
-      el.setAttribute('aria-selected', String(i === active)),
+    $$("[data-command-index]", results).forEach((el, i) =>
+      el.setAttribute("aria-selected", String(i === active)),
     );
-    const option = active >= 0 ? $(`[data-command-index="${active}"]`, results) : null;
-    if (option) input.setAttribute('aria-activedescendant', option.id);
-    else input.removeAttribute('aria-activedescendant');
+    const option =
+      active >= 0 ? $(`[data-command-index="${active}"]`, results) : null;
+    if (option) input.setAttribute("aria-activedescendant", option.id);
+    else input.removeAttribute("aria-activedescendant");
   }
   function render(reset = true) {
     const selected = itemKey(filtered[active]),
       q = input.value.trim().toLocaleLowerCase();
     filtered = entries().filter((item) =>
-      (item.label + ' ' + item.id + ' ' + item.hint + ' ' + (item.search || ''))
+      (item.label + " " + item.id + " " + item.hint + " " + (item.search || ""))
         .toLocaleLowerCase()
         .includes(q),
     );
-    active = reset ? -1 : filtered.findIndex((item) => itemKey(item) === selected);
+    active = reset
+      ? -1
+      : filtered.findIndex((item) => itemKey(item) === selected);
     const previous = new Map(
-      $$('[data-command-key]', results).map((el) => [el.dataset.commandKey, el]),
+      $$("[data-command-key]", results).map((el) => [
+        el.dataset.commandKey,
+        el,
+      ]),
     );
     const buttons = filtered.map((item, i) => {
       const key = itemKey(item),
-        button = previous.get(key) || document.createElement('button');
-      button.type = 'button';
-      button.className = 'command-item';
+        button = previous.get(key) || document.createElement("button");
+      button.type = "button";
+      button.className = "command-item";
       button.id = `command-option-${i}`;
       button.dataset.commandKey = key;
       button.dataset.commandIndex = String(i);
-      button.setAttribute('role', 'option');
+      button.setAttribute("role", "option");
       button.tabIndex = -1;
-      button.setAttribute('aria-selected', 'false');
-      const content = `${icon(item.ico)}<span>${esc(item.label)}<small>${esc(item.hint)}</small></span>${icon('arrow')}`;
+      button.setAttribute("aria-selected", "false");
+      const content = `${icon(item.ico)}<span>${esc(item.label)}<small>${esc(item.hint)}</small></span>${icon("arrow")}`;
       if (button.innerHTML !== content) button.innerHTML = content;
       return button;
     });
     if (!buttons.length)
-      results.innerHTML = '<div class="empty" role="status">没有匹配的页面或项目</div>';
+      results.innerHTML =
+        '<div class="empty" role="status">没有匹配的页面或项目</div>';
     else if (
       buttons.length !== results.children.length ||
       buttons.some((button, i) => results.children[i] !== button)
@@ -908,38 +1154,38 @@ async function uiCommand() {
     const item = filtered[index];
     if (!item || session !== S.session || !dialog.isConnected) return;
     if (
-      item.kind === 'project' &&
+      item.kind === "project" &&
       S.work.dirty &&
       !(await CP.ui.confirmSheet({
-        title: '打开项目并放弃草稿？',
-        body: '打开项目将丢弃当前未保存草稿，是否继续？',
-        confirmLabel: '放弃草稿并打开',
+        title: "打开项目并放弃草稿？",
+        body: "打开项目将丢弃当前未保存草稿，是否继续？",
+        confirmLabel: "放弃草稿并打开",
         danger: true,
       }))
     )
       return;
     if (session !== S.session || !dialog.isConnected) return;
     closeModal(dialog);
-    if (item.kind === 'project') {
+    if (item.kind === "project") {
       resetWork(item.id);
-      await navigate('workbench');
+      await navigate("workbench");
       return;
     }
-    if (item.kind === 'vps-session') {
+    if (item.kind === "vps-session") {
       await navigate(
         item.sessionId
-          ? 'vps?view=terminal&session=' + encodeURIComponent(item.sessionId)
-          : 'vps?view=terminal',
+          ? "vps?view=terminal&session=" + encodeURIComponent(item.sessionId)
+          : "vps?view=terminal",
       );
       return;
     }
-    if (item.kind === 'vps') {
-      if (item.canTerminal && typeof vpsOpenTerminal === 'function') {
-        if (S.page !== 'vps') await navigate('vps');
+    if (item.kind === "vps") {
+      if (item.canTerminal && typeof vpsOpenTerminal === "function") {
+        if (S.page !== "vps") await navigate("vps");
         await vpsOpenTerminal(item.id);
       } else {
         S.vpsQuery = item.label;
-        await navigate('vps');
+        await navigate("vps");
       }
       return;
     }
@@ -947,12 +1193,14 @@ async function uiCommand() {
   }
   input.oninput = () => render();
   results.onclick = (e) => {
-    const button = e.target.closest('[data-command-index]');
+    const button = e.target.closest("[data-command-index]");
     if (button)
-      choose(Number(button.dataset.commandIndex)).catch((err) => toast(err.message, true));
+      choose(Number(button.dataset.commandIndex)).catch((err) =>
+        toast(err.message, true),
+      );
   };
   results.onfocusin = (e) => {
-    const option = e.target.closest('[data-command-index]');
+    const option = e.target.closest("[data-command-index]");
     if (option) {
       active = Number(option.dataset.commandIndex);
       sync();
@@ -960,21 +1208,22 @@ async function uiCommand() {
   };
   input.onkeydown = (e) => {
     if (e.isComposing) return;
-    if (['ArrowDown', 'ArrowUp'].includes(e.key)) {
+    if (["ArrowDown", "ArrowUp"].includes(e.key)) {
       e.preventDefault();
       if (!filtered.length) return;
       active =
         active < 0
-          ? e.key === 'ArrowDown'
+          ? e.key === "ArrowDown"
             ? 0
             : filtered.length - 1
-          : (active + (e.key === 'ArrowDown' ? 1 : -1) + filtered.length) % filtered.length;
+          : (active + (e.key === "ArrowDown" ? 1 : -1) + filtered.length) %
+            filtered.length;
       sync();
       $(`[data-command-index="${active}"]`, results)?.scrollIntoView({
-        block: 'nearest',
+        block: "nearest",
       });
     }
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       e.preventDefault();
       choose(Math.max(0, active)).catch((err) => toast(err.message, true));
     }
@@ -982,7 +1231,7 @@ async function uiCommand() {
   render();
   input.focus();
   try {
-    const r = await api('/api/projects');
+    const r = await api("/api/projects");
     if (dialog.isConnected && session === S.session) {
       projects = r.projects;
       S.projects = r.projects;
@@ -992,61 +1241,76 @@ async function uiCommand() {
     if (dialog.isConnected && session === S.session) toast(error.message, true);
   }
 }
-document.addEventListener('click', (e) => {
-  const button = e.target.closest('[data-ui]');
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-ui]");
   if (button && !button.disabled) {
-    if (button.dataset.ui === 'command') {
+    if (button.dataset.ui === "command") {
       uiCommand().catch((err) => toast(err.message, true));
     }
-    if (button.dataset.ui === 'close-menu') uiSetMenu(false);
-    if (button.dataset.ui === 'topbar-back' && button.dataset.backTarget) {
-      navigate(button.dataset.backTarget).catch((err) => toast(err.message, true));
+    if (button.dataset.ui === "close-menu") uiSetMenu(false);
+    if (button.dataset.ui === "topbar-back" && button.dataset.backTarget) {
+      navigate(button.dataset.backTarget).catch((err) =>
+        toast(err.message, true),
+      );
     }
-    if (button.dataset.ui === 'clear-project-query') {
-      const input = $('#project-query');
+    if (button.dataset.ui === "clear-project-query") {
+      const input = $("#project-query");
       if (input) {
-        input.value = '';
+        input.value = "";
         uiFilterProjects();
         input.focus();
       }
     }
   }
-  const pane = e.target.closest('[data-ui-pane]');
+  const pane = e.target.closest("[data-ui-pane]");
   if (pane) uiSetPane(pane.dataset.uiPane, true);
   // Native details retain keyboard semantics. Collapse only after the original action handler has run.
-  $$('.tool-menu[open], .chat-history-chips > details[open]').forEach((menu) => {
-    if (!menu.contains(e.target)) menu.open = false;
-    else if (e.target.closest('button')) setTimeout(() => menu.removeAttribute('open'), 0);
-  });
+  $$(".tool-menu[open], .chat-history-chips > details[open]").forEach(
+    (menu) => {
+      if (!menu.contains(e.target)) menu.open = false;
+      else if (e.target.closest("button"))
+        setTimeout(() => menu.removeAttribute("open"), 0);
+    },
+  );
 });
-document.addEventListener('keydown', (e) => {
-  if (e.defaultPrevented || e.target?.closest?.('dialog') || CP.ui.layerHost() !== document.body)
+document.addEventListener("keydown", (e) => {
+  if (
+    e.defaultPrevented ||
+    e.target?.closest?.("dialog") ||
+    CP.ui.layerHost() !== document.body
+  )
     return;
   // Native terminal editor keys belong to Pi/Codex, not the panel palette.
-  if (e.target?.closest?.('#native-terminal') && !$('.modal')) return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.isComposing) {
+  if (e.target?.closest?.("#native-terminal") && !$(".modal")) return;
+  if (
+    (e.ctrlKey || e.metaKey) &&
+    e.key.toLowerCase() === "k" &&
+    !e.isComposing
+  ) {
     if (!S.session) return;
     e.preventDefault();
-    if ($('.command-dialog')) closeModal();
-    else if (!$('.modal')) {
+    if ($(".command-dialog")) closeModal();
+    else if (!$(".modal")) {
       uiCommand().catch((err) => toast(err.message, true));
     }
     return;
   }
-  if ($('.modal')) return;
-  const side = $('.sidebar.open');
+  if ($(".modal")) return;
+  const side = $(".sidebar.open");
   if (side) {
-    if (e.key === 'Escape') {
+    if (e.key === "Escape") {
       e.preventDefault();
       uiSetMenu(false);
     } else uiTrapTab(e, side);
     return;
   }
-  if (e.key === 'Escape') {
-    $$('.tool-menu[open], .chat-history-chips > details[open]').forEach((menu) => {
-      menu.removeAttribute('open');
-      $('summary', menu)?.focus();
-    });
+  if (e.key === "Escape") {
+    $$(".tool-menu[open], .chat-history-chips > details[open]").forEach(
+      (menu) => {
+        menu.removeAttribute("open");
+        $("summary", menu)?.focus();
+      },
+    );
   }
 });
 const uiViewportChanged = () => {
@@ -1054,104 +1318,108 @@ const uiViewportChanged = () => {
   uiSyncTopbarBack();
   uiSyncDockSpace();
 };
-if (typeof uiMobileMedia.addEventListener === 'function')
-  uiMobileMedia.addEventListener('change', uiViewportChanged);
-else if (typeof uiMobileMedia.addListener === 'function')
+if (typeof uiMobileMedia.addEventListener === "function")
+  uiMobileMedia.addEventListener("change", uiViewportChanged);
+else if (typeof uiMobileMedia.addListener === "function")
   uiMobileMedia.addListener(uiViewportChanged);
 function uiSyncVisualViewport(event) {
   const viewport = window.visualViewport;
   const vvHeight = Math.max(0, viewport?.height || window.innerHeight || 0);
   const top = Math.max(0, viewport?.offsetTop || 0);
-  const covered = viewport ? Math.max(0, window.innerHeight - viewport.height - top) : 0;
+  const covered = viewport
+    ? Math.max(0, window.innerHeight - viewport.height - top)
+    : 0;
   const root = document.documentElement;
-  if (vvHeight) root.style.setProperty('--ui-vv-height', vvHeight + 'px');
-  root.style.setProperty('--ui-vv-top', top + 'px');
-  root.style.setProperty('--ui-vv-bottom', covered + 'px');
-  root.style.setProperty('--ui-visual-viewport-top', top + 'px');
-  root.style.setProperty('--ui-visual-viewport-bottom', covered + 'px');
+  if (vvHeight) root.style.setProperty("--ui-vv-height", vvHeight + "px");
+  root.style.setProperty("--ui-vv-top", top + "px");
+  root.style.setProperty("--ui-vv-bottom", covered + "px");
+  root.style.setProperty("--ui-visual-viewport-top", top + "px");
+  root.style.setProperty("--ui-visual-viewport-bottom", covered + "px");
   const keyboardOpen = covered > 96;
-  document.body?.classList.toggle('ui-keyboard-open', keyboardOpen);
+  document.body?.classList.toggle("ui-keyboard-open", keyboardOpen);
   uiSyncDockSpace(keyboardOpen);
-  if (!keyboardOpen || event?.type !== 'resize') return;
+  if (!keyboardOpen || event?.type !== "resize") return;
   const field = document.activeElement;
   if (!field?.matches('input,textarea,[contenteditable="true"]')) return;
-  const scrollArea = field.closest('.modal-body,dialog[open]');
+  const scrollArea = field.closest(".modal-body,dialog[open]");
   if (!scrollArea) return;
   const bounds = scrollArea.getBoundingClientRect();
   const control = field.getBoundingClientRect();
   if (control.top < bounds.top || control.bottom > bounds.bottom)
-    field.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    field.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
-window.addEventListener('resize', uiSyncVisualViewport);
+window.addEventListener("resize", uiSyncVisualViewport);
 if (window.visualViewport) {
-  window.visualViewport.addEventListener('resize', uiSyncVisualViewport);
-  window.visualViewport.addEventListener('scroll', uiSyncVisualViewport);
+  window.visualViewport.addEventListener("resize", uiSyncVisualViewport);
+  window.visualViewport.addEventListener("scroll", uiSyncVisualViewport);
 }
 uiSyncVisualViewport();
-if (typeof MutationObserver === 'function' && document.body) {
+if (typeof MutationObserver === "function" && document.body) {
   new MutationObserver(() => uiSyncDockSpace()).observe(document.body, {
     attributes: true,
-    attributeFilter: ['class'],
+    attributeFilter: ["class"],
   });
 }
 
 // Shared management composition. Only presentation state is retained in memory.
 function uiPermissionState(title, reason) {
   return (
-    heading(title, '', '当前空间的访问权限') +
-    `<section class="permission-state"><span class="permission-symbol">${icon('lock')}</span><h2>此页面需要相应的管理权限</h2><p>${esc(reason)}</p><p class="muted">当前空间：${esc(CodePierIdentity.current()?.label || '未选择')}</p><button class="btn" data-nav="identity">返回我的账号</button></section>`
+    heading(title, "", "当前空间的访问权限") +
+    `<section class="permission-state"><span class="permission-symbol">${icon("lock")}</span><h2>此页面需要相应的管理权限</h2><p>${esc(reason)}</p><p class="muted">当前空间：${esc(CodePierIdentity.current()?.label || "未选择")}</p><button class="btn" data-nav="identity">返回我的账号</button></section>`
   );
 }
 function uiSectionTabs(host, groups) {
   const key = S.page;
   const tabs = S.managementTabs || (S.managementTabs = {});
-  const bar = document.createElement('nav');
-  bar.className = 'management-tabs';
-  bar.setAttribute('role', 'tablist');
-  bar.setAttribute('aria-label', '页面分区');
-  const content = document.createElement('div');
-  content.className = 'management-tab-content';
+  const bar = document.createElement("nav");
+  bar.className = "management-tabs";
+  bar.setAttribute("role", "tablist");
+  bar.setAttribute("aria-label", "页面分区");
+  const content = document.createElement("div");
+  content.className = "management-tab-content";
   const choose = (id, focus = false) => {
     tabs[key] = id;
     for (const button of bar.children) {
       const active = button.dataset.section === id;
-      button.setAttribute('aria-selected', String(active));
+      button.setAttribute("aria-selected", String(active));
       button.tabIndex = active ? 0 : -1;
       if (active && focus) button.focus();
     }
-    for (const panel of content.children) panel.hidden = panel.dataset.section !== id;
+    for (const panel of content.children)
+      panel.hidden = panel.dataset.section !== id;
   };
   for (const group of groups) {
-    const button = document.createElement('button');
-    button.type = 'button';
+    const button = document.createElement("button");
+    button.type = "button";
     button.textContent = group.label;
-    button.id = 'section-tab-' + group.id;
+    button.id = "section-tab-" + group.id;
     button.dataset.section = group.id;
-    button.setAttribute('role', 'tab');
-    button.setAttribute('aria-controls', 'section-panel-' + group.id);
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-controls", "section-panel-" + group.id);
     button.onclick = () => choose(group.id);
-    const pane = document.createElement('section');
-    pane.id = 'section-panel-' + group.id;
-    pane.className = 'management-grid';
+    const pane = document.createElement("section");
+    pane.id = "section-panel-" + group.id;
+    pane.className = "management-grid";
     pane.dataset.section = group.id;
-    pane.setAttribute('role', 'tabpanel');
-    pane.setAttribute('aria-labelledby', button.id);
+    pane.setAttribute("role", "tabpanel");
+    pane.setAttribute("aria-labelledby", button.id);
     pane.tabIndex = 0;
     pane.append(...group.panels);
     bar.append(button);
     content.append(pane);
   }
   bar.onkeydown = (event) => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     const current = [...bar.children].indexOf(document.activeElement);
     if (current < 0) return;
     event.preventDefault();
     const next =
-      event.key === 'Home'
+      event.key === "Home"
         ? 0
-        : event.key === 'End'
+        : event.key === "End"
           ? groups.length - 1
-          : (current + (event.key === 'ArrowRight' ? 1 : -1) + groups.length) % groups.length;
+          : (current + (event.key === "ArrowRight" ? 1 : -1) + groups.length) %
+            groups.length;
     choose(groups[next].id, true);
   };
   host.append(bar, content);
@@ -1159,44 +1427,54 @@ function uiSectionTabs(host, groups) {
 }
 function uiManagementLayout(page) {
   if (
-    !['identity', 'members', 'identity-admin', 'profiles', 'roles', 'mcp-gateway'].includes(S.page)
+    ![
+      "identity",
+      "members",
+      "identity-admin",
+      "profiles",
+      "roles",
+      "mcp-gateway",
+    ].includes(S.page)
   )
     return;
-  const host = $('#profiles-page,#roles-page,#gateway-page', page) || page;
-  host.classList.add('management-page');
-  const panels = $$(':scope > .panel', host);
-  if (panels.length > 1 && S.page === 'mcp-gateway') {
+  const host = $("#profiles-page,#roles-page,#gateway-page", page) || page;
+  host.classList.add("management-page");
+  const panels = $$(":scope > .panel", host);
+  if (panels.length > 1 && S.page === "mcp-gateway") {
     uiSectionTabs(host, [
-      { id: 'services', label: '服务与账号', panels: panels.slice(0, 2) },
-      { id: 'tools', label: '已发布工具', panels: panels.slice(2, 3) },
-      { id: 'delegation', label: '我的委派', panels: panels.slice(3, 4) },
-      { id: 'activity', label: '调用记录', panels: panels.slice(4) },
+      { id: "services", label: "服务与账号", panels: panels.slice(0, 2) },
+      { id: "tools", label: "已发布工具", panels: panels.slice(2, 3) },
+      { id: "delegation", label: "我的委派", panels: panels.slice(3, 4) },
+      { id: "activity", label: "调用记录", panels: panels.slice(4) },
     ]);
   } else if (panels.length > 1) {
-    const grid = document.createElement('div');
-    grid.className = 'management-grid management-grid-' + S.page;
+    const grid = document.createElement("div");
+    grid.className = "management-grid management-grid-" + S.page;
     panels[0].before(grid);
     grid.append(...panels);
   }
-  $$('.grant-row', host).forEach((row) => {
+  $$(".grant-row", host).forEach((row) => {
     const main = row.firstElementChild;
-    if (main?.tagName === 'DIV') main.classList.add('grant-info');
+    if (main?.tagName === "DIV") main.classList.add("grant-info");
   });
-  $$('.panel-body', host).forEach((body, index) => {
-    const rows = $$(':scope > .grant-row', body);
+  $$(".panel-body", host).forEach((body, index) => {
+    const rows = $$(":scope > .grant-row", body);
     if (rows.length < 5) return;
-    const filter = document.createElement('div');
-    filter.className = 'entity-filter';
-    const input = document.createElement('input');
-    input.type = 'search';
+    const filter = document.createElement("div");
+    filter.className = "entity-filter";
+    const input = document.createElement("input");
+    input.type = "search";
     const filters = S.managementFilters || (S.managementFilters = {});
-    const filterKey = S.page + ':' + index;
-    input.id = 'management-filter-' + S.page + '-' + index;
-    input.value = filters[filterKey] || '';
-    input.placeholder = '搜索名称、范围或标识';
-    input.setAttribute('aria-label', '筛选' + (body.previousElementSibling?.textContent || '列表'));
-    const count = document.createElement('span');
-    count.setAttribute('role', 'status');
+    const filterKey = S.page + ":" + index;
+    input.id = "management-filter-" + S.page + "-" + index;
+    input.value = filters[filterKey] || "";
+    input.placeholder = "搜索名称、范围或标识";
+    input.setAttribute(
+      "aria-label",
+      "筛选" + (body.previousElementSibling?.textContent || "列表"),
+    );
+    const count = document.createElement("span");
+    count.setAttribute("role", "status");
     const update = () => {
       const query = input.value.trim().toLocaleLowerCase();
       filters[filterKey] = input.value;
@@ -1216,37 +1494,39 @@ function uiManagementLayout(page) {
 
 // One rule at a time, without removing any control from the submitting form.
 function uiPolicyEditor(dialog, preferLast = false) {
-  const form = $('#role-form', dialog);
+  const form = $("#role-form", dialog);
   if (!form) return;
-  let layout = $('.policy-layout', form);
+  let layout = $(".policy-layout", form);
   if (!layout) {
-    layout = document.createElement('div');
-    layout.className = 'policy-layout';
-    const navigation = document.createElement('aside');
-    navigation.className = 'policy-navigation';
+    layout = document.createElement("div");
+    layout.className = "policy-layout";
+    const navigation = document.createElement("aside");
+    navigation.className = "policy-navigation";
     navigation.innerHTML =
       '<h3>权限规则</h3><p class="form-note">每条规则独立限定资源；选择一条进行编辑。</p><div class="policy-rule-list"></div><div class="policy-add-actions"></div>';
-    const body = document.createElement('div');
-    body.className = 'policy-content';
-    const projectRules = $('#role-project-rules', form),
-      devices = $('#role-device-rules', form);
+    const body = document.createElement("div");
+    body.className = "policy-content";
+    const projectRules = $("#role-project-rules", form),
+      devices = $("#role-device-rules", form);
     projectRules.before(layout);
     body.append(projectRules, devices);
-    $('.policy-add-actions', navigation).append(
-      $('#role-add-project-rule', form),
-      $('#role-add-device-rule', form),
+    $(".policy-add-actions", navigation).append(
+      $("#role-add-project-rule", form),
+      $("#role-add-device-rule", form),
     );
     layout.append(navigation, body);
   }
-  const list = $('.policy-rule-list', layout),
-    rules = $$('fieldset.role-rule', form);
+  const list = $(".policy-rule-list", layout),
+    rules = $$("fieldset.role-rule", form);
   let selected = Number(dialog.dataset.policyIndex || 0);
   if (preferLast instanceof Element) {
     selected = rules.indexOf(preferLast);
-    dialog.dataset.editorDirty = 'true';
+    dialog.dataset.editorDirty = "true";
   } else if (preferLast) selected = rules.length - 1;
   selected = Math.max(0, Math.min(selected, rules.length - 1));
-  const existing = new Map([...list.children].map((button) => [button.dataset.ruleKey, button]));
+  const existing = new Map(
+    [...list.children].map((button) => [button.dataset.ruleKey, button]),
+  );
   const buttons = [];
   const choose = (index, focus = false) => {
     dialog.dataset.policyIndex = String(index);
@@ -1254,39 +1534,43 @@ function uiPolicyEditor(dialog, preferLast = false) {
       rule.hidden = i !== index;
     });
     [...list.children].forEach((button, i) => {
-      button.setAttribute('aria-pressed', String(i === index));
+      button.setAttribute("aria-pressed", String(i === index));
       if (focus && i === index) button.focus();
     });
   };
   rules.forEach((rule, index) => {
     rule.dataset.policyKey ||= uid();
-    const button = existing.get(rule.dataset.policyKey) || document.createElement('button');
-    button.type = 'button';
+    const button =
+      existing.get(rule.dataset.policyKey) || document.createElement("button");
+    button.type = "button";
     button.dataset.ruleKey = rule.dataset.policyKey;
-    let title = button.querySelector('span'),
-      description = button.querySelector('small');
+    let title = button.querySelector("span"),
+      description = button.querySelector("small");
     if (!title) {
-      title = document.createElement('span');
-      description = document.createElement('small');
+      title = document.createElement("span");
+      description = document.createElement("small");
       button.append(title, description);
     }
-    title.textContent = `${index + 1} · ${rule.hasAttribute('data-project-rule') ? '项目规则' : '设备委派'}`;
+    title.textContent = `${index + 1} · ${rule.hasAttribute("data-project-rule") ? "项目规则" : "设备委派"}`;
     const update = () => {
-      const label = rule._policyButton?.querySelector('small');
+      const label = rule._policyButton?.querySelector("small");
       if (!label) return;
       const all = $('[name="all_projects"]', rule)?.checked;
-      const resources = $$('[name="project"]:checked,[name="device"]:checked', rule).length;
+      const resources = $$(
+        '[name="project"]:checked,[name="device"]:checked',
+        rule,
+      ).length;
       label.textContent = all
-        ? '全部当前与未来项目'
+        ? "全部当前与未来项目"
         : resources
           ? `已选择 ${resources} 项资源`
-          : '尚未选择资源';
+          : "尚未选择资源";
     };
     rule._policyButton = button;
     button.onclick = () => choose(index, true);
     if (!rule.dataset.policyBound) {
-      rule.addEventListener('change', update);
-      rule.dataset.policyBound = 'true';
+      rule.addEventListener("change", update);
+      rule.dataset.policyBound = "true";
     }
     update();
     buttons.push(button);
@@ -1296,13 +1580,14 @@ function uiPolicyEditor(dialog, preferLast = false) {
     if (button === cursor) cursor = cursor.nextElementSibling;
     else list.insertBefore(button, cursor);
   }
-  for (const button of [...list.children]) if (!buttons.includes(button)) button.remove();
-  let empty = $('.policy-empty', layout);
+  for (const button of [...list.children])
+    if (!buttons.includes(button)) button.remove();
+  let empty = $(".policy-empty", layout);
   if (!empty) {
-    empty = document.createElement('p');
-    empty.className = 'policy-empty';
-    empty.textContent = '先添加项目规则或设备委派，再选择允许的能力与资源。';
-    $('.policy-content', layout).append(empty);
+    empty = document.createElement("p");
+    empty.className = "policy-empty";
+    empty.textContent = "先添加项目规则或设备委派，再选择允许的能力与资源。";
+    $(".policy-content", layout).append(empty);
   }
   empty.hidden = rules.length > 0;
   choose(selected);
@@ -1311,58 +1596,67 @@ function uiPolicyEditor(dialog, preferLast = false) {
 
 // Close the focused menu before an enclosing dialog receives Escape.
 document.addEventListener(
-  'keydown',
+  "keydown",
   (event) => {
-    if (event.defaultPrevented || event.key !== 'Escape') return;
-    const menu = event.target.closest?.('.tool-menu[open], .chat-history-chips > details[open]');
+    if (event.defaultPrevented || event.key !== "Escape") return;
+    const menu = event.target.closest?.(
+      ".tool-menu[open], .chat-history-chips > details[open]",
+    );
     if (!menu) return;
     event.preventDefault();
     menu.open = false;
-    menu.querySelector('summary')?.focus();
+    menu.querySelector("summary")?.focus();
   },
   true,
 );
 
 // Menu movement follows the visible items; native select controls remain native.
-document.addEventListener('keydown', (event) => {
-  if (event.defaultPrevented || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key))
+document.addEventListener("keydown", (event) => {
+  if (
+    event.defaultPrevented ||
+    !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
+  )
     return;
-  const menu = event.target.closest?.('.tool-menu,.chat-overflow');
+  const menu = event.target.closest?.(".tool-menu,.chat-overflow");
   if (!menu) return;
-  const origin = menu.querySelector('summary');
+  const origin = menu.querySelector("summary");
   if (!menu.open && event.target !== origin) return;
   event.preventDefault();
   uiCloseMenuPeers(menu);
   menu.open = true;
-  const items = [...menu.querySelectorAll('button:not(:disabled),a[href]')].filter(
-    (item) => item.getClientRects().length,
-  );
+  const items = [
+    ...menu.querySelectorAll("button:not(:disabled),a[href]"),
+  ].filter((item) => item.getClientRects().length);
   if (!items.length) return;
   const index = items.indexOf(document.activeElement);
   const next =
-    event.key === 'Home'
+    event.key === "Home"
       ? 0
-      : event.key === 'End'
+      : event.key === "End"
         ? items.length - 1
         : index < 0
-          ? event.key === 'ArrowUp'
+          ? event.key === "ArrowUp"
             ? items.length - 1
             : 0
-          : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+          : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) %
+            items.length;
   items[next].focus();
 });
 
-document.addEventListener('click', (e) => {
-  const button = e.target.closest('[data-project-layout]');
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-project-layout]");
   if (!button) return;
   const value = button.dataset.projectLayout;
-  if (!['cards', 'list'].includes(value)) return;
-  const collection = $('.workspace-project-collection');
+  if (!["cards", "list"].includes(value)) return;
+  const collection = $(".workspace-project-collection");
   if (collection) collection.dataset.layout = value;
-  $$('[data-project-layout]').forEach((item) =>
-    item.setAttribute('aria-pressed', String(item.dataset.projectLayout === value)),
+  $$("[data-project-layout]").forEach((item) =>
+    item.setAttribute(
+      "aria-pressed",
+      String(item.dataset.projectLayout === value),
+    ),
   );
   try {
-    localStorage.setItem('codepier-project-layout', value);
+    localStorage.setItem("codepier-project-layout", value);
   } catch {}
 });

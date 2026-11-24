@@ -11,11 +11,22 @@ const running = { session_id: sid, vps_id: "saved-vps", state: "ready" };
 function panel(api) {
   const routes = [];
   const toasts = [];
-  const S = { session: { user_id: "same-account" }, space_id: "scope", page: "vps" };
+  const S = {
+    session: { user_id: "same-account" },
+    space_id: "scope",
+    page: "vps",
+  };
   const context = vm.createContext({
-    S, api, window: {}, document: { addEventListener() {} },
-    $: () => null, $$: () => [], icon: () => "", esc: String,
-    navigate: async (to) => routes.push(to), toast: (message) => toasts.push(message),
+    S,
+    api,
+    window: {},
+    document: { addEventListener() {} },
+    $: () => null,
+    $$: () => [],
+    icon: () => "",
+    esc: String,
+    navigate: async (to) => routes.push(to),
+    toast: (message) => toasts.push(message),
   });
   vm.runInContext(source, context);
   return { context, S, routes, toasts };
@@ -27,7 +38,9 @@ test("other browser waits for session list and opens the exact existing terminal
   const fixture = panel((url) => {
     calls.push(url);
     assert.equal(url, "/api/vps-terminal/sessions");
-    return new Promise((resolve) => { deliver = resolve; });
+    return new Promise((resolve) => {
+      deliver = resolve;
+    });
   });
   const background = fixture.context.vpsLoadPresence();
   const tap = fixture.context.vpsOpenTerminal(running.vps_id);
@@ -52,7 +65,12 @@ test("presence unavailable never converts resume into another shell", async () =
 
 test("one Space's response cannot restore a terminal after scope change", async () => {
   let deliver;
-  const f = panel(() => new Promise((resolve) => { deliver = resolve; }));
+  const f = panel(
+    () =>
+      new Promise((resolve) => {
+        deliver = resolve;
+      }),
+  );
   const pending = f.context.vpsOpenTerminal(running.vps_id);
   f.S.space_id = "another-scope";
   deliver({ sessions: [running] });
@@ -69,7 +87,12 @@ test("direct session cold restore only calls the session endpoint, even with syn
   store.api = async (path) => {
     calls.push(path);
     assert.equal(path, "/api/vps-terminal/sessions/" + sid);
-    return { ...running, id: sid, project_id: "direct:synthetic", limits: { frame_bytes: 24576 } };
+    return {
+      ...running,
+      id: sid,
+      project_id: "direct:synthetic",
+      limits: { frame_bytes: 24576 },
+    };
   };
   store.adopt = (session, { limits }) => {
     assert.equal(limits.frame_bytes, 24576);

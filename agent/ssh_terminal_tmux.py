@@ -12,6 +12,7 @@ import uuid
 from weakref import WeakValueDictionary
 
 from shared.ssh_host_pin import normalize_host_pin
+from shared.vps_transport import VPS_SSH_PROTOCOL
 from shared.ssh_terminal_config import TMUX_PROVISION_TIMEOUT_SECONDS
 
 from .ssh_terminal_transport import SSHTransportError
@@ -136,6 +137,18 @@ def _verified_endpoint(transport):
         return None
 
 
+def _vps_bound_endpoint(transport):
+    if getattr(transport, "transport_contract", None) != VPS_SSH_PROTOCOL:
+        return None
+    target = getattr(transport, "target_endpoint", None)
+    if not isinstance(target, tuple) or len(target) != 2:
+        return None
+    host, port = target
+    if not isinstance(host, str) or type(port) is not int or not 1 <= port <= 65535:
+        return None
+    return _normalize_endpoint(host, port)
+
+
 def _endpoint_lock(endpoint):
     hold = _HOLDS.get(endpoint)
     if hold is None:
@@ -145,7 +158,7 @@ def _endpoint_lock(endpoint):
 
 async def probe_tmux(transport):
     """Probe only; a ready result may reconcile only the exact verified peer."""
-    identity = _verified_endpoint(transport)
+    identity = _verified_endpoint(transport) or _vps_bound_endpoint(transport)
     if identity is None:
         capability, _binary = await _probe_tmux(transport)
         return capability
@@ -155,6 +168,8 @@ async def probe_tmux(transport):
         capability, _binary = await _probe_tmux(transport)
         if capability["available"]:
             _UNCERTAIN.discard(identity)
+            if _vps_bound_endpoint(transport) is not None:
+                _RECENT_FAILURES.pop(identity[:2], None)
         return capability
 
 
@@ -267,6 +282,29 @@ class TmuxReference:
         return {"socket": self.socket, "session": self.session}
 
 
+def _drop_incomplete_utf8_tail(data: bytes) -> bytes:
+    for back in range(1, min(4, len(data)) + 1):
+        lead = data[-back]
+        if 0x80 <= lead < 0xC0:
+            continue
+        if lead < 0x80:
+            return data
+        needed = 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4 if lead < 0xF8 else 5
+        return data[:-back] if needed > back else data
+    return b"" if len(data) < 4 else data
+
+
+def trim_utf8_scrollback(raw: bytes, max_bytes: int) -> bytes:
+    if not raw or max_bytes <= 0:
+        return b""
+    data = bytes(raw)
+    if len(data) > max_bytes:
+        data = data[-max_bytes:]
+        while data and 0x80 <= data[0] < 0xC0:
+            data = data[1:]
+    return _drop_incomplete_utf8_tail(data)
+
+
 class TmuxController:
     def __init__(self, transport, session_id, config):
         self.transport, self.config = transport, config
@@ -340,6 +378,28 @@ class TmuxController:
         if not await self.exists():
             raise SSHTransportError("REMOTE_SESSION_MISSING", "持久会话创建后已退出")
         return self.reference.public()
+
+    async def capture_scrollback(self, lines=200, max_bytes=131072):
+        if lines <= 0 or max_bytes <= 0:
+            return b""
+        bounded_lines = min(2000, int(lines))
+        bounded_bytes = min(131072, int(max_bytes))
+        try:
+            if self._binary is None:
+                await self.probe()
+            command = (
+                self._prefix()
+                + f" capture-pane -e -p -S -{bounded_lines} -t "
+                + shlex.quote(self.reference.session)
+            )
+            status, output = await self.transport.run_control(command, max_bytes=bounded_bytes)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return b""
+        if status != 0 or not output:
+            return b""
+        return trim_utf8_scrollback(output, bounded_bytes)
 
     async def recover(self):
         if not await self.exists():

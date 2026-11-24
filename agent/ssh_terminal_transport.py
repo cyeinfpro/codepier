@@ -8,6 +8,8 @@ import importlib
 import re
 
 from .ssh_terminal_trust import HostKeyPolicy, HostTrustError
+from shared.vps_ssh_connection import VPSSSHConnectionError, connect_vps
+from shared.vps_transport import VPS_HOST_IDENTITY_VERIFICATION, VPS_SSH_PROTOCOL
 
 
 class SSHTransportError(Exception):
@@ -35,6 +37,8 @@ def _classify_host_key_error(exc):
 def classify_error(exc, trust=None):
     if isinstance(exc, SSHTransportError):
         return exc
+    if isinstance(exc, VPSSSHConnectionError):
+        return SSHTransportError(exc.code, exc.message)
     if isinstance(exc, HostTrustError):
         return SSHTransportError(exc.code, exc.message)
     if trust is not None and trust.error is not None:
@@ -45,7 +49,7 @@ def classify_error(exc, trust=None):
     if kind == "HostKeyNotVerifiable":
         return _classify_host_key_error(exc)
     if kind == "KeyExchangeFailed":
-        return SSHTransportError("HOST_KEY_UNKNOWN", "无法核验 SSH 主机密钥或协商算法")
+        return SSHTransportError("SSH_PROTOCOL_NEGOTIATION_FAILED", "SSH 协议或密钥交换算法协商失败")
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return SSHTransportError("SSH_CONNECT_TIMEOUT", "SSH 连接或认证超时")
     if kind in {"ConnectionLost", "ConnectionResetError", "BrokenPipeError"}:
@@ -235,6 +239,9 @@ class AsyncSSHTransport:
         self.channel = None
         self.protocol = None
         self.trust = None
+        self._vps_connection = None
+        self.transport_contract = None
+        self.target_endpoint = None
         self._closed = False
 
     @property
@@ -254,7 +261,37 @@ class AsyncSSHTransport:
             expected_fingerprint=target.get("host_key_fingerprint", ""),
         )
 
+    async def _connect_managed_vps(self, target, password):
+        try:
+            connection = await connect_vps(
+                host=target["host"],
+                port=target.get("port", 22),
+                username=target["username"],
+                password=password,
+                connect_timeout=self.config.connect_timeout,
+                login_timeout=self.config.login_timeout,
+                keepalive_interval=self.config.ssh_keepalive_interval,
+                keepalive_count_max=self.config.ssh_keepalive_count,
+                challenge=None,
+                ssh_module=self.ssh,
+            )
+            self._vps_connection = connection
+            self.connection, self.ssh = connection.connection, connection.ssh_module
+            self.transport_contract = VPS_SSH_PROTOCOL
+            self.host_identity_verification_applied = VPS_HOST_IDENTITY_VERIFICATION
+            self.authentication_method = connection.authentication_method
+            self.target_endpoint = (target["host"], int(target.get("port", 22)))
+            return self
+        except asyncio.CancelledError:
+            await self.close()
+            raise
+        except Exception as exc:
+            await self.close()
+            raise classify_error(exc) from None
+
     async def connect(self, target, password, *, challenge=None):
+        if target.get("connection_contract") == VPS_SSH_PROTOCOL:
+            return await self._connect_managed_vps(target, password)
         if self.ssh is None:
             try:
                 self.ssh = importlib.import_module("asyncssh")
@@ -391,7 +428,10 @@ class AsyncSSHTransport:
         self._closed = True
         await self.close_channel()
         connection, self.connection = self.connection, None
-        if connection is not None:
+        vps_connection, self._vps_connection = self._vps_connection, None
+        if vps_connection is not None:
+            await vps_connection.close(timeout=self.config.shutdown_timeout)
+        elif connection is not None:
             connection.close()
             try:
                 await asyncio.wait_for(connection.wait_closed(), self.config.shutdown_timeout)

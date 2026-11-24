@@ -81,17 +81,17 @@
   white-space: nowrap;
 }
 .chat-session-state::before {
-  content: '';
+  content: "";
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--chat-soft);
   flex: none;
 }
-.chat-session[data-state='running'] .chat-session-state::before {
+.chat-session[data-state="running"] .chat-session-state::before {
   background: var(--chat-success);
 }
-.chat-session[data-state='offline'] .chat-session-state::before {
+.chat-session[data-state="offline"] .chat-session-state::before {
   background: var(--chat-warning);
 }
 .chat-history-notice {
@@ -116,7 +116,7 @@
   border-radius: var(--ui-radius-small, 8px);
   color: var(--chat-fg);
 }
-.chat-history[aria-busy='true'] {
+.chat-history[aria-busy="true"] {
   cursor: progress;
 }
 .chat-history-pages button {

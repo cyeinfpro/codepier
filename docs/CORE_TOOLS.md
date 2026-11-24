@@ -213,7 +213,7 @@ Task 绑定原 operation、Space、用户和确切创建 grant，每次查询/�
 
 ## VPS、浏览器、桌面
 
-`vps(project="ProjectAlpha")` 返回 `target="vps:<id>"`，传入 `exec(project="ProjectAlpha", target="vps:<id>", command="df -h", idempotency_key="…")`。保存的密码只在已验证投递时解密，沿用项目绑定、连接版本、主机密钥检查和 Agent 本机 Shell 授权；密码不会返回给模型。临时 SSH 可以通过本机 `exec` 使用已安装的 SSH 工具，秘密放在环境变量而非命令文本。
+`vps(project="ProjectAlpha")` 返回 `target="vps:<id>"`，以及新版受管连接的传输版本与各入口实际能力。保存的密码只在通过项目授权、目标与修订核对后用于连接，不返回给模型。`vps_ssh_v2` 不核验历史主机指纹；仅在可信网络使用，并核对目标地址。普通系统 SSH 的主机信任规则不受影响。操作待执行或结果不明时查询原编号，不换新键重放。
 
 浏览器使用本机配置的扩展、档案、空闲标签页池和站点白名单；桌面使用本机配置的原生提供方与允许的应用。工具出现在目录不代表本机已安装或授权。先调用 `status`，按真实配置结果处理。输入操作使用最新 `observation_id`，桌面还需要独立 `computer` scope；会话所有权、观察有效期、单次消费、截图过期与不确定输入不重放的规则不变。
 

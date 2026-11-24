@@ -970,10 +970,39 @@ class Store:
         from hub.oauth_lifetime import migrate_schema as migrate_oauth_lifetime
 
         migrate_oauth_lifetime(self.db)
+        self._migrate_vps_ssh_v2_triggers()
         # Backfill non-null devices.last_seen into device_presence once if absent.
         self.db.execute(
             "INSERT OR IGNORE INTO device_presence(device_id,last_seen,updated_at) "
             "SELECT id,last_seen,COALESCE(last_seen,created) FROM devices WHERE last_seen IS NOT NULL"
+        )
+
+    def _migrate_vps_ssh_v2_triggers(self):
+        """Idempotent, versioned migration replacing legacy vps_connections update triggers.
+
+        Replaces room_input_history_target_update in-transaction so retired
+        host_key_policy / host_key_fingerprint edits are ignored while real
+        host/port/username/secret/enabled changes continue to be recorded.
+        """
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {"vps_connections", "room_input_resource_revisions"} <= tables:
+            return
+        from hub.collaboration.room_input_authority import vps_target_update_trigger_sql
+
+        expected_sql = vps_target_update_trigger_sql()
+        existing = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='room_input_history_target_update'"
+        ).fetchone()
+        if existing is None or existing[0] != expected_sql:
+            self.db.execute("DROP TRIGGER IF EXISTS room_input_history_target_update")
+            self.db.execute(expected_sql)
+        self.db.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES ('vps_ssh_v2_trigger_migration', '1')"
         )
 
     @contextmanager

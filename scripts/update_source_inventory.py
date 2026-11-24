@@ -2,8 +2,8 @@
 """Refresh the reviewed public-source inventory from Git-owned source paths.
 
 Run after intentional additions, moves or deletions. --check is read-only.
-Ignored local evidence remains outside the candidate set. Existing public-doc
-curation and credential/file-type filters still apply.
+Without a checked-out commit, use the packager's curated filesystem selection.
+In a committed checkout, ignored local evidence stays outside the candidate set.
 """
 
 from __future__ import annotations
@@ -20,7 +20,24 @@ if str(ROOT) not in sys.path:
 from scripts.build_source_bundle import BASE_REQUIRED, include
 
 
+def _has_git_baseline(root):
+    if not (root / ".git").exists():
+        return False
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        cwd=root,
+        check=False,
+        stdout=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def inventory(root=ROOT):
+    if not _has_git_baseline(root):
+        from scripts.check_release import public_files
+
+        return {"schema_version": 1, "files": sorted(set(BASE_REQUIRED) | set(public_files(root)))}
+
     raw = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=root,

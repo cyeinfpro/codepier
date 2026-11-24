@@ -18,6 +18,8 @@ import socket
 from agent.ssh_terminal_tmux import probe_tmux
 from agent.ssh_terminal_transport import SSHTransportError
 from shared.ssh_host_pin import normalize_host_pin
+from shared.vps_ssh_connection import asyncssh_available
+from shared.vps_transport import hub_native_vps_ssh_capability
 
 
 _MAX_DNS_ANSWERS = 16
@@ -218,6 +220,12 @@ class NativeVPSReadiness:
         self._connect_timeout = connect_timeout
         self._authentication_timeout = authentication_timeout
         self._close_timeout = close_timeout
+
+    def capability(self) -> dict:
+        """Report Hub-native readiness capability independently of project Agent state."""
+        return hub_native_vps_ssh_capability(
+            available=bool(self._connector is not None and asyncssh_available())
+        )
 
     async def _current(self, job, action, expected=None):
         target = await self._resolve_target(job, action)

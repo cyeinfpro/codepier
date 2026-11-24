@@ -16,7 +16,10 @@ export function createPanel({ owner = () => null } = {}) {
       root,
       signal: controller.signal,
       current: () =>
-        active === scope && !controller.signal.aborted && root.isConnected && owner() === identity,
+        active === scope &&
+        !controller.signal.aborted &&
+        root.isConnected &&
+        owner() === identity,
       listen(target, type, listener, options = {}) {
         if (!target || controller.signal.aborted) return;
         const guarded = (event) => {

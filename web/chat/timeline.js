@@ -1,5 +1,5 @@
 function chatAtBottom() {
-  const el = $('#chat-scroll');
+  const el = $("#chat-scroll");
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 110;
 }
 function chatSetScrollTop(v, el, top) {
@@ -16,17 +16,19 @@ function chatSetScrollTop(v, el, top) {
   }
 }
 function chatBottom() {
-  const el = $('#chat-scroll');
+  const el = $("#chat-scroll");
   const v = chatView();
   if (el) chatSetScrollTop(v, el, el.scrollHeight);
-  if ($('#chat-latest')) $('#chat-latest').hidden = true;
+  if ($("#chat-latest")) $("#chat-latest").hidden = true;
 }
 function chatProcessFailure(item) {
   return (
-    item.kind === 'tool' &&
+    item.kind === "tool" &&
     (item.data.isError ||
       item.data.is_error ||
-      ['error', 'failed', 'denied', 'interrupted', 'cancelled'].includes(item.data.status))
+      ["error", "failed", "denied", "interrupted", "cancelled"].includes(
+        item.data.status,
+      ))
   );
 }
 function chatHasPendingApproval(v = chatView()) {
@@ -34,12 +36,15 @@ function chatHasPendingApproval(v = chatView()) {
   // small set of approval entries, not the entire retained conversation.
   if (!v.approvalKeys)
     v.approvalKeys = new Set(
-      [...v.items.values()].filter((item) => item.kind === 'approval').map((item) => item.key),
+      [...v.items.values()]
+        .filter((item) => item.kind === "approval")
+        .map((item) => item.key),
     );
   let pending = false;
   for (const key of v.approvalKeys) {
     const item = v.items.get(key);
-    if (!item || item.data.resolved || item.answered) v.approvalKeys.delete(key);
+    if (!item || item.data.resolved || item.answered)
+      v.approvalKeys.delete(key);
     else pending = true;
   }
   return pending;
@@ -55,51 +60,60 @@ function chatReconcileNodes(holder, nodes) {
 }
 function chatViewportActive(v = chatView()) {
   return (
-    typeof CP !== 'undefined' &&
+    typeof CP !== "undefined" &&
     !!CP.nativeWindow &&
-    typeof chatV2Enabled === 'function' &&
-    chatV2Enabled('native_viewport_v2') &&
+    typeof chatV2Enabled === "function" &&
+    chatV2Enabled("native_viewport_v2") &&
     !!v?.v2State
   );
 }
 function chatUpdateProcessGroupMeta(v, node, items, receipt) {
-  const tools = items.filter((i) => i.kind === 'tool').length,
+  const tools = items.filter((i) => i.kind === "tool").length,
     thoughts = items.length - tools;
   const live =
     !!v.active &&
     v.active === receipt &&
-    items.some((i) => !['completed', 'end', 'succeeded', 'ok'].includes(i.data.status));
-  const counts = [tools ? tools + ' 项工具' : '', thoughts ? thoughts + ' 段思考' : '']
+    items.some(
+      (i) => !["completed", "end", "succeeded", "ok"].includes(i.data.status),
+    );
+  const counts = [
+    tools ? tools + " 项工具" : "",
+    thoughts ? thoughts + " 段思考" : "",
+  ]
     .filter(Boolean)
-    .join(' · ');
+    .join(" · ");
   const last = items.at(-1),
     status = live
-      ? ' · ' + (last.kind === 'tool' ? (last.data.name || '工具') + ' 执行中' : '思考中')
-      : '';
-  const meta = node.querySelector('.chat-process-meta');
-  if (meta && meta.textContent !== counts + status) meta.textContent = counts + status;
+      ? " · " +
+        (last.kind === "tool"
+          ? (last.data.name || "工具") + " 执行中"
+          : "思考中")
+      : "";
+  const meta = node.querySelector(".chat-process-meta");
+  if (meta && meta.textContent !== counts + status)
+    meta.textContent = counts + status;
   node.dataset.active = String(live);
 }
 function chatEnsureProcessGroupNode(v, key) {
   v.processGroups ??= new Map();
   let node = v.processGroups.get(key);
   if (!node) {
-    node = document.createElement('details');
-    node.className = 'chat-process';
+    node = document.createElement("details");
+    node.className = "chat-process";
     node.dataset.groupKey = key;
     node.dataset.rowKey = key;
-    const summary = document.createElement('summary'),
-      label = document.createElement('span'),
-      meta = document.createElement('span'),
-      body = document.createElement('div');
-    label.className = 'chat-process-label';
-    label.textContent = '执行过程';
-    meta.className = 'chat-process-meta';
-    body.className = 'chat-process-body';
+    const summary = document.createElement("summary"),
+      label = document.createElement("span"),
+      meta = document.createElement("span"),
+      body = document.createElement("div");
+    label.className = "chat-process-label";
+    label.textContent = "执行过程";
+    meta.className = "chat-process-meta";
+    body.className = "chat-process-body";
     summary.append(label, meta);
     node.append(summary, body);
-    if (typeof chatSyncGroupToolOutputs === 'function') {
-      node.addEventListener('toggle', () => chatSyncGroupToolOutputs(v, node));
+    if (typeof chatSyncGroupToolOutputs === "function") {
+      node.addEventListener("toggle", () => chatSyncGroupToolOutputs(v, node));
     }
     v.processGroups.set(key, node);
   }
@@ -108,7 +122,7 @@ function chatEnsureProcessGroupNode(v, key) {
 // Group consecutive tool/thinking entries without replacing their disclosure nodes.
 function chatRenderProcessGroups() {
   const v = chatView(),
-    holder = $('#chat-messages');
+    holder = $("#chat-messages");
   if (!holder) return;
   const keys = v.order.slice(-v.limit),
     renderedItems = new Map(),
@@ -123,7 +137,8 @@ function chatRenderProcessGroups() {
     if (!item.node) chatCreateItem(item);
     chatUpdateItem(item);
     renderedItems.set(key, item);
-    const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+    const compact =
+      ["tool", "reasoning"].includes(item.kind) && !chatProcessFailure(item);
     if (!compact) {
       group = null;
       item.groupKey = null;
@@ -149,10 +164,11 @@ function chatRenderProcessGroups() {
   }
   chatReconcileNodes(holder, nodes);
   const retained = new Set(groups.map((g) => g.node.dataset.groupKey));
-  for (const key of v.processGroups.keys()) if (!retained.has(key)) v.processGroups.delete(key);
+  for (const key of v.processGroups.keys())
+    if (!retained.has(key)) v.processGroups.delete(key);
   for (const [key, item] of v.renderedItems || [])
     if (renderedItems.get(key) !== item) {
-      if (item.kind === 'tool' && typeof chatCloseToolOutput === 'function') {
+      if (item.kind === "tool" && typeof chatCloseToolOutput === "function") {
         chatCloseToolOutput(item.key, v);
       }
       item.node?.remove();
@@ -170,7 +186,8 @@ function chatBuildViewportRows(v, keys) {
   for (const key of keys) {
     const item = v.items.get(key);
     if (!item) continue;
-    const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+    const compact =
+      ["tool", "reasoning"].includes(item.kind) && !chatProcessFailure(item);
     if (!compact) {
       group = null;
       item.groupKey = null;
@@ -199,20 +216,22 @@ function chatBuildViewportRows(v, keys) {
   return { rows, itemToRowKey };
 }
 function chatEnsureViewportWindow(v) {
-  const el = $('#chat-scroll');
-  const holder = $('#chat-messages');
-  if (!el || !holder || typeof CP === 'undefined' || !CP.nativeWindow) return null;
-  el.style.overflowAnchor = 'none';
-  if (v.v2Window && v.v2Window.el === el && v.v2Window.holder === holder) return v.v2Window;
+  const el = $("#chat-scroll");
+  const holder = $("#chat-messages");
+  if (!el || !holder || typeof CP === "undefined" || !CP.nativeWindow)
+    return null;
+  el.style.overflowAnchor = "none";
+  if (v.v2Window && v.v2Window.el === el && v.v2Window.holder === holder)
+    return v.v2Window;
   v.v2Window?.observer?.disconnect?.();
-  const topSpacer = document.createElement('div');
-  topSpacer.className = 'chat-spacer-top';
-  topSpacer.setAttribute('aria-hidden', 'true');
-  const bottomSpacer = document.createElement('div');
-  bottomSpacer.className = 'chat-spacer-bottom';
-  bottomSpacer.setAttribute('aria-hidden', 'true');
+  const topSpacer = document.createElement("div");
+  topSpacer.className = "chat-spacer-top";
+  topSpacer.setAttribute("aria-hidden", "true");
+  const bottomSpacer = document.createElement("div");
+  bottomSpacer.className = "chat-spacer-bottom";
+  bottomSpacer.setAttribute("aria-hidden", "true");
   const win = {
-    owner: Symbol('v2-window'),
+    owner: Symbol("v2-window"),
     userScrollGeneration: 0,
     followBottom: v.follow !== false,
     programmaticScroll: false,
@@ -248,20 +267,30 @@ function chatEnsureViewportWindow(v) {
         if (item.groupKey && v.processGroups?.has(item.groupKey)) {
           const row = win.rowByKey.get(item.groupKey);
           if (row) {
-            const gItems = row.itemKeys.map((k) => v.items.get(k)).filter(Boolean);
-            chatUpdateProcessGroupMeta(v, v.processGroups.get(item.groupKey), gItems, row.receipt);
+            const gItems = row.itemKeys
+              .map((k) => v.items.get(k))
+              .filter(Boolean);
+            chatUpdateProcessGroupMeta(
+              v,
+              v.processGroups.get(item.groupKey),
+              gItems,
+              row.receipt,
+            );
           }
         }
       },
     },
     renderWindow: (range) => chatMountViewportRange(v, win, range),
   };
-  if (typeof ResizeObserver === 'function') {
+  if (typeof ResizeObserver === "function") {
     win.observer = new ResizeObserver((entries) => {
       if (win !== v.v2Window || !win.holder.isConnected) return;
       for (const entry of entries) {
         const target = entry.target;
-        const rowKey = target.dataset.rowKey || target.dataset.groupKey || target.dataset.key;
+        const rowKey =
+          target.dataset.rowKey ||
+          target.dataset.groupKey ||
+          target.dataset.key;
         if (!rowKey || !win.mountedKeys.has(rowKey)) continue;
         const h =
           entry.borderBoxSize?.[0]?.blockSize ||
@@ -278,10 +307,12 @@ function chatEnsureViewportWindow(v) {
         win.measureFrame = 0;
         if (win !== v.v2Window || !win.holder.isConnected) return;
         const anchor = CP.nativeWindow.captureAnchor(win);
-        const batch = [...win.pendingMeasurements.entries()].map(([key, height]) => ({
-          key,
-          height,
-        }));
+        const batch = [...win.pendingMeasurements.entries()].map(
+          ([key, height]) => ({
+            key,
+            height,
+          }),
+        );
         win.pendingMeasurements.clear();
         win.programmaticScroll = true;
         try {
@@ -302,8 +333,13 @@ function chatMountViewportRange(v, win, range) {
   if (!holder) return;
   const totalRows = win.rows.length;
   const indices = new Set();
-  for (let i = range.start; i < range.end && i < totalRows; i += 1) indices.add(i);
-  const pinnedRanges = win.pinSet.discreteRanges(win.heights, range.start, range.end);
+  for (let i = range.start; i < range.end && i < totalRows; i += 1)
+    indices.add(i);
+  const pinnedRanges = win.pinSet.discreteRanges(
+    win.heights,
+    range.start,
+    range.end,
+  );
   for (const pr of pinnedRanges) {
     for (let i = pr.start; i < pr.end && i < totalRows; i += 1) indices.add(i);
   }
@@ -311,8 +347,8 @@ function chatMountViewportRange(v, win, range) {
   const nextMounted = new Set();
   const nextRenderedItems = new Map();
   const nodes = [win.topSpacer];
-  win.topSpacer.style.height = Math.max(0, range.top) + 'px';
-  win.bottomSpacer.style.height = Math.max(0, range.bottom) + 'px';
+  win.topSpacer.style.height = Math.max(0, range.top) + "px";
+  win.bottomSpacer.style.height = Math.max(0, range.bottom) + "px";
   for (const idx of sortedIndices) {
     const row = win.rows[idx];
     if (!row) continue;
@@ -359,7 +395,7 @@ function chatMountViewportRange(v, win, range) {
   }
   for (const [key, item] of v.renderedItems || []) {
     if (nextRenderedItems.get(key) !== item) {
-      if (item.kind === 'tool' && typeof chatCloseToolOutput === 'function') {
+      if (item.kind === "tool" && typeof chatCloseToolOutput === "function") {
         chatCloseToolOutput(item.key, v);
       }
       win.observer?.unobserve(item.node);
@@ -384,8 +420,9 @@ function chatRenderViewportWindow(v = chatView()) {
   for (const key of v.approvalKeys || []) {
     const item = v.items.get(key);
     const rk = itemToRowKey.get(key);
-    if (item && !item.data.resolved && !item.answered && rk) win.pinSet.pin(rk, 'approval');
-    else if (rk) win.pinSet.unpin(rk, 'approval');
+    if (item && !item.data.resolved && !item.answered && rk)
+      win.pinSet.pin(rk, "approval");
+    else if (rk) win.pinSet.unpin(rk, "approval");
   }
   win.heights.rebuild(
     rows.map((r) => r.rowKey),
@@ -394,18 +431,27 @@ function chatRenderViewportWindow(v = chatView()) {
   );
   const total = win.heights.offset(win.heights.count);
   const clientH = win.el.clientHeight || 600;
-  const targetTop = win.followBottom ? Math.max(0, total - clientH) : win.el.scrollTop;
-  const range = CP.nativeWindow.visibleRange(win.heights, targetTop, clientH, win.overscanPx);
+  const targetTop = win.followBottom
+    ? Math.max(0, total - clientH)
+    : win.el.scrollTop;
+  const range = CP.nativeWindow.visibleRange(
+    win.heights,
+    targetTop,
+    clientH,
+    win.overscanPx,
+  );
   chatMountViewportRange(v, win, range);
 }
 function chatFlush() {
   const c = ChatUI;
   c.frame = 0;
-  if (!$('#chat-messages')) return;
+  if (!$("#chat-messages")) return;
   const v = chatView(),
     bottom = chatAtBottom();
   const dirtyKeys = new Set([...c.dirty, ...(v.v2DirtyKeys || [])]);
-  let structureDirty = Boolean(v.structureDirty || v.v2StructureDirty || !v.renderedItems?.size);
+  let structureDirty = Boolean(
+    v.structureDirty || v.v2StructureDirty || !v.renderedItems?.size,
+  );
   if (chatViewportActive(v)) {
     const win = chatEnsureViewportWindow(v);
     if (win) {
@@ -443,7 +489,9 @@ function chatFlush() {
           }
           continue;
         }
-        const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+        const compact =
+          ["tool", "reasoning"].includes(item.kind) &&
+          !chatProcessFailure(item);
         const insideGroup = Boolean(item.groupKey);
         if (compact !== insideGroup) {
           structureDirty = true;
@@ -451,7 +499,10 @@ function chatFlush() {
         }
         chatUpdateItem(item);
         if (item.groupKey && v.processGroupEntries?.has(item.groupKey)) {
-          updatedGroups.set(item.groupKey, v.processGroupEntries.get(item.groupKey));
+          updatedGroups.set(
+            item.groupKey,
+            v.processGroupEntries.get(item.groupKey),
+          );
         }
       }
       for (const entry of updatedGroups.values()) {
@@ -469,12 +520,12 @@ function chatFlush() {
     v.v2State?.changeReasons?.clear();
     if (v.v2State) v.v2State.structureDirty = false;
   }
-  $('#chat-empty').hidden = !!v.order.length;
-  $('#chat-older').hidden = v.v2State
+  $("#chat-empty").hidden = !!v.order.length;
+  $("#chat-older").hidden = v.v2State
     ? !v.v2State.projection?.history?.hasMore
     : v.order.length <= v.limit;
   if (bottom) chatBottom();
-  else $('#chat-latest').hidden = false;
+  else $("#chat-latest").hidden = false;
   chatSyncChrome();
 }
 function chatRenderHistory(scroll = true) {
@@ -491,88 +542,90 @@ function chatRenderHistory(scroll = true) {
   v.v2State?.dirtyKeys?.clear();
   v.v2State?.changeReasons?.clear();
   if (v.v2State) v.v2State.structureDirty = false;
-  $('#chat-empty').hidden = !!v.order.length;
-  $('#chat-older').hidden = v.v2State
+  $("#chat-empty").hidden = !!v.order.length;
+  $("#chat-older").hidden = v.v2State
     ? !v.v2State.projection?.history?.hasMore
     : v.order.length <= v.limit;
   if (scroll) {
-    if (!v.order.length) chatSetScrollTop(v, $('#chat-scroll'), 0);
+    if (!v.order.length) chatSetScrollTop(v, $("#chat-scroll"), 0);
     else if (v.follow !== false) chatBottom();
-    else chatSetScrollTop(v, $('#chat-scroll'), v.scrollTop || 0);
+    else chatSetScrollTop(v, $("#chat-scroll"), v.scrollTop || 0);
   }
-  $('#chat-latest').hidden = !v.order.length || chatAtBottom();
+  $("#chat-latest").hidden = !v.order.length || chatAtBottom();
 }
 function chatCreateItem(item) {
-  if (item.kind === 'review') {
+  if (item.kind === "review") {
     chatCreateReview(item);
     return;
   }
-  const article = document.createElement('article');
-  article.className = 'chat-message chat-message-' + item.kind;
+  const article = document.createElement("article");
+  article.className = "chat-message chat-message-" + item.kind;
   article.dataset.key = item.key;
-  const header = document.createElement('div'),
-    label = document.createElement('span'),
-    actions = document.createElement('div');
-  header.className = 'chat-message-head';
-  label.className = 'chat-message-label';
+  const header = document.createElement("div"),
+    label = document.createElement("span"),
+    actions = document.createElement("div");
+  header.className = "chat-message-head";
+  label.className = "chat-message-label";
   label.textContent =
     {
-      user: item.data.parent_receipt ? '你 · 补充指令' : '你',
+      user: item.data.parent_receipt ? "你 · 补充指令" : "你",
       assistant: chatProviderName(),
-      reasoning: '思考过程',
-      tool: '工具执行',
-      approval: '需要确认',
-      error: '未完成',
+      reasoning: "思考过程",
+      tool: "工具执行",
+      approval: "需要确认",
+      error: "未完成",
     }[item.kind] || item.kind;
-  actions.className = 'chat-message-actions';
-  const copyButton = document.createElement('button');
-  copyButton.type = 'button';
-  copyButton.title = '复制消息';
-  copyButton.setAttribute('aria-label', '复制消息');
-  copyButton.innerHTML = chatIcon('copy');
+  actions.className = "chat-message-actions";
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.title = "复制消息";
+  copyButton.setAttribute("aria-label", "复制消息");
+  copyButton.innerHTML = chatIcon("copy");
   copyButton.onclick = () => chatCopyText(item.text);
   actions.append(copyButton);
-  if (item.kind === 'user') {
-    const edit = document.createElement('button');
-    edit.textContent = '编辑为新消息';
+  if (item.kind === "user") {
+    const edit = document.createElement("button");
+    edit.textContent = "编辑为新消息";
     edit.onclick = async () => {
       if (await chatReplaceDraft(item.text))
-        chatStatus('已复制到输入框；发送后是新消息，不会撤销先前的工具操作。');
+        chatStatus("已复制到输入框；发送后是新消息，不会撤销先前的工具操作。");
     };
     actions.append(edit);
   }
   header.append(label, actions);
   article.append(header);
   let body;
-  if (['reasoning', 'tool'].includes(item.kind)) {
-    const details = document.createElement('details'),
-      summary = document.createElement('summary');
-    body = document.createElement('pre');
+  if (["reasoning", "tool"].includes(item.kind)) {
+    const details = document.createElement("details"),
+      summary = document.createElement("summary");
+    body = document.createElement("pre");
     details.append(summary, body);
-    if (item.kind === 'tool' && typeof chatOnToolDetailsToggle === 'function') {
-      details.addEventListener('toggle', () => chatOnToolDetailsToggle(item, details));
+    if (item.kind === "tool" && typeof chatOnToolDetailsToggle === "function") {
+      details.addEventListener("toggle", () =>
+        chatOnToolDetailsToggle(item, details),
+      );
     }
     article.append(details);
   } else {
-    body = document.createElement('div');
-    body.className = 'chat-message-body';
+    body = document.createElement("div");
+    body.className = "chat-message-body";
     article.append(body);
   }
   item.node = article;
   item.body = body;
   item.renderedSignature = null;
-  if (item.kind === 'user' && item.data.attachments?.length) {
-    const files = document.createElement('div');
-    files.className = 'chat-message-files';
+  if (item.kind === "user" && item.data.attachments?.length) {
+    const files = document.createElement("div");
+    files.className = "chat-message-files";
     for (const f of item.data.attachments) {
-      const badge = document.createElement('span');
-      badge.textContent = f.name || '附件';
-      badge.title = f.mime || '';
+      const badge = document.createElement("span");
+      badge.textContent = f.name || "附件";
+      badge.title = f.mime || "";
       files.append(badge);
     }
     article.append(files);
   }
-  if (item.kind === 'approval') {
+  if (item.kind === "approval") {
     const fields = item.data.details || {},
       context =
         fields.message ||
@@ -581,13 +634,15 @@ function chatCreateItem(item) {
         fields.changes ||
         fields.fileChanges;
     if (context) {
-      const details = document.createElement('details'),
-        summary = document.createElement('summary'),
-        pre = document.createElement('pre');
-      summary.textContent = '操作内容';
+      const details = document.createElement("details"),
+        summary = document.createElement("summary"),
+        pre = document.createElement("pre");
+      summary.textContent = "操作内容";
       pre.textContent =
-        (typeof context === 'string' ? context : JSON.stringify(context, null, 2)) +
-        (fields.cwd ? '\n工作目录：' + fields.cwd : '');
+        (typeof context === "string"
+          ? context
+          : JSON.stringify(context, null, 2)) +
+        (fields.cwd ? "\n工作目录：" + fields.cwd : "");
       details.open = true;
       details.append(summary, pre);
       article.append(details);
@@ -596,58 +651,66 @@ function chatCreateItem(item) {
   }
 }
 function chatUpdateItem(item) {
-  if (item.kind === 'review') {
+  if (item.kind === "review") {
     chatUpdateReview(item);
-    if (typeof chatApplyReviewEvidenceState === 'function') chatApplyReviewEvidenceState(item);
+    if (typeof chatApplyReviewEvidenceState === "function")
+      chatApplyReviewEvidenceState(item);
     return;
   }
   const signature =
     item.text +
-    '\0' +
-    (item.data.status || '') +
-    '\0' +
-    (item.data.name || '') +
-    '\0' +
+    "\0" +
+    (item.data.status || "") +
+    "\0" +
+    (item.data.name || "") +
+    "\0" +
     !!(item.data.isError || item.data.is_error) +
-    '\0' +
+    "\0" +
     !!item.data.partial +
-    '\0' +
+    "\0" +
     (item.data.body_loaded_bytes || 0);
-  if (item.renderedSignature === signature && item.body?.hasChildNodes()) return;
+  if (item.renderedSignature === signature && item.body?.hasChildNodes())
+    return;
   item.renderedSignature = signature;
-  if (item.kind === 'assistant') {
-    if (typeof chatRichMarkdown === 'function') chatRichMarkdown(item.body, item.text);
+  if (item.kind === "assistant") {
+    if (typeof chatRichMarkdown === "function")
+      chatRichMarkdown(item.body, item.text);
     else item.body.textContent = item.text;
-  } else if (item.kind === 'tool') {
-    const summary = item.node.querySelector('summary');
+  } else if (item.kind === "tool") {
+    const summary = item.node.querySelector("summary");
     let parsed;
     try {
       parsed = JSON.parse(item.text);
     } catch {}
     const failed = chatProcessFailure(item);
-    if (failed && !item.node.classList.contains('chat-tool-failed'))
-      item.node.querySelector('details').open = true;
-    item.node.classList.toggle('chat-tool-failed', !!failed);
+    if (failed && !item.node.classList.contains("chat-tool-failed"))
+      item.node.querySelector("details").open = true;
+    item.node.classList.toggle("chat-tool-failed", !!failed);
     summary.textContent =
-      (item.data.name || '工具') + ' · ' + (failed ? '执行异常' : chatStateName(item.data.status));
-    item.body.textContent = parsed ? JSON.stringify(parsed, null, 2) : item.text;
+      (item.data.name || "工具") +
+      " · " +
+      (failed ? "执行异常" : chatStateName(item.data.status));
+    item.body.textContent = parsed
+      ? JSON.stringify(parsed, null, 2)
+      : item.text;
   } else {
     item.body.textContent = item.text;
-    if (item.kind === 'reasoning')
-      item.node.querySelector('summary').textContent =
-        '查看思考过程 · ' + item.text.length + ' 字符';
+    if (item.kind === "reasoning")
+      item.node.querySelector("summary").textContent =
+        "查看思考过程 · " + item.text.length + " 字符";
   }
-  if (typeof chatSyncPartialBodyNotice === 'function') chatSyncPartialBodyNotice(item);
+  if (typeof chatSyncPartialBodyNotice === "function")
+    chatSyncPartialBodyNotice(item);
 }
 async function chatCopyText(text) {
-  if (typeof copy === 'function') {
+  if (typeof copy === "function") {
     await copy(text);
     return;
   }
   try {
     await navigator.clipboard.writeText(text);
-    chatStatus('已复制');
+    chatStatus("已复制");
   } catch {
-    chatStatus('浏览器未允许访问剪贴板，可选中文字复制');
+    chatStatus("浏览器未允许访问剪贴板，可选中文字复制");
   }
 }

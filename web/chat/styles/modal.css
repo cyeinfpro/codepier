@@ -3,7 +3,7 @@
   width: min(580px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
   max-height: calc(100dvh - 32px);
-  padding: 24px;
+  padding: 20px;
   border: 1px solid var(--chat-border);
   border-radius: var(--ui-radius-xl, 20px);
   background: var(--chat-bg);
@@ -35,6 +35,7 @@
   line-height: 1.3;
   font-weight: var(--ui-weight-bold, 700);
   letter-spacing: -0.4px;
+  text-wrap: balance;
 }
 .chat-project-sheet-head .chat-eyebrow {
   font-size: var(--ui-text-xs, 12px);
@@ -121,7 +122,7 @@
   color: var(--chat-accent);
 }
 .chat-project-option:hover:not(:disabled),
-.chat-project-option[data-keyboard='true'] {
+.chat-project-option[data-keyboard="true"] {
   background: var(--chat-hover);
   border-color: var(--chat-border);
 }
@@ -213,5 +214,49 @@
   }
   .chat-project-option {
     padding: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-workspace .chat-project-sheet[open] {
+    animation: chat-project-sheet-in var(--chat-motion-panel, 240ms)
+      var(--chat-ease);
+  }
+  .chat-project-sheet[open]::backdrop {
+    animation: chat-project-backdrop-in var(--chat-motion-fast, 160ms)
+      var(--chat-ease);
+  }
+  .chat-project-option {
+    transition:
+      background-color var(--chat-motion-fast, 140ms) var(--chat-ease),
+      border-color var(--chat-motion-fast, 140ms) var(--chat-ease),
+      transform var(--chat-motion-press, 80ms) var(--chat-ease);
+  }
+  @keyframes chat-project-sheet-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes chat-project-backdrop-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-workspace .chat-project-sheet[open],
+  .chat-project-sheet[open]::backdrop {
+    animation: none;
+  }
+  .chat-project-option {
+    transition: none;
   }
 }

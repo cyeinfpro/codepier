@@ -260,6 +260,13 @@ _EXEC_RESULT = _RECEIPT | frozenset(
         "ssh_error",
         "ssh_diagnostics",
         "transport_runtime",
+        "transport_contract",
+        "host_identity_verification_applied",
+        "credential_source",
+        "authentication_state",
+        "authentication_method",
+        "remote_execution_state",
+        "exit_signal",
         "runtime",
         "failure_context",
         "continuation",
@@ -363,7 +370,7 @@ def _exec_result(value):
     result = _pick(value, _EXEC_RESULT)
     fields = {
         "runtime": None,
-        "transport_runtime": {"mode", "target", "isolation", "grants_authority"},
+        "transport_runtime": {"mode", "engine", "target", "isolation", "grants_authority"},
         "ssh_diagnostics": {
             "schema_version",
             "source",
@@ -371,6 +378,12 @@ def _exec_result(value):
             "log_truncated",
             "log_cleanup",
             "authentication",
+            "authentication_state",
+            "authentication_method",
+            "transport_runtime",
+            "transport_contract",
+            "host_identity_verification_applied",
+            "remote_execution_state",
             "failure_stage",
             "credential_source",
             "password_prompt_limit",
@@ -506,7 +519,15 @@ def _execution(value):
     if isinstance(value.get("ssh"), dict):
         result["ssh"] = _pick(
             value["ssh"],
-            {"tool", "password_auth_available", "host_key_policy", "local_script_password"},
+            {
+                "tool",
+                "password_auth_available",
+                "connection_contract",
+                "host_identity_verification",
+                "transport_runtime",
+                "capabilities",
+                "local_script_password",
+            },
         )
     if isinstance(value.get("authorization"), dict):
         result["authorization"] = _pick(

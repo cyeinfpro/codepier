@@ -1022,7 +1022,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
     execution = obj(
         {
             **RECEIPT,
-            "exit_code": INT,
+            "exit_code": nullable(INT),
             "output": STR,
             **OUTPUT_EVIDENCE,
             "timed_out": BOOL,
@@ -1038,6 +1038,10 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             "ssh_error": nullable(STR),
             "ssh_diagnostics": OBJ,
             "transport_runtime": OBJ,
+            "transport_contract": STR,
+            "host_identity_verification_applied": STR,
+            "remote_execution_state": STR,
+            "exit_signal": nullable(STR),
             "runtime": OBJ,
             "failure_context": OBJ,
             "continuation": OBJ,
@@ -1158,6 +1162,10 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         }
         computer.append(copy(name, fields=fields))
 
+    vps_capability = obj(
+        {"supported": BOOL, "reason_code": nullable(STR)},
+        ("supported", "reason_code"),
+    )
     vps = obj(
         {
             **{
@@ -1167,7 +1175,8 @@ def build_core_output_schemas(legacy, *, include_queries=False):
                     "name",
                     "host",
                     "username",
-                    "host_key_policy",
+                    "connection_contract",
+                    "host_identity_verification",
                     "provider",
                     "region",
                     "system",
@@ -1182,6 +1191,15 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             "created": NUM,
             "updated": NUM,
             "has_password": BOOL,
+            "credential_available": BOOL,
+            "capabilities": obj(
+                {
+                    "exec": vps_capability,
+                    "terminal": vps_capability,
+                    "probe": vps_capability,
+                },
+                ("exec", "terminal", "probe"),
+            ),
             "projects": array(PROJECT),
             "project_ids": array(STR),
         },

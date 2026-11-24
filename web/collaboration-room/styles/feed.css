@@ -6,8 +6,9 @@
   overscroll-behavior: contain;
   flex: 1;
   min-height: 0;
-  padding: 24px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px))) 12px
-    max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
+  padding: 24px
+    max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+    12px max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
   scrollbar-width: thin;
 }
 

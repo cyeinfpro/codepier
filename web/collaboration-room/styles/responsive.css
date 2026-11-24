@@ -15,8 +15,18 @@
 }
 
 @media (max-width: 900px), (pointer: coarse) {
-  .cr-shell :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
-  .cr-panel :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+  .cr-shell
+    :is(
+      input:not([type="checkbox"], [type="radio"], [type="range"]),
+      select,
+      textarea
+    ),
+  .cr-panel
+    :is(
+      input:not([type="checkbox"], [type="radio"], [type="range"]),
+      select,
+      textarea
+    ),
   .cr-search input,
   .cr-recipient select,
   .cr-field .cr-instructions {
@@ -80,7 +90,10 @@
     width: min(296px, 86%);
     z-index: var(--ui-z-drawer);
     padding-left: max(12px, var(--safe-left, env(safe-area-inset-left, 0px)));
-    padding-bottom: max(14px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)));
+    padding-bottom: max(
+      14px,
+      var(--safe-bottom, env(safe-area-inset-bottom, 0px))
+    );
     background: var(--cr-surface);
     box-shadow: var(--ui-elev-2);
   }
@@ -93,7 +106,9 @@
   .cr-topbar {
     gap: 12px;
     min-height: 0;
-    padding: 12px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px))) 12px
+    padding: 12px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+      12px
       max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .cr-room-heading h1 {
@@ -147,7 +162,9 @@
     padding-left: 16px;
   }
   .cr-feed {
-    padding: 16px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px))) 10px
+    padding: 16px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+      10px
       max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .cr-message {
@@ -158,12 +175,13 @@
   }
   .cr-composer {
     width: auto;
-    margin: 8px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+    margin: 8px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
       max(12px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))
       max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
     border-radius: var(--ui-radius-lg);
   }
-  .cr-composer > footer > span[data-kind='shortcut'] {
+  .cr-composer > footer > span[data-kind="shortcut"] {
     display: none;
   }
   .cr-composer.is-locked > footer > span {
@@ -185,8 +203,8 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
   /* Conversation work detail is a full-screen modal, not a partial sheet. */
-  .cr-panel[data-panel='work'],
-  .cr-panel[data-panel='context-source'] {
+  .cr-panel[data-panel="work"],
+  .cr-panel[data-panel="context-source"] {
     inset: 0;
     margin: 0;
     width: 100%;
@@ -357,8 +375,9 @@
     width: auto;
     min-height: 38px;
     height: 38px;
-    margin: 4px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px))) 0
-      max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
+    margin: 4px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+      0 max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
     padding: 0 10px;
     flex-direction: row;
     align-items: center;
@@ -427,7 +446,9 @@
     position: relative;
     flex-wrap: nowrap;
     min-height: 50px;
-    padding: 6px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px))) 6px
+    padding: 6px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+      6px
       max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
     gap: 8px;
   }
@@ -456,7 +477,10 @@
     grid-template-columns: minmax(0, 1fr);
     position: absolute;
     top: calc(100% + 4px);
-    right: max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)));
+    right: max(
+      var(--cr-gutter),
+      var(--safe-right, env(safe-area-inset-right, 0px))
+    );
     width: min(232px, calc(100vw - 24px));
     padding: 8px;
     gap: 4px;
@@ -485,7 +509,8 @@
     padding-block: 10px 6px;
   }
   .cr-composer {
-    margin: 4px max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
+    margin: 4px
+      max(var(--cr-gutter), var(--safe-right, env(safe-area-inset-right, 0px)))
       max(8px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))
       max(var(--cr-gutter), var(--safe-left, env(safe-area-inset-left, 0px)));
   }
@@ -620,7 +645,7 @@
 }
 
 /* Send-blocking explanations remain available at every viewport width. */
-.cr-composer > footer > [data-cr-compose-status]:not([data-kind='shortcut']) {
+.cr-composer > footer > [data-cr-compose-status]:not([data-kind="shortcut"]) {
   display: inline-block;
   white-space: normal;
   overflow-wrap: anywhere;

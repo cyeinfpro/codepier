@@ -11,6 +11,7 @@ import socket
 
 from agent.ssh_terminal_transport import SSHTransportError, _ControlCapture, classify_error
 from shared.ssh_host_pin import normalize_host_pin
+from shared.vps_transport import VPS_SSH_PROTOCOL
 from hub.vps_readiness_native import readiness_identity_pin
 from shared.ssh_terminal_config import TMUX_PROVISION_TIMEOUT_SECONDS, TerminalConfig
 
@@ -25,7 +26,10 @@ class _ReadinessClient:
         self.target, self.peer, self.pin = target, peer, pin
         self.verify_host, self.load_password = verify_host, password
         self.candidate = None
-        self.endpoint_accepted = False
+        # The native adapter already screened the numeric socket and verified
+        # its actual peer. With no host pin, proof is the post-KEX auth callback
+        # on that same connection, not an SSH known-hosts lookup or a redial.
+        self.endpoint_accepted = pin is None
         self.proved = False
         self.password_requested = False
         self.failure = None
@@ -192,7 +196,7 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
                 username=target.username,
                 sock=sock,
                 config=None,
-                known_hosts=b"",
+                known_hosts=None if pin is None else b"",
                 client_factory=lambda: client,
                 # [] would load ~/.ssh default keys in AsyncSSH 2.24.1.
                 client_keys=None,
@@ -225,6 +229,9 @@ async def connect_readiness(target, sock, *, verify_host, password, configuratio
         # verified installation fence from a manual fleet connection.
         identity = (target.host, target.port, pin) if pin is not None else None
         result = ReadinessSSH(connection, ssh, config, identity)
+        if pin is None:
+            result.transport_contract = VPS_SSH_PROTOCOL
+            result.target_endpoint = (target.host, target.port)
         connection = None
         return result
     except asyncio.CancelledError:

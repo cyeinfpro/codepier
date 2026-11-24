@@ -284,7 +284,7 @@
   color: var(--chat-accent);
 }
 .chat-model-option:hover:not(:disabled),
-.chat-model-option[data-keyboard='true'] {
+.chat-model-option[data-keyboard="true"] {
   background: var(--chat-hover);
 }
 .chat-model-badges {
@@ -435,7 +435,7 @@
   display: none;
 }
 .chat-workspace.is-dragging::after {
-  content: '松开以添加图片或文件';
+  content: "松开以添加图片或文件";
   display: grid;
   place-items: center;
   position: absolute;

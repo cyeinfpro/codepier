@@ -80,8 +80,12 @@
   color: var(--ui-text);
   font-size: var(--ui-text-sm);
   transition:
-    background var(--ui-motion-fast) var(--ui-ease),
-    border-color var(--ui-motion-fast) var(--ui-ease);
+    background var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),
+    border-color var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),
+    box-shadow var(--ui-motion-fast, 140ms)
+      var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1));
 }
 
 .cr-search input::placeholder {
@@ -89,8 +93,9 @@
 }
 
 .cr-search input:focus {
-  border-color: var(--ui-border);
+  border-color: color-mix(in srgb, var(--ui-focus) 55%, var(--ui-border));
   background: var(--cr-surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
   outline: none;
 }
 
@@ -125,7 +130,13 @@
   background: transparent;
   color: inherit;
   text-align: left;
-  transition: background var(--ui-motion-fast) var(--ui-ease);
+  transition: background var(--ui-motion-fast, 140ms)
+    var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1));
+}
+
+.cr-room:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: -2px;
 }
 
 .cr-room:not(.is-current) {
@@ -148,11 +159,15 @@
   place-items: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--ui-radius-small);
+  border-radius: var(--ui-radius-xs);
   font-weight: var(--ui-weight-semibold);
   font-size: var(--ui-text-sm);
   color: color-mix(in srgb, hsl(var(--cr-hue, 40) 45% 38%) 75%, var(--ui-text));
-  background: color-mix(in srgb, hsl(var(--cr-hue, 40) 55% 58%) 16%, var(--cr-surface));
+  background: color-mix(
+    in srgb,
+    hsl(var(--cr-hue, 40) 55% 58%) 16%,
+    var(--cr-surface)
+  );
 }
 
 .cr-room.is-current .cr-room-avatar {

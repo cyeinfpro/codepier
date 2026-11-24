@@ -19,7 +19,7 @@ small{font-size:12px}
 .notice{padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);background:var(--warn-bg);border-radius:8px;margin:12px 0;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
 .notice.error{border-left-color:var(--error);background:var(--error-bg);color:var(--error)}
 button,summary,input,select{touch-action:manipulation}
-button{font:inherit;font-size:13px;font-weight:600;min-height:44px;padding:8px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;max-width:100%;overflow-wrap:anywhere;transition:background-color 120ms ease,border-color 120ms ease,transform 80ms ease}
+button{font:inherit;font-size:13px;font-weight:600;min-height:44px;padding:8px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);cursor:pointer;max-width:100%;overflow-wrap:anywhere;transition:background-color var(--ui-motion-fast, 140ms) var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),border-color var(--ui-motion-fast, 140ms) var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)),transform var(--ui-motion-press, 80ms) var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1))}
 button:active:not(:disabled){transform:scale(0.98);border-color:var(--muted);background:var(--soft)}
 button[aria-pressed="true"]{border-color:var(--accent);background:var(--warn-bg);color:var(--fg)}
 button:disabled{opacity:.5;cursor:not-allowed}
@@ -31,6 +31,13 @@ summary{display:flex;align-items:center;justify-content:space-between;gap:8px;pa
 summary:active{background:var(--surface)}
 summary>span{min-width:0;overflow-wrap:anywhere}
 summary>small{margin-left:auto;font-weight:500;flex-shrink:0}
+.file-summary>small{max-width:42%;overflow-wrap:anywhere;text-align:end}
+.file-path{display:flex;flex:1;min-width:0}
+.file-path-folder,.file-path-basename{overflow:hidden;white-space:pre;text-overflow:ellipsis}
+.file-path-folder{min-width:0;color:var(--muted)}
+.file-path-basename{flex:none;max-width:100%}
+.file-path-controls{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin-block:4px 8px;min-width:0}
+.file-path-controls code{min-width:0;max-width:100%;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .disclosure-body{padding:4px 0 14px;min-width:0;max-width:100%}
 .files{border-top:1px solid var(--line);margin-top:16px;min-width:0;max-width:100%}
 .compact-list{padding-left:20px;font-size:12px;line-height:1.7;overflow-wrap:anywhere}

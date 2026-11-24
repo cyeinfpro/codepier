@@ -134,7 +134,7 @@
   color: var(--ui-muted);
 }
 
-.roots-feedback[data-tone='error'] {
+.roots-feedback[data-tone="error"] {
   color: var(--ui-danger);
 }
 

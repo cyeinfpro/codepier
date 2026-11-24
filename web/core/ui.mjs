@@ -1,133 +1,283 @@
 // Shared UI primitives, authored as an ES module and bundled without external runtime dependencies.
-import { createPanel } from './lifecycle.mjs';
+import { createPanel } from "./lifecycle.mjs";
 
 export const $ = (s, r = document) => r.querySelector(s),
   $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 export const esc = (v) =>
-  String(v ?? '').replace(
+  String(v ?? "").replace(
     /[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
   );
 
 export const paths = {
-  dashboard: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z',
-  device: 'M3 4h18v13H3zM8 21h8M12 17v4',
-  folder: 'M3 6h6l2 2h10v12H3z',
-  code: 'm8 7-5 5 5 5m8-10 5 5-5 5m-3-12-2 20',
-  audit: 'M6 3h12v18H6zM9 7h6M9 11h6M9 15h4',
-  plug: 'M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0zM12 18v3',
+  dashboard: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
+  device: "M3 4h18v13H3zM8 21h8M12 17v4",
+  folder: "M3 6h6l2 2h10v12H3z",
+  code: "m8 7-5 5 5 5m8-10 5 5-5 5m-3-12-2 20",
+  audit: "M6 3h12v18H6zM9 7h6M9 11h6M9 15h4",
+  plug: "M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-12 0zM12 18v3",
   settings:
-    'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2',
-  arrow: 'm9 5 7 7-7 7',
-  plus: 'M12 5v14M5 12h14',
-  refresh: 'M20 7v5h-5M4 17v-5h5M19 9a7 7 0 0 0-12-4L4 8m1 7a7 7 0 0 0 12 4l3-3',
-  logout: 'M9 4H4v16h5M9 12h12m-4-4 4 4-4 4',
-  shield: 'm12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6',
-  close: 'm6 6 12 12M6 18 18 6',
-  menu: 'M4 6h16M4 12h16M4 18h16',
-  check: 'm5 12 4 4L19 6',
-  cloud: 'M6 18a4 4 0 0 1-1-8 7 7 0 0 1 13-2 5 5 0 0 1 0 10z',
-  ai: 'M7 5h10v14H7zM10 9h4m-4 4h4M3 9h4m10 0h4M3 15h4m10 0h4M10 2v3m4-3v3m-4 14v3m4-3v3',
-  activity: 'M2 12h4l3-8 6 16 3-8h4',
-  file: 'M5 3h9l5 5v13H5zM14 3v6h5',
-  search: 'M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14m5 12 6 6',
-  save: 'M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-7h8v7',
-  copy: 'M8 8h12v13H8zM4 16H2V2h13v3',
-  download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
-  play: 'm8 4 12 8-12 8z',
-  stop: 'M6 6h12v12H6z',
-  history: 'M4 4v5h5M5 7a9 9 0 1 1-2 8M12 7v5l4 2',
-  key: 'M8 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10m4 9 9 8m-5-4 3-3m-6 0 3-3',
-  warning: 'm12 3 10 18H2zM12 9v5m0 3v1',
-  git: 'M7 3v11a4 4 0 0 0 4 4h4M7 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4m10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4m0 4v8M17 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4',
-  terminal: 'm4 6 5 5-5 5m8 1h8',
-  edit: 'm4 15 12-12 5 5L9 20l-6 1zM13 6l5 5',
-  trash: 'M3 6h18M5 6l1 15h12l1-15M9 6V3h6v3M9 10v7m6-7v7',
-  network: 'M8 3h8v6H8zM2 16h7v5H2zM15 16h7v5h-7zM12 9v4M5 16v-3h14v3',
-  lock: 'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4M12 14v3',
+    "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2",
+  arrow: "m9 5 7 7-7 7",
+  plus: "M12 5v14M5 12h14",
+  refresh:
+    "M20 7v5h-5M4 17v-5h5M19 9a7 7 0 0 0-12-4L4 8m1 7a7 7 0 0 0 12 4l3-3",
+  logout: "M9 4H4v16h5M9 12h12m-4-4 4 4-4 4",
+  shield: "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6",
+  close: "m6 6 12 12M6 18 18 6",
+  menu: "M4 6h16M4 12h16M4 18h16",
+  check: "m5 12 4 4L19 6",
+  cloud: "M6 18a4 4 0 0 1-1-8 7 7 0 0 1 13-2 5 5 0 0 1 0 10z",
+  ai: "M7 5h10v14H7zM10 9h4m-4 4h4M3 9h4m10 0h4M3 15h4m10 0h4M10 2v3m4-3v3m-4 14v3m4-3v3",
+  activity: "M2 12h4l3-8 6 16 3-8h4",
+  file: "M5 3h9l5 5v13H5zM14 3v6h5",
+  search: "M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14m5 12 6 6",
+  save: "M4 3h13l3 3v15H4zM8 3v6h8V3M8 21v-7h8v7",
+  copy: "M8 8h12v13H8zM4 16H2V2h13v3",
+  download: "M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5",
+  play: "m8 4 12 8-12 8z",
+  stop: "M6 6h12v12H6z",
+  history: "M4 4v5h5M5 7a9 9 0 1 1-2 8M12 7v5l4 2",
+  key: "M8 4a5 5 0 1 0 0 10 5 5 0 0 0 0-10m4 9 9 8m-5-4 3-3m-6 0 3-3",
+  warning: "m12 3 10 18H2zM12 9v5m0 3v1",
+  git: "M7 3v11a4 4 0 0 0 4 4h4M7 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4m10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4m0 4v8M17 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4",
+  terminal: "m4 6 5 5-5 5m8 1h8",
+  edit: "m4 15 12-12 5 5L9 20l-6 1zM13 6l5 5",
+  trash: "M3 6h18M5 6l1 15h12l1-15M9 6V3h6v3M9 10v7m6-7v7",
+  network: "M8 3h8v6H8zM2 16h7v5H2zM15 16h7v5h-7zM12 9v4M5 16v-3h14v3",
+  lock: "M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4M12 14v3",
 };
 
-export const icon = (name, cls = '') =>
+export const icon = (name, cls = "") =>
   `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.code}"/></svg>`;
 
 export const stateNames = {
-  active: '进行中',
-  blocked: '受阻',
-  completed: '已验收',
-  pending: '待处理',
-  skipped: '已跳过',
-  reconnecting: '重连恢复中',
-  cancelling: '等待取消确认',
-  needs_review: '需核实本机结果',
-  succeeded: '已完成',
-  failed: '失败',
-  running: '执行中',
-  queued: '排队中',
-  unknown: '结果待核实',
-  interrupted: '已中断',
-  cancelled: '已取消',
-  ok: '成功',
-  denied: '已拒绝',
-  started: '已开始',
+  active: "进行中",
+  blocked: "受阻",
+  completed: "已验收",
+  pending: "待处理",
+  skipped: "已跳过",
+  reconnecting: "重连恢复中",
+  cancelling: "等待取消确认",
+  needs_review: "需核实本机结果",
+  succeeded: "已完成",
+  failed: "失败",
+  running: "执行中",
+  queued: "排队中",
+  unknown: "结果待核实",
+  interrupted: "已中断",
+  cancelled: "已取消",
+  ok: "成功",
+  denied: "已拒绝",
+  started: "已开始",
 };
 
 export const badge = (state) =>
   `<span class="badge ${esc(state)}">${esc(stateNames[state] || state)}</span>`;
 
 export const onlineBadge = (v) =>
-  `<span class="badge ${v ? '' : 'offline'}"><i class="dot ${v ? 'online' : 'offline'}"></i>${v ? '在线' : '离线'}</span>`;
+  `<span class="badge ${v ? "" : "offline"}"><i class="dot ${v ? "online" : "offline"}"></i>${v ? "在线" : "离线"}</span>`;
 
 export const timeText = (t) =>
-  t ? new Date(t * 1000).toLocaleString('zh-CN', { hour12: false }) : '尚未连接';
+  t
+    ? new Date(t * 1000).toLocaleString("zh-CN", { hour12: false })
+    : "尚未连接";
 
 export const shortTime = (t) =>
-  t ? new Date(t * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+  t ? new Date(t * 1000).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 
 export const json = (v) => JSON.stringify(v, null, 2);
 
 export function uid() {
   const b = new Uint8Array(16);
   crypto.getRandomValues(b);
-  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
 
-export function toast(message, error = false) {
-  const host = $('#toasts');
+const scrollEdgeFadeBindings = new WeakMap();
+
+export function bindScrollEdgeFade(el) {
+  if (!el || typeof el.addEventListener !== "function") return () => {};
+  const existing = scrollEdgeFadeBindings.get(el);
+  if (existing) {
+    existing.sync();
+    return existing.dispose;
+  }
+  el.classList.add("scroll-edge-fade");
+  let frame = 0;
+  let disposed = false;
+  let wasConnected = el.isConnected;
+  const sync = () => {
+    frame = 0;
+    if (disposed) return;
+    if (!el.isConnected) {
+      if (wasConnected) dispose();
+      return;
+    }
+    wasConnected = true;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    const canScroll = maxScroll > 2;
+    el.dataset.fadeTop = String(canScroll && el.scrollTop > 2);
+    el.dataset.fadeBottom = String(canScroll && el.scrollTop < maxScroll - 2);
+  };
+  const schedule = () => {
+    if (disposed || frame) return;
+    frame =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(sync)
+        : (sync(), 0);
+  };
+  const resize =
+    typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : null;
+  const mutations =
+    typeof MutationObserver === "function"
+      ? new MutationObserver(schedule)
+      : null;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    if (frame && typeof cancelAnimationFrame === "function")
+      cancelAnimationFrame(frame);
+    frame = 0;
+    el.removeEventListener("scroll", schedule);
+    el.removeEventListener("load", schedule, true);
+    el.removeEventListener("error", schedule, true);
+    resize?.disconnect();
+    mutations?.disconnect();
+    if (!resize && typeof window !== "undefined")
+      window.removeEventListener("resize", schedule);
+    delete el.dataset.fadeTop;
+    delete el.dataset.fadeBottom;
+    scrollEdgeFadeBindings.delete(el);
+  };
+  scrollEdgeFadeBindings.set(el, { sync: schedule, dispose });
+  el.addEventListener("scroll", schedule, { passive: true });
+  el.addEventListener("load", schedule, true);
+  el.addEventListener("error", schedule, true);
+  if (resize) resize.observe(el);
+  else if (typeof window !== "undefined")
+    window.addEventListener("resize", schedule, { passive: true });
+  // A fixed-size viewport can gain or lose overflow without a resize.
+  mutations?.observe(el, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["class", "style", "hidden", "open"],
+  });
+  schedule();
+  return dispose;
+}
+
+export function formatMiddlePath(path, { leafSegments = 1 } = {}) {
+  const raw = String(path ?? "");
+  if (!raw) return "";
+  const sep = raw.includes("\\") && !raw.includes("/") ? "\\" : "/";
+  const parts = raw.split(sep);
+  const keep = Math.max(1, Number(leafSegments) || 1);
+  if (parts.length <= keep) {
+    return `<span class="middle-truncate" title="${esc(raw)}"><span class="middle-truncate-leaf">${esc(raw)}</span></span>`;
+  }
+  const cut = parts.length - keep;
+  const prefix = parts.slice(0, cut).join(sep);
+  const leaf = sep + parts.slice(cut).join(sep);
+  return `<span class="middle-truncate" title="${esc(raw)}"><span class="middle-truncate-prefix">${esc(prefix)}</span><span class="middle-truncate-leaf">${esc(leaf)}</span></span>`;
+}
+
+export function toast(message, errorOrOptions = false, extraOptions = null) {
+  const host = $("#toasts");
   if (!host) return;
-  const text = String(message ?? '');
-  const duplicate = $$('.toast', host).find(
+  const opts =
+    errorOrOptions && typeof errorOrOptions === "object"
+      ? errorOrOptions
+      : extraOptions && typeof extraOptions === "object"
+        ? extraOptions
+        : {};
+  const error =
+    typeof errorOrOptions === "boolean"
+      ? errorOrOptions
+      : Boolean(opts.error || opts.tone === "error");
+  const actionLabel =
+    typeof opts.actionLabel === "string" ? opts.actionLabel.trim() : "";
+  const onAction = typeof opts.onAction === "function" ? opts.onAction : null;
+  const hasAction = Boolean(actionLabel && onAction);
+  const customDuration = Number(opts.duration);
+  const initialDuration =
+    Number.isFinite(customDuration) && customDuration > 0
+      ? customDuration
+      : hasAction
+        ? 6000
+        : 4700;
+  const text = String(message ?? "");
+  const duplicate = $$(".toast", host).find(
     (node) =>
-      node.classList.contains('error') === error && $('.toast-message', node)?.textContent === text,
+      node.dataset.leaving !== "true" &&
+      node.classList.contains("error") === error &&
+      $(".toast-message", node)?.textContent === text &&
+      ($(".toast-action", node)?.textContent || "") ===
+        (hasAction ? actionLabel : ""),
   );
   if (duplicate) return duplicate;
   const origin = document.activeElement,
-    node = document.createElement('div');
-  node.className = 'toast' + (error ? ' error' : '');
-  node.setAttribute('role', error ? 'alert' : 'status');
-  node.innerHTML = `${icon(error ? 'warning' : 'check')}<span class="toast-message"></span><button type="button" class="icon-btn toast-dismiss" aria-label="关闭提示">${icon('close')}</button>`;
-  $('.toast-message', node).textContent = text;
+    node = document.createElement("div");
+  node.className = "toast" + (error ? " error" : "");
+  node.setAttribute("role", error ? "alert" : "status");
+  node.innerHTML = `${icon(error ? "warning" : "check")}<span class="toast-message"></span>${hasAction ? `<button type="button" class="toast-action"></button>` : ""}<button type="button" class="icon-btn toast-dismiss" aria-label="关闭提示">${icon("close")}</button>`;
+  $(".toast-message", node).textContent = text;
+  if (hasAction) $(".toast-action", node).textContent = actionLabel;
+  const autoDismiss =
+    !error || (Number.isFinite(customDuration) && customDuration > 0);
+  if (autoDismiss) {
+    const progress = document.createElement("span");
+    progress.className = "toast-progress";
+    progress.setAttribute("aria-hidden", "true");
+    progress.style.setProperty("--toast-duration", `${initialDuration}ms`);
+    node.append(progress);
+  }
   host.append(node);
   let timer = null,
-    remaining = 4700,
+    leaveTimer = null,
+    remaining = initialDuration,
     started = 0,
-    hovered = false;
-  const remove = () => {
-    clearTimeout(timer);
+    hovered = false,
+    removing = false;
+  const finalizeRemove = () => {
+    clearTimeout(leaveTimer);
+    leaveTimer = null;
+    if (!node.isConnected) return;
     const focused = node.contains(document.activeElement);
     node.remove();
     if (focused) {
       const host = layerHost();
-      const dialog = host === document.body ? $('.modal') : host;
+      const dialog = host === document.body ? $(".modal") : host;
       const target =
         origin?.isConnected &&
         origin.getClientRects().length &&
-        !origin.closest('[inert]') &&
+        !origin.closest("[inert]") &&
         (!dialog || dialog.contains(origin))
           ? origin
           : dialog;
       target?.focus({ preventScroll: true });
     }
+  };
+  const remove = () => {
+    if (removing) return;
+    removing = true;
+    clearTimeout(timer);
+    timer = null;
+    const reduced =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    if (reduced || !node.isConnected) {
+      finalizeRemove();
+      return;
+    }
+    node.dataset.leaving = "true";
+    leaveTimer = setTimeout(finalizeRemove, 150);
   };
   const stop = () => {
     if (timer) {
@@ -137,52 +287,82 @@ export function toast(message, error = false) {
     }
   };
   const resume = () => {
-    if (timer || error || hovered || node.contains(document.activeElement) || !node.isConnected)
+    if (
+      removing ||
+      timer ||
+      !autoDismiss ||
+      hovered ||
+      node.contains(document.activeElement) ||
+      !node.isConnected
+    )
       return;
     started = Date.now();
     timer = setTimeout(remove, remaining);
   };
-  node.addEventListener('mouseenter', () => {
+  node.addEventListener("mouseenter", () => {
     hovered = true;
     stop();
   });
-  node.addEventListener('mouseleave', () => {
+  node.addEventListener("mouseleave", () => {
     hovered = false;
     resume();
   });
-  node.addEventListener('focusin', stop);
-  node.addEventListener('focusout', () => queueMicrotask(resume));
-  $('.toast-dismiss', node).onclick = remove;
+  node.addEventListener("focusin", stop);
+  node.addEventListener("focusout", () => queueMicrotask(resume));
+  if (hasAction) {
+    const actionButton = $(".toast-action", node);
+    let actionInvoked = false;
+    actionButton.onclick = () => {
+      if (
+        actionInvoked ||
+        removing ||
+        node.dataset.leaving === "true" ||
+        !node.isConnected
+      )
+        return;
+      // Claim before user code can re-enter; focus stays until finalizeRemove.
+      actionInvoked = true;
+      actionButton.setAttribute("aria-disabled", "true");
+      try {
+        onAction();
+      } finally {
+        remove();
+      }
+    };
+  }
+  $(".toast-dismiss", node).onclick = remove;
   resume();
   return node;
 }
 
 function triggerAnchorDownload(name, blob) {
   const u = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href = u;
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(u), 3000);
 }
 
-export function download(name, text, type = 'application/json') {
+export function download(name, text, type = "application/json") {
   const blob = text instanceof Blob ? text : new Blob([text], { type });
-  const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches;
+  const coarse =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(pointer: coarse)")?.matches;
   if (
     coarse &&
-    typeof File === 'function' &&
-    typeof navigator !== 'undefined' &&
-    typeof navigator.share === 'function' &&
-    typeof navigator.canShare === 'function'
+    typeof File === "function" &&
+    typeof navigator !== "undefined" &&
+    typeof navigator.share === "function" &&
+    typeof navigator.canShare === "function"
   ) {
     try {
       const fileObj = new File([blob], name, {
-        type: blob.type || type || 'application/octet-stream',
+        type: blob.type || type || "application/octet-stream",
       });
       if (navigator.canShare({ files: [fileObj] })) {
         void navigator.share({ files: [fileObj], title: name }).catch((err) => {
-          if (err?.name === 'AbortError') return;
+          if (err?.name === "AbortError") return;
           triggerAnchorDownload(name, blob);
         });
         return;
@@ -200,58 +380,60 @@ export function applyKeyboardHygiene(root = document) {
     'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea',
   );
   for (const control of controls) {
-    const type = (control.getAttribute('type') || 'text').toLowerCase();
-    const key = [control.name, control.id].filter(Boolean).join(' ');
+    const type = (control.getAttribute("type") || "text").toLowerCase();
+    const key = [control.name, control.id].filter(Boolean).join(" ");
     const labelEl =
       control.labels?.[0] ||
-      control.closest('.field')?.querySelector(':scope > label, .field-label');
+      control.closest(".field")?.querySelector(":scope > label, .field-label");
     const hint = [
-      labelEl?.textContent || '',
-      control.getAttribute('aria-label') || '',
-      control.getAttribute('placeholder') || '',
-    ].join(' ');
+      labelEl?.textContent || "",
+      control.getAttribute("aria-label") || "",
+      control.getAttribute("placeholder") || "",
+    ].join(" ");
     const setAttr = (attr, val) => {
       if (!control.hasAttribute(attr)) control.setAttribute(attr, val);
     };
     if (
-      type === 'search' ||
+      type === "search" ||
       /(?:^|[_-])(query|search|filter)(?:$|[_-])/i.test(key) ||
       /(搜索|筛选|查找)/.test(hint)
     ) {
-      setAttr('autocapitalize', 'none');
-      setAttr('autocorrect', 'off');
-      setAttr('spellcheck', 'false');
-      setAttr('enterkeyhint', 'search');
+      setAttr("autocapitalize", "none");
+      setAttr("autocorrect", "off");
+      setAttr("spellcheck", "false");
+      setAttr("enterkeyhint", "search");
       continue;
     }
     if (
-      type === 'url' ||
-      /(?:^|[_-])(url|uri|endpoint|webhook|callback|redirect|origin|issuer)(?:$|[_-])/i.test(key) ||
+      type === "url" ||
+      /(?:^|[_-])(url|uri|endpoint|webhook|callback|redirect|origin|issuer)(?:$|[_-])/i.test(
+        key,
+      ) ||
       /(回调地址|连接地址|服务地址|网关地址|Webhook|URL)/i.test(hint)
     ) {
-      setAttr('inputmode', 'url');
-      setAttr('autocapitalize', 'none');
-      setAttr('autocorrect', 'off');
-      setAttr('spellcheck', 'false');
+      setAttr("inputmode", "url");
+      setAttr("autocapitalize", "none");
+      setAttr("autocorrect", "off");
+      setAttr("spellcheck", "false");
       continue;
     }
     if (
-      control.tagName === 'INPUT' &&
-      (type === 'number' ||
+      control.tagName === "INPUT" &&
+      (type === "number" ||
         /(?:^|[_-])(port|timeout|ttl|seconds|days|limit|offset|quota|retries|interval)(?:$|[_-])/i.test(
           key,
         ) ||
         /(端口|超时|秒数|配额|阈值|上限)/.test(hint))
     ) {
-      setAttr('inputmode', 'numeric');
-      setAttr('autocapitalize', 'none');
-      setAttr('autocorrect', 'off');
-      setAttr('spellcheck', 'false');
+      setAttr("inputmode", "numeric");
+      setAttr("autocapitalize", "none");
+      setAttr("autocorrect", "off");
+      setAttr("spellcheck", "false");
       continue;
     }
     if (
-      type === 'password' ||
-      type === 'email' ||
+      type === "password" ||
+      type === "email" ||
       /(user|account|login|email|host|ip|domain|addr|path|root|dir|file|glob|slug|token|secret|bearer|cmd|command|shell|arg|env|repo|branch|sha|hash|bundle|app|network|group|issuer|client|audience|scope|key_id)/i.test(
         key,
       ) ||
@@ -259,49 +441,49 @@ export function applyKeyboardHygiene(root = document) {
         hint,
       )
     ) {
-      setAttr('autocapitalize', 'none');
-      setAttr('autocorrect', 'off');
-      setAttr('spellcheck', 'false');
+      setAttr("autocapitalize", "none");
+      setAttr("autocorrect", "off");
+      setAttr("spellcheck", "false");
     }
   }
 }
 
-export function buttons(primary, label = '保存') {
+export function buttons(primary, label = "保存") {
   return `<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" id="${primary}">${esc(label)}</button>`;
 }
 
 export function notice(text, info = false) {
-  return `<div class="notice ${info ? 'info' : ''}">${icon(info ? 'shield' : 'warning')}<div>${text}</div></div>`;
+  return `<div class="notice ${info ? "info" : ""}">${icon(info ? "shield" : "warning")}<div>${text}</div></div>`;
 }
 
-export function empty(text, action = '', label = '') {
-  return `<div class="empty">${icon('network')}<p>${esc(text)}</p>${action ? `<button class="btn small" data-action="${action}">${esc(label)}</button>` : ''}</div>`;
+export function empty(text, action = "", label = "") {
+  return `<div class="empty">${icon("network")}<p>${esc(text)}</p>${action ? `<button class="btn small" data-action="${action}">${esc(label)}</button>` : ""}</div>`;
 }
 
-export function heading(title, eyebrow, subtitle = '', actions = '') {
-  return `<header class="page-head"><div>${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ''}<h1>${esc(title)}</h1>${subtitle ? `<p>${esc(subtitle)}</p>` : ''}</div>${actions ? `<div class="actions">${actions}</div>` : ''}</header>`;
+export function heading(title, eyebrow, subtitle = "", actions = "") {
+  return `<header class="page-head"><div>${eyebrow ? `<div class="eyebrow">${esc(eyebrow)}</div>` : ""}<h1>${esc(title)}</h1>${subtitle ? `<p>${esc(subtitle)}</p>` : ""}</div>${actions ? `<div class="actions">${actions}</div>` : ""}</header>`;
 }
 
 export async function busy(button, fn, notify = toast) {
   if (button?.disabled) return;
   const children = button ? [...button.childNodes] : [],
-    priorBusy = button?.getAttribute('aria-busy');
-  const priorWidth = button?.style.getPropertyValue('min-width'),
-    priorPriority = button?.style.getPropertyPriority('min-width');
+    priorBusy = button?.getAttribute("aria-busy");
+  const priorWidth = button?.style.getPropertyValue("min-width"),
+    priorPriority = button?.style.getPropertyPriority("min-width");
   if (button) {
     const width = button.getBoundingClientRect().width;
-    const label = document.createElement('span');
-    label.className = 'ui-busy-label';
+    const label = document.createElement("span");
+    label.className = "ui-busy-label";
     label.append(...children);
-    const indicator = document.createElement('span');
-    indicator.className = 'ui-busy-indicator';
-    indicator.setAttribute('aria-hidden', 'true');
+    const indicator = document.createElement("span");
+    indicator.className = "ui-busy-indicator";
+    indicator.setAttribute("aria-hidden", "true");
     indicator.innerHTML = '<i class="spinner"></i>';
     button.replaceChildren(label, indicator);
     button.disabled = true;
-    button.classList.add('ui-busy');
-    button.setAttribute('aria-busy', 'true');
-    if (width) button.style.minWidth = width + 'px';
+    button.classList.add("ui-busy");
+    button.setAttribute("aria-busy", "true");
+    if (width) button.style.minWidth = width + "px";
   }
   try {
     return await fn();
@@ -311,11 +493,12 @@ export async function busy(button, fn, notify = toast) {
     if (button) {
       button.replaceChildren(...children);
       button.disabled = false;
-      button.classList.remove('ui-busy');
-      if (priorBusy === null) button.removeAttribute('aria-busy');
-      else button.setAttribute('aria-busy', priorBusy);
-      if (priorWidth) button.style.setProperty('min-width', priorWidth, priorPriority);
-      else button.style.removeProperty('min-width');
+      button.classList.remove("ui-busy");
+      if (priorBusy === null) button.removeAttribute("aria-busy");
+      else button.setAttribute("aria-busy", priorBusy);
+      if (priorWidth)
+        button.style.setProperty("min-width", priorWidth, priorPriority);
+      else button.style.removeProperty("min-width");
     }
   }
 }
@@ -328,11 +511,12 @@ let layerObserver = null;
 function hidingDisclosure(node) {
   let outermost;
   for (
-    let closed = node?.closest('details:not([open])');
+    let closed = node?.closest("details:not([open])");
     closed;
-    closed = closed.parentElement?.closest('details:not([open])')
+    closed = closed.parentElement?.closest("details:not([open])")
   ) {
-    if (!closed.querySelector(':scope > summary')?.contains(node)) outermost = closed;
+    if (!closed.querySelector(":scope > summary")?.contains(node))
+      outermost = closed;
   }
   return outermost;
 }
@@ -345,28 +529,32 @@ export function focusable(root) {
     if (
       node.tabIndex < 0 ||
       !node.getClientRects().length ||
-      node.closest('[inert]') ||
-      getComputedStyle(node).visibility !== 'visible'
+      node.closest("[inert]") ||
+      getComputedStyle(node).visibility !== "visible"
     )
       return false;
     return !hidingDisclosure(node);
   });
 }
 
-const noticeSelectors = ['#toasts', '#computer-approval-inbox'];
+const noticeSelectors = ["#toasts", "#computer-approval-inbox"];
 
 export function layerHost() {
-  return nativeLayers.findLast((dialog) => dialog.isConnected && dialog.open) || document.body;
+  return (
+    nativeLayers.findLast((dialog) => dialog.isConnected && dialog.open) ||
+    document.body
+  );
 }
 
 function adoptNotices(source = document) {
   const host = layerHost();
   for (const selector of noticeSelectors) {
-    const node = document.querySelector(selector) || source.querySelector(selector);
+    const node =
+      document.querySelector(selector) || source.querySelector(selector);
     if (!node) continue;
-    const modal = host === document.body && document.querySelector('.modal');
-    if (selector === '#toasts' && modal) {
-      const header = modal.querySelector('.modal-header');
+    const modal = host === document.body && document.querySelector(".modal");
+    if (selector === "#toasts" && modal) {
+      const header = modal.querySelector(".modal-header");
       if (header && header.nextElementSibling !== node) header.after(node);
     } else if (node.parentElement !== host) host.append(node);
   }
@@ -393,13 +581,17 @@ export function showModalLayer(dialog) {
   if (opening || index < 0) nativeLayers.push(dialog);
   if (!layerBindings.has(dialog)) {
     layerBindings.add(dialog);
-    dialog.addEventListener('close', () => {
+    dialog.addEventListener("close", () => {
       // The close event is queued; this dialog may already have reopened.
       if (!dialog.open) releaseLayer(dialog);
     });
-    dialog.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') event.stopPropagation();
-      if (event.key === 'Tab' && layerHost() === dialog && !event.defaultPrevented) {
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") event.stopPropagation();
+      if (
+        event.key === "Tab" &&
+        layerHost() === dialog &&
+        !event.defaultPrevented
+      ) {
         const items = focusable(dialog);
         event.preventDefault();
         const index = items.indexOf(document.activeElement);
@@ -419,7 +611,7 @@ export function showModalLayer(dialog) {
       for (const layer of [...nativeLayers]) {
         if (!layer.isConnected || !layer.open) {
           releaseLayer(layer);
-          layer.dispatchEvent(new Event('ui-layer-dismiss'));
+          layer.dispatchEvent(new Event("ui-layer-dismiss"));
         }
       }
       if (nativeLayers.length) adoptNotices();
@@ -428,7 +620,7 @@ export function showModalLayer(dialog) {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['open'],
+      attributeFilter: ["open"],
     });
   }
   return dialog;
@@ -442,79 +634,80 @@ export function closeModalLayer(dialog) {
 
 export function restoreLayerFocus(origin) {
   const host = layerHost();
-  const target = hidingDisclosure(origin)?.querySelector(':scope > summary') || origin;
+  const target =
+    hidingDisclosure(origin)?.querySelector(":scope > summary") || origin;
   if (
     target?.isConnected &&
     target.getClientRects().length &&
-    getComputedStyle(target).visibility === 'visible' &&
-    !target.closest('[inert]') &&
+    getComputedStyle(target).visibility === "visible" &&
+    !target.closest("[inert]") &&
     (host === document.body || host.contains(target))
   )
     target.focus({ preventScroll: true });
 }
 
 export function confirmSheet({
-  title = '确认操作',
-  body = '',
-  command = '',
-  typed = '',
-  confirmLabel = '确定',
-  cancelLabel = '取消',
+  title = "确认操作",
+  body = "",
+  command = "",
+  typed = "",
+  confirmLabel = "确定",
+  cancelLabel = "取消",
   danger = false,
   signal,
-  formId = '',
-  inputId = '',
-  submitId = '',
+  formId = "",
+  inputId = "",
+  submitId = "",
 } = {}) {
   if (signal?.aborted) return Promise.resolve(false);
-  const id = 'ui-sheet-' + uid(),
-    dialog = document.createElement('dialog');
-  dialog.className = 'ui-sheet';
-  dialog.setAttribute('aria-labelledby', id + '-title');
+  const id = "ui-sheet-" + uid(),
+    dialog = document.createElement("dialog");
+  dialog.className = "ui-sheet";
+  dialog.setAttribute("aria-labelledby", id + "-title");
   dialog.tabIndex = -1;
-  const form = document.createElement('form'),
-    heading = document.createElement('h2');
+  const form = document.createElement("form"),
+    heading = document.createElement("h2");
   if (formId) form.id = formId;
-  heading.id = id + '-title';
+  heading.id = id + "-title";
   heading.textContent = title;
   form.append(heading);
   if (body) {
-    const description = document.createElement('p');
-    description.id = id + '-body';
+    const description = document.createElement("p");
+    description.id = id + "-body";
     description.textContent = body;
-    dialog.setAttribute('aria-describedby', description.id);
+    dialog.setAttribute("aria-describedby", description.id);
     form.append(description);
   }
   if (command) {
-    const preview = document.createElement('pre');
-    preview.className = 'ui-sheet-command integration-page-text';
+    const preview = document.createElement("pre");
+    preview.className = "ui-sheet-command integration-page-text";
     preview.textContent = command;
     form.append(preview);
   }
   let input;
   if (typed) {
-    const label = document.createElement('label');
-    label.className = 'field ui-sheet-typed';
-    label.textContent = '输入项目名称「' + typed + '」确认';
-    input = document.createElement('input');
-    input.id = inputId || id + '-input';
-    input.autocomplete = 'off';
-    input.setAttribute('autocapitalize', 'none');
-    input.setAttribute('autocorrect', 'off');
+    const label = document.createElement("label");
+    label.className = "field ui-sheet-typed";
+    label.textContent = "输入项目名称「" + typed + "」确认";
+    input = document.createElement("input");
+    input.id = inputId || id + "-input";
+    input.autocomplete = "off";
+    input.setAttribute("autocapitalize", "none");
+    input.setAttribute("autocorrect", "off");
     input.spellcheck = false;
     input.required = true;
     label.append(input);
     form.append(label);
   }
-  const actions = document.createElement('div'),
-    cancel = document.createElement('button'),
-    confirm = document.createElement('button');
-  actions.className = 'ui-sheet-actions';
-  cancel.type = 'button';
-  cancel.className = 'btn ghost';
+  const actions = document.createElement("div"),
+    cancel = document.createElement("button"),
+    confirm = document.createElement("button");
+  actions.className = "ui-sheet-actions";
+  cancel.type = "button";
+  cancel.className = "btn ghost";
   cancel.textContent = cancelLabel;
-  confirm.type = 'submit';
-  confirm.className = 'btn ' + (danger ? 'danger' : 'primary');
+  confirm.type = "submit";
+  confirm.className = "btn " + (danger ? "danger" : "primary");
   confirm.textContent = confirmLabel;
   if (submitId) confirm.id = submitId;
   confirm.disabled = !!typed;
@@ -529,7 +722,7 @@ export function confirmSheet({
     const finish = (value) => {
       if (settled) return;
       settled = true;
-      signal?.removeEventListener('abort', abort);
+      signal?.removeEventListener("abort", abort);
       const wasTop = layerHost() === dialog;
       closeModalLayer(dialog);
       dialog.remove();
@@ -537,30 +730,39 @@ export function confirmSheet({
       resolve(value);
     };
     const abort = () => finish(false);
-    cancel.addEventListener('click', abort);
-    dialog.addEventListener('cancel', (event) => {
+    cancel.addEventListener("click", abort);
+    dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
       abort();
     });
-    dialog.addEventListener('close', abort);
-    dialog.addEventListener('ui-layer-dismiss', abort);
-    signal?.addEventListener('abort', abort, { once: true });
-    input?.addEventListener('input', () => {
+    dialog.addEventListener("close", abort);
+    dialog.addEventListener("ui-layer-dismiss", abort);
+    signal?.addEventListener("abort", abort, { once: true });
+    input?.addEventListener("input", () => {
       confirm.disabled = input.value !== typed;
     });
-    form.addEventListener('compositionstart', () => {
+    form.addEventListener("compositionstart", () => {
       composing = true;
     });
-    form.addEventListener('compositionend', () => {
+    form.addEventListener("compositionend", () => {
       composing = false;
     });
-    form.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && (composing || event.isComposing || event.keyCode === 229))
+    form.addEventListener("keydown", (event) => {
+      if (
+        event.key === "Enter" &&
+        (composing || event.isComposing || event.keyCode === 229)
+      )
         event.preventDefault();
     });
-    form.addEventListener('submit', (event) => {
+    form.addEventListener("submit", (event) => {
       event.preventDefault();
-      if (settled || composing || confirm.disabled || (input && input.value !== typed)) return;
+      if (
+        settled ||
+        composing ||
+        confirm.disabled ||
+        (input && input.value !== typed)
+      )
+        return;
       finish(true);
     });
     try {
@@ -575,14 +777,20 @@ export function confirmSheet({
 function canScrollElementAxis(el, delta, vertical) {
   const style = getComputedStyle(el);
   if (vertical) {
-    if (!/(auto|scroll|overlay)/.test(style.overflowY) || el.scrollHeight <= el.clientHeight + 1)
+    if (
+      !/(auto|scroll|overlay)/.test(style.overflowY) ||
+      el.scrollHeight <= el.clientHeight + 1
+    )
       return null;
     return (
       (delta < 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) ||
       (delta > 0 && el.scrollTop > 0)
     );
   }
-  if (!/(auto|scroll|overlay)/.test(style.overflowX) || el.scrollWidth <= el.clientWidth + 1)
+  if (
+    !/(auto|scroll|overlay)/.test(style.overflowX) ||
+    el.scrollWidth <= el.clientWidth + 1
+  )
     return null;
   return (
     (delta < 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) ||
@@ -620,26 +828,32 @@ function bindModalTouchGuard(backdrop, dialog) {
     }
     event.preventDefault();
   };
-  backdrop.addEventListener('touchstart', onTouchStart, { passive: true });
-  backdrop.addEventListener('touchmove', onTouchMove, { passive: false });
+  backdrop.addEventListener("touchstart", onTouchStart, { passive: true });
+  backdrop.addEventListener("touchmove", onTouchMove, { passive: false });
   return () => {
-    backdrop.removeEventListener('touchstart', onTouchStart);
-    backdrop.removeEventListener('touchmove', onTouchMove);
+    backdrop.removeEventListener("touchstart", onTouchStart);
+    backdrop.removeEventListener("touchmove", onTouchMove);
   };
 }
 
 function focusModalInitialControl(dialog, uiFocusable) {
   const controls = uiFocusable(dialog);
-  const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches;
+  const coarse =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(pointer: coarse)")?.matches;
   if (coarse) {
-    const explicitAutofocus = controls.find((control) => control.matches('[autofocus]'));
-    const closeBtn = dialog.querySelector('.modal-header [data-action="close-modal"]');
+    const explicitAutofocus = controls.find((control) =>
+      control.matches("[autofocus]"),
+    );
+    const closeBtn = dialog.querySelector(
+      '.modal-header [data-action="close-modal"]',
+    );
     (explicitAutofocus || dialog || closeBtn)?.focus({ preventScroll: true });
     return;
   }
   const preferred =
-    controls.find((control) => control.matches('[autofocus]')) ||
-    controls.find((control) => control.matches('input,textarea,select'));
+    controls.find((control) => control.matches("[autofocus]")) ||
+    controls.find((control) => control.matches("input,textarea,select"));
   (preferred || controls[0] || dialog).focus({ preventScroll: true });
 }
 
@@ -655,9 +869,13 @@ export function createModal({
     pendingEditor = null;
   const enterEditor = () => {
     editorRoute = { id: uid() };
-    history.pushState({ ...history.state, codepierEditor: editorRoute.id }, '', location.href);
+    history.pushState(
+      { ...history.state, codepierEditor: editorRoute.id },
+      "",
+      location.href,
+    );
   };
-  window.addEventListener('popstate', () => {
+  window.addEventListener("popstate", () => {
     if (pendingBack) {
       pendingBack = false;
       if (pendingEditor?.isConnected && S.session) enterEditor();
@@ -665,12 +883,16 @@ export function createModal({
       return;
     }
     if (editorRoute && history.state?.codepierEditor !== editorRoute.id) {
-      const dialog = $('.modal'),
+      const dialog = $(".modal"),
         routeId = editorRoute.id;
       void (async () => {
         if (!(await canClose(dialog))) {
           if (dialog?.isConnected && editorRoute?.id === routeId)
-            history.pushState({ ...history.state, codepierEditor: routeId }, '', location.href);
+            history.pushState(
+              { ...history.state, codepierEditor: routeId },
+              "",
+              location.href,
+            );
           return;
         }
         if (editorRoute?.id === routeId) {
@@ -683,45 +905,45 @@ export function createModal({
   async function canClose(dialog) {
     if (!dialog) return true;
     if (
-      !dialog.classList.contains('modal-editor') &&
+      !dialog.classList.contains("modal-editor") &&
       !dialog.querySelector('[data-submission="uncertain"]')
     )
       return true;
     const busy = !!dialog.querySelector('[aria-busy="true"]');
     if (
       !busy &&
-      dialog.dataset.editorDirty !== 'true' &&
+      dialog.dataset.editorDirty !== "true" &&
       !dialog.querySelector('[data-submission="uncertain"]')
     )
       return true;
-    if (dialog.dataset.confirmingClose === 'true') return false;
-    dialog.dataset.confirmingClose = 'true';
+    if (dialog.dataset.confirmingClose === "true") return false;
+    dialog.dataset.confirmingClose = "true";
     try {
       const ok = await confirmSheet({
-        title: busy ? '操作仍在提交，确定离开？' : '放弃未保存的改动？',
+        title: busy ? "操作仍在提交，确定离开？" : "放弃未保存的改动？",
         body: busy
-          ? '离开不会取消已提交的请求，请稍后查看操作结果。'
-          : '输入尚未保存，或保存结果未确认。离开将丢弃本页输入。',
-        confirmLabel: '继续离开',
-        cancelLabel: '留在此页',
+          ? "离开不会取消已提交的请求，请稍后查看操作结果。"
+          : "输入尚未保存，或保存结果未确认。离开将丢弃本页输入。",
+        confirmLabel: "继续离开",
+        cancelLabel: "留在此页",
         danger: true,
       });
-      return ok && dialog.isConnected && $('.modal') === dialog;
+      return ok && dialog.isConnected && $(".modal") === dialog;
     } finally {
       if (dialog.isConnected) delete dialog.dataset.confirmingClose;
     }
   }
   async function requestClose(expected = null, { navigation = false } = {}) {
-    const dialog = $('.modal');
+    const dialog = $(".modal");
     if (expected && expected !== dialog) return false;
     if (!(await canClose(dialog))) return false;
     // Even a clean close yields at await. Never apply that request to a newer dialog.
-    if ($('.modal') !== dialog) return false;
+    if ($(".modal") !== dialog) return false;
     if (navigation && editorRoute) {
       if (history.state?.codepierEditor === editorRoute.id) {
         const state = { ...history.state };
         delete state.codepierEditor;
-        history.replaceState(state, '', location.href);
+        history.replaceState(state, "", location.href);
       }
       editorRoute = null;
     }
@@ -729,17 +951,17 @@ export function createModal({
     return true;
   }
   function closeModal(expected = null, preserveRoute = false) {
-    if (expected && $('.modal') !== expected) return;
+    if (expected && $(".modal") !== expected) return;
     S.vpsIntent = (S.vpsIntent || 0) + 1;
     S.modalIntent = (S.modalIntent || 0) + 1;
     if (S.modalCleanup) S.modalCleanup();
     S.modalCleanup = null;
     // Preserve outstanding notices when a dialog closes or is replaced.
-    const toasts = $('#toasts');
-    if (toasts?.closest('.modal')) $('#modal-root').after(toasts);
-    $('#modal-root').innerHTML = '';
-    $('#app').inert = false;
-    document.body.style.overflow = $('.sidebar.open') ? 'hidden' : '';
+    const toasts = $("#toasts");
+    if (toasts?.closest(".modal")) $("#modal-root").after(toasts);
+    $("#modal-root").innerHTML = "";
+    $("#app").inert = false;
+    document.body.style.overflow = $(".sidebar.open") ? "hidden" : "";
     const focus = S.modalLastFocus;
     S.modalLastFocus = null;
     if (!preserveRoute && editorRoute) {
@@ -752,53 +974,57 @@ export function createModal({
     }
     restoreLayerFocus(focus);
   }
-  function modal(title, body, footer = '', large = false, closable = true) {
-    const origin = $('.modal') ? S.modalLastFocus : document.activeElement;
+  function modal(title, body, footer = "", large = false, closable = true) {
+    const origin = $(".modal") ? S.modalLastFocus : document.activeElement;
     closeModal(null, true);
     S.modalLastFocus = origin;
-    $('#modal-root').innerHTML =
-      `<div class="modal-backdrop"><section class="modal ${large ? 'large' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="modal-header"><h2 id="modal-title">${esc(title)}</h2>${closable ? `<button class="icon-btn" data-action="close-modal" aria-label="关闭">${icon('close')}</button>` : ''}</header><div class="modal-body">${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ''}</section></div>`;
-    document.body.style.overflow = 'hidden';
-    $('#app').inert = true;
-    const dialog = $('.modal');
+    $("#modal-root").innerHTML =
+      `<div class="modal-backdrop"><section class="modal ${large ? "large" : ""}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1"><header class="modal-header"><h2 id="modal-title">${esc(title)}</h2>${closable ? `<button class="icon-btn" data-action="close-modal" aria-label="关闭">${icon("close")}</button>` : ""}</header><div class="modal-body">${body}</div>${footer ? `<footer class="modal-footer">${footer}</footer>` : ""}</section></div>`;
+    document.body.style.overflow = "hidden";
+    $("#app").inert = true;
+    const dialog = $(".modal");
     adoptNotices();
     const complex = dialog.querySelector(
       '#role-form,#profile-form,#vps-form,#project-form,#device-form,#device-rename,#agent-command-form,#grant-form,#workflow-create-form,#workflow-update-form,#artifact-form,.gw-tools,#gw-form [name="networks"],#iam-issuer,#iam-group_name',
     );
     if (complex || large) {
-      dialog.classList.add('modal-editor');
+      dialog.classList.add("modal-editor");
       dialog.dataset.presentation = complex
-        ? 'editor'
-        : dialog.querySelector('#computer-open-form')
-          ? 'tool'
-          : 'reader';
+        ? "editor"
+        : dialog.querySelector("#computer-open-form")
+          ? "tool"
+          : "reader";
       if (!complex) {
-        const content = dialog.querySelector('.modal-body');
+        const content = dialog.querySelector(".modal-body");
         content.tabIndex = 0;
-        content.setAttribute('role', 'region');
-        content.setAttribute('aria-label', title + '内容');
+        content.setAttribute("role", "region");
+        content.setAttribute("aria-label", title + "内容");
       }
       if (complex) {
-        dialog.dataset.editorForm = complex.closest('form')?.id || complex.id;
+        dialog.dataset.editorForm = complex.closest("form")?.id || complex.id;
         const dirty = (event) => {
           const control = event.target;
           if (
-            control.matches?.('input[name],select[name],textarea[name],#device-rename') &&
+            control.matches?.(
+              "input[name],select[name],textarea[name],#device-rename",
+            ) &&
             !control.readOnly
           )
-            dialog.dataset.editorDirty = 'true';
+            dialog.dataset.editorDirty = "true";
         };
-        dialog.addEventListener('input', dirty);
-        dialog.addEventListener('change', dirty);
+        dialog.addEventListener("input", dirty);
+        dialog.addEventListener("change", dirty);
       }
       if (closable) {
-        const back = dialog.querySelector('.modal-header [data-action="close-modal"]');
-        back.classList.add('editor-back');
-        back.setAttribute('aria-label', '返回上一页');
+        const back = dialog.querySelector(
+          '.modal-header [data-action="close-modal"]',
+        );
+        back.classList.add("editor-back");
+        back.setAttribute("aria-label", "返回上一页");
         back.innerHTML =
           '<span class="editor-back-label">← 返回</span><span class="editor-close-icon">' +
-          icon('close') +
-          '</span>';
+          icon("close") +
+          "</span>";
         if (!editorRoute) {
           if (pendingBack) pendingEditor = dialog;
           else enterEditor();
@@ -807,28 +1033,41 @@ export function createModal({
     }
     uiLabelFields(dialog);
     applyKeyboardHygiene(dialog);
-    const unbindTouchGuard = bindModalTouchGuard($('.modal-backdrop'), dialog);
+    const unbindModalEdgeFade = bindScrollEdgeFade(
+      dialog.querySelector(".modal-body"),
+    );
+    const unbindTouchGuard = bindModalTouchGuard($(".modal-backdrop"), dialog);
     const key = (e) => {
-      if (e.defaultPrevented || layerHost() !== document.body || e.target?.closest?.('dialog'))
+      if (
+        e.defaultPrevented ||
+        layerHost() !== document.body ||
+        e.target?.closest?.("dialog")
+      )
         return;
-      if (e.key === 'Escape' && closable) {
+      if (e.key === "Escape" && closable) {
         e.preventDefault();
         void requestClose(dialog);
         return;
       }
-      uiTrapTab(e, dialog, [document.getElementById('computer-approval-inbox')]);
+      uiTrapTab(e, dialog, [
+        document.getElementById("computer-approval-inbox"),
+      ]);
     };
     const scope = lifetime.mount(dialog);
-    scope.listen(document, 'keydown', key);
-    const editorBack = dialog.querySelector('.editor-back');
+    scope.listen(document, "keydown", key);
+    const editorBack = dialog.querySelector(".editor-back");
     if (editorBack) {
-      const mobile = matchMedia('(max-width:760px)');
+      const mobile = matchMedia("(max-width:760px)");
       const syncLabel = () =>
-        editorBack.setAttribute('aria-label', mobile.matches ? '返回上一页' : '关闭');
+        editorBack.setAttribute(
+          "aria-label",
+          mobile.matches ? "返回上一页" : "关闭",
+        );
       syncLabel();
-      scope.listen(mobile, 'change', syncLabel);
+      scope.listen(mobile, "change", syncLabel);
     }
     S.modalCleanup = () => {
+      unbindModalEdgeFade();
       unbindTouchGuard();
       scope.dispose();
     };

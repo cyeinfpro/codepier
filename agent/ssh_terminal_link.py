@@ -19,6 +19,11 @@ from shared.ssh_terminal_channel import (
 )
 from shared.ssh_terminal_config import TerminalConfig
 from shared.ssh_terminal_protocol import TerminalProtocolError, canonical_uuid, decode_frame
+from shared.vps_transport import (
+    VPS_HOST_IDENTITY_VERIFICATION,
+    VPS_SSH_PROTOCOL,
+    agent_vps_ssh_capability,
+)
 from .ssh_terminal_manager import TerminalSessionManager
 
 
@@ -48,6 +53,7 @@ class AgentTerminalLink:
         return direct_vps_denial(config) is None
 
     def _hello(self):
+        terminal_ready = bool(self.manager.capabilities().get("protocol"))
         return {
             "type": "terminal_hello",
             "protocol": 1,
@@ -58,6 +64,14 @@ class AgentTerminalLink:
             "probe": True,
             "host_pin": True,
             "saved_vps_password_only": True,
+            "vps_ssh_protocol": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+            "agent_vps_ssh": agent_vps_ssh_capability(
+                available=terminal_ready,
+                exec_supported=True,
+                terminal_supported=terminal_ready,
+                probe_supported=terminal_ready,
+            ),
         }
 
     async def emit(self, event):

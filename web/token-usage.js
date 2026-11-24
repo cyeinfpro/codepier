@@ -1,14 +1,21 @@
-'use strict';
+"use strict";
 // Presentation of server-recorded, sanitized text estimates only. No tokenizer,
 // request bodies, credentials, or host billing values are stored in this module.
 window.CodePierTokenUsage = (() => {
-  const VERSION = 'codepier-text-v1';
-  const fields = ['estimated_tokens', 'low', 'high', 'characters', 'utf8_bytes'];
-  const integer = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
-  const number = (value) => integer(value)?.toLocaleString('zh-CN') ?? '未记录';
+  const VERSION = "codepier-text-v1";
+  const fields = [
+    "estimated_tokens",
+    "low",
+    "high",
+    "characters",
+    "utf8_bytes",
+  ];
+  const integer = (value) =>
+    Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const number = (value) => integer(value)?.toLocaleString("zh-CN") ?? "未记录";
   // Decimal K/M/B, two decimals at most, promoting again after rounding.
   function formatTokens(value) {
-    if (integer(value) === null) return '未记录';
+    if (integer(value) === null) return "未记录";
     const n = BigInt(value),
       scales = [1n, 1000n, 1000000n, 1000000000n];
     let unit = 0;
@@ -20,33 +27,41 @@ window.CodePierTokenUsage = (() => {
       rounded = (n * 100n + scales[unit] / 2n) / scales[unit];
     }
     const fraction = String(rounded % 100n)
-      .padStart(2, '0')
-      .replace(/0+$/, '');
-    return String(rounded / 100n) + (fraction ? '.' + fraction : '') + ['', 'K', 'M', 'B'][unit];
+      .padStart(2, "0")
+      .replace(/0+$/, "");
+    return (
+      String(rounded / 100n) +
+      (fraction ? "." + fraction : "") +
+      ["", "K", "M", "B"][unit]
+    );
   }
   function formatUSD(nano) {
-    if (integer(nano) === null) return '未记录';
-    if (nano > 0 && nano < 100000) return '< $0.0001';
+    if (integer(nano) === null) return "未记录";
+    if (nano > 0 && nano < 100000) return "< $0.0001";
     const usd = nano / 1e9;
     return (
-      '$' +
-      usd.toLocaleString('en-US', {
+      "$" +
+      usd.toLocaleString("en-US", {
         minimumFractionDigits: 2,
         maximumFractionDigits: usd < 1 ? 4 : 2,
       })
     );
   }
   function combined(value) {
-    const sides = ['input', 'output'].map((direction) => value[direction] || {});
+    const sides = ["input", "output"].map(
+      (direction) => value[direction] || {},
+    );
     const sum = (field) => {
-      const counts = sides.map((item) => integer(item[field])).filter((n) => n !== null);
+      const counts = sides
+        .map((item) => integer(item[field]))
+        .filter((n) => n !== null);
       const total = counts.reduce((a, b) => a + b, 0);
       return counts.length && Number.isSafeInteger(total) ? total : null;
     };
     return {
-      estimated_tokens: sum('estimated_tokens'),
-      low: sum('low'),
-      high: sum('high'),
+      estimated_tokens: sum("estimated_tokens"),
+      low: sum("low"),
+      high: sum("high"),
       partial: sides.some(
         (item) =>
           integer(item.estimated_tokens) === null ||
@@ -64,12 +79,12 @@ window.CodePierTokenUsage = (() => {
     for (const row of rows) {
       const item = row.token_usage?.reference_cost;
       if (
-        item?.kind !== 'reference_estimate' ||
-        item.scope !== 'visible_tool_text_equivalent' ||
-        item.currency !== 'USD' ||
+        item?.kind !== "reference_estimate" ||
+        item.scope !== "visible_tool_text_equivalent" ||
+        item.currency !== "USD" ||
         !item.pricing?.version ||
         integer(item.amount_nano_usd) === null ||
-        (!side(row.token_usage, 'input') && !side(row.token_usage, 'output'))
+        (!side(row.token_usage, "input") && !side(row.token_usage, "output"))
       ) {
         missing += 1;
         continue;
@@ -84,7 +99,7 @@ window.CodePierTokenUsage = (() => {
       cost = item;
       const exact = item.amount_pico_usd_exact;
       const pico =
-        typeof exact === 'string' && /^\d{1,40}$/.test(exact)
+        typeof exact === "string" && /^\d{1,40}$/.test(exact)
           ? BigInt(exact)
           : integer(item.amount_pico_usd) !== null
             ? BigInt(item.amount_pico_usd)
@@ -101,7 +116,9 @@ window.CodePierTokenUsage = (() => {
           pricing: cost.pricing,
           amount_nano_usd: total,
           amount_pico_usd_exact: String(totalPico),
-          partial: missing > 0 || rows.some((row) => row.token_usage?.reference_cost?.partial),
+          partial:
+            missing > 0 ||
+            rows.some((row) => row.token_usage?.reference_cost?.partial),
         }
       : null;
   }
@@ -110,22 +127,22 @@ window.CodePierTokenUsage = (() => {
       /[&<>"']/g,
       (character) =>
         ({
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#39;',
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
         })[character],
     );
 
   function side(usage, direction) {
     const value = usage?.[direction];
     if (
-      usage?.kind !== 'estimate' ||
+      usage?.kind !== "estimate" ||
       usage.version !== VERSION ||
-      usage.scope !== 'project_tool_payload' ||
+      usage.scope !== "project_tool_payload" ||
       !value ||
-      !['available', 'partial'].includes(value.state) ||
+      !["available", "partial"].includes(value.state) ||
       fields.some((field) => integer(value[field]) === null) ||
       value.low > value.estimated_tokens ||
       value.estimated_tokens > value.high
@@ -146,15 +163,17 @@ window.CodePierTokenUsage = (() => {
   function summarize(rows) {
     rows = mergeActivities([], rows);
     const result = {
-      scope: 'loaded_activity_rows',
+      scope: "loaded_activity_rows",
       wire_attempts: rows.length,
       distinct_server_operation_ids: new Set(
-        rows.map((row) => row.operation_id).filter((id) => typeof id === 'string' && id),
+        rows
+          .map((row) => row.operation_id)
+          .filter((id) => typeof id === "string" && id),
       ).size,
       version: VERSION,
       actual_usage: null,
     };
-    for (const direction of ['input', 'output']) {
+    for (const direction of ["input", "output"]) {
       const total = Object.fromEntries(fields.map((field) => [field, 0]));
       let measured = 0,
         partial = 0,
@@ -164,14 +183,15 @@ window.CodePierTokenUsage = (() => {
         const value = side(row.token_usage, direction);
         if (!value) continue;
         measured += 1;
-        if (value.state === 'partial' || value.truncated) partial += 1;
+        if (value.state === "partial" || value.truncated) partial += 1;
         if (value.source_truncated === true) sourceTruncated += 1;
         for (const field of fields) {
           total[field] += value[field];
           if (!Number.isSafeInteger(total[field])) overflow = true;
         }
       }
-      if (!measured || overflow) for (const field of fields) total[field] = null;
+      if (!measured || overflow)
+        for (const field of fields) total[field] = null;
       result[direction] = {
         ...total,
         measured_attempts: measured,
@@ -189,35 +209,35 @@ window.CodePierTokenUsage = (() => {
   function cell(usage, direction) {
     const value = side(usage, direction);
     if (!value) return '<span class="muted">未记录</span>';
-    const partial = value.state === 'partial' || value.truncated;
+    const partial = value.state === "partial" || value.truncated;
     return (
-      '<span>约 ' +
+      "<span>约 " +
       formatTokens(value.estimated_tokens) +
-      '</span>' +
-      '<small>范围 ' +
+      "</span>" +
+      "<small>范围 " +
       number(value.low) +
-      '–' +
+      "–" +
       number(value.high) +
-      (partial ? ' · 部分文本' : '') +
-      (value.source_truncated === true ? ' · 源工具已截断' : '') +
-      '</small>'
+      (partial ? " · 部分文本" : "") +
+      (value.source_truncated === true ? " · 源工具已截断" : "") +
+      "</small>"
     );
   }
 
   function contextEstimate(value) {
     const context = value?.context_estimate;
     if (
-      context?.kind !== 'context_scenario' ||
-      context.version !== 'codepier-context-v1' ||
-      context.scope !== 'retained_authorized_context_estimate' ||
-      !['partial', 'unavailable'].includes(context.state)
+      context?.kind !== "context_scenario" ||
+      context.version !== "codepier-context-v1" ||
+      context.scope !== "retained_authorized_context_estimate" ||
+      !["partial", "unavailable"].includes(context.state)
     )
       return null;
     const total = context.total || {};
     const n = integer(total.estimated_tokens),
       low = integer(total.low),
       high = integer(total.high);
-    if (n === null) return context.state === 'unavailable' ? context : null;
+    if (n === null) return context.state === "unavailable" ? context : null;
     if (low === null || high === null || low > n || n > high) return null;
     return context;
   }
@@ -225,20 +245,21 @@ window.CodePierTokenUsage = (() => {
   function callEstimate(value) {
     const item = value?.call_estimate;
     if (
-      item?.kind !== 'call_calibration' ||
-      item.version !== 'codepier-call-prior-v1' ||
-      item.scope !== 'retained_authorized_call_estimate' ||
-      !['partial', 'unavailable'].includes(item.state)
+      item?.kind !== "call_calibration" ||
+      item.version !== "codepier-call-prior-v1" ||
+      item.scope !== "retained_authorized_call_estimate" ||
+      !["partial", "unavailable"].includes(item.state)
     )
       return null;
     const n = integer(item.total?.estimated_tokens);
-    if (n === null) return item.state === 'unavailable' ? item : null;
+    if (n === null) return item.state === "unavailable" ? item : null;
     const low = integer(item.total.low),
       high = integer(item.total.high);
     return low !== null && high !== null && low <= n && n <= high ? item : null;
   }
 
-  const modelEstimate = (value) => callEstimate(value) || contextEstimate(value);
+  const modelEstimate = (value) =>
+    callEstimate(value) || contextEstimate(value);
 
   function headline(value) {
     const calls = callEstimate(value),
@@ -247,66 +268,75 @@ window.CodePierTokenUsage = (() => {
       n = integer(total.estimated_tokens);
     const cost = context?.reference_cost || value.reference_cost;
     const amount =
-      cost?.kind === 'reference_estimate' &&
+      cost?.kind === "reference_estimate" &&
       cost.scope ===
         (calls
-          ? 'call_round_equivalent'
+          ? "call_round_equivalent"
           : context
-            ? 'context_scenario_equivalent'
-            : 'visible_tool_text_equivalent') &&
-      cost.currency === 'USD'
+            ? "context_scenario_equivalent"
+            : "visible_tool_text_equivalent") &&
+      cost.currency === "USD"
         ? integer(cost.amount_nano_usd)
         : null;
     const range = context
       ? n === null
         ? calls
-          ? '暂无保留调用，暂无法估算。'
-          : '缺少工具记录，暂无法估算上下文。'
-        : '范围 ' +
+          ? "暂无保留调用，暂无法估算。"
+          : "缺少工具记录，暂无法估算上下文。"
+        : "范围 " +
           formatTokens(total.low) +
-          '–' +
+          "–" +
           formatTokens(total.high) +
-          (calls ? ' · 经验估算，历史可能不完整' : ' · 情景估算，历史可能不完整')
-      : '未包含完整对话上下文，仅供估算参考。';
+          (calls
+            ? " · 经验估算，历史可能不完整"
+            : " · 情景估算，历史可能不完整")
+      : "未包含完整对话上下文，仅供估算参考。";
     return (
       '<div class="token-dashboard-metrics">' +
       '<div class="token-dashboard-metric is-total"><span>' +
-      (calls ? '按调用估算 Token' : context ? '含上下文 Token' : '工具文本 Token') +
+      (calls
+        ? "按调用估算 Token"
+        : context
+          ? "含上下文 Token"
+          : "工具文本 Token") +
       '</span><strong title="' +
       number(n) +
       ' Token">' +
-      (n === null ? '未记录' : formatTokens(n)) +
-      '</strong></div>' +
+      (n === null ? "未记录" : formatTokens(n)) +
+      "</strong></div>" +
       '<div class="token-dashboard-metric is-cost"><span>参考费用 · USD</span><strong>' +
       escape(formatUSD(amount)) +
-      '</strong></div></div>' +
+      "</strong></div></div>" +
       '<p class="token-dashboard-note token-dashboard-context">' +
       number(value.wire_attempts) +
-      ' 次工具调用' +
+      " 次工具调用" +
       (calls && integer(calls.estimated_model_rounds) !== null
-        ? ' · 约 ' + number(calls.estimated_model_rounds) + ' 个模型轮次'
-        : '') +
+        ? " · 约 " + number(calls.estimated_model_rounds) + " 个模型轮次"
+        : "") +
       (cost?.pricing
-        ? ' · ' +
-          escape(cost.pricing.model_label || cost.pricing.model || '参考模型未知') +
-          ' · 输入缓存 ' +
+        ? " · " +
+          escape(
+            cost.pricing.model_label || cost.pricing.model || "参考模型未知",
+          ) +
+          " · 输入缓存 " +
           escape(cost.pricing.cache_read_percent) +
-          (calls ? '% 上限假设' : '% 假设')
-        : '') +
-      (!context && n !== null && total.partial ? ' · 仅已记录部分' : '') +
+          (calls ? "% 上限假设" : "% 假设")
+        : "") +
+      (!context && n !== null && total.partial ? " · 仅已记录部分" : "") +
       '</p><p class="token-dashboard-limit">' +
       escape(range) +
-      '</p>'
+      "</p>"
     );
   }
 
   function pricingDetails(cost, adjustable = false, expanded = false) {
     const p = cost?.pricing;
-    if (!p || cost.kind !== 'reference_estimate')
-      return '<p>参考估价未记录；实际模型用量：未提供。</p>';
+    if (!p || cost.kind !== "reference_estimate")
+      return "<p>参考估价未记录；实际模型用量：未提供。</p>";
     const rates = p.usd_per_million || {};
-    const calibrated = cost.scope === 'call_round_equivalent';
-    const money = (value) => (Number.isFinite(value) && value >= 0 ? '$' + value : '未记录');
+    const calibrated = cost.scope === "call_round_equivalent";
+    const money = (value) =>
+      Number.isFinite(value) && value >= 0 ? "$" + value : "未记录";
     return (
       '<div class="token-pricing-details">' +
       (adjustable
@@ -314,8 +344,8 @@ window.CodePierTokenUsage = (() => {
           (
             p.available_models || [
               {
-                id: p.model || 'gpt-6-astra',
-                label: p.model_label || 'GPT-6 Astra',
+                id: p.model || "gpt-6-astra",
+                label: p.model_label || "GPT-6 Astra",
               },
             ]
           )
@@ -324,87 +354,95 @@ window.CodePierTokenUsage = (() => {
                 '<option value="' +
                 escape(model.id) +
                 '"' +
-                (model.id === (p.model || 'gpt-6-astra') ? ' selected' : '') +
-                '>' +
+                (model.id === (p.model || "gpt-6-astra") ? " selected" : "") +
+                ">" +
                 escape(model.label) +
-                '</option>',
+                "</option>",
             )
-            .join('') +
-          '</select></label>'
-        : '') +
+            .join("") +
+          "</select></label>"
+        : "") +
       (adjustable
         ? '<label class="token-cache-assumption">' +
-          (calibrated ? '输入缓存读取上限假设' : '模型输入缓存读取假设') +
+          (calibrated ? "输入缓存读取上限假设" : "模型输入缓存读取假设") +
           ' <span><input type="number" min="0" max="100" step="1" inputmode="numeric" data-token-filter="cache_read_percent" aria-label="模型输入缓存读取假设百分比" value="' +
           escape(p.cache_read_percent) +
           '"> %</span></label>'
-        : '<p>模型输入缓存读取假设：' + escape(p.cache_read_percent) + '%。</p>') +
-      `<details class="token-pricing-notes" data-token-panel="pricing"${expanded ? ' open' : ''}><summary>计价依据与限制</summary>` +
-      '<p><strong>' +
-      escape(p.model_label || p.model || '参考模型未知') +
-      ' 参考估价</strong> · Standard API 短上下文，USD / 1M Token。</p>' +
-      '<p>输入 ' +
+        : "<p>模型输入缓存读取假设：" +
+          escape(p.cache_read_percent) +
+          "%。</p>") +
+      `<details class="token-pricing-notes" data-token-panel="pricing"${expanded ? " open" : ""}><summary>计价依据与限制</summary>` +
+      "<p><strong>" +
+      escape(p.model_label || p.model || "参考模型未知") +
+      " 参考估价</strong> · Standard API 短上下文，USD / 1M Token。</p>" +
+      "<p>输入 " +
       money(rates.input) +
-      '，缓存读取 ' +
+      "，缓存读取 " +
       money(rates.cached_input) +
-      '，输出 ' +
+      "，输出 " +
       money(rates.output) +
-      (calibrated ? '；未受新文本限制时，输入参考单价 ' : '；按此假设，输入综合单价 ') +
-      money(p.effective_input_usd_per_million) +
-      ' / 1M。</p>' +
-      (cost.breakdown
-        ? '<p>估价拆分：普通输入 ' +
-          escape(formatUSD(cost.breakdown.uncached_input?.amount_nano_usd)) +
-          '，缓存读取 ' +
-          escape(formatUSD(cost.breakdown.cached_input?.amount_nano_usd)) +
-          '，输出 ' +
-          escape(formatUSD(cost.breakdown.output?.amount_nano_usd)) +
-          '。</p>'
-        : '') +
-      '<p>MCP 请求参数按模型输出计价；MCP 响应文本按后续模型输入计价。缓存是输入的一部分，不另加到总 Token；' +
-      '按此假设比例估算缓存读取费用。实际命中率以供应商记录为准；缓存写入费用需要相应的用量数据。</p>' +
       (calibrated
-        ? '<p>按推断模型轮次与 Astra 编程样本先验估价，大段可见上下文或输出会提高估算。缓存比例是上限：本轮新消费的工具文本至少按普通输入计价；这是情景假设，不是缓存实测。样本历史均价与此处按所选模型及缓存假设计价的结果可能不同。</p><p>本参考使用短上下文 Standard 单价；'
-        : cost.scope === 'context_scenario_equivalent'
-          ? '<p>按固定底座、历史重读与压缩情景估算等价 API 成本；实际模型用量未知，非实际账单。完整请求超过 272K 输入时适用整请求长上下文价；'
-          : '<p>仅估算可见工具文本的等价成本；实际模型用量未知，不是完整会话或实际账单。完整请求超过 272K 输入时适用整请求长上下文价；') +
-      '不能从单次 MCP 文本大小判断。本参考未使用长上下文、加速档位、地区附加费或折扣。ChatGPT/Codex订阅及额度规则不同，不能用此值代替账单。</p>' +
-      '<p>真实缓存命中、缓存写入、思考 Token：未知。切换参考模型只重算此情景，不改变实际执行模型。</p>' +
+        ? "；未受新文本限制时，输入参考单价 "
+        : "；按此假设，输入综合单价 ") +
+      money(p.effective_input_usd_per_million) +
+      " / 1M。</p>" +
+      (cost.breakdown
+        ? "<p>估价拆分：普通输入 " +
+          escape(formatUSD(cost.breakdown.uncached_input?.amount_nano_usd)) +
+          "，缓存读取 " +
+          escape(formatUSD(cost.breakdown.cached_input?.amount_nano_usd)) +
+          "，输出 " +
+          escape(formatUSD(cost.breakdown.output?.amount_nano_usd)) +
+          "。</p>"
+        : "") +
+      "<p>MCP 请求参数按模型输出计价；MCP 响应文本按后续模型输入计价。缓存是输入的一部分，不另加到总 Token；" +
+      "按此假设比例估算缓存读取费用。实际命中率以供应商记录为准；缓存写入费用需要相应的用量数据。</p>" +
+      (calibrated
+        ? "<p>按推断模型轮次与 Astra 编程样本先验估价，大段可见上下文或输出会提高估算。缓存比例是上限：本轮新消费的工具文本至少按普通输入计价；这是情景假设，不是缓存实测。样本历史均价与此处按所选模型及缓存假设计价的结果可能不同。</p><p>本参考使用短上下文 Standard 单价；"
+        : cost.scope === "context_scenario_equivalent"
+          ? "<p>按固定底座、历史重读与压缩情景估算等价 API 成本；实际模型用量未知，非实际账单。完整请求超过 272K 输入时适用整请求长上下文价；"
+          : "<p>仅估算可见工具文本的等价成本；实际模型用量未知，不是完整会话或实际账单。完整请求超过 272K 输入时适用整请求长上下文价；") +
+      "不能从单次 MCP 文本大小判断。本参考未使用长上下文、加速档位、地区附加费或折扣。ChatGPT/Codex订阅及额度规则不同，不能用此值代替账单。</p>" +
+      "<p>真实缓存命中、缓存写入、思考 Token：未知。切换参考模型只重算此情景，不改变实际执行模型。</p>" +
       '<p>官方来源：<a href="https://developers.openai.com/api/docs/models/' +
       escape(
-        ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'].includes(p.model) ? p.model : 'gpt-6-astra',
+        ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"].includes(p.model)
+          ? p.model
+          : "gpt-6-astra",
       ) +
       '" target="_blank" rel="noopener noreferrer">模型价格</a> · ' +
       '<a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">计价说明</a>；核对 ' +
-      escape(p.source_date || '未记录') +
-      ' · ' +
+      escape(p.source_date || "未记录") +
+      " · " +
       escape(p.version) +
-      '。</p></details></div>'
+      "。</p></details></div>"
     );
   }
 
   function metricDetails(value, direction, label) {
     const item = value[direction] || {};
     return (
-      '<p><strong>' +
+      "<p><strong>" +
       label +
-      '</strong>：' +
+      "</strong>：" +
       (integer(item.low) === null
-        ? '范围未记录；'
-        : '粗略范围 ' + number(item.low) + '–' + number(item.high) + '；') +
+        ? "范围未记录；"
+        : "粗略范围 " + number(item.low) + "–" + number(item.high) + "；") +
       number(item.measured_attempts) +
-      ' 次有记录，' +
+      " 次有记录，" +
       number(item.unavailable_attempts) +
-      ' 次未记录' +
-      (item.partial_attempts ? '，' + number(item.partial_attempts) + ' 次仅部分文本' : '') +
+      " 次未记录" +
+      (item.partial_attempts
+        ? "，" + number(item.partial_attempts) + " 次仅部分文本"
+        : "") +
       (item.source_truncated_attempts
-        ? '，' + number(item.source_truncated_attempts) + ' 次源工具已截断'
-        : '') +
-      '。已计入 ' +
+        ? "，" + number(item.source_truncated_attempts) + " 次源工具已截断"
+        : "") +
+      "。已计入 " +
       number(item.characters) +
-      ' 个 Unicode 字符 / ' +
+      " 个 Unicode 字符 / " +
       number(item.utf8_bytes) +
-      ' 字节。</p>'
+      " 字节。</p>"
     );
   }
 
@@ -414,63 +452,71 @@ window.CodePierTokenUsage = (() => {
       .map((row) => row.started)
       .filter(Number.isFinite);
     const range = times.length
-      ? dateText(Math.min(...times), 'UTC') +
-        ' 至 ' +
-        dateText(Math.max(...times), 'UTC') +
-        ' · UTC'
-      : '时间范围未记录';
+      ? dateText(Math.min(...times), "UTC") +
+        " 至 " +
+        dateText(Math.max(...times), "UTC") +
+        " · UTC"
+      : "时间范围未记录";
     return (
       '<div class="token-dashboard token-loaded-summary"><div class="integration-section-head"><h3>已加载工具 Token</h3>' +
       '<span class="badge neutral">估算 · 非账单</span></div>' +
       headline(value) +
       '<details class="token-usage-help"><summary>详情 · 当前已载入 ' +
       number(value.wire_attempts) +
-      ' 次调用</summary>' +
-      '<p>' +
+      " 次调用</summary>" +
+      "<p>" +
       escape(range) +
-      '；只汇总已加载明细，不代表整个时间段。实际模型用量：未提供。</p>' +
-      metricDetails(value, 'input', 'MCP 请求参数') +
-      metricDetails(value, 'output', 'MCP 响应文本') +
+      "；只汇总已加载明细，不代表整个时间段。实际模型用量：未提供。</p>" +
+      metricDetails(value, "input", "MCP 请求参数") +
+      metricDetails(value, "output", "MCP 响应文本") +
       pricingDetails(value.reference_cost) +
-      '<p>' +
+      "<p>" +
       number(value.distinct_server_operation_ids) +
-      ' 个不同服务端操作编号。重试返回文本仍计入；操作编号不用于扣减 Token。</p>' +
-      '<p>统计范围为筛选后的项目工具文本。完整对话用量及模型账单请以供应商记录为准；工具定义、图片与文件字节另计，' +
-      '已识别的敏感字段和链接不计入。历史缺失不会补算，范围不是统计置信区间。算法 ' +
+      " 个不同服务端操作编号。重试返回文本仍计入；操作编号不用于扣减 Token。</p>" +
+      "<p>统计范围为筛选后的项目工具文本。完整对话用量及模型账单请以供应商记录为准；工具定义、图片与文件字节另计，" +
+      "已识别的敏感字段和链接不计入。历史缺失不会补算，范围不是统计置信区间。算法 " +
       escape(value.version) +
-      '。</p></details></div>'
+      "。</p></details></div>"
     );
   }
 
-  function dateText(timestamp, timezone, bucket = '') {
-    if (!Number.isFinite(timestamp)) return '未记录';
+  function dateText(timestamp, timezone, bucket = "") {
+    if (!Number.isFinite(timestamp)) return "未记录";
     try {
-      const options = { timeZone: timezone || 'UTC', hour12: false };
-      if (bucket !== 'hour') Object.assign(options, { month: '2-digit', day: '2-digit' });
-      if (bucket !== 'day') Object.assign(options, { hour: '2-digit', minute: '2-digit' });
-      return new Intl.DateTimeFormat('zh-CN', options).format(new Date(timestamp * 1000));
+      const options = { timeZone: timezone || "UTC", hour12: false };
+      if (bucket !== "hour")
+        Object.assign(options, { month: "2-digit", day: "2-digit" });
+      if (bucket !== "day")
+        Object.assign(options, { hour: "2-digit", minute: "2-digit" });
+      return new Intl.DateTimeFormat("zh-CN", options).format(
+        new Date(timestamp * 1000),
+      );
     } catch {
-      return '未记录';
+      return "未记录";
     }
   }
 
   function trendHTML(data) {
     const useContext = !!modelEstimate(data?.summary);
-    const trend = (Array.isArray(data?.trend) ? data.trend : []).map((point) => {
-      if (!useContext) return point;
-      const context = modelEstimate(point);
-      return {
-        ...point,
-        input: context?.input || {},
-        output: context?.output || {},
-      };
-    });
+    const trend = (Array.isArray(data?.trend) ? data.trend : []).map(
+      (point) => {
+        if (!useContext) return point;
+        const context = modelEstimate(point);
+        return {
+          ...point,
+          input: context?.input || {},
+          output: context?.output || {},
+        };
+      },
+    );
     if (!trend.length)
       return '<p class="token-dashboard-note">此范围没有保留的调用记录；缺失时段不会补成 0。</p>';
     const maximum = Math.max(
       1,
       ...trend.flatMap((point) =>
-        ['input', 'output'].map((direction) => integer(point[direction]?.estimated_tokens) || 0),
+        ["input", "output"].map(
+          (direction) => integer(point[direction]?.estimated_tokens) || 0,
+        ),
       ),
     );
     return (
@@ -484,56 +530,69 @@ window.CodePierTokenUsage = (() => {
             const n = integer(point[direction]?.estimated_tokens);
             return n === null
               ? '<div class="token-trend-missing" aria-hidden="true"></div>'
-              : `<div class="token-trend-bar ${direction === 'output' ? 'is-output' : ''}" style="--token-bar:${((n / maximum) * 100).toFixed(2)}%" aria-hidden="true"></div>`;
+              : `<div class="token-trend-bar ${direction === "output" ? "is-output" : ""}" style="--token-bar:${((n / maximum) * 100).toFixed(2)}%" aria-hidden="true"></div>`;
           };
           return (
-            '<li><time>' +
-            escape(dateText(point.started, data.period?.timezone, data.period?.bucket)) +
+            "<li><time>" +
+            escape(
+              dateText(
+                point.started,
+                data.period?.timezone,
+                data.period?.bucket,
+              ),
+            ) +
             '</time><div class="token-trend-bars">' +
-            bar('input') +
-            bar('output') +
-            (useContext ? '</div><small>输入 ' : '</div><small>请求 ') +
+            bar("input") +
+            bar("output") +
+            (useContext ? "</div><small>输入 " : "</div><small>请求 ") +
             formatTokens(point.input?.estimated_tokens) +
-            (useContext ? ' / 输出 ' : ' / 响应 ') +
+            (useContext ? " / 输出 " : " / 响应 ") +
             formatTokens(point.output?.estimated_tokens) +
-            '<br>' +
+            "<br>" +
             number(point.wire_attempts) +
-            ' 次工具调用</small></li>'
+            " 次工具调用</small></li>"
           );
         })
-        .join('') +
-      '</ol>'
+        .join("") +
+      "</ol>"
     );
   }
 
   const filterValues = (data) => ({
-    period: data.period?.key || 'today',
+    period: data.period?.key || "today",
     ...data.filters,
-    cache_read_percent: String(data.summary?.reference_cost?.pricing?.cache_read_percent ?? 95),
-    reference_model: data.summary?.reference_cost?.pricing?.model || 'gpt-6-astra',
+    cache_read_percent: String(
+      data.summary?.reference_cost?.pricing?.cache_read_percent ?? 95,
+    ),
+    reference_model:
+      data.summary?.reference_cost?.pricing?.model || "gpt-6-astra",
   });
   let dashboardState = null,
     dashboardCache = null;
   const identity = () =>
-    typeof S === 'undefined'
-      ? { owner: null, user: '', space: '' }
+    typeof S === "undefined"
+      ? { owner: null, user: "", space: "" }
       : {
           owner: S.session,
-          user: S.session?.user_id || S.session?.username || '',
+          user: S.session?.user_id || S.session?.username || "",
           space: S.space_id,
         };
   const sameIdentity = (captured) => {
     const now = identity();
     return (
-      now.owner === captured.owner && now.user === captured.user && now.space === captured.space
+      now.owner === captured.owner &&
+      now.user === captured.user &&
+      now.space === captured.space
     );
   };
   const permissionError = (error) =>
     [401, 403].includes(error?.status) ||
-    error?.code === 'STATISTICS_AUTHORITY_CHANGED' ||
-    /UNAUTH|FORBIDDEN|ACCESS_DENIED|PERMISSION|SESSION_CHANGED/.test(error?.code || '');
+    error?.code === "STATISTICS_AUTHORITY_CHANGED" ||
+    /UNAUTH|FORBIDDEN|ACCESS_DENIED|PERMISSION|SESSION_CHANGED/.test(
+      error?.code || "",
+    );
   const hasAuthority = (data) =>
-    typeof data?.authority_key === 'string' && data.authority_key.length > 0;
+    typeof data?.authority_key === "string" && data.authority_key.length > 0;
   function rememberDashboard(data) {
     dashboardCache = hasAuthority(data) ? { ...identity(), data } : null;
   }
@@ -549,24 +608,30 @@ window.CodePierTokenUsage = (() => {
     dashboardCache = null;
     root.onclick = null;
     root.onchange = null;
-    const holder = document.createElement('div');
+    const holder = document.createElement("div");
     holder.innerHTML = dashboard({ loading: true });
     root.className = holder.firstElementChild.className;
     root.replaceChildren(...holder.firstElementChild.childNodes);
-    root.setAttribute('aria-busy', 'false');
-    root.querySelector('[role=status]').textContent = text;
+    root.setAttribute("aria-busy", "false");
+    root.querySelector("[role=status]").textContent = text;
   }
   function resetDashboard(clearVisible = false) {
     dashboardState = null;
     dashboardCache = null;
-    if (clearVisible && typeof document !== 'undefined') {
+    if (clearVisible && typeof document !== "undefined") {
       document
-        .querySelectorAll('[data-token-dashboard]')
-        .forEach((root) => clearDashboard(root, '访问范围已变化，正在读取当前统计…'));
+        .querySelectorAll("[data-token-dashboard]")
+        .forEach((root) =>
+          clearDashboard(root, "访问范围已变化，正在读取当前统计…"),
+        );
     }
   }
   function viewState(data, continuing = true) {
-    if (!continuing || !dashboardState || dashboardState.authority !== data.authority_key) {
+    if (
+      !continuing ||
+      !dashboardState ||
+      dashboardState.authority !== data.authority_key
+    ) {
       dashboardState = {
         authority: data.authority_key,
         filters: filterValues(data),
@@ -577,30 +642,39 @@ window.CodePierTokenUsage = (() => {
     }
     return dashboardState;
   }
-  async function prepareDashboard(initial, fetcher, continuing, valid, invalidate = () => {}) {
+  async function prepareDashboard(
+    initial,
+    fetcher,
+    continuing,
+    valid,
+    invalidate = () => {},
+  ) {
     if (!initial?.summary || !valid()) return initial;
     const state = viewState(initial, continuing),
       revision = state.revision;
     const filters = { ...state.filters };
     let result = initial;
     if (
-      filters.period !== 'today' ||
+      filters.period !== "today" ||
       filters.project ||
       filters.connection ||
       filters.session ||
-      filters.cache_read_percent !== '95' ||
-      filters.reference_model !== 'gpt-6-astra'
+      filters.cache_read_percent !== "95" ||
+      filters.reference_model !== "gpt-6-astra"
     ) {
-      result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));
-      if (!valid() || dashboardState !== state || state.revision !== revision) return null;
+      result = await fetcher(
+        "/api/token-usage?" + new URLSearchParams(filters),
+      );
+      if (!valid() || dashboardState !== state || state.revision !== revision)
+        return null;
       if (!hasAuthority(result) || result.authority_key !== state.authority) {
         invalidate();
         resetDashboard();
-        result = await fetcher('/api/token-usage');
+        result = await fetcher("/api/token-usage");
         if (!valid()) return null;
         if (!hasAuthority(result))
-          throw Object.assign(new Error('Unknown authority'), {
-            code: 'STATISTICS_AUTHORITY_CHANGED',
+          throw Object.assign(new Error("Unknown authority"), {
+            code: "STATISTICS_AUTHORITY_CHANGED",
           });
         viewState(result, false);
       }
@@ -609,7 +683,7 @@ window.CodePierTokenUsage = (() => {
   }
 
   async function loadDashboard(container, fetcher, continuing, valid) {
-    const placeholder = container?.querySelector('[data-token-dashboard]');
+    const placeholder = container?.querySelector("[data-token-dashboard]");
     if (!placeholder) return;
     const owner = identity(),
       cached = continuing ? cachedDashboard() : null;
@@ -617,27 +691,38 @@ window.CodePierTokenUsage = (() => {
     const state = dashboardState,
       revision = state?.revision;
     const current = () =>
-      valid() && sameIdentity(owner) && placeholder.isConnected && container.contains(placeholder);
+      valid() &&
+      sameIdentity(owner) &&
+      placeholder.isConnected &&
+      container.contains(placeholder);
     try {
-      const initial = await fetcher('/api/token-usage');
+      const initial = await fetcher("/api/token-usage");
       if (!current()) return;
       if (!hasAuthority(initial)) {
         resetDashboard();
-        clearDashboard(placeholder, '授权范围未确认，统计已清除。请刷新重试。');
+        clearDashboard(placeholder, "授权范围未确认，统计已清除。请刷新重试。");
         return;
       }
       if (cached && initial.authority_key !== cached.authority_key) {
-        clearDashboard(placeholder, '授权范围已变化，正在读取当前统计…');
+        clearDashboard(placeholder, "授权范围已变化，正在读取当前统计…");
         resetDashboard();
-      } else if (state && (dashboardState !== state || state.revision !== revision)) return;
-      const data = await prepareDashboard(initial, fetcher, continuing, current, () =>
-        clearDashboard(placeholder, '授权范围已变化，正在读取当前统计…'),
+      } else if (
+        state &&
+        (dashboardState !== state || state.revision !== revision)
+      )
+        return;
+      const data = await prepareDashboard(
+        initial,
+        fetcher,
+        continuing,
+        current,
+        () => clearDashboard(placeholder, "授权范围已变化，正在读取当前统计…"),
       );
       if (!current() || !data) return;
       const focusedFilter = placeholder.contains(document.activeElement)
         ? document.activeElement.dataset.tokenFilter
         : null;
-      const holder = document.createElement('div');
+      const holder = document.createElement("div");
       holder.innerHTML = dashboard(data);
       placeholder.replaceWith(holder.firstElementChild);
       bindDashboard(container, fetcher, data);
@@ -649,14 +734,19 @@ window.CodePierTokenUsage = (() => {
       if (!current()) return;
       if (permissionError(error)) {
         resetDashboard();
-        clearDashboard(placeholder, '权限已变化，统计已清除。请重新确认访问权限。');
+        clearDashboard(
+          placeholder,
+          "权限已变化，统计已清除。请重新确认访问权限。",
+        );
       } else {
-        const status = placeholder.querySelector('.token-dashboard-status, [role=status]');
+        const status = placeholder.querySelector(
+          ".token-dashboard-status, [role=status]",
+        );
         if (status)
           status.textContent = cachedDashboard()?.summary
-            ? '后台刷新失败，仍显示上一次结果。'
-            : '统计暂不可用，请刷新重试。';
-        placeholder.setAttribute('aria-busy', 'false');
+            ? "后台刷新失败，仍显示上一次结果。"
+            : "统计暂不可用，请刷新重试。";
+        placeholder.setAttribute("aria-busy", "false");
       }
     }
   }
@@ -664,7 +754,9 @@ window.CodePierTokenUsage = (() => {
   function dashboard(data, expanded = null) {
     if (expanded === null)
       expanded =
-        dashboardState?.authority === data?.authority_key ? dashboardState?.expanded : false;
+        dashboardState?.authority === data?.authority_key
+          ? dashboardState?.expanded
+          : false;
     if (!data?.summary)
       return (
         '<div class="token-dashboard token-dashboard-placeholder" data-token-dashboard data-details-open="false" aria-busy="' +
@@ -673,59 +765,63 @@ window.CodePierTokenUsage = (() => {
         '<div class="token-dashboard-metrics" aria-hidden="true"><div class="token-dashboard-metric is-total"><span>Token 估算</span><strong>—</strong></div><div class="token-dashboard-metric is-cost"><span>参考费用 · USD</span><strong>—</strong></div></div>' +
         '<p class="token-dashboard-note" aria-hidden="true">统计依据将在读取后显示</p><p class="token-dashboard-limit" aria-hidden="true">缺失数据不会补成零</p>' +
         '<details data-token-filters inert aria-hidden="true"><summary>查看详情<span class="token-summary-hint">时间范围与趋势</span></summary></details><p class="token-dashboard-status" role="status">' +
-        (data?.loading ? '正在读取统计…' : '统计暂不可用') +
-        '</p></div>'
+        (data?.loading ? "正在读取统计…" : "统计暂不可用") +
+        "</p></div>"
       );
     const value = data.summary,
       period = data.period || {};
-    const title = { today: '今日', '7d': '近 7 天', '30d': '近 30 天' }[period.key] || '所选时间';
-    const select = (name, label, choices, selected, all = '') =>
-      '<label>' +
+    const title =
+      { today: "今日", "7d": "近 7 天", "30d": "近 30 天" }[period.key] ||
+      "所选时间";
+    const select = (name, label, choices, selected, all = "") =>
+      "<label>" +
       label +
       `<select data-token-filter="${name}" aria-label="${label}">` +
-      (all ? `<option value="">${all}</option>` : '') +
+      (all ? `<option value="">${all}</option>` : "") +
       choices
         .map(
           (item) =>
-            `<option value="${escape(item.id)}"${item.id === selected ? ' selected' : ''}>${escape(item.label)}</option>`,
+            `<option value="${escape(item.id)}"${item.id === selected ? " selected" : ""}>${escape(item.label)}</option>`,
         )
-        .join('') +
-      '</select></label>';
+        .join("") +
+      "</select></label>";
     return (
       '<div class="token-dashboard" data-token-dashboard data-details-open="' +
-      (expanded ? 'true' : 'false') +
+      (expanded ? "true" : "false") +
       '">' +
       `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span>` +
       (Number.isFinite(data.freshness?.as_of)
         ? '<span class="token-dashboard-freshness" title="统计最多每30秒更新">更新于 ' +
           escape(dateText(data.freshness.as_of, period.timezone)) +
-          '</span>'
+          "</span>"
         : '<span class="token-dashboard-freshness">更新时间未提供</span>') +
-      '</div>' +
+      "</div>" +
       headline(value) +
-      (data.coverage?.collection_unavailable ? '<p role="status">估算读取暂不可用</p>' : '') +
-      `<details data-token-filters${expanded ? ' open' : ''}><summary>查看详情<span class="token-summary-hint">时间范围与趋势</span></summary>` +
+      (data.coverage?.collection_unavailable
+        ? '<p role="status">估算读取暂不可用</p>'
+        : "") +
+      `<details data-token-filters${expanded ? " open" : ""}><summary>查看详情<span class="token-summary-hint">时间范围与趋势</span></summary>` +
       '<div class="token-dashboard-filters token-primary-filter">' +
       select(
-        'period',
-        '时间范围',
+        "period",
+        "时间范围",
         [
-          { id: 'today', label: '今日' },
-          { id: '7d', label: '近 7 天' },
-          { id: '30d', label: '近 30 天' },
+          { id: "today", label: "今日" },
+          { id: "7d", label: "近 7 天" },
+          { id: "30d", label: "近 30 天" },
         ],
         period.key,
       ) +
       '</div><section class="token-trend-section" aria-label="用量趋势"><h4>用量趋势</h4>' +
       trendHTML(data) +
-      '</section>' +
+      "</section>" +
       '<p class="token-detail-note">' +
       escape(dateText(period.start, period.timezone)) +
-      ' 至 ' +
+      " 至 " +
       escape(dateText(period.end, period.timezone)) +
-      ' · ' +
-      escape(period.timezone || 'UTC') +
-      '。仅统计已记录部分；估算仅供参考，缺失不补零。</p></details>' +
+      " · " +
+      escape(period.timezone || "UTC") +
+      "。仅统计已记录部分；估算仅供参考，缺失不补零。</p></details>" +
       '<p class="token-dashboard-status" role="status" aria-live="polite"></p></div>'
     );
   }
@@ -735,10 +831,10 @@ window.CodePierTokenUsage = (() => {
     // credentials, connection labels, project paths, or raw request metadata.
     const value = {
       kind: callEstimate(data.summary)
-        ? 'mcp_call_calibration_estimate'
+        ? "mcp_call_calibration_estimate"
         : contextEstimate(data.summary)
-          ? 'mcp_context_scenario_estimate'
-          : 'mcp_tool_text_reference_estimate',
+          ? "mcp_context_scenario_estimate"
+          : "mcp_tool_text_reference_estimate",
       exported_at: new Date().toISOString(),
       schema_version: data.schema_version || 2,
       period: data.period,
@@ -752,7 +848,7 @@ window.CodePierTokenUsage = (() => {
 
   let bindingGeneration = 0;
   function bindDashboard(container, fetcher, initial) {
-    let root = container?.querySelector('[data-token-dashboard]');
+    let root = container?.querySelector("[data-token-dashboard]");
     if (!root || !initial?.summary) return;
     rememberDashboard(initial);
     const bindingOwner = identity();
@@ -764,31 +860,35 @@ window.CodePierTokenUsage = (() => {
       root._codepierTokenGeneration = generation;
       // Keep the full estimate basis available on hover.
       root
-        .querySelectorAll(':scope > .token-dashboard-note, :scope > .token-dashboard-limit')
+        .querySelectorAll(
+          ":scope > .token-dashboard-note, :scope > .token-dashboard-limit",
+        )
         .forEach((line) => (line.title = line.textContent.trim()));
-      root.querySelectorAll('[data-token-filters], [data-token-panel]').forEach((details) => {
-        details.ontoggle = () => {
-          const key = details.dataset.tokenPanel;
-          const previous = key ? !!state.panels[key] : state.expanded;
-          if (
-            details.isConnected &&
-            details.closest('[data-token-dashboard]') === root &&
-            root._codepierTokenGeneration === generation &&
-            dashboardState === state &&
-            previous !== details.open
-          ) {
-            if (key) state.panels[key] = details.open;
-            else {
-              state.expanded = details.open;
-              root.dataset.detailsOpen = String(details.open);
+      root
+        .querySelectorAll("[data-token-filters], [data-token-panel]")
+        .forEach((details) => {
+          details.ontoggle = () => {
+            const key = details.dataset.tokenPanel;
+            const previous = key ? !!state.panels[key] : state.expanded;
+            if (
+              details.isConnected &&
+              details.closest("[data-token-dashboard]") === root &&
+              root._codepierTokenGeneration === generation &&
+              dashboardState === state &&
+              previous !== details.open
+            ) {
+              if (key) state.panels[key] = details.open;
+              else {
+                state.expanded = details.open;
+                root.dataset.detailsOpen = String(details.open);
+              }
+              state.revision += 1;
             }
-            state.revision += 1;
-          }
-        };
-      });
+          };
+        });
       root.onclick = (event) => {
         if (
-          !event.target.closest('[data-token-export]') ||
+          !event.target.closest("[data-token-export]") ||
           !root.isConnected ||
           root._codepierTokenGeneration !== generation ||
           dashboardState !== state
@@ -796,49 +896,53 @@ window.CodePierTokenUsage = (() => {
           return;
         try {
           const url = URL.createObjectURL(
-            new Blob([exportJSON(data)], { type: 'application/json' }),
+            new Blob([exportJSON(data)], { type: "application/json" }),
           );
-          const link = document.createElement('a');
+          const link = document.createElement("a");
           link.href = url;
-          link.download = 'codepier-mcp-tool-estimate.json';
+          link.download = "codepier-mcp-tool-estimate.json";
           link.click();
           setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch {
-          root.querySelector('.token-dashboard-status').textContent = '导出失败，请重试。';
+          root.querySelector(".token-dashboard-status").textContent =
+            "导出失败，请重试。";
         }
       };
       root.onchange = async (event) => {
-        const target = event.target.closest('[data-token-filter]');
+        const target = event.target.closest("[data-token-filter]");
         if (!target) return;
         if (
-          target.dataset.tokenFilter === 'cache_read_percent' &&
+          target.dataset.tokenFilter === "cache_read_percent" &&
           (!/^\d{1,3}$/.test(target.value) || Number(target.value) > 100)
         ) {
           target.value = filterValues(data).cache_read_percent;
-          root.querySelector('.token-dashboard-status').textContent =
-            '请输入 0–100 的整数缓存比例。';
+          root.querySelector(".token-dashboard-status").textContent =
+            "请输入 0–100 的整数缓存比例。";
           return;
         }
         const captured = root,
           current = ++sequence;
         const filters = Object.fromEntries(
-          [...root.querySelectorAll('[data-token-filter]')].map((select) => [
+          [...root.querySelectorAll("[data-token-filter]")].map((select) => [
             select.dataset.tokenFilter,
             select.value,
           ]),
         );
-        if (['period', 'project'].includes(target.dataset.tokenFilter)) {
-          filters.connection = '';
-          filters.session = '';
+        if (["period", "project"].includes(target.dataset.tokenFilter)) {
+          filters.connection = "";
+          filters.session = "";
         }
-        if (target.dataset.tokenFilter === 'connection') filters.session = '';
+        if (target.dataset.tokenFilter === "connection") filters.session = "";
         state.filters = filters;
-        state.expanded = !!root.querySelector('[data-token-filters]')?.open;
+        state.expanded = !!root.querySelector("[data-token-filters]")?.open;
         state.revision += 1;
-        root.querySelector('.token-dashboard-status').textContent = '正在读取当前授权范围…';
+        root.querySelector(".token-dashboard-status").textContent =
+          "正在读取当前授权范围…";
         let authorityChanged = false;
         try {
-          let result = await fetcher('/api/token-usage?' + new URLSearchParams(filters));
+          let result = await fetcher(
+            "/api/token-usage?" + new URLSearchParams(filters),
+          );
           if (
             current !== sequence ||
             !captured.isConnected ||
@@ -849,14 +953,17 @@ window.CodePierTokenUsage = (() => {
             return;
           if (!hasAuthority(result)) {
             resetDashboard();
-            clearDashboard(captured, '授权范围未确认，旧统计已清除。请刷新重试。');
+            clearDashboard(
+              captured,
+              "授权范围未确认，旧统计已清除。请刷新重试。",
+            );
             return;
           }
           const sameAuthority = result.authority_key === state.authority;
           if (!sameAuthority) {
             authorityChanged = true;
-            clearDashboard(captured, '授权范围已变化，正在读取当前统计…');
-            result = await fetcher('/api/token-usage');
+            clearDashboard(captured, "授权范围已变化，正在读取当前统计…");
+            result = await fetcher("/api/token-usage");
             if (
               current !== sequence ||
               !captured.isConnected ||
@@ -866,8 +973,8 @@ window.CodePierTokenUsage = (() => {
             )
               return;
             if (!hasAuthority(result))
-              throw Object.assign(new Error('Unknown authority'), {
-                code: 'STATISTICS_AUTHORITY_CHANGED',
+              throw Object.assign(new Error("Unknown authority"), {
+                code: "STATISTICS_AUTHORITY_CHANGED",
               });
             state = viewState(result, false);
           }
@@ -880,18 +987,18 @@ window.CodePierTokenUsage = (() => {
           )
             return;
           if (sameAuthority) {
-            state.expanded = !!captured.querySelector('[data-token-filters]')?.open;
+            state.expanded = !!captured.querySelector("[data-token-filters]")
+              ?.open;
             state.panels = Object.fromEntries(
-              [...captured.querySelectorAll('[data-token-panel]')].map((details) => [
-                details.dataset.tokenPanel,
-                details.open,
-              ]),
+              [...captured.querySelectorAll("[data-token-panel]")].map(
+                (details) => [details.dataset.tokenPanel, details.open],
+              ),
             );
           }
           data = result;
           rememberDashboard(result);
           state.filters = filterValues(result);
-          const holder = document.createElement('div');
+          const holder = document.createElement("div");
           holder.innerHTML = dashboard(data, state.expanded);
           root = holder.firstElementChild;
           captured.replaceWith(root);
@@ -907,16 +1014,16 @@ window.CodePierTokenUsage = (() => {
             return;
           if (authorityChanged || permissionError(error)) {
             resetDashboard();
-            clearDashboard(root, '权限范围已变化，旧统计已清除。请刷新重试。');
+            clearDashboard(root, "权限范围已变化，旧统计已清除。请刷新重试。");
             return;
           }
           state.filters = filterValues(data);
           state.revision += 1;
-          root.querySelectorAll('[data-token-filter]').forEach((select) => {
-            select.value = filterValues(data)[select.dataset.tokenFilter] || '';
+          root.querySelectorAll("[data-token-filter]").forEach((select) => {
+            select.value = filterValues(data)[select.dataset.tokenFilter] || "";
           });
-          root.querySelector('.token-dashboard-status').textContent =
-            '统计读取失败，仍显示上一次结果。请重新选择或刷新。';
+          root.querySelector(".token-dashboard-status").textContent =
+            "统计读取失败，仍显示上一次结果。请重新选择或刷新。";
         }
       };
     };

@@ -1,7 +1,9 @@
 // Compute in layout-viewport CSS pixels. The caller only passes a rendered
 // bottom dock; it owns DOM sampling and frame scheduling.
-const finite = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
-const nonNegative = (value, fallback = 0) => Math.max(0, finite(value, fallback));
+const finite = (value, fallback = 0) =>
+  Number.isFinite(value) ? value : fallback;
+const nonNegative = (value, fallback = 0) =>
+  Math.max(0, finite(value, fallback));
 
 const WIDTH_RESET_PX = 24;
 const KEYBOARD_MIN_PX = 80;
@@ -26,7 +28,8 @@ export function computeTerminalViewport(
 ) {
   const layoutHeight = nonNegative(innerHeight);
   const screenWidth = nonNegative(innerWidth);
-  const height = nonNegative(visualViewport?.height, layoutHeight) || layoutHeight;
+  const height =
+    nonNegative(visualViewport?.height, layoutHeight) || layoutHeight;
   const width = nonNegative(visualViewport?.width, screenWidth) || screenWidth;
   const zoomed = Math.abs(finite(visualViewport?.scale, 1) - 1) > 0.02;
   const stable =
@@ -47,19 +50,26 @@ export function computeTerminalViewport(
       keyboardOpen: focused && previous.keyboardOpen,
     };
   const previousBaseline = stable ? previous.baselineHeight : 0;
-  const baselineHeight = focused ? Math.max(previousBaseline || layoutHeight, height) : height;
+  const baselineHeight = focused
+    ? Math.max(previousBaseline || layoutHeight, height)
+    : height;
   const threshold =
     Math.max(KEYBOARD_MIN_PX, baselineHeight * KEYBOARD_HEIGHT_FRACTION) *
     (stable && previous.keyboardOpen ? KEYBOARD_EXIT_FRACTION : 1);
   // On Android the layout viewport can shrink with the visual viewport. Its
   // previous no-keyboard height is the second independent measurement.
   const keyboardOpen =
-    !zoomed && focused && Math.max(layoutHeight, baselineHeight) - height >= threshold;
+    !zoomed &&
+    focused &&
+    Math.max(layoutHeight, baselineHeight) - height >= threshold;
   const viewTop = finite(visualViewport?.offsetTop);
   const viewLeft = finite(visualViewport?.offsetLeft);
   const top = Math.max(viewTop, finite(workspaceRect.top, viewTop));
   const left = Math.max(viewLeft, finite(workspaceRect.left, viewLeft));
-  const right = Math.min(viewLeft + width, finite(workspaceRect.right, viewLeft + width));
+  const right = Math.min(
+    viewLeft + width,
+    finite(workspaceRect.right, viewLeft + width),
+  );
   let bottom = viewTop + height;
   if (
     !expanded &&
@@ -71,7 +81,10 @@ export function computeTerminalViewport(
     dockRect.bottom > dockRect.top
   )
     bottom = Math.min(bottom, dockRect.top);
-  const rawAvailableHeight = Math.max(0, Math.floor(bottom - top - nonNegative(gap)));
+  const rawAvailableHeight = Math.max(
+    0,
+    Math.floor(bottom - top - nonNegative(gap)),
+  );
   const heightDelta =
     stable && Number.isFinite(previous?.availableHeight)
       ? Math.abs(rawAvailableHeight - previous.availableHeight)
@@ -91,7 +104,9 @@ export function computeTerminalViewport(
     heightDelta > 0 &&
     heightDelta < ADDRESS_BAR_DEADBAND_PX;
   return {
-    availableHeight: suppressJitter ? previous.availableHeight : rawAvailableHeight,
+    availableHeight: suppressJitter
+      ? previous.availableHeight
+      : rawAvailableHeight,
     keyboardOpen,
     keyboardTransition,
     baselineHeight,

@@ -8,20 +8,24 @@ export function create() {
       !Array.isArray(names) ||
       !names.length ||
       new Set(names).size !== names.length ||
-      typeof handler !== 'function'
+      typeof handler !== "function"
     )
-      throw new TypeError('Invalid action registration');
+      throw new TypeError("Invalid action registration");
     if (
       names.some(
-        (name) => typeof name !== 'string' || !/^[a-z][a-z0-9-]*$/.test(name) || handlers.has(name),
+        (name) =>
+          typeof name !== "string" ||
+          !/^[a-z][a-z0-9-]*$/.test(name) ||
+          handlers.has(name),
       )
     )
-      throw new Error('Invalid or duplicate action');
+      throw new Error("Invalid or duplicate action");
     for (const name of names) handlers.set(name, handler);
   }
   async function dispatch(name, button, event) {
     const handler = handlers.get(name);
-    if (!handler || !button || button.disabled || pending.has(button)) return false;
+    if (!handler || !button || button.disabled || pending.has(button))
+      return false;
     pending.add(button);
     try {
       await handler(button, event);

@@ -107,7 +107,7 @@
 .token-dashboard-note,
 .token-dashboard-status,
 .token-dashboard details > p,
-.token-dashboard > [role='status'] {
+.token-dashboard > [role="status"] {
   font-size: var(--ui-text-sm);
   line-height: 1.6;
   opacity: 0.85;
@@ -155,7 +155,7 @@
   font-size: var(--ui-text-xs);
 }
 .token-dashboard-legend span::before {
-  content: '';
+  content: "";
   display: inline-block;
   width: 0.7rem;
   height: 0.7rem;
@@ -439,8 +439,12 @@
     margin: 0;
     font-size: var(--ui-text-md);
   }
-  .overview-summary [data-token-dashboard][data-details-open='false'] > .token-dashboard-note,
-  .overview-summary [data-token-dashboard][data-details-open='false'] > .token-dashboard-limit {
+  .overview-summary
+    [data-token-dashboard][data-details-open="false"]
+    > .token-dashboard-note,
+  .overview-summary
+    [data-token-dashboard][data-details-open="false"]
+    > .token-dashboard-limit {
     display: none;
   }
   .overview-summary [data-token-dashboard] > [data-token-filters] {

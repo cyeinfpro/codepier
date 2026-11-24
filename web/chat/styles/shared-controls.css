@@ -1,7 +1,7 @@
 /* Shared controls and touch targets; keep the standalone conversation usable. */
 /* Reapply shared arrow longhands after compact chat controls' background/padding. */
 .chat-workspace select:not([multiple]):not([size]),
-.chat-workspace select[size='1'] {
+.chat-workspace select[size="1"] {
   appearance: none;
   background-image: var(--ui-select-arrow-image);
   background-repeat: no-repeat;
@@ -11,7 +11,7 @@
 }
 @media (forced-colors: active) {
   .chat-workspace select:not([multiple]):not([size]),
-  .chat-workspace select[size='1'] {
+  .chat-workspace select[size="1"] {
     appearance: auto;
     background-image: none;
   }
@@ -153,7 +153,10 @@
   }
   /* iOS keeps the layout viewport full-height while its keyboard is open. */
   body.ui-keyboard-open .chat-workspace {
-    height: max(0px, calc(100dvh - var(--ui-vv-bottom, var(--ui-visual-viewport-bottom, 0px))));
+    height: max(
+      0px,
+      calc(100dvh - var(--ui-vv-bottom, var(--ui-visual-viewport-bottom, 0px)))
+    );
     min-height: 0;
   }
 }
@@ -268,7 +271,11 @@
 }
 @media (max-width: 900px), (pointer: coarse) {
   .chat-workspace
-    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+    :is(
+      input:not([type="checkbox"], [type="radio"], [type="range"]),
+      select,
+      textarea
+    ),
   .chat-workspace .chat-options .chat-setting-field > select,
   .chat-workspace .chat-run-controls select,
   .chat-workspace .chat-send-actions select,

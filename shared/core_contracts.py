@@ -576,7 +576,7 @@ def register(tool, tools):
         "vps": (
             VPSList,
             "read",
-            "List authorized VPS targets for exec; never returns credentials.",
+            "List authorized VPS targets (vps_ssh_v2, no historical host fingerprint verification) for exec; never returns credentials.",
             False,
             True,
         ),
@@ -611,7 +611,7 @@ def register(tool, tools):
         "exec": (
             Exec,
             "execute",
-            "Run command/task; native is not a sandbox; config is not isolation proof. Tests read; edits write; freeze read_stable/snapshot. Artifacts: $CODEPIER_RUN_DIR. Brief CI polls. Saved VPS: <=3 retries only for proven pre-command SSH failure, same receipt; recover via task_query.",
+            "Run command/task; native is not a sandbox; config is not isolation proof. Tests read; edits write; freeze read_stable/snapshot. Artifacts: $CODEPIER_RUN_DIR. Brief CI polls. Saved VPS uses vps_ssh_v2 without historical host fingerprint verification (no known_hosts cleanup needed on reinstall); <=3 retries only for proven pre-command SSH failure, same receipt; recover pending/unknown via task_query.",
             True,
             False,
         ),

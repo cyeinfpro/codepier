@@ -26,7 +26,8 @@
   flex-wrap: wrap;
   gap: 8px 16px;
   padding: 10px 28px;
-  border-bottom: 1px solid color-mix(in srgb, var(--ui-warning) 18%, var(--cr-line));
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--ui-warning) 18%, var(--cr-line));
   background: var(--ui-warning-bg);
   color: var(--cr-muted);
   font-size: var(--ui-text-xs);

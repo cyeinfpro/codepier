@@ -7,7 +7,7 @@
   border: 1px solid var(--chat-border);
   border-radius: var(--ui-radius-xl, 20px);
   background: var(--chat-raised);
-  overflow: hidden;
+  overflow: clip;
 }
 .chat-review > summary {
   display: flex;
@@ -24,10 +24,13 @@
   display: none;
 }
 .chat-review > summary::before {
-  content: '›';
+  content: "›";
   font-size: var(--ui-text-h2, 22px);
   width: 12px;
+  text-align: center;
+  line-height: 1;
   color: var(--chat-muted);
+  transition: transform var(--chat-motion-fast, 140ms) var(--chat-ease);
 }
 .chat-review[open] > summary::before {
   transform: rotate(90deg);
@@ -77,18 +80,56 @@
   list-style: none;
   cursor: pointer;
 }
-.chat-review-file > summary > strong {
+.chat-review-file[open] > summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--chat-raised);
+  border-bottom: 1px solid var(--chat-line);
+}
+.chat-review-path {
+  display: flex;
   min-width: 0;
   flex: 1;
   font-size: var(--ui-text-xs, 12px);
   font-weight: var(--ui-weight-semibold, 600);
-  overflow-wrap: anywhere;
+}
+.chat-review-path-folder,
+.chat-review-path-basename {
+  overflow: hidden;
+  white-space: pre;
+  text-overflow: ellipsis;
+}
+.chat-review-path-folder {
+  min-width: 0;
+  color: var(--chat-muted);
+}
+.chat-review-path-basename {
+  flex: none;
+  max-width: 100%;
 }
 .chat-review-file > summary > span {
   flex: none;
+  max-width: 42%;
   font-size: var(--ui-text-xs, 12px);
   font-variant-numeric: tabular-nums;
   color: var(--chat-muted);
+  overflow-wrap: anywhere;
+  text-align: end;
+}
+.chat-review-full-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  margin-block: 4px 8px;
+}
+.chat-review-full-path code {
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--ui-text-xs, 12px);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .chat-review-diff {
   min-width: 0;
@@ -109,7 +150,7 @@
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
 }
-.chat-review-toolbar button[aria-pressed='true'] {
+.chat-review-toolbar button[aria-pressed="true"] {
   background: var(--chat-selected);
   border-color: var(--chat-border);
   color: var(--chat-fg);
@@ -118,18 +159,22 @@
   max-width: 100%;
   max-height: 360px;
   overflow: auto;
+  overscroll-behavior: contain;
   overscroll-behavior-x: contain;
+  scroll-padding-inline: 12px;
   touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
   margin: 0 0 10px;
   padding: 13px;
-  border-radius: var(--ui-radius-md, 12px);
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-small, 8px);
   background: var(--chat-surface);
   font-size: var(--ui-text-xs, 12px);
   line-height: 1.75;
   tab-size: 2;
   white-space: pre;
   scrollbar-width: thin;
+  scrollbar-color: var(--chat-border) transparent;
 }
 .chat-review-diff pre.is-wrapped {
   white-space: pre-wrap;
@@ -372,8 +417,8 @@
   }
   .chat-find-bar {
     gap: 5px;
-    padding: 8px max(10px, var(--safe-right, env(safe-area-inset-right, 0px))) 8px
-      max(10px, var(--safe-left, env(safe-area-inset-left, 0px)));
+    padding: 8px max(10px, var(--safe-right, env(safe-area-inset-right, 0px)))
+      8px max(10px, var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .chat-find-bar span {
     font-size: var(--ui-text-xs, 12px);
@@ -442,12 +487,22 @@
 }
 @media (max-width: 900px), (pointer: coarse) {
   .chat-workspace
-    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
-  .chat-sheet :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+    :is(
+      input:not([type="checkbox"], [type="radio"], [type="range"]),
+      select,
+      textarea
+    ),
+  .chat-sheet
+    :is(
+      input:not([type="checkbox"], [type="radio"], [type="range"]),
+      select,
+      textarea
+    ),
   #chat-inspector-body :is(input, select, textarea) {
     font-size: var(--ui-text-input, 16px);
   }
-  .chat-workspace :is(.chat-square, .chat-drawer-toggle, .chat-overflow summary, .chat-send),
+  .chat-workspace
+    :is(.chat-square, .chat-drawer-toggle, .chat-overflow summary, .chat-send),
   .chat-workspace .chat-compose-controls .chat-square {
     width: var(--chat-touch-target);
     height: var(--chat-touch-target);
@@ -474,7 +529,12 @@
     min-height: var(--chat-touch-target);
   }
   .chat-workspace
-    :is(.chat-file, .chat-message-actions, .chat-code-head, .chat-review-toolbar)
+    :is(
+      .chat-file,
+      .chat-message-actions,
+      .chat-code-head,
+      .chat-review-toolbar
+    )
     button {
     min-width: var(--chat-touch-target);
     min-height: var(--chat-touch-target);
@@ -500,18 +560,18 @@
   }
   .chat-popover,
   .chat-sheet[open] {
-    animation: chat-layer-in var(--chat-motion-normal) var(--chat-ease);
+    animation: chat-layer-in var(--chat-motion-panel) var(--chat-ease);
   }
-  .chat-activity[data-state='working'] i {
+  .chat-activity[data-state="working"] i {
     animation: chat-activity-spin 1s linear infinite;
   }
   .chat-sidebar {
-    transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition: transform var(--chat-motion-panel) var(--chat-ease);
   }
   @keyframes chat-layer-in {
     from {
       opacity: 0;
-      transform: translateY(5px) scale(0.985);
+      transform: translateY(8px) scale(0.985);
     }
     to {
       opacity: 1;
@@ -522,5 +582,15 @@
     to {
       transform: rotate(360deg);
     }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-review > summary::before,
+  .chat-sidebar {
+    transition: none;
+  }
+  .chat-popover,
+  .chat-sheet[open] {
+    animation: none;
   }
 }

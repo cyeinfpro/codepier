@@ -1,7 +1,6 @@
 """Pinned SSH host keys verify before any credentials go to a synthetic peer."""
 
 import pytest
-from pydantic import ValidationError
 
 from agent.ssh_terminal_trust import HostKeyPolicy, HostTrustError
 from agent.ssh_terminal_transport import AsyncSSHTransport, SSHTransportError
@@ -10,15 +9,12 @@ from shared.ssh_terminal_config import TerminalConfig
 
 
 @pytest.mark.parametrize("pin", ["", "MD5:" + "01" * 16, "SHA256:" + "B" * 43])
-def test_pin_mode_rejects_missing_or_malformed_fingerprint(pin):
-    with pytest.raises(ValidationError):
-        VPSInput(
-            name="fixture",
-            host="127.0.0.1",
-            username="fixture",
-            host_key_policy="confirm-change",
-            host_key_fingerprint=pin,
-        )
+def test_saved_vps_accepts_inert_historical_metadata(pin):
+    value = VPSInput(
+        name="fixture", host="127.0.0.1", username="fixture",
+        host_key_policy="confirm-change", host_key_fingerprint=pin,
+    )
+    assert value.host_key_fingerprint == pin
 
 
 @pytest.mark.asyncio
@@ -105,7 +101,7 @@ def test_pin_mode_trust_callback_filters_legacy_trust_and_honors_revocation():
     assert policy.error.code == "HOST_KEY_REVOKED"
 
 
-def test_pin_lives_on_the_vps_and_rotation_changes_the_connection_revision(tmp_path):
+def test_inert_pin_metadata_does_not_change_connection_revision(tmp_path):
     from hub.runtime import Principal, Runtime
     from hub.store import Store
     from tests.legacy_iam_fixture import seed_owner
@@ -123,7 +119,7 @@ def test_pin_lives_on_the_vps_and_rotation_changes_the_connection_revision(tmp_p
         saved = runtime.vps.save(
             VPSInput(**common, host_key_fingerprint=previous, password="synthetic"), owner
         )
-        assert saved["host_key_fingerprint"] == previous
+        assert saved["legacy_host_trust"]["host_key_fingerprint"] == previous
         row = store.one(
             "SELECT connection_revision FROM vps_connections WHERE id=?", (saved["id"],)
         )
@@ -132,11 +128,11 @@ def test_pin_lives_on_the_vps_and_rotation_changes_the_connection_revision(tmp_p
             owner,
             saved["id"],
         )
-        assert result["host_key_fingerprint"] == updated
+        assert result["legacy_host_trust"]["host_key_fingerprint"] == updated
         latest = store.one(
             "SELECT connection_revision FROM vps_connections WHERE id=?", (saved["id"],)
         )
-        assert latest["connection_revision"] == row["connection_revision"] + 1
+        assert latest["connection_revision"] == row["connection_revision"]
     finally:
         store.close()
 
@@ -146,24 +142,30 @@ def test_saved_vps_capability_uses_exact_bool_and_current_agent_connection(monke
 
     from hub.ssh_terminal.service import TerminalService
     from hub.vps import _agent_probe_ready
+    from hub.vps_connection import parse_agent_vps_ssh
     from shared.util import DevError
 
     main = object()
     old = SimpleNamespace(
         closed=False, probe_supported=True, direct_vps=True, host_pin_supported=True
     )
+    capability = {
+        "protocol": "vps_ssh_v2", "host_identity_verification": "disabled",
+        "exec": True, "terminal": True, "probe": True,
+    }
     new = SimpleNamespace(
         closed=False, probe_supported=True, direct_vps=True,
-        saved_vps_password_only_supported=True, main_connection=main,
+        agent_vps_ssh=capability, main_connection=main,
     )
     malformed = SimpleNamespace(
         closed=False, probe_supported=True, direct_vps=True,
-        saved_vps_password_only_supported="true",
+        agent_vps_ssh={**capability, "probe": "true", "terminal": "true"},
     )
     denied = SimpleNamespace(**{**vars(new), "direct_vps_allowed": False})
     project = {"device_id": "new", "_direct_vps": True}
     assert not _agent_probe_ready(old, project)
     assert not _agent_probe_ready(malformed, project)
+    assert parse_agent_vps_ssh({"agent_vps_ssh": malformed.agent_vps_ssh})["probe"] is False
     assert not _agent_probe_ready(denied, project)
     assert _agent_probe_ready(new, project)
 
@@ -175,15 +177,15 @@ def test_saved_vps_capability_uses_exact_bool_and_current_agent_connection(monke
     terminal.agents = {"old": old, "new": new, "denied": denied, "malformed": malformed}
     devices = [{"id": identifier} for identifier in terminal.agents]
     assert terminal._select_admin_direct_device(devices, {"old", "denied"}, {})["id"] == "new"
-    assert terminal._capability_reason(project, old) == "AGENT_UPGRADE_REQUIRED"
+    assert terminal._capability_reason(project, old) == "VPS_TRANSPORT_UPGRADE_REQUIRED"
     assert terminal._capability_reason(project, new) is None
     assert terminal._require_saved_vps_agent(project, new) is None
 
     terminal.runtime.connections["new"] = object()
-    assert terminal._capability_reason(project, new) == "AGENT_UPGRADE_REQUIRED"
+    assert terminal._capability_reason(project, new) == "VPS_TRANSPORT_UPGRADE_REQUIRED"
     with pytest.raises(DevError) as error:
         terminal._require_saved_vps_agent(project, new)
-    assert error.value.code == "AGENT_UPGRADE_REQUIRED"
+    assert error.value.code == "VPS_TRANSPORT_UPGRADE_REQUIRED"
     terminal.runtime.connections["new"] = main
     terminal.agents["new"] = old
     with pytest.raises(DevError):

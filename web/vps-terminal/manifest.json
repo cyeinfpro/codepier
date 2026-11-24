@@ -29,12 +29,12 @@
   ],
   "outputs": {
     "vps-terminal.js": {
-      "bytes": 656691,
-      "sha256": "1a9a963510ca27e6767f0853d7146ff7e827b5e79c0e1e0d5a1c3db2d91c5066"
+      "bytes": 657313,
+      "sha256": "2b775b7556b2f10933817a9295e14ca44270f1ed1724fc6d505860a7346376d5"
     },
     "vps-terminal.css": {
-      "bytes": 30164,
-      "sha256": "591beafd91d0d63fca6d7308f3c4878b7ebb5591c36d5a2a8c4c3569191f293e"
+      "bytes": 30193,
+      "sha256": "658c39ee6317890ad0f0b417c1716dc7813828c5438fabd509d9f8037e7c4bc7"
     },
     "vps-terminal/THIRD_PARTY_NOTICES.txt": {
       "bytes": 6317,

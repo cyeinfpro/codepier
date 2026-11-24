@@ -117,7 +117,8 @@ def test_manual_scan_and_install_are_separate_and_space_scoped(tmp_path, monkeyp
         assert disabled["readiness_available"] is False
         owner_inventory = owner.get("/api/vps").json()
         assert owner_inventory["readiness_manual_actions"]
-        assert owner_inventory["readiness_fleet_host_verification"] == "skip"
+        assert owner_inventory["readiness_connection_contract"] == "vps_ssh_v2"
+        assert owner_inventory["readiness_host_identity_verification"] == "disabled"
         assert not member.get("/api/vps").json()["readiness_manual_actions"]
 
         scan = "/api/vps/readiness/scan"
@@ -126,20 +127,13 @@ def test_manual_scan_and_install_are_separate_and_space_scoped(tmp_path, monkeyp
             assert member.post(route).status_code == 403
             assert owner.post(route, headers={"X-RD-CSRF": "wrong"}).status_code == 403
         assert owner.post(install).json() == {"queued_count": 0}
+        # Unified vps_ssh_v2: backfill, scan, and install all use skip semantics regardless of legacy pin.
         assert (
             owner.post("/api/vps/readiness/backfill", json={"host_verification": "skip"}).json()[
                 "queued_count"
             ]
             == 3
         )
-        verified = wait_job(owner, missing["id"], state="missing")
-        assert verified["host_verification"] == "required"
-        blocked = wait_job(owner, old_trust["id"], state="failed")
-        assert blocked["reason_code"] == "HUB_SSH_TRUST_MIGRATION_REQUIRED"
-        assert wait_job(owner, ready["id"])["host_verification"] == "required"
-        # Positive evidence from the verified legacy path is not promotable.
-        assert owner.post(install).json() == {"queued_count": 0}
-        assert owner.post(scan, json={"host_verification": "required"}).json()["queued_count"] == 3
         queued = wait_job(owner, missing["id"], state="missing")
         assert queued["reason_code"] == "TMUX_MISSING"
         assert queued["host_verification"] == "skip"
@@ -158,7 +152,7 @@ def test_manual_scan_and_install_are_separate_and_space_scoped(tmp_path, monkeyp
         assert len(native.install_calls) == 2
         assert all(call.host_verification == "skip" for call in native.install_calls)
         assert all(call.space_id == "primary" for call in native.inspect_calls)
-        assert owner.get(f"/api/vps/{missing['id']}").json()["host_key_fingerprint"] == FIXED_PIN
+        assert owner.get(f"/api/vps/{missing['id']}").json()["legacy_host_trust"]["host_key_fingerprint"] == FIXED_PIN
 
 
 def test_readiness_is_unavailable_without_explicit_native_executor(tmp_path, monkeypatch):

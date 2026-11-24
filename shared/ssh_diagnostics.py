@@ -9,6 +9,12 @@ SSH_STAGES = {
 SSH_ERRORS = frozenset(
     {
         "SSH_AUTH_FAILED",
+        "SSH_AUTH_CHALLENGE_REQUIRED",
+        "SSH_CONNECT_TIMEOUT",
+        "SSH_CONNECTION_FAILED",
+        "SSH_CHANNEL_CLOSED",
+        "SSH_PROTOCOL_NEGOTIATION_FAILED",
+        "VPS_TRANSPORT_UPGRADE_REQUIRED",
         "SSH_HOST_KEY_CHANGED",
         "SSH_HOST_KEY_UNTRUSTED",
         "SSH_COMMAND_OR_CONNECTION_FAILED",
@@ -38,6 +44,22 @@ def safe_ssh_detail(detail):
     for key, values in (
         ("ssh_error", SSH_ERRORS),
         ("authentication", {"succeeded", "failed", "not_observed"}),
+        ("authentication_state", {"accepted", "failed", "not_observed"}),
+        ("authentication_method", {"password", "keyboard-interactive", "none", "unknown"}),
+        ("transport_runtime", {"asyncssh", "openssh"}),
+        ("transport_contract", {"vps_ssh_v2"}),
+        ("host_identity_verification_applied", {"disabled"}),
+        (
+            "remote_execution_state",
+            {
+                "not_started",
+                "running",
+                "completed",
+                "cancelled",
+                "timed_out",
+                "remote_outcome_unknown",
+            },
+        ),
         (
             "failure_stage",
             {

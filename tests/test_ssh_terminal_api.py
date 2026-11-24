@@ -87,7 +87,14 @@ class TerminalPeer:
     def __init__(self):
         self.device_id, self.generation = DEVICE, GENERATION
         self.closed = False
-        self.saved_vps_password_only_supported = True
+        self.vps_ssh_v2_supported = True
+        self.agent_vps_ssh = {
+            "protocol": "vps_ssh_v2",
+            "host_identity_verification": "disabled",
+            "exec": True,
+            "terminal": True,
+            "probe": True,
+        }
         self.sessions, self.actions = {}, []
         self.revision = 0
 
@@ -97,7 +104,9 @@ class TerminalPeer:
         if action == "reserve_create":
             return {"admission_token": None}
         if action == "create":
-            assert payload.get("saved_vps_password_only") is True
+            assert payload.get("transport_contract") == "vps_ssh_v2"
+            assert payload.get("host_identity_verification") == "disabled"
+            assert "saved_vps_password_only" not in payload
             assert "host_key_policy" not in payload and "host_key_fingerprint" not in payload
             self.sessions[sid] = {
                 "session_id": sid,
@@ -346,7 +355,13 @@ def agent_hello(api, socket, *, secret=DEVICE_SECRET, **changes):
             key: getattr(api.service.config, key)
             for key in ("frame_bytes", "input_frame_bytes", "control_bytes")
         },
-        "saved_vps_password_only": True,
+        "agent_vps_ssh": {
+            "protocol": "vps_ssh_v2",
+            "host_identity_verification": "disabled",
+            "exec": True,
+            "terminal": True,
+            "probe": True,
+        },
         **changes,
     }
     socket.send_text(peer.pack(hello))
@@ -520,7 +535,9 @@ def test_capabilities_distinguish_offline_old_agent_and_supported_agent(terminal
     api.install_terminal()
     current = api.capabilities().json()
     assert current["available"] and current["protocol_version"] == 1
-    assert current["saved_vps_host_verification"] == "skip"
+    assert current["connection_contract"] == "vps_ssh_v2"
+    assert current["host_identity_verification"] == "disabled"
+    assert current["capabilities"]["terminal"] == {"supported": True, "reason_code": None}
     assert current["runtime_generation"] == GENERATION
     assert current["limits"]["frame_bytes"] == api.service.config.frame_bytes
     assert VPS_PASSWORD not in json.dumps(current)
@@ -930,11 +947,15 @@ def test_project_free_session_creation_unassigned_admin_and_demotion_revocation(
 def test_terminal_agent_without_explicit_managed_vps_capability_cannot_create(terminal_api):
     api = terminal_api
     peer = api.install_terminal()
-    peer.saved_vps_password_only_supported = False
+    peer.agent_vps_ssh = None
+    peer.vps_ssh_v2_supported = False
     caps = api.capabilities().json()
     assert not caps["available"]
-    assert caps["reason_code"] == "AGENT_UPGRADE_REQUIRED"
-    assert caps["saved_vps_host_verification"] is None
+    assert caps["reason_code"] == "VPS_TRANSPORT_UPGRADE_REQUIRED"
+    assert caps["capabilities"]["terminal"] == {
+        "supported": False,
+        "reason_code": "VPS_TRANSPORT_UPGRADE_REQUIRED",
+    }
     blocked = api.alice.post("/api/vps-terminal/sessions", json=api.body())
     assert blocked.status_code == 409
     assert peer.actions == []
@@ -943,10 +964,10 @@ def test_terminal_agent_without_explicit_managed_vps_capability_cannot_create(te
 def test_stale_main_channel_cannot_dispatch_saved_vps_password(terminal_api):
     api = terminal_api
     peer = api.install_terminal()
-    assert api.capabilities().json()["saved_vps_host_verification"] == "skip"
+    assert api.capabilities().json()["connection_contract"] == "vps_ssh_v2"
     api.install_main()
     caps = api.capabilities().json()
-    assert not caps["available"] and caps["saved_vps_host_verification"] is None
+    assert not caps["available"] and caps["reason_code"] == "VPS_TRANSPORT_UPGRADE_REQUIRED"
     blocked = api.alice.post("/api/vps-terminal/sessions", json=api.body())
     assert blocked.status_code == 409
     assert peer.actions == []

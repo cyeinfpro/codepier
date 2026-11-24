@@ -125,7 +125,7 @@
 #project-runtime-form .field {
   min-width: 0;
 }
-#project-runtime-form input:not([type='radio']):not([type='checkbox']),
+#project-runtime-form input:not([type="radio"]):not([type="checkbox"]),
 #project-runtime-form textarea,
 #project-runtime-form select {
   max-width: 100%;

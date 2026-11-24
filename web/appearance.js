@@ -1,25 +1,27 @@
-'use strict';
+"use strict";
 // Storage keys: 'codepier-appearance' and 'codepier-chat-appearance'.
 (function initCodePierAppearance(window, document) {
-  const KEY = 'codepier-appearance';
-  const LEGACY_KEY = 'codepier-chat-appearance';
-  const VALUES = new Set(['auto', 'light', 'dark']);
+  const KEY = "codepier-appearance";
+  const LEGACY_KEY = "codepier-chat-appearance";
+  const VALUES = new Set(["auto", "light", "dark"]);
   const media =
-    typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-color-scheme: dark)')
+    typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: dark)")
       : null;
-  let preference = 'auto';
-  let scheme = 'light';
-  let themeColorOverride = '';
+  let preference = "auto";
+  let scheme = "light";
+  let themeColorOverride = "";
 
   function validThemeColor(value) {
-    if (typeof value !== 'string') return false;
+    if (typeof value !== "string") return false;
     const trimmed = value.trim();
     if (!trimmed) return false;
-    if (typeof window.CSS?.supports === 'function') return window.CSS.supports('color', trimmed);
+    if (typeof window.CSS?.supports === "function")
+      return window.CSS.supports("color", trimmed);
     return (
-      /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed) ||
-      /^(?:rgb|hsl)a?\([^()]+\)$/i.test(trimmed)
+      /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(
+        trimmed,
+      ) || /^(?:rgb|hsl)a?\([^()]+\)$/i.test(trimmed)
     );
   }
 
@@ -42,40 +44,50 @@
     return VALUES.has(value);
   }
   function resolve(value) {
-    return value === 'auto' && media?.matches ? 'dark' : value === 'dark' ? 'dark' : 'light';
+    return value === "auto" && media?.matches
+      ? "dark"
+      : value === "dark"
+        ? "dark"
+        : "light";
   }
   function detail() {
     return { preference, scheme };
   }
   function syncControls() {
-    document.querySelectorAll('[data-ui-appearance],#chat-appearance').forEach((control) => {
-      if ('value' in control && control.value !== preference) control.value = preference;
-      if (control.matches('[data-ui-appearance]')) control.setAttribute('aria-label', '全站外观');
-    });
+    document
+      .querySelectorAll("[data-ui-appearance],#chat-appearance")
+      .forEach((control) => {
+        if ("value" in control && control.value !== preference)
+          control.value = preference;
+        if (control.matches("[data-ui-appearance]"))
+          control.setAttribute("aria-label", "全站外观");
+      });
   }
   function applyThemeColor() {
     let meta = document.querySelector('meta[name="theme-color"]');
     if (!meta && document.head) {
-      meta = document.createElement('meta');
-      meta.name = 'theme-color';
+      meta = document.createElement("meta");
+      meta.name = "theme-color";
       document.head.append(meta);
     }
-    if (!meta) return '';
+    if (!meta) return "";
     if (themeColorOverride) {
       meta.content = themeColorOverride;
       return meta.content;
     }
-    const token = getComputedStyle(document.documentElement).getPropertyValue('--ui-bg').trim();
-    meta.content = token || (scheme === 'dark' ? '#141413' : '#f5f5f4');
+    const token = getComputedStyle(document.documentElement)
+      .getPropertyValue("--ui-bg")
+      .trim();
+    meta.content = token || (scheme === "dark" ? "#141413" : "#f5f5f4");
     return meta.content;
   }
   function syncThemeColor(overrideColor) {
     if (
       overrideColor === undefined ||
       overrideColor === null ||
-      (typeof overrideColor === 'string' && !overrideColor.trim())
+      (typeof overrideColor === "string" && !overrideColor.trim())
     ) {
-      themeColorOverride = '';
+      themeColorOverride = "";
     } else if (validThemeColor(overrideColor)) {
       themeColorOverride = overrideColor.trim();
     }
@@ -87,24 +99,29 @@
     document.documentElement.style.colorScheme = scheme;
     applyThemeColor();
     syncControls();
-    if (emit) window.dispatchEvent(new CustomEvent('codepier:appearance', { detail: detail() }));
+    if (emit)
+      window.dispatchEvent(
+        new CustomEvent("codepier:appearance", { detail: detail() }),
+      );
   }
   function setPreference(value) {
-    if (!valid(value)) throw new TypeError('外观偏好必须是 auto、light 或 dark');
+    if (!valid(value))
+      throw new TypeError("外观偏好必须是 auto、light 或 dark");
     preference = value;
     write(KEY, value);
     apply(true);
     return detail();
   }
   function subscribe(callback) {
-    if (typeof callback !== 'function') throw new TypeError('外观订阅者必须是函数');
+    if (typeof callback !== "function")
+      throw new TypeError("外观订阅者必须是函数");
     const listener = (event) => callback(event.detail);
-    window.addEventListener('codepier:appearance', listener);
+    window.addEventListener("codepier:appearance", listener);
     callback(detail());
-    return () => window.removeEventListener('codepier:appearance', listener);
+    return () => window.removeEventListener("codepier:appearance", listener);
   }
   function systemChanged() {
-    if (preference === 'auto') apply(true);
+    if (preference === "auto") apply(true);
   }
   function storageChanged(event) {
     let storage = null;
@@ -113,10 +130,11 @@
     } catch {}
     if (event.storageArea && storage && event.storageArea !== storage) return;
     let next = null;
-    if (event.key === null) next = 'auto';
-    else if (event.key === KEY) next = valid(event.newValue) ? event.newValue : 'auto';
+    if (event.key === null) next = "auto";
+    else if (event.key === KEY)
+      next = valid(event.newValue) ? event.newValue : "auto";
     else if (event.key === LEGACY_KEY && !read(KEY))
-      next = valid(event.newValue) ? event.newValue : 'auto';
+      next = valid(event.newValue) ? event.newValue : "auto";
     if (next === null) return;
     preference = next;
     apply(true);
@@ -124,7 +142,7 @@
 
   const saved = read(KEY);
   const legacy = read(LEGACY_KEY);
-  preference = valid(saved) ? saved : valid(legacy) ? legacy : 'auto';
+  preference = valid(saved) ? saved : valid(legacy) ? legacy : "auto";
   if (!valid(saved) && valid(legacy)) write(KEY, legacy);
 
   window.CodePierAppearance = Object.freeze({
@@ -135,18 +153,19 @@
     syncThemeColor,
   });
 
-  document.addEventListener('change', (event) => {
-    const control = event.target.closest?.('[data-ui-appearance]');
+  document.addEventListener("change", (event) => {
+    const control = event.target.closest?.("[data-ui-appearance]");
     if (control && valid(control.value)) setPreference(control.value);
   });
-  window.addEventListener('storage', storageChanged);
+  window.addEventListener("storage", storageChanged);
   if (media) {
-    if (typeof media.addEventListener === 'function')
-      media.addEventListener('change', systemChanged);
-    else if (typeof media.addListener === 'function') media.addListener(systemChanged);
+    if (typeof media.addEventListener === "function")
+      media.addEventListener("change", systemChanged);
+    else if (typeof media.addListener === "function")
+      media.addListener(systemChanged);
   }
   // Static first paint is synced once; dynamic controls are rendered with the
   // current preference. Streaming transcripts never trigger document scans.
-  document.addEventListener('DOMContentLoaded', syncControls, { once: true });
+  document.addEventListener("DOMContentLoaded", syncControls, { once: true });
   apply(false);
 })(window, document);

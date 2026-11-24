@@ -298,7 +298,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'] .chat-message-user .chat-message-body code, html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-body code",
+    "selector": ".chat-workspace[data-appearance=\"dark\"] .chat-message-user .chat-message-body code, html[data-appearance=\"dark\"] .chat-workspace .chat-message-user .chat-message-body code",
     "property": "background",
     "value": "var(--ui-message-code-bg, #414141)",
     "count": 1
@@ -306,7 +306,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-accent",
     "value": "var(--ui-accent, #d1bd75)",
     "count": 1
@@ -314,7 +314,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-accent-soft",
     "value": "var(--ui-accent-soft, #343128)",
     "count": 1
@@ -322,7 +322,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-apricot",
     "value": "var(--ui-apricot, #362f29)",
     "count": 1
@@ -330,7 +330,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-bg",
     "value": "var(--ui-panel, #1c1c1b)",
     "count": 1
@@ -338,7 +338,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-border",
     "value": "var(--ui-border, #3d3d3a)",
     "count": 1
@@ -346,7 +346,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-device",
     "value": "var(--ui-cover-device, #2d414c)",
     "count": 1
@@ -354,7 +354,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-device-muted",
     "value": "var(--ui-cover-device-muted, #c1d8e4)",
     "count": 1
@@ -362,7 +362,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-muted",
     "value": "var(--ui-cover-muted, #d3c7e0)",
     "count": 1
@@ -370,7 +370,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-project",
     "value": "var(--ui-cover-project, #40374f)",
     "count": 1
@@ -378,7 +378,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-task",
     "value": "var(--ui-cover-task, #4c3c2c)",
     "count": 1
@@ -386,7 +386,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-task-muted",
     "value": "var(--ui-cover-task-muted, #e5d0b2)",
     "count": 1
@@ -394,7 +394,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-cover-text",
     "value": "var(--ui-cover-text, #f2edf8)",
     "count": 1
@@ -402,7 +402,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-danger",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -410,7 +410,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-danger-bg",
     "value": "var(--ui-danger-bg, #352b2a)",
     "count": 1
@@ -418,7 +418,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-fg",
     "value": "var(--ui-text, #e5e5e5)",
     "count": 1
@@ -426,7 +426,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-highlight",
     "value": "var(--ui-highlight, #d1bd75)",
     "count": 1
@@ -434,7 +434,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-hover",
     "value": "var(--ui-hover, #343434)",
     "count": 1
@@ -442,7 +442,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-ink",
     "value": "var(--ui-ink, #292929)",
     "count": 1
@@ -450,7 +450,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-lilac",
     "value": "var(--ui-lilac, #302d37)",
     "count": 1
@@ -458,7 +458,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-line",
     "value": "var(--ui-line, #2c2c2a)",
     "count": 1
@@ -466,7 +466,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-muted",
     "value": "var(--ui-muted, #b9b9b9)",
     "count": 1
@@ -474,7 +474,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-primary",
     "value": "var(--ui-primary, #d1bd75)",
     "count": 1
@@ -482,7 +482,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-primary-text",
     "value": "var(--ui-primary-text, #27241b)",
     "count": 1
@@ -490,7 +490,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-raised",
     "value": "var(--ui-raised, #2b2b2b)",
     "count": 1
@@ -498,7 +498,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-selected",
     "value": "var(--ui-selected, #393939)",
     "count": 1
@@ -506,7 +506,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-side",
     "value": "var(--ui-side, #181817)",
     "count": 1
@@ -514,7 +514,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-sky",
     "value": "var(--ui-sky, #293137)",
     "count": 1
@@ -522,7 +522,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-soft",
     "value": "var(--ui-soft, #ababab)",
     "count": 1
@@ -530,7 +530,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-success",
     "value": "var(--ui-success, #9ec4ae)",
     "count": 1
@@ -538,7 +538,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-success-bg",
     "value": "var(--ui-success-bg, #27332d)",
     "count": 1
@@ -546,7 +546,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-surface",
     "value": "var(--ui-surface, #2b2b2b)",
     "count": 1
@@ -554,7 +554,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-user-bg",
     "value": "var(--ui-message-bg, #343434)",
     "count": 1
@@ -562,7 +562,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-user-fg",
     "value": "var(--ui-message-text, #e5e5e5)",
     "count": 1
@@ -570,7 +570,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-warning",
     "value": "var(--ui-warning, #d5b77e)",
     "count": 1
@@ -578,7 +578,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": ".chat-workspace[data-appearance='dark'], html[data-appearance='dark'] .chat-workspace",
+    "selector": ".chat-workspace[data-appearance=\"dark\"], html[data-appearance=\"dark\"] .chat-workspace",
     "property": "--chat-warning-bg",
     "value": "var(--ui-warning-bg, #322e27)",
     "count": 1
@@ -594,7 +594,7 @@
   {
     "path": "chat.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] body.chat-mode, body.chat-mode[data-chat-appearance='dark']",
+    "selector": "html[data-appearance=\"dark\"] body.chat-mode, body.chat-mode[data-chat-appearance=\"dark\"]",
     "property": "background",
     "value": "var(--ui-bg, #141413)",
     "count": 1
@@ -650,7 +650,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='expired']",
+    "selector": "#computer-approval-inbox > section[data-state=\"expired\"]",
     "property": "background",
     "value": "var(--ui-danger-bg, #f8efed)",
     "count": 1
@@ -658,7 +658,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='expired']",
+    "selector": "#computer-approval-inbox > section[data-state=\"expired\"]",
     "property": "border-color",
     "value": "var(--ui-danger, #a13c35)",
     "count": 1
@@ -666,7 +666,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='pending']",
+    "selector": "#computer-approval-inbox > section[data-state=\"pending\"]",
     "property": "background",
     "value": "var(--ui-surface, #f0f0f0)",
     "count": 1
@@ -674,7 +674,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='pending']",
+    "selector": "#computer-approval-inbox > section[data-state=\"pending\"]",
     "property": "border-color",
     "value": "var(--ui-border, #d6d5d2)",
     "count": 1
@@ -682,7 +682,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='ready']",
+    "selector": "#computer-approval-inbox > section[data-state=\"ready\"]",
     "property": "box-shadow",
     "value": "inset 4px 0 var(--ui-primary, #f3d970)",
     "count": 1
@@ -690,7 +690,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='unavailable']",
+    "selector": "#computer-approval-inbox > section[data-state=\"unavailable\"]",
     "property": "background",
     "value": "var(--ui-warning-bg, #f7f3e9)",
     "count": 1
@@ -698,7 +698,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox > section[data-state='unavailable']",
+    "selector": "#computer-approval-inbox > section[data-state=\"unavailable\"]",
     "property": "border-color",
     "value": "var(--ui-warning, #785b22)",
     "count": 1
@@ -794,7 +794,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "#computer-approval-inbox p[role='status']",
+    "selector": "#computer-approval-inbox p[role=\"status\"]",
     "property": "color",
     "value": "var(--ui-muted, #606060)",
     "count": 1
@@ -930,7 +930,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox",
     "property": "background",
     "value": "var(--ui-raised, #2b2b2b)",
     "count": 1
@@ -938,7 +938,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox",
     "property": "border-color",
     "value": "var(--ui-border, #3d3d3a)",
     "count": 1
@@ -946,7 +946,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox",
     "property": "color",
     "value": "var(--ui-text, #e5e5e5)",
     "count": 1
@@ -954,7 +954,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox",
     "property": "scrollbar-color",
     "value": "var(--ui-border, #3d3d3a) transparent",
     "count": 1
@@ -962,7 +962,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox :is(button, summary):focus-visible",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox :is(button, summary):focus-visible",
     "property": "outline-color",
     "value": "var(--ui-focus, #d1bd75)",
     "count": 1
@@ -970,7 +970,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section + section",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section + section",
     "property": "border-top-color",
     "value": "var(--ui-line, #2c2c2a)",
     "count": 1
@@ -978,7 +978,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='expired']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"expired\"]",
     "property": "background",
     "value": "var(--ui-danger-bg, #352b2a)",
     "count": 1
@@ -986,7 +986,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='expired']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"expired\"]",
     "property": "border-color",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -994,7 +994,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='pending']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"pending\"]",
     "property": "background",
     "value": "var(--ui-surface, #2b2b2b)",
     "count": 1
@@ -1002,7 +1002,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='pending']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"pending\"]",
     "property": "border-color",
     "value": "var(--ui-border, #3d3d3a)",
     "count": 1
@@ -1010,7 +1010,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='ready']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"ready\"]",
     "property": "box-shadow",
     "value": "inset 4px 0 var(--ui-primary, #d1bd75)",
     "count": 1
@@ -1018,7 +1018,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unavailable']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"unavailable\"]",
     "property": "background",
     "value": "var(--ui-warning-bg, #322e27)",
     "count": 1
@@ -1026,7 +1026,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unavailable']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox > section[data-state=\"unavailable\"]",
     "property": "border-color",
     "value": "var(--ui-warning, #d5b77e)",
     "count": 1
@@ -1034,7 +1034,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:first-of-type",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:first-of-type",
     "property": "background",
     "value": "var(--ui-primary, #d1bd75)",
     "count": 1
@@ -1042,7 +1042,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:first-of-type",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:first-of-type",
     "property": "border-color",
     "value": "var(--ui-primary, #d1bd75)",
     "count": 1
@@ -1050,7 +1050,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:first-of-type",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:first-of-type",
     "property": "color",
     "value": "var(--ui-primary-text, #27241b)",
     "count": 1
@@ -1058,7 +1058,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:nth-of-type(2)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:nth-of-type(2)",
     "property": "background",
     "value": "var(--ui-danger-bg, #352b2a)",
     "count": 1
@@ -1066,7 +1066,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:nth-of-type(2)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:nth-of-type(2)",
     "property": "border-color",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -1074,7 +1074,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox button:nth-of-type(2)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox button:nth-of-type(2)",
     "property": "color",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -1082,7 +1082,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox p:first-of-type, html[data-appearance='dark'] #computer-approval-inbox p[role='status']",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox p:first-of-type, html[data-appearance=\"dark\"] #computer-approval-inbox p[role=\"status\"]",
     "property": "color",
     "value": "var(--ui-muted, #b9b9b9)",
     "count": 1
@@ -1090,7 +1090,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(2)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox p:nth-of-type(2)",
     "property": "color",
     "value": "var(--ui-text, #e5e5e5)",
     "count": 1
@@ -1098,7 +1098,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(3)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox p:nth-of-type(3)",
     "property": "background",
     "value": "var(--ui-warning-bg, #322e27)",
     "count": 1
@@ -1106,7 +1106,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(3)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox p:nth-of-type(3)",
     "property": "border-color",
     "value": "var(--ui-warning, #d5b77e)",
     "count": 1
@@ -1114,7 +1114,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(3)",
+    "selector": "html[data-appearance=\"dark\"] #computer-approval-inbox p:nth-of-type(3)",
     "property": "color",
     "value": "var(--ui-warning, #d5b77e)",
     "count": 1
@@ -1122,7 +1122,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-accessibility",
+    "selector": "html[data-appearance=\"dark\"] .computer-accessibility",
     "property": "background",
     "value": "var(--ui-surface, #2b2b2b)",
     "count": 1
@@ -1130,7 +1130,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-accessibility",
+    "selector": "html[data-appearance=\"dark\"] .computer-accessibility",
     "property": "border-color",
     "value": "var(--ui-line, #2c2c2a)",
     "count": 1
@@ -1138,7 +1138,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-accessibility pre",
+    "selector": "html[data-appearance=\"dark\"] .computer-accessibility pre",
     "property": "background",
     "value": "var(--ui-panel, #1c1c1b)",
     "count": 1
@@ -1146,7 +1146,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-accessibility pre",
+    "selector": "html[data-appearance=\"dark\"] .computer-accessibility pre",
     "property": "border-color",
     "value": "var(--ui-line, #2c2c2a)",
     "count": 1
@@ -1154,7 +1154,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-accessibility pre",
+    "selector": "html[data-appearance=\"dark\"] .computer-accessibility pre",
     "property": "color",
     "value": "var(--ui-text, #e5e5e5)",
     "count": 1
@@ -1162,7 +1162,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-panel",
+    "selector": "html[data-appearance=\"dark\"] .computer-panel",
     "property": "color",
     "value": "var(--ui-text, #e5e5e5)",
     "count": 1
@@ -1170,7 +1170,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-toolbar .danger",
+    "selector": "html[data-appearance=\"dark\"] .computer-toolbar .danger",
     "property": "border-color",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -1178,7 +1178,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .computer-toolbar .danger",
+    "selector": "html[data-appearance=\"dark\"] .computer-toolbar .danger",
     "property": "color",
     "value": "var(--ui-danger, #e3a39b)",
     "count": 1
@@ -1186,7 +1186,7 @@
   {
     "path": "computer.css",
     "context": [],
-    "selector": "html[data-appearance='dark'] .tool-scope.computer",
+    "selector": "html[data-appearance=\"dark\"] .tool-scope.computer",
     "property": "color",
     "value": "var(--ui-warning, #d5b77e)",
     "count": 1

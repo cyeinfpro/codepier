@@ -2,16 +2,19 @@ const DEFAULT_ESTIMATED_HEIGHT = 64;
 const DEFAULT_OVERSCAN_PX = 200;
 const DEFAULT_MAX_PINNED = 16;
 
-function assertPositiveHeight(height, label = 'height') {
-  if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) {
+function assertPositiveHeight(height, label = "height") {
+  if (typeof height !== "number" || !Number.isFinite(height) || height <= 0) {
     throw new RangeError(`${label} must be a finite positive number`);
   }
   return height;
 }
 
 export class HeightIndex {
-  constructor(keys = [], { defaultHeight = DEFAULT_ESTIMATED_HEIGHT, heights = null } = {}) {
-    this.defaultHeight = assertPositiveHeight(defaultHeight, 'defaultHeight');
+  constructor(
+    keys = [],
+    { defaultHeight = DEFAULT_ESTIMATED_HEIGHT, heights = null } = {},
+  ) {
+    this.defaultHeight = assertPositiveHeight(defaultHeight, "defaultHeight");
     this.keys = [];
     this.keyToIndex = new Map();
     this.rowHeights = new Float64Array(0);
@@ -39,7 +42,7 @@ export class HeightIndex {
   }
 
   rebuild(keys = [], knownHeights = null, defaultHeight = this.defaultHeight) {
-    this.defaultHeight = assertPositiveHeight(defaultHeight, 'defaultHeight');
+    this.defaultHeight = assertPositiveHeight(defaultHeight, "defaultHeight");
     const n = keys.length;
     this.keys = [...keys];
     this.keyToIndex = new Map();
@@ -49,9 +52,14 @@ export class HeightIndex {
     for (let i = 0; i < n; i += 1) {
       const key = this.keys[i];
       this.keyToIndex.set(key, i);
-      const raw = knownHeights instanceof Map ? knownHeights.get(key) : knownHeights?.[key];
+      const raw =
+        knownHeights instanceof Map
+          ? knownHeights.get(key)
+          : knownHeights?.[key];
       const h =
-        typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : this.defaultHeight;
+        typeof raw === "number" && Number.isFinite(raw) && raw > 0
+          ? raw
+          : this.defaultHeight;
       this.rowHeights[i] = h;
       this.tree[i + 1] += h;
       const parent = i + 1 + ((i + 1) & -(i + 1));
@@ -61,7 +69,7 @@ export class HeightIndex {
 
   setHeight(i, height) {
     if (i < 0 || i >= this.keys.length) return false;
-    const next = assertPositiveHeight(height, 'height');
+    const next = assertPositiveHeight(height, "height");
     const delta = next - this.rowHeights[i];
     if (delta === 0) return false;
     this.rowHeights[i] = next;
@@ -124,7 +132,12 @@ export class HeightIndex {
   }
 }
 
-export function visibleRange(index, scrollTop, viewportHeight, overscanPx = DEFAULT_OVERSCAN_PX) {
+export function visibleRange(
+  index,
+  scrollTop,
+  viewportHeight,
+  overscanPx = DEFAULT_OVERSCAN_PX,
+) {
   const count = index.count;
   if (!count) return { start: 0, end: 0, top: 0, bottom: 0 };
   const total = index.offset(count);
@@ -145,7 +158,9 @@ export function visibleRange(index, scrollTop, viewportHeight, overscanPx = DEFA
 export function captureAnchor(view, neighborLookahead = 4) {
   const count = view.heights.count;
   const scrollTop = view.el.scrollTop;
-  const i = count ? Math.min(count - 1, view.heights.firstRowWhoseEndExceeds(scrollTop)) : -1;
+  const i = count
+    ? Math.min(count - 1, view.heights.firstRowWhoseEndExceeds(scrollTop))
+    : -1;
   const prevKeys = [];
   const nextKeys = [];
   if (i >= 0) {
@@ -176,7 +191,7 @@ export function resolveSurvivingAnchor(view, anchor, fallbackTop = 0) {
   const mapKey = (candidate) => {
     const direct = heights.indexOfKey(candidate);
     if (direct >= 0) return direct;
-    if (typeof view.groupKeyFor === 'function') {
+    if (typeof view.groupKeyFor === "function") {
       const gk = view.groupKeyFor(candidate);
       if (gk) {
         const grouped = heights.indexOfKey(gk);
@@ -189,7 +204,10 @@ export function resolveSurvivingAnchor(view, anchor, fallbackTop = 0) {
   if (anchor?.key) {
     const idx = mapKey(anchor.key);
     if (idx >= 0) {
-      const clampedWithin = Math.max(0, Math.min(anchor.within ?? 0, heights.heightAt(idx) - 1));
+      const clampedWithin = Math.max(
+        0,
+        Math.min(anchor.within ?? 0, heights.heightAt(idx) - 1),
+      );
       return Math.max(0, Math.min(maxTop, heights.offset(idx) + clampedWithin));
     }
   }
@@ -211,7 +229,7 @@ export function commitHeightBatch(view, measurements, anchor) {
     const i = view.heights.indexOfKey(entry.key);
     if (
       i >= 0 &&
-      typeof entry.height === 'number' &&
+      typeof entry.height === "number" &&
       Number.isFinite(entry.height) &&
       entry.height > 0
     ) {
@@ -221,7 +239,10 @@ export function commitHeightBatch(view, measurements, anchor) {
   const canRestore = anchor.userScrollGeneration === view.userScrollGeneration;
   let targetTop = view.el.scrollTop;
   if (canRestore && anchor.followBottom) {
-    targetTop = Math.max(0, view.heights.offset(view.heights.count) - view.el.clientHeight);
+    targetTop = Math.max(
+      0,
+      view.heights.offset(view.heights.count) - view.el.clientHeight,
+    );
   } else if (canRestore && anchor.key !== null) {
     targetTop = resolveSurvivingAnchor(view, anchor, targetTop);
   }
@@ -241,7 +262,7 @@ export function commitHeightBatch(view, measurements, anchor) {
 export class PinSet {
   constructor(maxPinned = DEFAULT_MAX_PINNED) {
     if (!Number.isSafeInteger(maxPinned) || maxPinned < 0) {
-      throw new RangeError('maxPinned must be a non-negative safe integer');
+      throw new RangeError("maxPinned must be a non-negative safe integer");
     }
     this.maxPinned = maxPinned;
     this.entries = new Map();
@@ -256,8 +277,8 @@ export class PinSet {
     return this.entries.has(key);
   }
 
-  pin(key, reason = 'focus') {
-    if (typeof key !== 'string' || !key || this.maxPinned === 0) return false;
+  pin(key, reason = "focus") {
+    if (typeof key !== "string" || !key || this.maxPinned === 0) return false;
     const existing = this.entries.get(key);
     if (existing) {
       existing.add(reason);
@@ -268,7 +289,7 @@ export class PinSet {
     while (this.entries.size >= this.maxPinned) {
       let victim = null;
       for (const [candidateKey, reasons] of this.entries) {
-        if (!reasons.has('approval')) {
+        if (!reasons.has("approval")) {
           victim = candidateKey;
           break;
         }
@@ -356,7 +377,11 @@ export function flushVisibleDirty(view, runtime) {
     }
   }
 
-  if (runtime.dirtyKeys.size > 0 && !runtime.frame && typeof scheduleRaf === 'function') {
+  if (
+    runtime.dirtyKeys.size > 0 &&
+    !runtime.frame &&
+    typeof scheduleRaf === "function"
+  ) {
     runtime.frame = scheduleRaf(() => flushVisibleDirty(view, runtime));
   }
   return { aborted: false, updated, remaining: runtime.dirtyKeys.size };

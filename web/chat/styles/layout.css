@@ -46,22 +46,35 @@
   --chat-touch-target: var(--ui-touch-target, 44px);
   --chat-panel-radius: var(--ui-panel-radius, 20px);
   --chat-window-radius: var(--ui-window-radius, 20px);
-  --chat-shadow: var(--ui-shadow, 0 12px 36px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 5%));
+  --chat-shadow: var(
+    --ui-shadow,
+    0 12px 36px rgb(0 0 0 / 10%),
+    0 2px 6px rgb(0 0 0 / 5%)
+  );
   --chat-scrim: var(--ui-scrim, rgb(20 20 20 / 36%));
-  --chat-motion-fast: var(--ui-motion-fast, 120ms);
-  --chat-motion-normal: var(--ui-motion-normal, 180ms);
-  --chat-ease: var(--ui-ease, cubic-bezier(0.2, 0.8, 0.2, 1));
+  --chat-motion-press: var(--ui-motion-press, 80ms);
+  --chat-motion-fast: var(--ui-motion-fast, 140ms);
+  --chat-motion-normal: var(--ui-motion-normal, 200ms);
+  --chat-motion-panel: var(--ui-motion-panel, 240ms);
+  --chat-ease: var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1));
   --chat-font: var(
     --ui-font,
     -apple-system,
     BlinkMacSystemFont,
-    'SF Pro Text',
-    'Segoe UI',
-    'PingFang SC',
-    'Microsoft YaHei',
+    "SF Pro Text",
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
     sans-serif
   );
-  --chat-mono: var(--ui-mono, ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace);
+  --chat-mono: var(
+    --ui-mono,
+    ui-monospace,
+    "SFMono-Regular",
+    Menlo,
+    Consolas,
+    monospace
+  );
   --chat-user-bg: var(--ui-message-bg, #ededed);
   --chat-user-fg: var(--ui-message-text, #272727);
   display: flex;
@@ -84,8 +97,8 @@
 
   box-sizing: border-box;
 }
-.chat-workspace[data-appearance='dark'],
-html[data-appearance='dark'] .chat-workspace {
+.chat-workspace[data-appearance="dark"],
+html[data-appearance="dark"] .chat-workspace {
   --chat-bg: var(--ui-panel, #1c1c1b);
   --chat-side: var(--ui-side, #181817);
   --chat-surface: var(--ui-surface, #2b2b2b);
@@ -112,7 +125,11 @@ html[data-appearance='dark'] .chat-workspace {
   --chat-warning-bg: var(--ui-warning-bg, #322e27);
   --chat-success: var(--ui-success, #9ec4ae);
   --chat-success-bg: var(--ui-success-bg, #27332d);
-  --chat-shadow: var(--ui-shadow, 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%));
+  --chat-shadow: var(
+    --ui-shadow,
+    0 16px 40px rgb(0 0 0 / 24%),
+    0 2px 8px rgb(0 0 0 / 12%)
+  );
   --chat-scrim: var(--ui-scrim, rgb(0 0 0 / 46%));
   --chat-user-bg: var(--ui-message-bg, #343434);
   --chat-user-fg: var(--ui-message-text, #e5e5e5);
@@ -133,8 +150,8 @@ body.chat-mode {
   overflow: hidden;
   background: var(--ui-bg, #f5f5f4);
 }
-html[data-appearance='dark'] body.chat-mode,
-body.chat-mode[data-chat-appearance='dark'] {
+html[data-appearance="dark"] body.chat-mode,
+body.chat-mode[data-chat-appearance="dark"] {
   background: var(--ui-bg, #141413);
 }
 html:has(body.chat-mode) {
@@ -193,7 +210,8 @@ html:has(body.chat-mode) {
   height: 18px;
   flex: none;
 }
-.chat-workspace :is(button, input, textarea, select, summary, a, [tabindex]):focus-visible {
+.chat-workspace
+  :is(button, input, textarea, select, summary, a, [tabindex]):focus-visible {
   outline: var(--ui-focus-width, 3px) solid var(--ui-focus, var(--chat-accent));
   outline-offset: 3px;
 }
@@ -237,7 +255,7 @@ html:has(body.chat-mode) {
   color: var(--chat-muted);
 }
 .chat-square:hover:not(:disabled),
-.chat-square[aria-pressed='true'] {
+.chat-square[aria-pressed="true"] {
   background: var(--chat-hover);
   color: var(--chat-fg);
 }

@@ -9,6 +9,7 @@ from anyio import CancelScope
 from fastapi import APIRouter, Query, Request, Response, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from hub.vps_connection import parse_agent_vps_ssh, supports_vps_ssh_v2
 from shared.crypto import pack_channel, token, unpack_channel
 from shared.ssh_terminal_channel import terminal_secure_channel
 from shared.ssh_terminal_protocol import TerminalProtocolError, canonical_uuid, parse_control
@@ -212,10 +213,12 @@ async def _agent_socket(socket, device_id, runtime, store, service):
         connection.direct_vps_allowed = bool(
             hello_info.get("direct_vps_allowed", connection.direct_vps)
         )
-        connection.probe_supported = bool(hello_info.get("probe"))
         connection.host_pin_supported = hello_info.get("host_pin") is True
-        connection.saved_vps_password_only_supported = (
-            hello_info.get("saved_vps_password_only") is True
+        connection.saved_vps_password_only_supported = hello_info.get("saved_vps_password_only") is True
+        connection.agent_vps_ssh = parse_agent_vps_ssh(hello_info)
+        connection.vps_ssh_v2_supported = supports_vps_ssh_v2(connection, "terminal")
+        connection.probe_supported = bool(hello_info.get("probe")) or supports_vps_ssh_v2(
+            connection, "probe"
         )
         await socket.send_text(
             await pack_channel(

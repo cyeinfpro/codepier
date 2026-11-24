@@ -6,8 +6,8 @@ async function chatInterrupt() {
   if (!id || !v.active) return;
   v.interruptReceipt = v.interruptReceipt || uid();
   try {
-    await chatAPI('chat_interrupt', { id, receipt: v.interruptReceipt });
-    if (chatCurrent(gen, v)) chatStatus('正在中断当前回复；排队消息仍会继续');
+    await chatAPI("chat_interrupt", { id, receipt: v.interruptReceipt });
+    if (chatCurrent(gen, v)) chatStatus("正在中断当前回复；排队消息仍会继续");
   } catch (e) {
     if (chatCurrent(gen, v)) chatStatus(e.message, true);
   }
@@ -19,16 +19,16 @@ async function chatRename() {
     project = ChatUI.project;
   if (!row) return;
   const title = await chatDialog({
-    title: '重命名对话',
-    body: '给这段工作起个容易找到的名字。',
-    value: row.title || '',
-    confirmLabel: '保存',
+    title: "重命名对话",
+    body: "给这段工作起个容易找到的名字。",
+    value: row.title || "",
+    confirmLabel: "保存",
   });
   if (!title || !chatCurrent(gen, v)) return;
-  await chatAPI('rename', { id: row.id, title }, project);
+  await chatAPI("rename", { id: row.id, title }, project);
   if (chatCurrent(gen, v)) {
     row.title = title;
-    $('#chat-title').textContent = title;
+    $("#chat-title").textContent = title;
     chatList();
   }
 }
@@ -40,18 +40,18 @@ async function chatResume() {
     identity = S.session;
   if (!row || v.resumeBusy || v.busy) return;
   if (v.pending) {
-    chatStatus('上一条消息还没确认发出，点“重试”。', true);
+    chatStatus("上一条消息还没确认发出，点“重试”。", true);
     return;
   }
-  if (['running', 'starting', 'stopping', 'orphaned'].includes(row.status)) {
-    chatStatus('会话还在运行，先停止再恢复。');
+  if (["running", "starting", "stopping", "orphaned"].includes(row.status)) {
+    chatStatus("会话还在运行，先停止再恢复。");
     return;
   }
   v.resumeId = v.resumeId || uid();
   v.resumeRequest = v.resumeRequest || {
     id: v.resumeId,
     cli: row.provider,
-    mode: 'chat',
+    mode: "chat",
     cwd: c.cwd,
     continue_session: row.id,
     ...(v.selectedModel != null ? { model: v.selectedModel } : {}),
@@ -60,7 +60,7 @@ async function chatResume() {
   v.resumeBusy = true;
   chatSyncChrome();
   try {
-    const next = await chatAPI('start', v.resumeRequest, project);
+    const next = await chatAPI("start", v.resumeRequest, project);
     if (S.session !== identity || ![...c.views.values()].includes(v)) return;
     const current = chatViewVisible(v, identity);
     v.resumeId = null;
@@ -76,7 +76,7 @@ async function chatResume() {
     v.v2Scope = null;
     v.v2Window = null;
     v.v2Halted = null;
-    v.v2ProjectionState = '';
+    v.v2ProjectionState = "";
     c.views.set(chatKey(project, next.id), v);
     if (current) await chatSwitch(next, project);
     c.views.delete(chatKey(project, row.id));
@@ -88,7 +88,7 @@ async function chatResume() {
       e.status >= 400 &&
       e.status < 500 &&
       e.status !== 408 &&
-      !['CLI_UNCERTAIN', 'CLI_OFFLINE'].includes(e.code)
+      !["CLI_UNCERTAIN", "CLI_OFFLINE"].includes(e.code)
     ) {
       v.resumeId = null;
       v.resumeRequest = null;
@@ -106,9 +106,9 @@ async function chatStop() {
     project = ChatUI.project;
   if (!row) return;
   const confirmed = await chatDialog({
-    title: '停止会话？',
-    body: '正在进行的回复和排队消息会取消。',
-    confirmLabel: '停止会话',
+    title: "停止会话？",
+    body: "正在进行的回复和排队消息会取消。",
+    confirmLabel: "停止会话",
     danger: true,
   });
   if (!confirmed || !chatCurrent(gen, v)) return;
@@ -117,8 +117,8 @@ async function chatStop() {
     v.stopReceipt = uid();
   }
   v.stopReceipt = v.stopReceipt || uid();
-  await chatAPI('stop', { id: row.id, receipt: v.stopReceipt }, project);
-  if (chatCurrent(gen, v)) chatStatus('正在停止…');
+  await chatAPI("stop", { id: row.id, receipt: v.stopReceipt }, project);
+  if (chatCurrent(gen, v)) chatStatus("正在停止…");
 }
 async function chatDelete() {
   const c = ChatUI,
@@ -127,15 +127,17 @@ async function chatDelete() {
     gen = c.generation,
     project = c.project;
   if (!row || v.deleteBusy) return;
-  const live = () => ['starting', 'running', 'stopping', 'orphaned'].includes(row.status);
+  const live = () =>
+    ["starting", "running", "stopping", "orphaned"].includes(row.status);
   const running = live();
   v.deleteBusy = true;
   try {
     const confirmed = await chatDialog({
-      title: running ? '停止并删除这个会话？' : '删除这个会话？',
+      title: running ? "停止并删除这个会话？" : "删除这个会话？",
       body:
-        (running ? '正在进行的回复和排队消息会取消。' : '') + '电脑上的 CLI 历史和项目文件会保留。',
-      confirmLabel: running ? '停止并删除' : '删除',
+        (running ? "正在进行的回复和排队消息会取消。" : "") +
+        "电脑上的 CLI 历史和项目文件会保留。",
+      confirmLabel: running ? "停止并删除" : "删除",
       danger: true,
     });
     if (!confirmed || !chatCurrent(gen, v)) return;
@@ -145,26 +147,26 @@ async function chatDelete() {
         v.stopReceipt = uid();
       }
       v.stopReceipt ||= uid();
-      if (row.status !== 'stopping')
-        await chatAPI('stop', { id: row.id, receipt: v.stopReceipt }, project);
+      if (row.status !== "stopping")
+        await chatAPI("stop", { id: row.id, receipt: v.stopReceipt }, project);
       if (!chatCurrent(gen, v)) return;
-      chatStatus('正在停止…');
+      chatStatus("正在停止…");
       const deadline = Date.now() + 30000;
       while (live() && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 300));
         if (!chatCurrent(gen, v)) return;
       }
       if (live()) {
-        chatStatus('会话还在停止，稍后再试。', true);
+        chatStatus("会话还在停止，稍后再试。", true);
         return;
       }
     }
-    await chatAPI('delete', { id: row.id, confirm: row.id }, project);
+    await chatAPI("delete", { id: row.id, confirm: row.id }, project);
     v.v2Scope?.stopNative?.();
     v.v2OutputSubscriptions?.closeAll?.();
     v.v2Window?.observer?.disconnect?.();
     const scopeKey = v.v2State?.scopeKey;
-    if (scopeKey && typeof chatV2Cache === 'function') {
+    if (scopeKey && typeof chatV2Cache === "function") {
       chatV2Cache()?.invalidateScope(scopeKey);
     }
     if (chatCurrent(gen, v)) await chatSwitch(null, project);
@@ -181,52 +183,60 @@ async function chatDelete() {
 function chatExport(format) {
   const sid = ChatUI.selected?.id;
   if (!sid) {
-    chatStatus('请先打开一条会话');
+    chatStatus("请先打开一条会话");
     return;
   }
-  const a = document.createElement('a');
+  const a = document.createElement("a");
   a.href =
-    '/api/native/sessions/' +
+    "/api/native/sessions/" +
     encodeURIComponent(sid) +
-    '/export?' +
-    new URLSearchParams({ format, space_id: S.space_id || '' });
-  a.download = 'conversation.' + format;
+    "/export?" +
+    new URLSearchParams({ format, space_id: S.space_id || "" });
+  a.download = "conversation." + format;
   a.click();
-  chatStatus('正在导出此会话的完整已同步记录');
+  chatStatus("正在导出此会话的完整已同步记录");
 }
 function chatFindToggle(open) {
   if (open) {
     chatClosePopover();
     chatOptions(false);
-    if ($('#chat-root').classList.contains('drawer-open')) chatDrawer(false, true);
-    if (ChatUI.inspector && innerWidth <= 1100) chatInspector('');
+    if ($("#chat-root").classList.contains("drawer-open"))
+      chatDrawer(false, true);
+    if (ChatUI.inspector && innerWidth <= 1100) chatInspector("");
   }
-  $('#chat-find-bar').hidden = !open;
+  $("#chat-find-bar").hidden = !open;
   if (open) {
-    $('#chat-find-input').value = chatView().search || '';
+    $("#chat-find-input").value = chatView().search || "";
     chatFind();
-    $('#chat-find-input').focus();
+    $("#chat-find-input").focus();
   } else {
-    for (const el of document.querySelectorAll('.chat-message.search-match'))
-      el.classList.remove('search-match');
-    $('#chat-compose').focus();
+    for (const el of document.querySelectorAll(".chat-message.search-match"))
+      el.classList.remove("search-match");
+    $("#chat-compose").focus();
   }
 }
 function chatFind() {
   const v = chatView(),
     q = v.search.toLocaleLowerCase();
-  for (const el of document.querySelectorAll('.chat-message.search-match'))
-    el.classList.remove('search-match');
-  const keys = q ? v.order.filter((k) => v.items.get(k).text.toLocaleLowerCase().includes(q)) : [];
-  for (const id of ['chat-find-prev', 'chat-find-next']) $('#' + id).disabled = !keys.length;
+  for (const el of document.querySelectorAll(".chat-message.search-match"))
+    el.classList.remove("search-match");
+  const keys = q
+    ? v.order.filter((k) => v.items.get(k).text.toLocaleLowerCase().includes(q))
+    : [];
+  for (const id of ["chat-find-prev", "chat-find-next"])
+    $("#" + id).disabled = !keys.length;
   if (!keys.length) {
-    $('#chat-find-count').textContent = q ? '无匹配' : '';
+    $("#chat-find-count").textContent = q ? "无匹配" : "";
     return;
   }
   v.match = ((v.match % keys.length) + keys.length) % keys.length;
   const item = v.items.get(keys[v.match]);
   if (!item.node) {
-    if (typeof chatViewportActive === 'function' && chatViewportActive(v) && v.v2Window) {
+    if (
+      typeof chatViewportActive === "function" &&
+      chatViewportActive(v) &&
+      v.v2Window
+    ) {
       const rowKey = v.v2Window.groupKeyFor(item.key);
       const rowIdx = v.v2Window.heights.indexOfKey(rowKey);
       if (rowIdx >= 0) {
@@ -240,11 +250,11 @@ function chatFind() {
     }
   }
   if (!item.node) return;
-  item.node.classList.add('search-match');
-  const group = item.node.closest('.chat-process');
+  item.node.classList.add("search-match");
+  const group = item.node.closest(".chat-process");
   if (group) group.open = true;
-  const detail = item.node.querySelector('details');
+  const detail = item.node.querySelector("details");
   if (detail) detail.open = true;
-  item.node.scrollIntoView({ block: 'center', behavior: 'auto' });
-  $('#chat-find-count').textContent = v.match + 1 + ' / ' + keys.length;
+  item.node.scrollIntoView({ block: "center", behavior: "auto" });
+  $("#chat-find-count").textContent = v.match + 1 + " / " + keys.length;
 }

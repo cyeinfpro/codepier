@@ -8,10 +8,10 @@
     --ui-font,
     -apple-system,
     BlinkMacSystemFont,
-    'SF Pro Text',
-    'Segoe UI',
-    'PingFang SC',
-    'Microsoft YaHei',
+    "SF Pro Text",
+    "Segoe UI",
+    "PingFang SC",
+    "Microsoft YaHei",
     sans-serif
   );
 }
@@ -82,12 +82,23 @@
   background: var(--ui-panel, #ffffff);
   color: var(--ui-text, #272727);
   font: var(--ui-text-xs, 12px)/1.75
-    var(--ui-mono, ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace);
+    var(--ui-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .tool-scope.computer {
   color: var(--ui-warning, #785b22);
+}
+
+@keyframes approval-inbox-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 #computer-approval-inbox {
@@ -104,22 +115,28 @@
   border-radius: var(--ui-panel-radius, 20px);
   background: var(--ui-raised, #ffffff);
   color: var(--ui-text, #272727);
-  box-shadow: var(--ui-shadow, 0 12px 36px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 5%));
+  box-shadow: var(
+    --ui-shadow,
+    0 12px 36px rgb(0 0 0 / 10%),
+    0 2px 6px rgb(0 0 0 / 5%)
+  );
+  animation: approval-inbox-in var(--ui-motion-panel, 240ms)
+    var(--ui-ease-out, cubic-bezier(0.32, 0.72, 0, 1)) both;
   font: var(--ui-text-sm, 13px)/1.6
     var(
       --ui-font,
       -apple-system,
       BlinkMacSystemFont,
-      'SF Pro Text',
-      'Segoe UI',
-      'PingFang SC',
-      'Microsoft YaHei',
+      "SF Pro Text",
+      "Segoe UI",
+      "PingFang SC",
+      "Microsoft YaHei",
       sans-serif
     );
   scrollbar-color: var(--ui-border, #d6d5d2) transparent;
 }
 #computer-approval-inbox::before {
-  content: '需要确认';
+  content: "需要确认";
   display: inline-flex;
   align-items: center;
   min-height: 28px;
@@ -137,7 +154,7 @@
   min-width: 0;
   padding: 17px 16px 16px;
   border: 1px solid transparent;
-  border-radius: var(--ui-radius-xl, 20px);
+  border-radius: var(--ui-radius-md);
 }
 #computer-approval-inbox > section + section {
   border-top-color: var(--ui-line, #e6e5e3);
@@ -149,6 +166,7 @@
   font-weight: var(--ui-weight-bold, 700);
   line-height: 1.35;
   letter-spacing: 0;
+  text-wrap: balance;
 }
 #computer-approval-inbox p {
   margin: 8px 0;
@@ -168,13 +186,13 @@
 #computer-approval-inbox p:nth-of-type(3) {
   padding: 11px 12px;
   border-left: 4px solid var(--ui-warning, #785b22);
-  border-radius: var(--ui-radius-md, 12px);
+  border-radius: var(--ui-radius-small);
   background: var(--ui-warning-bg, #f7f3e9);
   color: var(--ui-warning, #785b22);
   font-size: var(--ui-text-xs, 12px);
   line-height: 1.7;
 }
-#computer-approval-inbox p[role='status'] {
+#computer-approval-inbox p[role="status"] {
   margin-top: 12px;
   color: var(--ui-muted, #606060);
   font-size: var(--ui-text-xs, 12px);
@@ -183,7 +201,7 @@
   min-height: var(--ui-control-height, 40px);
   margin: 8px 8px 0 0;
   padding-inline: 15px;
-  border-radius: var(--ui-radius-xl, 20px);
+  border-radius: var(--ui-radius-small);
   font-weight: var(--ui-weight-bold, 700);
 }
 #computer-approval-inbox button:first-of-type {
@@ -200,88 +218,102 @@
   outline: var(--ui-focus-width, 3px) solid var(--ui-focus, #746018);
   outline-offset: 3px;
 }
-#computer-approval-inbox > section[data-state='ready'] {
+#computer-approval-inbox > section[data-state="ready"] {
   box-shadow: inset 4px 0 var(--ui-primary, #f3d970);
 }
-#computer-approval-inbox > section[data-state='pending'] {
+#computer-approval-inbox > section[data-state="pending"] {
   border-color: var(--ui-border, #d6d5d2);
   background: var(--ui-surface, #f0f0f0);
 }
-#computer-approval-inbox > section[data-state='expired'] {
+#computer-approval-inbox > section[data-state="expired"] {
   border-color: var(--ui-danger, #a13c35);
   background: var(--ui-danger-bg, #f8efed);
 }
-#computer-approval-inbox > section[data-state='unavailable'] {
+#computer-approval-inbox > section[data-state="unavailable"] {
   border-color: var(--ui-warning, #785b22);
   background: var(--ui-warning-bg, #f7f3e9);
 }
 
-html[data-appearance='dark'] .computer-panel {
+html[data-appearance="dark"] .computer-panel {
   color: var(--ui-text, #e5e5e5);
 }
-html[data-appearance='dark'] .computer-toolbar .danger {
+html[data-appearance="dark"] .computer-toolbar .danger {
   color: var(--ui-danger, #e3a39b);
   border-color: var(--ui-danger, #e3a39b);
 }
-html[data-appearance='dark'] .computer-accessibility {
+html[data-appearance="dark"] .computer-accessibility {
   border-color: var(--ui-line, #2c2c2a);
   background: var(--ui-surface, #2b2b2b);
 }
-html[data-appearance='dark'] .computer-accessibility pre {
+html[data-appearance="dark"] .computer-accessibility pre {
   border-color: var(--ui-line, #2c2c2a);
   background: var(--ui-panel, #1c1c1b);
   color: var(--ui-text, #e5e5e5);
 }
-html[data-appearance='dark'] .tool-scope.computer {
+html[data-appearance="dark"] .tool-scope.computer {
   color: var(--ui-warning, #d5b77e);
 }
-html[data-appearance='dark'] #computer-approval-inbox {
+html[data-appearance="dark"] #computer-approval-inbox {
   border-color: var(--ui-border, #3d3d3a);
   background: var(--ui-raised, #2b2b2b);
   color: var(--ui-text, #e5e5e5);
-  box-shadow: var(--ui-shadow, 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%));
+  box-shadow: var(
+    --ui-shadow,
+    0 16px 40px rgb(0 0 0 / 24%),
+    0 2px 8px rgb(0 0 0 / 12%)
+  );
   scrollbar-color: var(--ui-border, #3d3d3a) transparent;
 }
-html[data-appearance='dark'] #computer-approval-inbox > section + section {
+html[data-appearance="dark"] #computer-approval-inbox > section + section {
   border-top-color: var(--ui-line, #2c2c2a);
 }
-html[data-appearance='dark'] #computer-approval-inbox p:first-of-type,
-html[data-appearance='dark'] #computer-approval-inbox p[role='status'] {
+html[data-appearance="dark"] #computer-approval-inbox p:first-of-type,
+html[data-appearance="dark"] #computer-approval-inbox p[role="status"] {
   color: var(--ui-muted, #b9b9b9);
 }
-html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(2) {
+html[data-appearance="dark"] #computer-approval-inbox p:nth-of-type(2) {
   color: var(--ui-text, #e5e5e5);
 }
-html[data-appearance='dark'] #computer-approval-inbox p:nth-of-type(3) {
+html[data-appearance="dark"] #computer-approval-inbox p:nth-of-type(3) {
   border-color: var(--ui-warning, #d5b77e);
   background: var(--ui-warning-bg, #322e27);
   color: var(--ui-warning, #d5b77e);
 }
-html[data-appearance='dark'] #computer-approval-inbox button:first-of-type {
+html[data-appearance="dark"] #computer-approval-inbox button:first-of-type {
   border-color: var(--ui-primary, #d1bd75);
   background: var(--ui-primary, #d1bd75);
   color: var(--ui-primary-text, #27241b);
 }
-html[data-appearance='dark'] #computer-approval-inbox button:nth-of-type(2) {
+html[data-appearance="dark"] #computer-approval-inbox button:nth-of-type(2) {
   border-color: var(--ui-danger, #e3a39b);
   background: var(--ui-danger-bg, #352b2a);
   color: var(--ui-danger, #e3a39b);
 }
-html[data-appearance='dark'] #computer-approval-inbox :is(button, summary):focus-visible {
+html[data-appearance="dark"]
+  #computer-approval-inbox
+  :is(button, summary):focus-visible {
   outline-color: var(--ui-focus, #d1bd75);
 }
-html[data-appearance='dark'] #computer-approval-inbox > section[data-state='ready'] {
+html[data-appearance="dark"]
+  #computer-approval-inbox
+  > section[data-state="ready"] {
   box-shadow: inset 4px 0 var(--ui-primary, #d1bd75);
 }
-html[data-appearance='dark'] #computer-approval-inbox > section[data-state='pending'] {
+html[data-appearance="dark"]
+  #computer-approval-inbox
+  > section[data-state="pending"] {
   border-color: var(--ui-border, #3d3d3a);
   background: var(--ui-surface, #2b2b2b);
 }
-html[data-appearance='dark'] #computer-approval-inbox > section[data-state='expired'] {
+html[data-appearance="dark"]
+  #computer-approval-inbox
+  > section[data-state="expired"] {
   border-color: var(--ui-danger, #e3a39b);
   background: var(--ui-danger-bg, #352b2a);
 }
-html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unavailable'] {
+html[data-appearance="dark"]
+  #computer-approval-inbox
+  > section[data-state="unavailable"] {
   border-color: var(--ui-warning, #d5b77e);
   background: var(--ui-warning-bg, #322e27);
 }
@@ -316,7 +348,9 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
           )
         )
     );
-    max-height: calc(var(--ui-vv-height, 100dvh) - var(--ui-dock-space, 0px) - 24px);
+    max-height: calc(
+      var(--ui-vv-height, 100dvh) - var(--ui-dock-space, 0px) - 24px
+    );
     padding: 8px;
     border-radius: var(--ui-radius-xl, 20px);
   }
@@ -331,6 +365,7 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  #computer-approval-inbox,
   #computer-approval-inbox *,
   .computer-panel * {
     animation: none !important;
@@ -348,17 +383,20 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   left: max(18px, env(safe-area-inset-left));
 }
 :is(body:has(.modal-backdrop), dialog[open])
-  > #computer-approval-inbox:not([data-expanded='true']) {
+  > #computer-approval-inbox:not([data-expanded="true"]) {
   width: auto;
   max-width: calc(100vw - 36px);
   padding: 6px;
   overflow: hidden;
   border-radius: var(--ui-radius-pill, 999px);
 }
-:is(body:has(.modal-backdrop), dialog[open]) > #computer-approval-inbox::before {
+:is(body:has(.modal-backdrop), dialog[open])
+  > #computer-approval-inbox::before {
   display: none;
 }
-:is(body:has(.modal-backdrop), dialog[open]) > #computer-approval-inbox > .approval-inbox-toggle {
+:is(body:has(.modal-backdrop), dialog[open])
+  > #computer-approval-inbox
+  > .approval-inbox-toggle {
   display: inline-flex;
   align-items: center;
   min-height: var(--ui-touch-target, 44px);
@@ -372,7 +410,7 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   font-weight: var(--ui-weight-bold, 700);
 }
 :is(body:has(.modal-backdrop), dialog[open])
-  > #computer-approval-inbox:not([data-expanded='true'])
+  > #computer-approval-inbox:not([data-expanded="true"])
   > section {
   display: none;
 }
@@ -381,7 +419,9 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   #computer-approval-inbox {
     right: max(12px, var(--safe-right, env(safe-area-inset-right)));
     bottom: calc(var(--ui-dock-space, 0px) + var(--ui-vv-bottom, 0px) + 8px);
-    max-height: calc(var(--ui-vv-height, 100dvh) - var(--ui-dock-space, 0px) - 24px);
+    max-height: calc(
+      var(--ui-vv-height, 100dvh) - var(--ui-dock-space, 0px) - 24px
+    );
   }
 }
 @media (max-height: 520px) {
@@ -414,7 +454,7 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
     padding: 4px 8px;
     line-height: 1.35;
   }
-  #computer-approval-inbox p[role='status'] {
+  #computer-approval-inbox p[role="status"] {
     margin-top: 4px;
   }
   #computer-approval-inbox button {
@@ -462,23 +502,23 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   }
 }
 :is(body:has(.modal-backdrop), dialog[open])
-  > #computer-approval-inbox:not([data-expanded='true'])
+  > #computer-approval-inbox:not([data-expanded="true"])
   > .approval-inbox-bar {
   display: none;
 }
-#computer-approval-inbox[data-collapsed='true'] {
+#computer-approval-inbox[data-collapsed="true"] {
   width: auto;
   max-width: calc(100vw - 16px);
   padding: 6px;
   overflow: hidden;
   border-radius: var(--ui-radius-pill);
 }
-#computer-approval-inbox[data-collapsed='true']::before,
-#computer-approval-inbox[data-collapsed='true'] > .approval-inbox-bar,
-#computer-approval-inbox[data-collapsed='true'] > section {
+#computer-approval-inbox[data-collapsed="true"]::before,
+#computer-approval-inbox[data-collapsed="true"] > .approval-inbox-bar,
+#computer-approval-inbox[data-collapsed="true"] > section {
   display: none;
 }
-#computer-approval-inbox[data-collapsed='true'] > .approval-inbox-toggle {
+#computer-approval-inbox[data-collapsed="true"] > .approval-inbox-toggle {
   display: inline-flex;
   align-items: center;
   min-height: var(--ui-touch-target);
@@ -492,7 +532,7 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
   font-weight: var(--ui-weight-bold);
 }
 
-.computer-frame[data-inspectable='true'] img {
+.computer-frame[data-inspectable="true"] img {
   cursor: zoom-in;
   touch-action: pinch-zoom;
 }
@@ -515,7 +555,8 @@ html[data-appearance='dark'] #computer-approval-inbox > section[data-state='unav
 }
 .computer-frame.is-fullscreen {
   position: fixed;
-  inset: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px) var(--safe-left, 0px);
+  inset: var(--safe-top, 0px) var(--safe-right, 0px) var(--safe-bottom, 0px)
+    var(--safe-left, 0px);
   z-index: var(--ui-z-critical);
   max-height: none;
   border-radius: 0;

@@ -1,8 +1,10 @@
 """Saved VPS permissions, durable credential references and real MCP transport."""
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import Future
 import json
-import os
+from threading import Thread
 import time
 import uuid
 from types import SimpleNamespace
@@ -17,7 +19,8 @@ from hub.vps import ProjectVPSAssignments, VPSAssignments, VPSInput
 from shared.contracts import tool_definitions
 from shared.core_contracts import Exec
 from shared.util import DevError, atomic_json
-from tests.test_ssh import PASSWORD, fake_transport
+from tests.test_ssh import PASSWORD
+from tests.test_vps_ssh_v2_exec import _make_exec_server
 
 
 @pytest.fixture
@@ -43,7 +46,7 @@ def body(projects, **changes):
 
 
 def edit_body(v, **changes):
-    keys = ('name', 'host', 'port', 'username', 'host_key_policy', 'provider', 'region', 'system', 'notes', 'enabled', 'project_ids')
+    keys = ('name', 'host', 'port', 'username', 'provider', 'region', 'system', 'notes', 'enabled', 'project_ids')
     return VPSInput(**{**{k: v[k] for k in keys}, 'expected_version': v['version'], **changes})
 
 
@@ -72,7 +75,7 @@ def test_saved_credential_encryption_many_to_many_and_visibility(inventory):
     {'host': '-oProxyCommand=x'}, {'host': 'a;id'}, {'host': 'user@host'},
     {'host': 'host:22'}, {'host': 'https://host'}, {'port': True}, {'port': 0},
     {'username': '-root'}, {'password': ''}, {'password': 'hello\nthere'},
-    {'host_key_policy': 'no'}, {'name': '  '}, {'project_ids': ['same', 'same']},
+    {'host_key_policy': 'bad\x00policy'}, {'name': '  '}, {'project_ids': ['same', 'same']},
 ])
 def test_invalid_inventory_input(changes):
     with pytest.raises(ValidationError):
@@ -227,51 +230,58 @@ def test_catalog_has_secret_free_inputs(profile):
 @pytest.fixture(scope='module')
 def vps_stack(stack):
     stack.stop_agent()
-    stack.config['shell'] = {'enabled': True, 'projects': ['ProjectAlpha','ProjectGamma','ProjectBeta'], 'command': ['/bin/sh','-c'], 'env': {'PATH': fake_transport(stack.directory / 'vps-bin')}}
+    stack.config['shell'] = {'enabled': True, 'projects': ['ProjectAlpha','ProjectGamma','ProjectBeta'], 'command': ['/bin/sh','-c']}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
     return stack
 
 
 @pytest.fixture
-def rejected_auth_transport(vps_stack):
-    # This response-wait test needs real native processes and retry backoff, not
-    # six coverage-instrumented Python startups competing for its 10s budget.
-    # Other transport tests retain the general Python fixture and command path.
-    directory = vps_stack.directory / 'vps-bin'
-    assert vps_stack.config['shell']['env']['PATH'].split(os.pathsep)[0] == str(directory)
-    scripts = {
-        directory / 'sshpass': '#!/bin/sh\n[ "$1" = "-e" ] || exit 99\nshift\nexec "$@"\n',
-        directory / 'ssh': r'''#!/bin/sh
-[ "$SSHPASS" = wrong ] || exit 99
-log= batch= pubkey= hostkey= host=
-for arg in "$@"; do
-  case "$arg" in *"$SSHPASS"*) exit 98;; esac
-done
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    BatchMode=no) batch=yes;;
-    PubkeyAuthentication=no) pubkey=yes;;
-    StrictHostKeyChecking=yes|StrictHostKeyChecking=accept-new) hostkey=yes;;
-    -E) shift; log="$1";;
-    --) shift; host="$1"; break;;
-  esac
-  shift
-done
-[ "$batch:$pubkey:$hostkey:$host" = yes:yes:yes:vps.example.invalid ] || exit 97
-[ -n "$log" ] || exit 96
-printf '%s\n' 'root@vps.example.invalid: Permission denied (password).' > "$log"
-exit 5
-''',
-    }
-    original = {path: path.read_bytes() for path in scripts}
+def v2_loopback():
+    ssh = pytest.importorskip("asyncssh")
+    started = Future()
+    commands = []
+
+    async def handle(channel, _username, command):
+        commands.append(command)
+        if command == "exit 7":
+            channel.exit(7)
+        elif command == "sleep 5":
+            await asyncio.sleep(5)
+        else:
+            channel.write(f"remote-ok {PASSWORD}\n".encode())
+            channel.exit(0)
+
+    async def serve():
+        stop = asyncio.Event()
+        key = ssh.generate_private_key("ssh-ed25519")
+        peer = _make_exec_server(ssh, users={"root": PASSWORD}, handler=handle)
+        server = await ssh.create_server(peer, "127.0.0.1", 0, server_host_keys=[key], encoding=None)
+        started.set_result((server.get_port(), asyncio.get_running_loop(), stop))
+        try:
+            await stop.wait()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    def run():
+        try:
+            asyncio.run(serve())
+        except BaseException as exc:
+            if not started.done():
+                started.set_exception(exc)
+            else:
+                raise
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    port, loop, stop = started.result(timeout=15)
     try:
-        for path, source in scripts.items():
-            path.write_text(source)
-        yield
+        yield {"host": "127.0.0.1", "port": port}, commands
     finally:
-        for path, raw in original.items():
-            path.write_bytes(raw)
+        loop.call_soon_threadsafe(stop.set)
+        worker.join(15)
+        assert not worker.is_alive()
 
 
 def create_remote(stack, **changes):
@@ -343,11 +353,12 @@ def test_http_admin_csrf_validation_no_secret_echo(vps_stack):
     assert PASSWORD not in response.text and 'secret' not in response.json()
 
 
-def test_mcp_saved_ssh_real_process_redaction_and_once_only(vps_stack):
+def test_mcp_saved_ssh_real_loopback_redaction_and_once_only(vps_stack, v2_loopback):
     s = vps_stack
-    v = create_remote(s)
-    filename = 'vps-once-'+uuid.uuid4().hex
-    call = execute_args('ProjectAlpha', v['id'], command=f'printf once >> {filename}; printf remote-ok')
+    endpoint, commands = v2_loopback
+    v = create_remote(s, **endpoint)
+    command = "printf remote-ok"
+    call = execute_args('ProjectAlpha', v['id'], command=command)
     result = s.mcp('exec',call)
     assert not result.get('isError'),result
     receipt = result['structuredContent']
@@ -362,7 +373,7 @@ def test_mcp_saved_ssh_real_process_redaction_and_once_only(vps_stack):
     assert op['result']['data']['transport_runtime']['target'] == 'vps:' + v['id']
     assert not op['result']['data']['transport_runtime']['grants_authority']
     assert 'remote-ok' in op['output'] and '<redacted>' in op['output']
-    assert (s.projectalpha / filename).read_text() == 'once'
+    assert commands == [command]
     assert PASSWORD not in json.dumps(op)
     saved = Store(s.hubdir)
     try:
@@ -387,9 +398,10 @@ def test_mcp_scope_and_assignments(vps_stack):
     assert denied['isError'] and denied['structuredContent']['error']['code'] == 'VPS_NOT_FOUND'
 
 
-def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_stack, rejected_auth_transport):
+def test_saved_vps_default_wait_returns_final_result_without_retrying_rejected_auth(vps_stack, v2_loopback):
     s = vps_stack
-    v = create_remote(s, password='wrong')
+    endpoint, commands = v2_loopback
+    v = create_remote(s, password='wrong', **endpoint)
     call = execute_args('ProjectAlpha', v['id'], command='touch auth-must-not-execute')
     call.pop('yield_seconds')
     rendered = s.mcp('exec', call)
@@ -397,9 +409,10 @@ def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_s
     assert rendered['isError'] and receipt['state'] == 'failed' and not receipt['pending']
     assert receipt['attempts'] == 1
     diagnostic = receipt['result']['data']['ssh_diagnostics']
-    assert diagnostic['attempt_count'] == diagnostic['attempt_limit'] == 3
-    assert diagnostic['credential_source'] == 'saved_vps' and diagnostic['retry_exhausted']
-    assert not (s.projectalpha / 'auth-must-not-execute').exists()
+    assert diagnostic['attempt_count'] == 1 and diagnostic['attempt_limit'] == 3
+    assert diagnostic['authentication_state'] == 'failed'
+    assert diagnostic['credential_source'] == 'saved_vps' and not diagnostic['retry_exhausted']
+    assert commands == []
     repeated = s.mcp('exec', call)['structuredContent']
     assert repeated['operation_id'] == receipt['operation_id']
     assert s.poll(repeated['operation_id'])['result']['data']['ssh_diagnostics'] == diagnostic
@@ -409,14 +422,19 @@ def test_saved_vps_default_wait_returns_final_result_after_bounded_retries(vps_s
     assert previous_default['operation_id'] == receipt['operation_id']
 
 
-def test_saved_ssh_remote_failure_and_timeout(vps_stack):
-    s = vps_stack;v = create_remote(s)
+def test_saved_ssh_remote_failure_and_timeout(vps_stack, v2_loopback):
+    s = vps_stack
+    endpoint, commands = v2_loopback
+    v = create_remote(s, **endpoint)
     for command,timeout in [('exit 7',10),('sleep 5',1)]:
         result = s.mcp('exec',execute_args('ProjectAlpha',v['id'],command=command,timeout_seconds=timeout))
         assert not result.get('isError'),result
         op = s.poll(result['structuredContent']['operation_id'],timeout=20)
         assert op['state'] == 'failed' and not op['result']['data']['command_ok']
         assert PASSWORD not in json.dumps(op)
+        data = op['result']['data']
+        assert data['exit_code'] == (7 if command == 'exit 7' else None)
+    assert commands == ['exit 7', 'sleep 5']
 
 
 def test_offline_queue_unassign_before_delivery(vps_stack):
@@ -570,7 +588,14 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
             direct_vps = True
             direct_vps_allowed = True
             probe_supported = True
-            saved_vps_password_only_supported = True
+            vps_ssh_v2_supported = True
+            agent_vps_ssh = {
+                'protocol': 'vps_ssh_v2',
+                'host_identity_verification': 'disabled',
+                'exec': True,
+                'terminal': True,
+                'probe': True,
+            }
 
             async def request(self, action, payload, project, **kwargs):
                 probed.append((action, dict(payload), dict(project)))
@@ -597,10 +622,13 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
         assert probed[0][0] == 'probe' and probed[0][2]['_direct_vps'] is True and PASSWORD not in res.text
 
 
-        assert probed[0][1]["saved_vps_password_only"] is True
+        assert probed[0][1]["transport_contract"] == "vps_ssh_v2"
+        assert probed[0][1]["host_identity_verification"] == "disabled"
+        assert "saved_vps_password_only" not in probed[0][1]
         assert "host_key_policy" not in probed[0][1]
         assert "host_key_fingerprint" not in probed[0][1]
-        assert unassigned["saved_vps_host_verification"] == "skip"
+        assert unassigned["connection_contract"] == "vps_ssh_v2"
+        assert unassigned["host_identity_verification"] == "disabled"
 
         check_prepare = app.state.runtime.vps._prepare_check
 
@@ -617,12 +645,13 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
                     json={"idempotency_key": "stale-main-peer"},
                 )
                 assert stale.status_code == 409
-                assert stale.json()["error"]["code"] == "AGENT_UPGRADE_REQUIRED"
+                assert stale.json()["error"]["code"] == "VPS_TRANSPORT_UPGRADE_REQUIRED"
                 assert len(probed) == 1
             finally:
                 app.state.runtime.connections[device_id] = peer.main_connection
 
-        peer.saved_vps_password_only_supported = False
+        peer.agent_vps_ssh = None
+        peer.vps_ssh_v2_supported = False
 
         async def unexpected_invoke(*_args, **_kwargs):
             raise AssertionError("Managed VPS probe must not use the generic SSH execution fallback")
@@ -634,7 +663,7 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
                 json={"idempotency_key": "check-old-agent"},
             )
             assert old_agent.status_code == 409
-            assert old_agent.json()["error"]["code"] == "AGENT_UPGRADE_REQUIRED"
+            assert old_agent.json()["error"]["code"] == "VPS_TRANSPORT_UPGRADE_REQUIRED"
         assert len(probed) == 1
 
         existing = client.post("/api/vps", headers=headers, json={
@@ -644,6 +673,7 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
         edited = client.put(f"/api/vps/{existing['id']}", headers=headers, json={
             "name": "Renamed pinned", "host": existing["host"], "expected_version": existing["version"],
         }).json()
-        assert edited["host_key_policy"] == "confirm-change"
-        assert edited["host_key_fingerprint"] == existing["host_key_fingerprint"]
+        assert edited["connection_contract"] == "vps_ssh_v2"
+        assert edited["host_identity_verification"] == "disabled"
+        assert edited["legacy_host_trust"]["ignored"] is True
         assert edited["connection_revision"] == existing["connection_revision"]

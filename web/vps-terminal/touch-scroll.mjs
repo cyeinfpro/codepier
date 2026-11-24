@@ -6,14 +6,17 @@ const HOLD_DELAY_MS = 300;
 const HOLD_INTERVAL_MS = 45;
 
 export const DIRECTION_SEQUENCES = {
-  up: ['\x1b[A', '\x1bOA'],
-  down: ['\x1b[B', '\x1bOB'],
-  right: ['\x1b[C', '\x1bOC'],
-  left: ['\x1b[D', '\x1bOD'],
+  up: ["\x1b[A", "\x1bOA"],
+  down: ["\x1b[B", "\x1bOB"],
+  right: ["\x1b[C", "\x1bOC"],
+  left: ["\x1b[D", "\x1bOD"],
 };
 
 function touchDistance(a, b) {
-  return Math.hypot((b.clientX || 0) - (a.clientX || 0), (b.clientY || 0) - (a.clientY || 0));
+  return Math.hypot(
+    (b.clientX || 0) - (a.clientX || 0),
+    (b.clientY || 0) - (a.clientY || 0),
+  );
 }
 
 export function glideGearInterval(distance) {
@@ -23,10 +26,10 @@ export function glideGearInterval(distance) {
   return 0;
 }
 
-export function resolveGlideDirection(dx, dy, fallback = 'right') {
+export function resolveGlideDirection(dx, dy, fallback = "right") {
   if (Math.hypot(dx, dy) < 10) return fallback;
-  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left';
-  return dy >= 0 ? 'down' : 'up';
+  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? "right" : "left";
+  return dy >= 0 ? "down" : "up";
 }
 
 export class TouchScrollController {
@@ -41,9 +44,11 @@ export class TouchScrollController {
     onPinchEnd,
     onAltScrollChange,
     now = Date.now,
-    requestFrame = (fn) => (globalThis.requestAnimationFrame || ((cb) => setTimeout(cb, 16)))(fn),
+    requestFrame = (fn) =>
+      (globalThis.requestAnimationFrame || ((cb) => setTimeout(cb, 16)))(fn),
     cancelFrame = (id) => (globalThis.cancelAnimationFrame || clearTimeout)(id),
-    reducedMotion = () => !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+    reducedMotion = () =>
+      !!globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches,
   }) {
     this.target = target;
     this.getTerminal = getTerminal;
@@ -74,16 +79,16 @@ export class TouchScrollController {
     const onStart = (event) => this.handleTouchStart(event);
     const onMove = (event) => this.handleTouchMove(event);
     const onEnd = (event) => this.handleTouchEnd(event);
-    this.target.addEventListener('touchstart', onStart, { passive: false });
-    this.target.addEventListener('touchmove', onMove, { passive: false });
-    this.target.addEventListener('touchend', onEnd, { passive: false });
-    this.target.addEventListener('touchcancel', onEnd, { passive: false });
+    this.target.addEventListener("touchstart", onStart, { passive: false });
+    this.target.addEventListener("touchmove", onMove, { passive: false });
+    this.target.addEventListener("touchend", onEnd, { passive: false });
+    this.target.addEventListener("touchcancel", onEnd, { passive: false });
     return () => {
       this.stopMomentum();
-      this.target.removeEventListener?.('touchstart', onStart);
-      this.target.removeEventListener?.('touchmove', onMove);
-      this.target.removeEventListener?.('touchend', onEnd);
-      this.target.removeEventListener?.('touchcancel', onEnd);
+      this.target.removeEventListener?.("touchstart", onStart);
+      this.target.removeEventListener?.("touchmove", onMove);
+      this.target.removeEventListener?.("touchend", onEnd);
+      this.target.removeEventListener?.("touchcancel", onEnd);
     };
   }
 
@@ -110,11 +115,23 @@ export class TouchScrollController {
     const cols = terminal?.cols || 80;
     const rows = terminal?.rows || 24;
     if (!rect || rect.width <= 0 || rect.height <= 0) return { col: 1, row: 1 };
-    const relX = Math.max(0, Math.min(rect.width - 1, (touch.clientX || 0) - rect.left));
-    const relY = Math.max(0, Math.min(rect.height - 1, (touch.clientY || 0) - rect.top));
+    const relX = Math.max(
+      0,
+      Math.min(rect.width - 1, (touch.clientX || 0) - rect.left),
+    );
+    const relY = Math.max(
+      0,
+      Math.min(rect.height - 1, (touch.clientY || 0) - rect.top),
+    );
     return {
-      col: Math.max(1, Math.min(cols, Math.floor((relX / rect.width) * cols) + 1)),
-      row: Math.max(1, Math.min(rows, Math.floor((relY / rect.height) * rows) + 1)),
+      col: Math.max(
+        1,
+        Math.min(cols, Math.floor((relX / rect.width) * cols) + 1),
+      ),
+      row: Math.max(
+        1,
+        Math.min(rows, Math.floor((relY / rect.height) * rows) + 1),
+      ),
     };
   }
 
@@ -146,7 +163,10 @@ export class TouchScrollController {
     const dist = touchDistance(touches[0], touches[1]);
     if (!this.pinchStartDist || dist <= 0) return;
     const scaled = this.pinchBaseFont * (dist / this.pinchStartDist);
-    const quantized = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, Math.round(scaled * 2) / 2));
+    const quantized = Math.max(
+      MIN_FONT_SIZE,
+      Math.min(MAX_FONT_SIZE, Math.round(scaled * 2) / 2),
+    );
     if (Math.abs(quantized - this.pinchLastFont) >= 0.5) {
       this.pinchLastFont = quantized;
       this.onFontSize?.(quantized, { fit: false });
@@ -212,7 +232,8 @@ export class TouchScrollController {
   recordSample(y) {
     const t = this.now();
     this.samples.push({ y, t });
-    while (this.samples.length > 2 && t - this.samples[0].t > 100) this.samples.shift();
+    while (this.samples.length > 2 && t - this.samples[0].t > 100)
+      this.samples.shift();
   }
 
   consumePixels(px, maxLines = 0) {
@@ -231,7 +252,7 @@ export class TouchScrollController {
     if (!terminal || !lines) return;
     const up = lines > 0;
     const count = Math.abs(lines);
-    if (terminal.buffer?.active?.type === 'alternate') {
+    if (terminal.buffer?.active?.type === "alternate") {
       this.emitAlternateScroll(terminal, up, count);
       return;
     }
@@ -243,14 +264,15 @@ export class TouchScrollController {
     if (!this.canInput?.()) return;
     const mouseMode = terminal.modes?.mouseTrackingMode;
     let unit;
-    if (mouseMode && mouseMode !== 'none') {
+    if (mouseMode && mouseMode !== "none") {
       const { col, row } = this.anchor || { col: 1, row: 1 };
       unit = `\x1b[<${up ? 64 : 65};${col};${row}M`;
     } else {
       const app = !!terminal.modes?.applicationCursorKeysMode;
-      unit = up ? (app ? '\x1bOA' : '\x1b[A') : app ? '\x1bOB' : '\x1b[B';
+      unit = up ? (app ? "\x1bOA" : "\x1b[A") : app ? "\x1bOB" : "\x1b[B";
     }
-    if (this.sendRaw?.(unit.repeat(count)) !== false) this.onAltScrollChange?.(up, count);
+    if (this.sendRaw?.(unit.repeat(count)) !== false)
+      this.onAltScrollChange?.(up, count);
   }
 
   handleTouchEnd(event) {
@@ -266,7 +288,8 @@ export class TouchScrollController {
     const wasDragging = this.dragging;
     this.tracking = false;
     this.dragging = false;
-    if (wasDragging && event.type === 'touchend' && !this.reducedMotion()) this.startMomentum();
+    if (wasDragging && event.type === "touchend" && !this.reducedMotion())
+      this.startMomentum();
   }
 
   startMomentum() {
@@ -299,7 +322,11 @@ export class TouchScrollController {
   }
 }
 
-export function bindDirectionalKey(node, direction, { sendDirection, onHaptic } = {}) {
+export function bindDirectionalKey(
+  node,
+  direction,
+  { sendDirection, onHaptic } = {},
+) {
   let pointerId = null;
   let startX = 0;
   let startY = 0;
@@ -366,19 +393,19 @@ export function bindDirectionalKey(node, direction, { sendDirection, onHaptic } 
     if (pointerId !== null && (event.pointerId ?? 1) === pointerId) stopAll();
   };
 
-  node.addEventListener('click', onClick);
-  node.addEventListener('pointerdown', onDown);
-  node.addEventListener('pointermove', onMove);
-  node.addEventListener('pointerup', onUp);
-  node.addEventListener('pointercancel', onUp);
-  node.addEventListener('lostpointercapture', stopAll);
+  node.addEventListener("click", onClick);
+  node.addEventListener("pointerdown", onDown);
+  node.addEventListener("pointermove", onMove);
+  node.addEventListener("pointerup", onUp);
+  node.addEventListener("pointercancel", onUp);
+  node.addEventListener("lostpointercapture", stopAll);
   return () => {
     stopAll();
-    node.removeEventListener?.('click', onClick);
-    node.removeEventListener?.('pointerdown', onDown);
-    node.removeEventListener?.('pointermove', onMove);
-    node.removeEventListener?.('pointerup', onUp);
-    node.removeEventListener?.('pointercancel', onUp);
-    node.removeEventListener?.('lostpointercapture', stopAll);
+    node.removeEventListener?.("click", onClick);
+    node.removeEventListener?.("pointerdown", onDown);
+    node.removeEventListener?.("pointermove", onMove);
+    node.removeEventListener?.("pointerup", onUp);
+    node.removeEventListener?.("pointercancel", onUp);
+    node.removeEventListener?.("lostpointercapture", stopAll);
   };
 }

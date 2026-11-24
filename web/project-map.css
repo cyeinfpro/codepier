@@ -82,7 +82,7 @@
   margin: 0;
 }
 .map-audit > .form-note,
-.map-audit > [role='alert'],
+.map-audit > [role="alert"],
 .map-audit-rows {
   margin-inline: 20px;
 }
@@ -138,7 +138,7 @@
   .map-fields select {
     font-size: var(--ui-text-input);
   }
-  .map-controls[data-has-project='true'] .map-mobile-summary {
+  .map-controls[data-has-project="true"] .map-mobile-summary {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -174,13 +174,15 @@
     font-size: var(--ui-text-xs);
     color: var(--ui-accent);
   }
-  .map-controls[data-has-project='true'][data-collapsed='true'] {
+  .map-controls[data-has-project="true"][data-collapsed="true"] {
     padding: 10px 14px;
   }
-  .map-controls[data-has-project='true'][data-collapsed='true'] .map-controls-body {
+  .map-controls[data-has-project="true"][data-collapsed="true"]
+    .map-controls-body {
     display: none;
   }
-  .map-controls[data-has-project='true']:not([data-collapsed='true']) .map-controls-body {
+  .map-controls[data-has-project="true"]:not([data-collapsed="true"])
+    .map-controls-body {
     margin-top: 12px;
   }
 }

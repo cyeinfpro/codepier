@@ -17,7 +17,7 @@ Web SSH 由浏览器连接 Hub，Hub 通过独立的加密终端通道联系所�
 | VPS 系统 | SSH 服务允许 PTY。自动模式会探测远端 `tmux`；版本至少为 `2.6` 时使用持久会话，明确缺失或版本不支持时使用普通会话。 |
 | 浏览器 | 从同源 HTTPS 面板访问，支持 WebSocket、现代 JavaScript 和 xterm；localhost/回环地址允许 HTTP，供隔离测试使用。 |
 
-Web SSH 的认证实现支持保存的密码及 keyboard-interactive；没有新增浏览器私钥上传、SSH Agent 转发、ProxyJump 配置或 SFTP 传输。Agent 的 AsyncSSH 连接显式关闭私钥发现、SSH Agent、X11 和 Agent 转发，不读取用户私钥。传统 VPS「检查连接」仍使用原有 OpenSSH/sshpass 链路，两条链路分别验收。[认证实现](../agent/ssh_terminal_transport.py)、[项目授权](../agent/ssh_terminal_manager.py)、[tmux 探测](../agent/ssh_terminal_tmux.py)
+已保存 VPS 的受管 Web SSH 使用保存的密码，不把额外认证提示交给浏览器。面板连接检查、MCP 命令、环境扫描与浏览器终端分别核对各自能力和授权。不会新增浏览器私钥上传、SSH Agent 转发、ProxyJump 或 SFTP，也不读取用户私钥。
 
 ### 1.2 功能开关的准确含义
 
@@ -103,7 +103,7 @@ Agent 的数值配置应放在实际启动 Agent 的服务环境中。`CODEPIER_
 
 空间管理员在 VPS 面板先选择「扫描全部 SSH」。这一步只核验连接与 tmux 状态，不安装软件。之后选择「一键安装 tmux」，只处理最近 30 分钟内确认缺少 tmux、且连接配置未变的启用服务器。保存服务器不会自动安装。刷新页面不取消后台任务；安装结果不明时只会复查，不会自动重发。
 
-批量环境检查由 Hub 执行，和浏览器终端使用的通道不同。自 v1.34.8 起，Hub 和 Agent 均升级后，已保存 VPS 的连接检查、WebSSH、环境扫描和手动安装使用保存的地址、端口、账号和密码，不验证主机指纹。普通系统 SSH 和通用工具的信任规则不变。旧扫描结果不能授权新的批量安装，升级后需重新扫描。
+批量环境检查由 Hub 执行，和浏览器终端使用的通道不同。支持 `vps_ssh_v2` 的已保存 VPS 入口使用保存的地址、端口、账号和密码，不验证历史主机指纹。普通系统 SSH 和通用工具的信任规则不变。旧扫描结果不能授权新的批量安装，升级后需重新扫描。
 
 警告：未验证目标主机身份时，错误地址或被劫持的网络可能让无关主机收到保存的密码。仅在可信网络上使用，并确认保存的目标地址。无法登录或无安装权限的服务器不会安装；面板会显示具体失败原因。
 
@@ -266,7 +266,7 @@ PY
 | `FEATURE_DISABLED` | Hub 新建入口开关；已有会话的存在不说明新建已开放。 |
 | `LOGIN_REQUIRED` / `AUTH_REQUIRED` / `SESSION_EXPIRED` | 当前面板登录已失效；自动重试停止，重新登录后再进入终端。 |
 | `AGENT_OFFLINE` | 所选项目所在电脑和主 Agent 通道。 |
-| `AGENT_UPGRADE_REQUIRED` / `SSH_DEPENDENCY_MISSING` | Agent 运行版本、AsyncSSH 锁定依赖、独立终端 WS 路由；主 Agent 在线不代表该专用通道已建立。 |
+| `VPS_TRANSPORT_UPGRADE_REQUIRED` / `AGENT_UPGRADE_REQUIRED` / `SSH_DEPENDENCY_MISSING` | Agent 运行版本、AsyncSSH 锁定依赖、独立终端 WS 路由；主 Agent 在线不代表该专用通道已建立。 |
 | `SSH_TERMINAL_FORBIDDEN` / `AUTH_REVOKED` | 当前登录、Space 成员资格、项目写入/执行权、Agent Shell 策略、VPS 分配与设备启停。 |
 | `TARGET_REVISION_CHANGED` / `PROJECT_MAPPING_CHANGED` | 保存的连接或项目映射变化。旧会话目标不会被悄悄改写，重新核对后新建。 |
 | `VPS_CREDENTIAL_UNAVAILABLE` / `SSH_AUTH_FAILED` | 保存的凭据、Hub 配套主密钥、账号登录策略；不要把密码放入诊断日志或 URL。 |

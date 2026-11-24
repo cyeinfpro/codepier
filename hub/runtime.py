@@ -193,6 +193,7 @@ class Connection:
         self.project_view_protocol = 0
         self.project_runtime_protocol = 0
         self.project_runtime_profiles = []
+        self.agent_vps_ssh = None
         from hub.admission_policy import AdmissionWindow
 
         self.admission = AdmissionWindow()
@@ -3488,9 +3489,24 @@ class Runtime:
             if op["accepted_at"] or expired or denied or op["cancel_requested"] and op["attempts"]:
                 packets.append({"type": "probe", "id": id})
             else:
-                if "vps_ref" in request:
+                if "vps_ref" in request or op["tool"] == "ssh_exec":
+                    from hub.vps_connection import require_vps_capability
+                    from shared.vps_transport import (
+                        VpsTransportContract,
+                        decode_legacy_ssh_request,
+                    )
+
                     try:
-                        request = self.vps.transport(request, op["project_id"])
+                        if "vps_ref" in request:
+                            request = self.vps.transport(request, op["project_id"], agent=con)
+                        else:
+                            require_vps_capability(con, "exec", device_online=True)
+                            cleaned_args = decode_legacy_ssh_request(request["args"])
+                            request = {
+                                **request,
+                                "args": cleaned_args,
+                                "vps_transport": VpsTransportContract().model_dump(),
+                            }
                     except DevError as exc:
                         if op["attempts"]:
                             # An earlier send may already have executed. Recover
@@ -4113,6 +4129,9 @@ class Runtime:
         connection.project_runtime_protocol, connection.project_runtime_profiles = (
             parse_advertisement(hello)
         )
+        from hub.vps_connection import parse_agent_vps_ssh
+
+        connection.agent_vps_ssh = parse_agent_vps_ssh(hello)
         connection.journal_id = hello.get("journal_id")
         connection.protocol = hello.get("delivery_protocol", 1)
         if (
@@ -4175,6 +4194,8 @@ class Runtime:
         info["project_view_protocol"] = connection.project_view_protocol
         info["project_runtime_protocol"] = connection.project_runtime_protocol
         info["project_runtime_profiles"] = connection.project_runtime_profiles
+        if connection.agent_vps_ssh is not None:
+            info["agent_vps_ssh"] = connection.agent_vps_ssh
         build = hello.get("build")
         if isinstance(build, dict) and len(json.dumps(build)) <= 12000:
             info["build"] = build

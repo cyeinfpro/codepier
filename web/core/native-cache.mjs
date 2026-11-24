@@ -1,4 +1,8 @@
-import { assertHex32, assertSafeNonNegativeInt, decodeSnapshot } from './native-contracts.mjs';
+import {
+  assertHex32,
+  assertSafeNonNegativeInt,
+  decodeSnapshot,
+} from "./native-contracts.mjs";
 
 const DEFAULT_MAX_ENTRIES = 20;
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
@@ -6,30 +10,46 @@ const DEFAULT_TTL_MS = 3600_000;
 const TEXT_ENCODER = new TextEncoder();
 
 function assertSerializableValue(value, seen = new Set(), depth = 0) {
-  if (depth > 64) throw new RangeError('Cache envelope nesting too deep');
+  if (depth > 64) throw new RangeError("Cache envelope nesting too deep");
   if (value === null || value === undefined) return;
   const kind = typeof value;
-  if (kind === 'boolean' || kind === 'number' || kind === 'string') return;
-  if (kind === 'function' || kind === 'symbol' || kind === 'bigint') {
+  if (kind === "boolean" || kind === "number" || kind === "string") return;
+  if (kind === "function" || kind === "symbol" || kind === "bigint") {
     throw new TypeError(`Non-cacheable value type: ${kind}`);
   }
-  if (typeof globalThis.Node === 'function' && value instanceof globalThis.Node) {
-    throw new TypeError('DOM Node cannot be stored in NativeSnapshotCache');
+  if (
+    typeof globalThis.Node === "function" &&
+    value instanceof globalThis.Node
+  ) {
+    throw new TypeError("DOM Node cannot be stored in NativeSnapshotCache");
   }
-  if (typeof globalThis.EventSource === 'function' && value instanceof globalThis.EventSource) {
-    throw new TypeError('EventSource cannot be stored in NativeSnapshotCache');
+  if (
+    typeof globalThis.EventSource === "function" &&
+    value instanceof globalThis.EventSource
+  ) {
+    throw new TypeError("EventSource cannot be stored in NativeSnapshotCache");
   }
-  if (value && typeof value.nodeType === 'number' && typeof value.nodeName === 'string') {
-    throw new TypeError('DOM-like node cannot be stored in NativeSnapshotCache');
+  if (
+    value &&
+    typeof value.nodeType === "number" &&
+    typeof value.nodeName === "string"
+  ) {
+    throw new TypeError(
+      "DOM-like node cannot be stored in NativeSnapshotCache",
+    );
   }
   if (seen.has(value)) {
-    throw new TypeError('Circular reference cannot be stored in NativeSnapshotCache');
+    throw new TypeError(
+      "Circular reference cannot be stored in NativeSnapshotCache",
+    );
   }
   seen.add(value);
   if (Array.isArray(value)) {
     for (const item of value) assertSerializableValue(item, seen, depth + 1);
   } else if (value instanceof Map || value instanceof Set) {
-    throw new TypeError('Map/Set must be serialized into plain JSON structures before caching');
+    throw new TypeError(
+      "Map/Set must be serialized into plain JSON structures before caching",
+    );
   } else {
     for (const val of Object.values(value)) {
       assertSerializableValue(val, seen, depth + 1);
@@ -39,17 +59,20 @@ function assertSerializableValue(value, seen = new Set(), depth = 0) {
 }
 
 function serializeStateSnapshot(stateOrEnvelope) {
-  if (stateOrEnvelope.snapshot && typeof stateOrEnvelope.snapshot === 'object') {
+  if (
+    stateOrEnvelope.snapshot &&
+    typeof stateOrEnvelope.snapshot === "object"
+  ) {
     const snap = decodeSnapshot(stateOrEnvelope.snapshot);
     return {
       snapshot: snap,
       revision: assertSafeNonNegativeInt(
         stateOrEnvelope.revision ?? snap.projection_revision,
-        'revision',
+        "revision",
       ),
       appliedCursor: assertSafeNonNegativeInt(
         stateOrEnvelope.appliedCursor ?? snap.applied_cursor,
-        'appliedCursor',
+        "appliedCursor",
       ),
       streamEpoch: String(stateOrEnvelope.streamEpoch ?? snap.stream_epoch),
       resumeToken: stateOrEnvelope.resumeToken ?? snap.resume_token ?? null,
@@ -57,8 +80,10 @@ function serializeStateSnapshot(stateOrEnvelope) {
   }
 
   const state = stateOrEnvelope;
-  if (!state || typeof state !== 'object' || !state.projection) {
-    throw new TypeError('Cache entry must be a native state or snapshot envelope');
+  if (!state || typeof state !== "object" || !state.projection) {
+    throw new TypeError(
+      "Cache entry must be a native state or snapshot envelope",
+    );
   }
   const items = [];
   for (const key of state.projection.order || []) {
@@ -68,7 +93,7 @@ function serializeStateSnapshot(stateOrEnvelope) {
   const pending = [];
   for (const [requestId, val] of state.projection.pending || []) {
     pending.push(
-      val && typeof val === 'object'
+      val && typeof val === "object"
         ? { request_id: requestId, ...val }
         : { request_id: requestId },
     );
@@ -94,8 +119,11 @@ function serializeStateSnapshot(stateOrEnvelope) {
   });
   return {
     snapshot,
-    revision: assertSafeNonNegativeInt(state.revision, 'revision'),
-    appliedCursor: assertSafeNonNegativeInt(state.appliedCursor, 'appliedCursor'),
+    revision: assertSafeNonNegativeInt(state.revision, "revision"),
+    appliedCursor: assertSafeNonNegativeInt(
+      state.appliedCursor,
+      "appliedCursor",
+    ),
     streamEpoch: String(state.streamEpoch),
     resumeToken: state.resumeToken ?? null,
   };
@@ -109,9 +137,9 @@ export class NativeSnapshotCache {
     storage = null,
     now = () => Date.now(),
   } = {}) {
-    this.maxEntries = assertSafeNonNegativeInt(maxEntries, 'maxEntries');
-    this.maxBytes = assertSafeNonNegativeInt(maxBytes, 'maxBytes');
-    this.ttlMs = assertSafeNonNegativeInt(ttlMs, 'ttlMs');
+    this.maxEntries = assertSafeNonNegativeInt(maxEntries, "maxEntries");
+    this.maxBytes = assertSafeNonNegativeInt(maxBytes, "maxBytes");
+    this.ttlMs = assertSafeNonNegativeInt(ttlMs, "ttlMs");
     this.storage = storage;
     this.now = now;
     this.entries = new Map();
@@ -120,11 +148,11 @@ export class NativeSnapshotCache {
   }
 
   static makeKey({ scopeKey, sessionId, schemaVersion = 2 }) {
-    if (typeof scopeKey !== 'string' || !scopeKey) {
-      throw new TypeError('scopeKey must be a non-empty string');
+    if (typeof scopeKey !== "string" || !scopeKey) {
+      throw new TypeError("scopeKey must be a non-empty string");
     }
-    const sid = assertHex32(sessionId, 'sessionId');
-    const ver = assertSafeNonNegativeInt(schemaVersion, 'schemaVersion');
+    const sid = assertHex32(sessionId, "sessionId");
+    const ver = assertSafeNonNegativeInt(schemaVersion, "schemaVersion");
     return `${scopeKey}::${sid}::v${ver}`;
   }
 
@@ -132,8 +160,10 @@ export class NativeSnapshotCache {
     this.entries.delete(key);
     this.pendingWrites.delete(key);
     if (this.storage) {
-      if (typeof this.storage.removeItem === 'function') this.storage.removeItem(key);
-      else if (typeof this.storage.delete === 'function') this.storage.delete(key);
+      if (typeof this.storage.removeItem === "function")
+        this.storage.removeItem(key);
+      else if (typeof this.storage.delete === "function")
+        this.storage.delete(key);
     }
   }
 
@@ -149,25 +179,36 @@ export class NativeSnapshotCache {
     this.entries.delete(key);
     this.entries.set(key, { serialized, bytes, savedAt });
     if (this.storage) {
-      if (typeof this.storage.setItem === 'function') this.storage.setItem(key, serialized);
-      else if (typeof this.storage.set === 'function') this.storage.set(key, serialized);
+      if (typeof this.storage.setItem === "function")
+        this.storage.setItem(key, serialized);
+      else if (typeof this.storage.set === "function")
+        this.storage.set(key, serialized);
     }
     this.prune(savedAt);
   }
 
   _validateEnvelope(rawEnvelope, identity) {
-    const parsed = typeof rawEnvelope === 'string' ? JSON.parse(rawEnvelope) : rawEnvelope;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const parsed =
+      typeof rawEnvelope === "string" ? JSON.parse(rawEnvelope) : rawEnvelope;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return null;
     const savedAt = parsed.savedAt;
-    if (typeof savedAt !== 'number' || !Number.isFinite(savedAt)) return null;
+    if (typeof savedAt !== "number" || !Number.isFinite(savedAt)) return null;
     if (this.now() - savedAt > this.ttlMs) return null;
     const snap = decodeSnapshot(parsed.snapshot);
-    if (snap.scope_key !== identity.scopeKey || snap.session_id !== identity.sessionId) {
+    if (
+      snap.scope_key !== identity.scopeKey ||
+      snap.session_id !== identity.sessionId
+    ) {
       return null;
     }
-    const revision = assertSafeNonNegativeInt(parsed.revision, 'revision');
-    const appliedCursor = assertSafeNonNegativeInt(parsed.appliedCursor, 'appliedCursor');
-    if (typeof parsed.streamEpoch !== 'string' || !parsed.streamEpoch) return null;
+    const revision = assertSafeNonNegativeInt(parsed.revision, "revision");
+    const appliedCursor = assertSafeNonNegativeInt(
+      parsed.appliedCursor,
+      "appliedCursor",
+    );
+    if (typeof parsed.streamEpoch !== "string" || !parsed.streamEpoch)
+      return null;
     return {
       snapshot: snap,
       revision,
@@ -183,8 +224,10 @@ export class NativeSnapshotCache {
     let record = this.entries.get(key);
     let raw = record ? record.serialized : null;
     if (!raw && this.storage) {
-      if (typeof this.storage.getItem === 'function') raw = this.storage.getItem(key);
-      else if (typeof this.storage.get === 'function') raw = this.storage.get(key);
+      if (typeof this.storage.getItem === "function")
+        raw = this.storage.getItem(key);
+      else if (typeof this.storage.get === "function")
+        raw = this.storage.get(key);
     }
     if (!raw) return null;
     try {
@@ -213,7 +256,7 @@ export class NativeSnapshotCache {
   }
 
   set(stateOrEnvelope, ownerCheck = null) {
-    if (typeof ownerCheck === 'function' && !ownerCheck()) return false;
+    if (typeof ownerCheck === "function" && !ownerCheck()) return false;
     assertSerializableValue(
       stateOrEnvelope?.snapshot ?? stateOrEnvelope?.projection?.session ?? null,
     );
@@ -239,7 +282,7 @@ export class NativeSnapshotCache {
   }
 
   enqueue(stateOrEnvelope, ownerCheck = null) {
-    if (typeof ownerCheck === 'function' && !ownerCheck()) return false;
+    if (typeof ownerCheck === "function" && !ownerCheck()) return false;
     const core = serializeStateSnapshot(stateOrEnvelope);
     const envelope = {
       ...core,
@@ -267,7 +310,8 @@ export class NativeSnapshotCache {
     const batch = [...this.pendingWrites.entries()];
     this.pendingWrites.clear();
     for (const [key, entry] of batch) {
-      if (typeof entry.ownerCheck === 'function' && !entry.ownerCheck()) continue;
+      if (typeof entry.ownerCheck === "function" && !entry.ownerCheck())
+        continue;
       const serialized = JSON.stringify(entry.envelope);
       const bytes = TEXT_ENCODER.encode(serialized).length;
       if (bytes > this.maxBytes || this.maxEntries === 0) {
@@ -281,7 +325,7 @@ export class NativeSnapshotCache {
   }
 
   invalidateScope(scopeKey) {
-    if (typeof scopeKey !== 'string' || !scopeKey) return 0;
+    if (typeof scopeKey !== "string" || !scopeKey) return 0;
     const prefix = `${scopeKey}::`;
     let removed = 0;
     for (const key of [...this.entries.keys()]) {
@@ -293,9 +337,9 @@ export class NativeSnapshotCache {
     for (const key of [...this.pendingWrites.keys()]) {
       if (key.startsWith(prefix)) this.pendingWrites.delete(key);
     }
-    if (this.storage && typeof this.storage.keys === 'function') {
+    if (this.storage && typeof this.storage.keys === "function") {
       for (const key of [...this.storage.keys()]) {
-        if (typeof key === 'string' && key.startsWith(prefix)) {
+        if (typeof key === "string" && key.startsWith(prefix)) {
           this._deleteKey(key);
         }
       }
@@ -309,7 +353,7 @@ export class NativeSnapshotCache {
     for (const key of keys) {
       this._deleteKey(key);
     }
-    if (this.storage && typeof this.storage.clear === 'function') {
+    if (this.storage && typeof this.storage.clear === "function") {
       this.storage.clear();
     }
     return keys.length;
@@ -323,7 +367,8 @@ export class NativeSnapshotCache {
     }
     let totalBytes = this._totalBytes();
     for (const [key, record] of [...this.entries.entries()]) {
-      if (this.entries.size <= this.maxEntries && totalBytes <= this.maxBytes) break;
+      if (this.entries.size <= this.maxEntries && totalBytes <= this.maxBytes)
+        break;
       this._deleteKey(key);
       totalBytes -= record.bytes;
     }

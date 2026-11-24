@@ -1,22 +1,24 @@
-import { join } from 'node:path';
-import { build } from 'esbuild';
-import { codeOptions } from './build-options.mjs';
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { join } from "node:path";
+import { build } from "esbuild";
+import { codeOptions } from "./build-options.mjs";
+import { readFile, writeFile, readdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
-const packageMeta = JSON.parse(await readFile('package.json', 'utf8'));
+const packageMeta = JSON.parse(await readFile("package.json", "utf8"));
 // The Apps SDK is only the test host harness (tests/fixtures/mcp-apps-host.js);
 // production pages bundle the local host-bridge.js, so it is a dev dependency.
-const sdkVersion = packageMeta.devDependencies?.['@modelcontextprotocol/ext-apps'];
-if (!sdkVersion) throw new Error('Missing @modelcontextprotocol/ext-apps test dependency');
+const sdkVersion =
+  packageMeta.devDependencies?.["@modelcontextprotocol/ext-apps"];
+if (!sdkVersion)
+  throw new Error("Missing @modelcontextprotocol/ext-apps test dependency");
 
 // Escape multiline SDK strings without altering their runtime content.
 const result = await build({
-  entryPoints: ['app.js'],
+  entryPoints: ["app.js"],
   bundle: true,
   write: false,
-  format: 'iife',
-  platform: 'browser',
+  format: "iife",
+  platform: "browser",
   metafile: true,
   ...codeOptions,
 });
@@ -24,23 +26,26 @@ const result = await build({
 const bundled = [
   ...new Set(
     Object.keys(result.metafile.inputs)
-      .map((input) => input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/)?.[1])
+      .map(
+        (input) =>
+          input.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)/)?.[1],
+      )
       .filter(Boolean),
   ),
 ].sort();
-const js = result.outputFiles[0].text.replace(/<\/script/gi, '<\\/script');
-const css = await readFile('app.css', 'utf8');
+const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+const css = await readFile("app.css", "utf8");
 const outputs = {};
-for (const kind of ['changes']) {
+for (const kind of ["changes"]) {
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CodePier · 改动审阅</title><style>${css}</style><body data-kind="${kind}"><main id="app" aria-busy="true"><p class="muted">正在连接项目…</p></main><script>${js}</script></body></html>`;
   await writeFile(`${kind}-v1.html`, html);
   outputs[`${kind}-v1.html`] = {
     bytes: Buffer.byteLength(html),
-    sha256: createHash('sha256').update(html).digest('hex'),
+    sha256: createHash("sha256").update(html).digest("hex"),
   };
 }
 await writeFile(
-  'manifest.json',
+  "manifest.json",
   JSON.stringify(
     {
       test_sdk: `@modelcontextprotocol/ext-apps@${sdkVersion}`,
@@ -59,58 +64,60 @@ const seen = new Set(),
 async function collect(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const path = join(directory, entry.name);
-    if (entry.name.startsWith('@')) {
+    if (entry.name.startsWith("@")) {
       await collect(path);
       continue;
     }
     let meta;
     try {
-      meta = JSON.parse(await readFile(join(path, 'package.json'), 'utf8'));
+      meta = JSON.parse(await readFile(join(path, "package.json"), "utf8"));
     } catch {
       continue;
     }
-    const key = meta.name + '@' + meta.version;
+    const key = meta.name + "@" + meta.version;
     // Ship notices for bundled code and the esbuild runtime helpers only.
-    if (!bundled.includes(meta.name) && meta.name !== 'esbuild') continue;
+    if (!bundled.includes(meta.name) && meta.name !== "esbuild") continue;
     if (seen.has(key)) continue;
     seen.add(key);
     const names = (await readdir(path, { withFileTypes: true }))
-      .filter((e) => e.isFile() && /^(LICENSE|LICENCE|NOTICE|COPYING)/i.test(e.name))
+      .filter(
+        (e) => e.isFile() && /^(LICENSE|LICENCE|NOTICE|COPYING)/i.test(e.name),
+      )
       .map((e) => e.name)
       .sort();
     const text = [];
     for (const name of names) {
       if ((await stat(join(path, name))).size >= 200000) continue;
-      const license = (await readFile(join(path, name), 'utf8'))
-        .replace(/\r\n?/g, '\n')
-        .replace(/[ \t]+$/gm, '')
+      const license = (await readFile(join(path, name), "utf8"))
+        .replace(/\r\n?/g, "\n")
+        .replace(/[ \t]+$/gm, "")
         .trimEnd();
-      text.push('-- ' + name + ' --\n' + license);
+      text.push("-- " + name + " --\n" + license);
     }
     if (text.length)
       notices.push(
-        '='.repeat(72) +
-          '\n' +
+        "=".repeat(72) +
+          "\n" +
           key +
-          '\nLicense: ' +
-          (meta.license || 'see text') +
-          '\n\n' +
-          text.join('\n\n'),
+          "\nLicense: " +
+          (meta.license || "see text") +
+          "\n\n" +
+          text.join("\n\n"),
       );
     try {
-      await collect(join(path, 'node_modules'));
+      await collect(join(path, "node_modules"));
     } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
+      if (e.code !== "ENOENT") throw e;
     }
   }
 }
-await collect('node_modules');
+await collect("node_modules");
 const noticeText =
   notices
-    .join('\n\n')
-    .replace(/\r\n?/g, '\n')
-    .replace(/[ \t]+$/gm, '')
-    .trimEnd() + '\n';
-await writeFile('THIRD_PARTY_NOTICES.txt', noticeText);
+    .join("\n\n")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .trimEnd() + "\n";
+await writeFile("THIRD_PARTY_NOTICES.txt", noticeText);

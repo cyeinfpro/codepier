@@ -90,7 +90,7 @@
 .chat-send:not(:disabled):hover {
   transform: translateY(-1px);
 }
-.chat-composer[aria-busy='true'] .chat-send {
+.chat-composer[aria-busy="true"] .chat-send {
   opacity: 0.65;
 }
 .chat-config-bar :is(button, select):hover:not(:disabled) {
@@ -294,7 +294,7 @@
   border-top-color: var(--chat-muted);
   border-radius: 50%;
 }
-.chat-activity[data-state='approval'] i {
+.chat-activity[data-state="approval"] i {
   border-color: var(--chat-warning);
   background: var(--chat-warning);
 }
@@ -347,23 +347,26 @@
 .chat-files {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: 8px;
   max-height: 136px;
   overflow: auto;
 }
 .chat-files:not(:empty) {
-  margin-bottom: 9px;
+  margin-bottom: 10px;
 }
 .chat-file {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   max-width: 280px;
-  padding: 7px 9px;
+  padding: 6px 8px 6px 10px;
   border: 1px solid var(--chat-line);
-  border-radius: var(--ui-radius-lg, 16px);
+  border-radius: var(--ui-radius-md, 12px);
   background: var(--chat-surface);
   font-size: var(--ui-text-xs, 12px);
+}
+.chat-file:hover {
+  border-color: var(--chat-border);
 }
 .chat-file.is-error {
   flex-wrap: wrap;
@@ -386,7 +389,7 @@
   width: 34px;
   height: 34px;
   object-fit: cover;
-  border-radius: var(--ui-radius-small, 8px);
+  border-radius: var(--ui-radius-xs, 6px);
 }
 .chat-file > span {
   max-width: 135px;
@@ -402,9 +405,14 @@
 .chat-file button {
   padding: 4px;
   border: 0;
+  border-radius: var(--ui-radius-xs, 6px);
   background: none;
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
+}
+.chat-file button:hover:not(:disabled) {
+  background: var(--chat-hover);
+  color: var(--chat-fg);
 }
 .chat-latest {
   position: absolute;
@@ -420,4 +428,61 @@
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-fg);
   white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-composer {
+    transition:
+      border-color var(--ui-motion-fast, 140ms) var(--chat-ease),
+      box-shadow var(--ui-motion-fast, 140ms) var(--chat-ease),
+      background-color var(--ui-motion-fast, 140ms) var(--chat-ease);
+  }
+  .chat-compose-controls .chat-square,
+  .chat-stop-turn,
+  .chat-model-picker,
+  .chat-cwd-button,
+  .chat-config-bar :is(button, select),
+  .chat-file,
+  .chat-file button {
+    transition:
+      background-color var(--ui-motion-fast, 140ms) var(--chat-ease),
+      border-color var(--ui-motion-fast, 140ms) var(--chat-ease),
+      color var(--ui-motion-fast, 140ms) var(--chat-ease),
+      box-shadow var(--ui-motion-fast, 140ms) var(--chat-ease),
+      transform var(--chat-motion-press) var(--chat-ease);
+  }
+  .chat-send {
+    transition:
+      background-color var(--ui-motion-fast, 140ms) var(--chat-ease),
+      box-shadow var(--ui-motion-fast, 140ms) var(--chat-ease),
+      opacity var(--ui-motion-fast, 140ms) var(--chat-ease),
+      transform var(--chat-motion-press) var(--chat-ease);
+  }
+  .chat-send:not(:disabled):active,
+  .chat-compose-controls .chat-square:not(:disabled):active,
+  .chat-stop-turn:not(:disabled):active,
+  .chat-model-picker:not(:disabled):active,
+  .chat-cwd-button:not(:disabled):active {
+    transform: scale(0.96);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer,
+  .chat-send,
+  .chat-compose-controls .chat-square,
+  .chat-stop-turn,
+  .chat-model-picker,
+  .chat-cwd-button,
+  .chat-config-bar :is(button, select),
+  .chat-file,
+  .chat-file button {
+    transition: none;
+  }
+  .chat-send:not(:disabled):active,
+  .chat-compose-controls .chat-square:not(:disabled):active,
+  .chat-stop-turn:not(:disabled):active,
+  .chat-model-picker:not(:disabled):active,
+  .chat-cwd-button:not(:disabled):active {
+    transform: none;
+  }
 }

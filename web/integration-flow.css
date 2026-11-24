@@ -8,7 +8,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.chat-overflow [data-devtools='handoff'] {
+.chat-overflow [data-devtools="handoff"] {
   border-bottom: 1px solid var(--chat-line);
   border-radius: 0;
   margin-bottom: 5px;
@@ -439,7 +439,7 @@
 .integration-center .btn:disabled {
   cursor: not-allowed;
 }
-.integration-center .btn[aria-busy='true'] {
+.integration-center .btn[aria-busy="true"] {
   cursor: progress;
 }
 .integration-result-card:focus-visible,

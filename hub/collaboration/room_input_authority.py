@@ -6,8 +6,23 @@ from dataclasses import asdict
 import json
 
 from hub.collaboration.common import canonical, digest
+from hub.collaboration.delegation import effective_target_projection
 from hub.principal import Principal, refresh_principal
 from shared.util import DevError
+
+_VPS_TARGET_WATCH_FIELDS = ("host", "port", "username", "secret", "enabled", "connection_revision")
+_VPS_TARGET_VALUE_FIELDS = ("host", "port", "username", "enabled", "connection_revision")
+
+
+def vps_target_update_trigger_sql() -> str:
+    value = "json_object(" + ",".join(f"'{f}',NEW.{f}" for f in _VPS_TARGET_VALUE_FIELDS) + ")"
+    when = " OR ".join(f"OLD.{f} IS NOT NEW.{f}" for f in _VPS_TARGET_WATCH_FIELDS)
+    return (
+        "CREATE TRIGGER room_input_history_target_update"
+        f" AFTER UPDATE ON vps_connections WHEN {when} BEGIN"
+        f" INSERT INTO room_input_resource_revisions(kind,resource_id,value)"
+        f" VALUES ('target',NEW.id,{value}); END"
+    )
 
 
 def migrate(db):
@@ -38,7 +53,7 @@ def migrate(db):
             "vps_connections",
             "target",
             "id",
-            ("host", "port", "username", "host_key_policy", "enabled"),
+            _VPS_TARGET_VALUE_FIELDS,
         ),
         ("vps_projects", "target_binding", "vps_id || ':' || {row}.project_id", ("binding_id",)),
     ):
@@ -46,6 +61,19 @@ def migrate(db):
         if not set(fields) <= columns:
             continue
         for event, row in (("UPDATE", "NEW"), ("DELETE", "OLD")):
+            trigger_name = f"room_input_history_{kind}_{event.lower()}"
+            if table == "vps_connections" and event == "UPDATE":
+                if not set(_VPS_TARGET_WATCH_FIELDS) <= columns:
+                    continue
+                expected_sql = vps_target_update_trigger_sql()
+                existing = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (trigger_name,),
+                ).fetchone()
+                if existing is None or existing[0] != expected_sql:
+                    db.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+                    db.execute(expected_sql)
+                continue
             key = f"{row}.{identifier.format(row=row)}"
             value = (
                 "json_object(" + ",".join(f"'{field}',{row}.{field}" for field in fields) + ")"
@@ -57,7 +85,7 @@ def migrate(db):
                 if event == "UPDATE"
                 else ""
             )
-            db.execute(f"""CREATE TRIGGER IF NOT EXISTS room_input_history_{kind}_{event.lower()}
+            db.execute(f"""CREATE TRIGGER IF NOT EXISTS {trigger_name}
                 AFTER {event} ON {table}{when} BEGIN
                     INSERT INTO room_input_resource_revisions(kind,resource_id,value) VALUES ('{kind}',{key},{value});
                 END""")
@@ -566,15 +594,26 @@ class RoomInputAuthority:
             return None
         for target in tuple(targets):
             original = rule["target_snapshots"].get(target)
-            if live and live["target_snapshots"].get(target) != original:
+            if live and effective_target_projection(
+                live["target_snapshots"].get(target)
+            ) != effective_target_projection(original):
                 targets.remove(target)
                 continue
             if target.startswith("vps:"):
                 target_id = target[4:]
+                original_endpoint = (original or {}).get("endpoint") or {}
+                original_revision = ((original or {}).get("reference") or {}).get("connection_revision")
                 if any(
                     not state
                     or not state["enabled"]
-                    or any(state[k] != original["endpoint"][k] for k in original["endpoint"])
+                    or (
+                        state.get("connection_revision") is not None
+                        and state["connection_revision"] != original_revision
+                    )
+                    or any(
+                        state.get(k) != original_endpoint.get(k)
+                        for k in ("host", "port", "username")
+                    )
                     for state in self.resources(proof, "target", target_id)
                 ) or any(
                     True for _ in self.resources(proof, "target_binding", target_id + ":" + project)

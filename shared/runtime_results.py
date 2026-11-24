@@ -86,6 +86,12 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
         ssh_code = data.get("ssh_error")
         if isinstance(ssh_code, str) and ssh_code in {
             "SSH_AUTH_FAILED",
+            "SSH_AUTH_CHALLENGE_REQUIRED",
+            "SSH_CONNECT_TIMEOUT",
+            "SSH_CONNECTION_FAILED",
+            "SSH_CHANNEL_CLOSED",
+            "SSH_PROTOCOL_NEGOTIATION_FAILED",
+            "VPS_TRANSPORT_UPGRADE_REQUIRED",
             "SSH_HOST_KEY_CHANGED",
             "SSH_HOST_KEY_UNTRUSTED",
             "SSH_COMMAND_OR_CONNECTION_FAILED",
@@ -93,6 +99,10 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
             "SSH_CANCELLED",
         }:
             code = ssh_code
+    elif code is None and data.get("remote_execution_state") == "remote_outcome_unknown":
+        code = data.get("ssh_error") if isinstance(data.get("ssh_error"), str) else None
+    elif code is None and isinstance(data.get("ssh_error"), str) and data.get("exit_code") is None:
+        code = data["ssh_error"]
     if code in DENIALS or (
         code and code.startswith(("ROOM_SCOPE_", "DELEGATION_", "LEASE_", "FENCING_"))
     ):
@@ -115,10 +125,16 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
         category = "outcome_unconfirmed"
     elif data.get("cancelled") or code in {"CANCELLED", "INTERRUPTED"}:
         category = "cancelled" if code != "INTERRUPTED" else "outcome_unconfirmed"
+    elif data.get("remote_execution_state") == "remote_outcome_unknown":
+        category = "outcome_unconfirmed"
     elif data.get("timed_out"):
         category = "command_timeout"
-    elif code == "SSH_AUTH_FAILED":
+    elif code in {"SSH_AUTH_FAILED", "SSH_AUTH_CHALLENGE_REQUIRED"}:
         category = "ssh_authentication_failed"
+    elif code == "VPS_TRANSPORT_UPGRADE_REQUIRED":
+        category = "execution_unavailable"
+    elif code in {"SSH_PROTOCOL_NEGOTIATION_FAILED", "SSH_CONNECT_TIMEOUT", "SSH_CONNECTION_FAILED", "SSH_CHANNEL_CLOSED"}:
+        category = "ssh_command_or_connection_failed"
     elif code in {"SSH_HOST_KEY_CHANGED", "SSH_HOST_KEY_UNTRUSTED"}:
         category = "ssh_host_verification_failed"
     elif code == "SSH_COMMAND_OR_CONNECTION_FAILED":

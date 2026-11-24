@@ -8,8 +8,12 @@ from uuid import uuid4
 
 from hub import iam
 from shared.util import DevError
+from shared.vps_transport import (
+    VPS_HOST_IDENTITY_VERIFICATION,
+    VPS_SSH_PROTOCOL,
+    hub_native_vps_ssh_capability,
+)
 from hub.vps_readiness import (
-    HOST_VERIFICATION_REQUIRED,
     HOST_VERIFICATION_SKIP,
     ReadinessTarget,
     VPSReadiness,
@@ -37,7 +41,7 @@ WHERE active=1"""
 _LIVE_SPACE_SCAN_GRANT = """
 SELECT * FROM vps_readiness_grants WHERE space_id=? AND authorized_user_id=?
 AND identity_id IS ? AND vps_id IS NULL AND active=1 AND intent='scan'
-AND host_verification='required'
+ORDER BY CASE WHEN host_verification='skip' THEN 0 ELSE 1 END, created DESC
 """
 _CURRENT_JOB = """
 SELECT q.* FROM vps_readiness_jobs q JOIN vps_connections v ON v.id=q.vps_id
@@ -154,17 +158,15 @@ class VPSReadinessWiring:
             grant
             and grant["authorized_user_id"] == target.authorized_user_id
             and grant["vps_id"] in (None, target.vps_id)
-            and grant["host_verification"] == target.host_verification
             and (action != "install" or grant["intent"] == "install")
             and self._valid_grant(grant)
         )
 
     @staticmethod
     def _host_parameters(row, target):
-        if target.host_verification == HOST_VERIFICATION_SKIP:
-            return HOST_VERIFICATION_SKIP, "", "managed_vps"
-        pin = row["host_key_fingerprint"] if row["host_key_policy"] == "confirm-change" else ""
-        return HOST_VERIFICATION_REQUIRED, pin, "default"
+        # Unified vps_ssh_v2 contract: legacy host_key_policy / host_key_fingerprint
+        # and historical required/skip grant modes never gate readiness execution.
+        return HOST_VERIFICATION_SKIP, "", "managed_vps"
 
     async def authorize(self, target, action):
         return bool(await self.store.run(self._bound_target, target, action))
@@ -173,9 +175,6 @@ class VPSReadinessWiring:
         row = await self.store.run(self._bound_target, target)
         if not row:
             return "authorization_changed"
-        mode, pin, _purpose = self._host_parameters(row, target)
-        if mode == HOST_VERIFICATION_REQUIRED and not pin:
-            return "trust_missing"
         return await self.executor.inspect(target)
 
     async def resolve_target(self, target, action):
@@ -235,7 +234,7 @@ class VPSReadinessWiring:
         if not row:
             return False
         mode, pin, purpose = self._host_parameters(row, target)
-        return (mode != HOST_VERIFICATION_REQUIRED or bool(pin)) and (
+        return (
             row["host"],
             row["port"],
             row["username"],
@@ -259,33 +258,36 @@ class VPSReadinessWiring:
         principal,
         vps_id=None,
         intent="scan",
-        host_verification=HOST_VERIFICATION_REQUIRED,
+        host_verification=HOST_VERIFICATION_SKIP,
     ):
-        """Reuse only the exact actor, identity, scope and purpose."""
+        """Reuse any valid active grant for the exact actor, identity, scope and intent.
+
+        Compatible with dual active historical grants (required + skip) without
+        violating the unique index, duplicating grants, or reviving revoked grants.
+        """
         if intent not in ("scan", "install"):
             raise ValueError("Unknown readiness grant intent")
         require_host_verification_mode(host_verification)
         with self.store.transaction() as db:
             principal = self._admin(principal)
             identity_id = getattr(principal, "identity_id", None)
-            scope = (
-                principal.space_id,
-                vps_id,
-                principal.user_id,
-                identity_id,
-                intent,
-                host_verification,
-            )
-            row = self.store.one(
+            rows = self.store.all(
                 """SELECT * FROM vps_readiness_grants
                    WHERE space_id=? AND vps_id IS ? AND authorized_user_id=?
-                     AND identity_id IS ? AND intent=? AND host_verification=? AND active=1
-                   ORDER BY created DESC LIMIT 1""",
-                scope,
+                     AND identity_id IS ? AND intent=? AND active=1
+                   ORDER BY CASE WHEN host_verification='skip' THEN 0 ELSE 1 END, created DESC""",
+                (
+                    principal.space_id,
+                    vps_id,
+                    principal.user_id,
+                    identity_id,
+                    intent,
+                ),
             )
-            if self._valid_grant(row):
-                return row["id"]
-            if row:
+            for row in rows:
+                if self._valid_grant(row):
+                    return row["id"]
+            for row in rows:
                 db.execute("UPDATE vps_readiness_grants SET active=0 WHERE id=?", (row["id"],))
             grant = uuid4().hex
             db.execute(
@@ -301,7 +303,7 @@ class VPSReadinessWiring:
                     identity_id,
                     vps_id,
                     intent,
-                    host_verification,
+                    HOST_VERIFICATION_SKIP,
                     time.time(),
                 ),
             )
@@ -314,19 +316,23 @@ class VPSReadinessWiring:
         available = self.available and bool(
             principal.admin and principal.session_hash and not principal.grant_id
         )
-        grant = (
-            self.store.one(
+        grants = (
+            self.store.all(
                 _LIVE_SPACE_SCAN_GRANT,
                 (principal.space_id, principal.user_id, getattr(principal, "identity_id", None)),
             )
             if available
-            else None
+            else []
         )
         return {
             "readiness_backfill_available": available,
-            "readiness_backfill_enabled": self._valid_grant(grant),
+            "readiness_backfill_enabled": any(self._valid_grant(g) for g in grants),
             "readiness_manual_actions": available,
-            "readiness_fleet_host_verification": HOST_VERIFICATION_SKIP if available else None,
+            "readiness_connection_contract": VPS_SSH_PROTOCOL if available else None,
+            "readiness_host_identity_verification": (
+                VPS_HOST_IDENTITY_VERIFICATION if available else None
+            ),
+            "hub_native_vps_ssh": hub_native_vps_ssh_capability(available=self.available),
         }
 
     def summary(self, principal, vps_id, enabled):
@@ -375,28 +381,34 @@ class VPSReadinessWiring:
             raise DevError("VPS_CONFIGURATION_CHANGED", "VPS 配置已变更，请刷新后重试", 409)
         return {"available": True, "job": job}
 
-    async def activate_space(self, principal, host_verification=HOST_VERIFICATION_REQUIRED):
+    async def activate_space(self, principal, host_verification=HOST_VERIFICATION_SKIP):
         principal = await self.store.run(self._admin, principal)
         self._require_available()
-        grant = await self.store.run(self._grant_for, principal, None, "scan", host_verification)
+        require_host_verification_mode(host_verification)
+        grant = await self.store.run(
+            self._grant_for, principal, None, "scan", HOST_VERIFICATION_SKIP
+        )
         count = await self.queue.backfill(
             principal.space_id,
             grant,
             authorized_user_id=principal.user_id,
             refresh=True,
-            host_verification=host_verification,
+            host_verification=HOST_VERIFICATION_SKIP,
         )
         return {"enabled": True, "queued_count": count}
 
-    async def install_space(self, principal, host_verification=HOST_VERIFICATION_REQUIRED):
+    async def install_space(self, principal, host_verification=HOST_VERIFICATION_SKIP):
         principal = await self.store.run(self._admin, principal)
         self._require_available()
-        grant = await self.store.run(self._grant_for, principal, None, "install", host_verification)
+        require_host_verification_mode(host_verification)
+        grant = await self.store.run(
+            self._grant_for, principal, None, "install", HOST_VERIFICATION_SKIP
+        )
         count = await self.queue.install_missing(
             principal.space_id,
             grant,
             authorized_user_id=principal.user_id,
-            host_verification=host_verification,
+            host_verification=HOST_VERIFICATION_SKIP,
         )
         return {"queued_count": count}
 

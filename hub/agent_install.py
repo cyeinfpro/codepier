@@ -262,6 +262,18 @@ class AgentPackage:
             raise ValueError("Package source too large")
         return content
 
+    def _collect_python_dir(self, directory):
+        folder = self.root / directory
+        if folder.is_symlink():
+            raise ValueError("Package source directory unavailable")
+        if not folder.is_dir():
+            raise ValueError("Package source directory unavailable")
+        return [
+            f"{directory}/{entry.name}"
+            for entry in folder.iterdir()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\.py", entry.name)
+        ]
+
     def build(self):
         with self.lock:
             if self.content is not None:
@@ -272,15 +284,8 @@ class AgentPackage:
                     "scripts/install_agent.py",
                     "scripts/agent_lifecycle.py",
                 ]
-                for directory in ("agent", "shared"):
-                    folder = self.root / directory
-                    if folder.is_symlink() or not folder.is_dir():
-                        raise ValueError("Package source directory unavailable")
-                    names.extend(
-                        f"{directory}/{entry.name}"
-                        for entry in folder.iterdir()
-                        if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*\.py", entry.name)
-                    )
+                names.extend(self._collect_python_dir("agent"))
+                names.extend(self._collect_python_dir("shared"))
                 names.extend(name for name in DEPLOY_FILES if (self.root / name).exists())
                 if not {
                     "agent/__main__.py",

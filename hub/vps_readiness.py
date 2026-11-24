@@ -155,6 +155,19 @@ class VPSReadiness:
             (self.clock(), self.clock()),
         )
 
+        now = self.clock()
+        # Historical rows stopped solely by retired host-key verification errors
+        # become re-probeable under vps_ssh_v2 without replaying unknown installs
+        # (verify_only is preserved as-is).
+        self.store.execute(
+            """UPDATE vps_readiness_jobs
+               SET state='queued',intent='scan',reason_code=NULL,attempts=0,
+                   next_attempt=?,updated=?,host_verification=?
+               WHERE state='failed'
+                 AND reason_code IN ('HOST_KEY_CHANGED','HOST_KEY_UNKNOWN','HOST_KEY_REVOKED','HUB_SSH_TRUST_MIGRATION_REQUIRED')""",
+            (now, now, HOST_VERIFICATION_SKIP),
+        )
+
     async def start(self):
         if self._workers:
             return

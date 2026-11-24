@@ -258,21 +258,27 @@ class SSHExec(Project):
         min_length=1,
         max_length=4096,
         repr=False,
-        description="User-authorized SSH password. Passed through a child environment, never command arguments. Do not repeat it in command or output. Requires local sshpass.",
+        description="User-authorized SSH password. Provided directly to the AsyncSSH client callback, never via command arguments. Do not repeat it in command or output.",
     )
     command: str = Field(
         min_length=1,
         max_length=65536,
         description="Command/script to run ON THE VPS, not a local SSH invocation. Non-interactive; no sudo/password prompts after login.",
     )
-    host_key_policy: Literal["strict", "accept-new"] = Field(
-        default="strict",
-        description="strict requires an existing trusted known_hosts entry. Explicit accept-new trusts a first-seen host and saves its key; changed keys are always rejected.",
+    host_key_policy: str = Field(
+        default="disabled",
+        max_length=64,
+        description="Deprecated legacy compatibility field; ignored. CodePier VPS SSH uses vps_ssh_v2 without host key verification.",
     )
     known_hosts_file: str = Field(
         default="",
         max_length=4096,
-        description="Optional absolute Agent-local known_hosts path. Empty uses the user's OpenSSH configuration.",
+        description="Deprecated legacy compatibility field; ignored. Local known_hosts files are never read.",
+    )
+    host_key_fingerprint: str = Field(
+        default="",
+        max_length=256,
+        description="Deprecated legacy compatibility field; ignored.",
     )
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
     idempotency_key: str = Field(
@@ -298,12 +304,12 @@ class SSHExec(Project):
             raise ValueError("SSH password cannot contain NUL or line breaks")
         if not self.command.strip() or "\x00" in self.command:
             raise ValueError("SSH command must be nonempty text without NUL")
-        if (
-            "\x00" in self.known_hosts_file
-            or "\n" in self.known_hosts_file
-            or "\r" in self.known_hosts_file
-        ):
-            raise ValueError("known_hosts_file cannot contain NUL or line breaks")
+        if "\x00" in self.known_hosts_file or "\x00" in self.host_key_policy or "\x00" in self.host_key_fingerprint:
+            raise ValueError("legacy SSH trust fields cannot contain NUL")
+        # Normalize retired legacy trust fields so downstream execution never branches on them.
+        self.host_key_policy = "disabled"
+        self.known_hosts_file = ""
+        self.host_key_fingerprint = ""
         return self
 
 

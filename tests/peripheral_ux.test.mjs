@@ -111,3 +111,199 @@ test('MCP Apps action failure retains a validated original operation ID without 
   assert.match(parent.children[1].textContent,/不重新执行/);
   delete globalThis.document;
 });
+
+// Test both the exported code path and the legacy fallback with the same inputs.
+function uiFallbackContext(overrides = {}) {
+  return vm.createContext({
+    CP: {},
+    document: { addEventListener() {} },
+    window: {},
+    ...overrides,
+  });
+}
+
+function loadUiFallback(overrides) {
+  const ctx = uiFallbackContext(overrides);
+  const source = fs.readFileSync('web/ui.js', 'utf8');
+  const end = source.indexOf('async function uiConfirmAction(');
+  assert.ok(end > 0, 'legacy UI helper boundary exists');
+  vm.runInContext(source.slice(0, end), ctx);
+  return ctx;
+}
+
+function scrollFadeHarness() {
+  const jobs = new Map();
+  const scrollEvents = new Map();
+  const windowEvents = new Map();
+  const observers = [];
+  let id = 0;
+  const el = {
+    dataset: {},
+    classList: { add() {} },
+    isConnected: true,
+    clientHeight: 100,
+    scrollHeight: 100,
+    scrollTop: 0,
+    addEventListener(name, fn, options) { scrollEvents.set(name, { fn, options }); },
+    removeEventListener(name, fn, options) {
+      assert.equal(scrollEvents.get(name)?.fn, fn);
+      assert.equal(scrollEvents.get(name)?.options === true, options === true);
+      scrollEvents.delete(name);
+    },
+  };
+  const globals = {
+    window: {
+      addEventListener(name, fn) { windowEvents.set(name, fn); },
+      removeEventListener(name, fn) {
+        assert.equal(windowEvents.get(name), fn);
+        windowEvents.delete(name);
+      },
+    },
+    // Exercise the window-resize fallback rather than masking the missing
+    // mutation signal with a fake ResizeObserver notification.
+    ResizeObserver: undefined,
+    MutationObserver: class {
+      constructor(cb) { this.cb = cb; this.disconnected = false; observers.push(this); }
+      observe(target, options) { assert.equal(target, el); this.options = options; }
+      disconnect() { this.disconnected = true; }
+    },
+    requestAnimationFrame(fn) { jobs.set(++id, fn); return id; },
+    cancelAnimationFrame(frame) { jobs.delete(frame); },
+  };
+  const flush = () => {
+    const pending = Array.from(jobs.values());
+    jobs.clear();
+    pending.forEach(job => job());
+  };
+  return { el, globals, flush, jobs, scrollEvents, windowEvents, observers };
+}
+
+function withUiGlobals(globals, body) {
+  const saved = new Map(Object.keys(globals).map(key =>
+    [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  try {
+    for (const [key, value] of Object.entries(globals)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+    }
+    return body();
+  } finally {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
+}
+
+for (const mode of ['module', 'legacy fallback']) {
+  test(`scroll edge fade (${mode}) refreshes same-size growth and releases subscriptions`, async () => {
+    const h = scrollFadeHarness();
+    const bind = mode === 'module'
+      ? (await import('../web/core/ui.mjs')).bindScrollEdgeFade
+      : loadUiFallback(h.globals).uiBindScrollEdgeFade;
+    withUiGlobals(h.globals, () => {
+      const dispose = bind(h.el);
+      h.flush();
+      assert.deepEqual(h.el.dataset, { fadeTop: 'false', fadeBottom: 'false' });
+      h.el.scrollHeight = 150;
+      assert.equal(h.observers.length, 1, 'observe content even with a fixed clientHeight');
+      assert.equal(h.observers[0].options.subtree, true);
+      assert.equal(h.observers[0].options.characterData, true);
+      h.observers[0].cb();
+      h.observers[0].cb();
+      assert.equal(h.jobs.size, 1);
+      h.flush();
+      assert.deepEqual(h.el.dataset, { fadeTop: 'false', fadeBottom: 'true' });
+      h.el.scrollTop = 50;
+      h.scrollEvents.get('scroll').fn();
+      h.flush();
+      assert.deepEqual(h.el.dataset, { fadeTop: 'true', fadeBottom: 'false' });
+      h.el.scrollHeight = 180;
+      h.scrollEvents.get('load').fn();
+      h.flush();
+      assert.deepEqual(h.el.dataset, { fadeTop: 'true', fadeBottom: 'true' });
+      h.el.scrollTop = 0;
+      h.el.scrollHeight = 100;
+      h.observers[0].cb();
+      h.flush();
+      assert.deepEqual(h.el.dataset, { fadeTop: 'false', fadeBottom: 'false' });
+      h.observers[0].cb();
+      dispose();
+      dispose();
+      h.observers[0].cb();
+      assert.equal(h.jobs.size, 0);
+      assert.equal(h.observers[0].disconnected, true);
+      assert.equal(h.scrollEvents.size, 0);
+      assert.equal(h.windowEvents.size, 0);
+      assert.deepEqual(h.el.dataset, {});
+    });
+  });
+
+  test(`Undo Toast (${mode}) claims one action before callback and ignores leaving/detached clicks`, async () => {
+    let reduced = false;
+    const root = { current: null,
+      querySelectorAll() { return this.current?.isConnected ? [this.current] : []; },
+      append(node) { this.current = node; node.isConnected = true; },
+    };
+    const child = () => ({ setAttribute() {}, style: { setProperty() {} } });
+    const item = () => ({
+      dataset: {},
+      isConnected: true,
+      matches: { '.toast-message': child(), '.toast-action': child(), '.toast-dismiss': child() },
+      classList: { contains: () => false },
+      querySelector(s) { return this.matches[s] || null; },
+      append(node) { if (node.className) this.matches['.' + node.className] = node; },
+      setAttribute() {},
+      addEventListener() {},
+      contains: () => false,
+      remove() { this.isConnected = false; },
+    });
+    const doc = {
+      activeElement: null,
+      addEventListener() {},
+      querySelector(s) { return s === '#toasts' ? root : null; },
+      createElement(tag) { return tag === 'div' ? item() : child(); },
+    };
+    const timers = new Map();
+    let id = 0;
+    const globals = {
+      document: doc,
+      window: { matchMedia: () => ({ matches: reduced }) },
+      setTimeout(fn, ms) { timers.set(++id, { fn, ms }); return id; },
+      clearTimeout(key) { timers.delete(key); },
+    };
+    const action = (node) => node.querySelector('.toast-action');
+    const render = mode === 'module' ? (await import('../web/core/ui.mjs')).toast
+      : loadUiFallback({ ...globals, CP: { ui: { toast() {
+          const node = item();
+          delete node.matches['.toast-action'];
+          node.matches['.toast-dismiss'].before = button => node.append(button);
+          root.append(node);
+          return node;
+        } } } }).uiToast;
+
+    withUiGlobals(globals, () => {
+      let calls = 0, first;
+      first = render('Removed', { actionLabel: 'Undo', onAction: () => {
+        calls += 1;
+        if (calls === 1) action(first).onclick(); // synchronous re-entry
+      } });
+      action(first).onclick();
+      action(first).onclick(); // keyboard activation while still connected
+      assert.equal(calls, 1);
+      assert.equal(first.dataset.leaving, 'true');
+      first.remove();
+      action(first).onclick();
+      assert.equal(calls, 1);
+      const alreadyLeaving = render('Other', { actionLabel: 'Undo', onAction: () => { calls += 1; } });
+      alreadyLeaving.dataset.leaving = 'true';
+      action(alreadyLeaving).onclick();
+      assert.equal(calls, 1);
+      reduced = true;
+      const last = render('Last', { actionLabel: 'Undo', onAction: () => { calls += 1; } });
+      action(last).onclick();
+      assert.equal(last.isConnected, false);
+      action(last).onclick();
+      assert.equal(calls, 2);
+    });
+  });
+}

@@ -1,21 +1,23 @@
-'use strict';
+"use strict";
 /* One-way preference and receipt migration. Not a credential store. */
 (function initCodePierBrand(window) {
   const exact = new Map([
-    ['relay-appearance', 'codepier-appearance'],
-    ['relay-chat-appearance', 'codepier-chat-appearance'],
-    ['relay-operation', 'codepier-operation'],
-    ['relay-task-submission', 'codepier-task-submission'],
+    ["relay-appearance", "codepier-appearance"],
+    ["relay-chat-appearance", "codepier-chat-appearance"],
+    ["relay-operation", "codepier-operation"],
+    ["relay-task-submission", "codepier-task-submission"],
   ]);
   function migrate(storage) {
     const result = { moved: 0, conflicts: 0, unavailable: false };
     try {
-      const keys = Array.from({ length: storage.length }, (_, i) => storage.key(i));
+      const keys = Array.from({ length: storage.length }, (_, i) =>
+        storage.key(i),
+      );
       for (const old of keys) {
         const key =
           exact.get(old) ||
           (/^relay-agent-lifecycle:[A-Za-z0-9_-]{1,100}:[a-z_]+$/.test(old)
-            ? 'codepier' + old.slice(5)
+            ? "codepier" + old.slice(5)
             : null);
         if (!key) continue;
         const value = storage.getItem(old),
@@ -37,7 +39,7 @@
     return result;
   }
   const storage = [];
-  for (const name of ['localStorage', 'sessionStorage']) {
+  for (const name of ["localStorage", "sessionStorage"]) {
     try {
       storage.push({ store: name, ...migrate(window[name]) });
     } catch {
@@ -45,9 +47,9 @@
     }
   }
   window.CodePierBrand = Object.freeze({
-    name: 'CodePier',
-    title: 'CodePier · 码头',
-    tagline: 'AI 与本地代码对接、任务停靠的地方',
+    name: "CodePier",
+    title: "CodePier · 码头",
+    tagline: "AI 与本地代码对接、任务停靠的地方",
     storageMigration: storage,
     migrateStorage: migrate,
   });

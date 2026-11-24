@@ -1,15 +1,6 @@
 {
-  "singleQuote": true,
-  "printWidth": 100,
+  "printWidth": 80,
+  "singleQuote": false,
   "endOfLine": "lf",
-  "embeddedLanguageFormatting": "off",
-  "overrides": [
-    {
-      "files": "web/core/native-contracts.mjs",
-      "options": {
-        "singleQuote": false,
-        "printWidth": 80
-      }
-    }
-  ]
+  "embeddedLanguageFormatting": "auto"
 }

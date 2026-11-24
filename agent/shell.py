@@ -120,7 +120,12 @@ def prepare_shell(config, project, spec, root, args):
 def execution_info(config, project, spec, root):
     shell = config.get("shell") or validate_shell({})
     from agent.project_runtime import build_environment, runtime_readiness, shell_command
-    from agent.ssh import ssh_transport_tools
+    from shared.vps_ssh_connection import asyncssh_available
+    from shared.vps_transport import (
+        VPS_HOST_IDENTITY_VERIFICATION,
+        VPS_SSH_PROTOCOL,
+        VPS_TRANSPORT_RUNTIME,
+    )
 
     environment = build_environment({**config, "shell": shell}, project, root)
     runtime = runtime_readiness({**config, "shell": shell}, project, root)
@@ -184,14 +189,16 @@ def execution_info(config, project, spec, root):
         },
         "ssh": {
             "tool": "ssh_exec",
+            "connection_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+            "transport_runtime": VPS_TRANSPORT_RUNTIME,
             "password_auth_available": denial is None
             and runtime["mode"] != "container_v1"
             and not project.get("_runtime_requirement")
-            and all(ssh_transport_tools(shell).values()),
-            "host_key_policy": "strict by default; explicit accept-new for a first connection",
+            and asyncssh_available(),
             "local_script_password": "For existing deployment scripts use shell_exec env.SSHPASS; chat text alone does not supply an environment variable.",
         },
-        "tool_lookup": "Configured project runtime PATH; native SSH transport uses Agent PATH overridden by shell.env.PATH",
+        "tool_lookup": "Configured project runtime PATH; VPS SSH transport uses AsyncSSH (vps_ssh_v2) without local known_hosts or sshpass",
         "credential_environment_present": {
             name: bool(environment.get(name))
             for name in ("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN", "DOCKER_HOST")

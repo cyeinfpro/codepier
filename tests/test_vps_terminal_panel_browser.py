@@ -91,17 +91,34 @@ class PanelFixture:
         self.closes = []
         self.close_state = "closed"
         self.diagnostics_requests = []
-        self.capability = {"available": True, "protocol_version": 1, "limits": {}, "saved_vps_host_verification": "skip"}
+        self.capability = {
+            "available": True,
+            "protocol_version": 1,
+            "limits": {},
+            "connection_contract": "vps_ssh_v2",
+            "host_identity_verification": "disabled",
+            "capabilities": {
+                "exec": {"supported": True, "reason_code": None},
+                "terminal": {"supported": True, "reason_code": None},
+                "probe": {"supported": True, "reason_code": None},
+            },
+        }
         self.projects = [
             {**project, "mode": "write", "allow_tasks": True, "online": True,
              "device_name": project.get("device_name", "Fixture Agent")}
             for project in stack.projects[:2 if multiple else 1]
         ]
         self.vps = {
-            "saved_vps_host_verification": "skip",
+            "connection_contract": "vps_ssh_v2",
+            "host_identity_verification": "disabled",
+            "capabilities": {
+                "exec": {"supported": True, "reason_code": None},
+                "terminal": {"supported": True, "reason_code": None},
+                "probe": {"supported": True, "reason_code": None},
+            },
             "id": uuid.uuid4().hex, "name": "终端路由测试", "host": "fixture.invalid",
             "port": 22, "username": "fixture", "enabled": True,
-            "host_key_policy": "strict", "provider": "", "region": "", "system": "Linux",
+            "provider": "", "region": "", "system": "Linux",
             "notes": "", "project_ids": [project["id"] for project in self.projects],
             "projects": self.projects,
         }
@@ -193,9 +210,30 @@ def detach_all_tabs(page):
         tabs = page.locator(".vt-tab-select")
         size = tabs.count()
         tabs.last.click()
-        page.locator(".vt-toolbar details summary").click()
-        page.get_by_role("button", name="分离标签", exact=True).click()
+        if page.viewport_size["width"] <= 700:
+            activate_terminal_more_action(page, "分离标签")
+        else:
+            page.locator(".vt-toolbar details summary").click()
+            page.get_by_role("button", name="分离标签", exact=True).click()
         expect(tabs).to_have_count(size - 1)
+
+
+def activate_terminal_more_action(page, label, *, touch=False):
+    action = "tap" if touch else "click"
+    more = page.get_by_role("button", name="更多终端操作", exact=True)
+    getattr(more, action)()
+    menu = page.get_by_role("menu", name="更多终端操作", exact=True)
+    expect(menu).to_be_visible()
+    getattr(menu.get_by_role("button", name=label, exact=True), action)()
+    expect(menu).not_to_be_visible()
+
+
+def open_terminal_diagnostics(page, *, mobile=False, touch=False):
+    if mobile:
+        activate_terminal_more_action(page, "诊断", touch=touch)
+    else:
+        action = "tap" if touch else "click"
+        getattr(page.get_by_role("button", name="诊断", exact=True), action)()
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -244,7 +282,7 @@ def test_terminal_route_preserves_dom_and_closed_tabs_do_not_reopen(stack, width
             if width <= 700:
                 assert_mobile_keys_are_unobscured(page)
             capture_evidence(page, f"terminal-panel-{engine}-{width}.png")
-            page.get_by_role("button", name="诊断", exact=True).click()
+            open_terminal_diagnostics(page, mobile=width <= 700)
             diagnostic = page.get_by_role("region", name="当前会话连接诊断", exact=True)
             expect(diagnostic.locator(".vt-diagnostics-link strong")).to_have_text(["已连接"] * 3)
             expect(diagnostic.locator(".vt-diagnostics-content > .vt-diagnostics-values dd").last).to_have_text("0 ms")
@@ -261,14 +299,21 @@ def test_terminal_route_preserves_dom_and_closed_tabs_do_not_reopen(stack, width
             tab = page.locator(f'.vt-tab[data-session-id="{identifier}"]')
             lock = tab.locator(".vt-tab-lock")
             close = tab.locator(".vt-tab-close")
-            lock.click()
+            if width <= 700:
+                activate_terminal_more_action(page, "锁定标签")
+            else:
+                lock.click()
             expect(lock).to_have_attribute("aria-pressed", "true")
             expect(close).to_be_disabled()
             tab.dispatch_event("auxclick", {"button": 1})
             dialog = page.get_by_role("alertdialog")
             expect(dialog).not_to_be_visible()
             assert not fixture.closes
-            lock.click()
+            if width <= 700:
+                activate_terminal_more_action(page, "解锁标签")
+            else:
+                lock.click()
+            expect(lock).to_have_attribute("aria-pressed", "false")
             expect(close).to_be_enabled()
             close.click()
             expect(dialog).to_contain_text(fixture.vps["name"])
@@ -311,7 +356,10 @@ def test_terminal_route_preserves_dom_and_closed_tabs_do_not_reopen(stack, width
             page.evaluate("renderPage(false)")
             expect(page.locator(".xterm")).to_have_count(0)
             # The shared Space/logout cleanup path removes all private renderers.
-            page.get_by_role("button", name="最近会话", exact=True).click()
+            if width <= 700:
+                activate_terminal_more_action(page, "最近会话")
+            else:
+                page.get_by_role("button", name="最近会话", exact=True).click()
             page.locator(".vt-recent-item").first.click()
             expect(page.locator(".xterm")).to_have_count(1)
             page.evaluate("clearSpaceSnapshots()")
@@ -350,7 +398,14 @@ def test_project_picker_survives_refresh_and_old_agents_show_an_actionable_reaso
             capture_evidence(page, f"terminal-project-upgrade-{engine}.png")
 
             # Multi-project VPS connects directly without showing a project picker.
-            fixture.capability = {"available": True, "protocol_version": 1, "limits": {}, "saved_vps_host_verification": "skip"}
+            fixture.capability = {
+                "available": True,
+                "protocol_version": 1,
+                "limits": {},
+                "connection_contract": "vps_ssh_v2",
+                "host_identity_verification": "disabled",
+                "capabilities": {"terminal": {"supported": True, "reason_code": None}},
+            }
             page.locator('[data-vps-action="terminal"]').click()
             expect(page.get_by_role("combobox", name="连接项目", exact=True)).to_have_count(0)
             expect(page.locator(".vt-state")).to_have_text("已连接")
@@ -432,7 +487,7 @@ def test_new_terminal_requires_explicit_server_selection(stack, engine):
                 f'[data-vps-action="terminal"][data-id="{original["id"]}"]'
             ).click()
             expect(page.locator(".vt-state")).to_have_text("已连接")
-            new = page.get_by_role("button", name="＋ 新建", exact=True)
+            new = page.get_by_role("button", name="新建终端会话", exact=True)
             picker = page.get_by_role("dialog", name="快速连接服务器")
             new.click()
             expect(picker).to_be_visible()
@@ -567,7 +622,7 @@ def test_terminal_mobile_toolbar_survives_height_change_and_rotation(stack, engi
             assert_mobile_keys_are_unobscured(page)
             page.evaluate("""window.touchToolbar = document.querySelector('.vt-primary-slot .vt-mobile-keys');
                              window.touchRenderer = document.querySelector('.vt-primary-slot .xterm');""")
-            page.get_by_role("button", name="诊断", exact=True).tap()
+            open_terminal_diagnostics(page, mobile=True, touch=True)
             diagnostic = page.get_by_role("region", name="当前会话连接诊断", exact=True)
             expect(diagnostic).to_be_visible()
             diagnostic.get_by_role("button", name="收起", exact=True).tap()
@@ -656,10 +711,11 @@ def test_mobile_reopens_existing_desktop_terminal_without_new_session(stack, eng
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(stack, engine):
+@pytest.mark.parametrize("width", [390, 1200])
+def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(stack, engine, width):
     with sync_playwright() as pw:
         browser = launch_browser(getattr(pw, engine))
-        page = browser.new_page(viewport={"width": 390, "height": 820}, has_touch=True)
+        page = browser.new_page(viewport={"width": width, "height": 820}, has_touch=width <= 700)
         fixture = PanelFixture(page, stack)
         identifier = uuid.uuid4().hex
         fixture.sessions[identifier] = {
@@ -699,12 +755,14 @@ def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(sta
             assert fixture.creates == []
             assert page.evaluate("terminalFixtureSockets.map(socket => socket.id)") == [identifier]
 
-            retry.tap()
+            if width <= 700:
+                retry.tap()
+                recovery_notice = "已接续实时输出 · 断线期间历史已跳过"
+            else:
+                retry.click()
+                recovery_notice = "已继续原 SSH，会话未重建。旧画面和历史输出无法恢复，只显示之后的新输出。"
             expect(page.locator(".vt-state")).to_have_text("已连接")
-            expect(page.get_by_text(
-                "已继续原 SSH，会话未重建。旧画面和历史输出无法恢复，只显示之后的新输出。",
-                exact=True,
-            )).to_be_visible()
+            expect(page.get_by_role("tabpanel").get_by_text(recovery_notice, exact=True)).to_be_visible()
             assert len(requests) == 2
             assert requests[1]["resume_from_live"] is True
             assert requests[0]["renderer_id"] == requests[1]["renderer_id"]
@@ -715,9 +773,18 @@ def test_history_gap_requires_explicit_live_tail_for_the_same_direct_session(sta
 
             # Observe the actual real xterm output after the accepted baseline.
             # The mock fails immediately on binary client input.
-            page.locator(".vt-settings > summary").click()
-            page.get_by_role("checkbox", name="屏幕阅读器模式").check()
-            page.locator(".vt-settings > summary").click()
+            if width <= 700:
+                more = page.get_by_role("button", name="更多终端操作", exact=True)
+                more.tap()
+                menu = page.get_by_role("menu", name="更多终端操作", exact=True)
+                expect(menu).to_be_visible()
+                menu.get_by_role("checkbox", name="屏幕阅读器模式").check()
+                more.tap()
+                expect(menu).not_to_be_visible()
+            else:
+                page.locator(".vt-settings > summary").click()
+                page.get_by_role("checkbox", name="屏幕阅读器模式").check()
+                page.locator(".vt-settings > summary").click()
             for cursor, value in ((0, b"old-fixture-history"), (555, b"fresh-fixture-output\r\n")):
                 frame = TerminalFrame(FrameKind.OUTPUT, identifier, "a" * 32, 1, 1, cursor, value)
                 page.evaluate(

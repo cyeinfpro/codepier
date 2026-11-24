@@ -16,7 +16,8 @@ test("only a focused terminal editor allows compact keyboard mode", () => {
   const smaller = { ...phone, visualViewport: { height: 620 } };
   assert.equal(computeTerminalViewport(smaller, baseline).keyboardOpen, false);
   assert.equal(
-    computeTerminalViewport({ ...smaller, editableFocused: true }, baseline).keyboardOpen,
+    computeTerminalViewport({ ...smaller, editableFocused: true }, baseline)
+      .keyboardOpen,
     true,
   );
 });
@@ -33,7 +34,10 @@ test("Android resizes both viewports; baseline and hysteresis still classify the
   assert.equal(opened.keyboardOpen, true);
   assert.equal(computeTerminalViewport(frame(720), opened).keyboardOpen, true);
   assert.equal(computeTerminalViewport(frame(759), opened).keyboardOpen, false);
-  assert.equal(computeTerminalViewport(frame(650, false), opened).keyboardOpen, false);
+  assert.equal(
+    computeTerminalViewport(frame(650, false), opened).keyboardOpen,
+    false,
+  );
 });
 
 test("rotation resets portrait baseline; shallow landscape keyboard still detected", () => {
@@ -49,21 +53,27 @@ test("rotation resets portrait baseline; shallow landscape keyboard still detect
   const turned = computeTerminalViewport(landscape, baseline);
   assert.equal(turned.keyboardOpen, false);
   assert.equal(
-    computeTerminalViewport({
-      ...landscape,
-      visualViewport: { ...landscape.visualViewport, height: 300 },
-    }, turned).keyboardOpen,
+    computeTerminalViewport(
+      {
+        ...landscape,
+        visualViewport: { ...landscape.visualViewport, height: 300 },
+      },
+      turned,
+    ).keyboardOpen,
     true,
   );
 });
 
 test("pinch zoom does not shrink an already measured PTY viewport or fake an IME", () => {
   const baseline = computeTerminalViewport(phone);
-  const zoomed = computeTerminalViewport({
-    ...phone,
-    visualViewport: { height: 400, width: 220, scale: 1.7, offsetTop: 52 },
-    editableFocused: true,
-  }, baseline);
+  const zoomed = computeTerminalViewport(
+    {
+      ...phone,
+      visualViewport: { height: 400, width: 220, scale: 1.7, offsetTop: 52 },
+      editableFocused: true,
+    },
+    baseline,
+  );
   assert.equal(zoomed.zoomed, true);
   assert.equal(zoomed.availableHeight, baseline.availableHeight);
   assert.equal(zoomed.keyboardOpen, false);
@@ -76,11 +86,18 @@ test("panned visible rectangle and actual dock intersection determine usable hei
     dockRect: { left: 0, right: 390, top: 542, bottom: 575 },
   };
   assert.equal(computeTerminalViewport(input).availableHeight, 430);
-  assert.equal(computeTerminalViewport({ ...input, expanded: true, gap: 0 }).availableHeight, 480);
-  assert.equal(computeTerminalViewport({
-    ...input,
-    dockRect: { left: 0, right: 12, top: 542, bottom: 575 },
-  }).availableHeight, 468);
+  assert.equal(
+    computeTerminalViewport({ ...input, expanded: true, gap: 0 })
+      .availableHeight,
+    480,
+  );
+  assert.equal(
+    computeTerminalViewport({
+      ...input,
+      dockRect: { left: 0, right: 12, top: 542, bottom: 575 },
+    }).availableHeight,
+    468,
+  );
 });
 
 test("a dock outside the visible frame and a workspace below the keyboard never yield negative size", () => {
@@ -91,5 +108,43 @@ test("a dock outside the visible frame and a workspace below the keyboard never 
     dockRect: { left: 0, right: 390, top: 725, bottom: 780 },
   };
   assert.equal(computeTerminalViewport(input).availableHeight, 0);
-  assert.equal(computeTerminalViewport({ ...phone, visualViewport: null }).availableHeight, 728);
+  assert.equal(
+    computeTerminalViewport({ ...phone, visualViewport: null }).availableHeight,
+    728,
+  );
+});
+
+test("MOB-16 suppresses sub-line Safari address-bar jitter while flagging >= 80px keyboard transitions", () => {
+  const baseline = computeTerminalViewport({
+    ...phone,
+    keyboardEligible: true,
+    editableFocused: false,
+  });
+  assert.equal(baseline.availableHeight, 728);
+  assert.equal(baseline.keyboardTransition, false);
+
+  const subtleBarShift = computeTerminalViewport(
+    {
+      ...phone,
+      keyboardEligible: true,
+      editableFocused: false,
+      visualViewport: { height: 770, width: 390, scale: 1 },
+    },
+    baseline,
+  );
+  assert.equal(subtleBarShift.availableHeight, 728);
+  assert.equal(subtleBarShift.keyboardTransition, false);
+
+  const keyboardOpened = computeTerminalViewport(
+    {
+      ...phone,
+      keyboardEligible: true,
+      editableFocused: true,
+      visualViewport: { height: 460, width: 390, scale: 1 },
+    },
+    subtleBarShift,
+  );
+  assert.equal(keyboardOpened.keyboardOpen, true);
+  assert.equal(keyboardOpened.keyboardTransition, true);
+  assert.equal(keyboardOpened.availableHeight, 408);
 });

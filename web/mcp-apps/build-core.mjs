@@ -1,13 +1,13 @@
-import { build } from 'esbuild';
+import { build } from "esbuild";
 await build({
-  entryPoints: ['../core/index.mjs'],
+  entryPoints: ["../core/index.mjs"],
   bundle: true,
-  format: 'iife',
-  globalName: 'CP',
-  platform: 'browser',
-  target: 'es2022',
+  format: "iife",
+  globalName: "CP",
+  platform: "browser",
+  target: "es2022",
   minifyWhitespace: true,
   minifySyntax: true,
-  legalComments: 'eof',
-  outfile: '../core/bundle.js',
+  legalComments: "eof",
+  outfile: "../core/bundle.js",
 });

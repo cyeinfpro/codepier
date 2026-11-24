@@ -12,8 +12,12 @@ import time
 import uuid
 
 from shared.instance_lock import InstanceLock
-from shared.ssh_host_pin import CONFIRM_CHANGE, validate_optional_host_pin
 from shared.ssh_terminal_config import DEFAULT_CONFIG
+from shared.vps_transport import (
+    VPS_HOST_IDENTITY_VERIFICATION,
+    VPS_SSH_PROTOCOL,
+    agent_vps_ssh_capability,
+)
 from shared.ssh_terminal_flow import (
     ByteRingBuffer,
     HistoryGap,
@@ -24,7 +28,7 @@ from shared.ssh_terminal_protocol import PROTOCOL_VERSION, FrameKind, TerminalPr
 from shared.util import VERSION
 
 from .ssh_terminal_transport import AsyncSSHTransport, SSHTransportError, available, classify_error
-from .ssh_terminal_tmux import TmuxController, TmuxReference
+from .ssh_terminal_tmux import TmuxController, TmuxReference, trim_utf8_scrollback
 
 
 _DIAGNOSTIC_LIMIT = (1 << 31) - 1
@@ -238,11 +242,19 @@ class TerminalSessionManager:
         return {
             "protocol": 1 if enabled else 0,
             "engine": "asyncssh",
+            "connection_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
             "runtime_generation": self.generation,
             "pty": enabled,
             "binary_io": enabled,
             "flow_control": enabled,
             "tmux_probe": enabled,
+            "vps_ssh": agent_vps_ssh_capability(
+                available=enabled,
+                exec_supported=True,
+                terminal_supported=enabled,
+                probe_supported=enabled,
+            ),
         }
 
     def maintenance_busy(self):
@@ -608,23 +620,9 @@ class TerminalSessionManager:
             "host": host,
             "port": _integer(payload.get("port", 22), "port", 1, 65535),
             "username": username,
-            **self._host_trust_target(payload),
+            "connection_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
         }, timeout
-
-    def _host_trust_target(self, payload):
-        if payload.get("saved_vps_password_only") is True:
-            return {"saved_vps_password_only": True}
-        policy = payload.get("host_key_policy", "strict")
-        if policy not in {"strict", "accept-new", CONFIRM_CHANGE}:
-            raise TerminalProtocolError("INVALID_ARGUMENT", "未知主机密钥政策")
-        return {"host_key_policy": policy, "host_key_fingerprint": self._host_pin(policy, payload)}
-
-    @staticmethod
-    def _host_pin(policy, payload):
-        try:
-            return validate_optional_host_pin(policy, payload.get("host_key_fingerprint", ""))
-        except ValueError as exc:
-            raise TerminalProtocolError("INVALID_ARGUMENT", str(exc)) from None
 
     @staticmethod
     def _redact_secret(text, secret):
@@ -866,10 +864,9 @@ class TerminalSessionManager:
 
     @staticmethod
     def _apply_saved_vps_transport_mode(session, payload):
-        # Recovery/close may authorize an existing session without changing
-        # saved VPS trust settings or affecting its attached SSH connection.
-        if payload.get("saved_vps_password_only") is True:
-            session.target["saved_vps_password_only"] = True
+        del payload
+        session.target["connection_contract"] = VPS_SSH_PROTOCOL
+        session.target["host_identity_verification"] = VPS_HOST_IDENTITY_VERIFICATION
 
     def _needs_recovery(self, session):
         if session.mode != "tmux":
@@ -1061,7 +1058,8 @@ class TerminalSessionManager:
             "host": host,
             "port": _integer(payload.get("port", 22), "port", 1, 65535),
             "username": username,
-            **self._host_trust_target(payload),
+            "connection_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
             "cols": cols,
             "rows": rows,
         }
@@ -1388,8 +1386,7 @@ class TerminalSessionManager:
         # recovered scrollback. Do not read or replay any older bytes.
         return session.ring.end_offset, "live_tail"
 
-    async def _redraw_attachment(self, session, lifecycle):
-        await session.tmux.recover()
+    def _ensure_redraw_active(self, session, lifecycle):
         self._check_maintenance()
         if (
             lifecycle != session.lifecycle_revision
@@ -1398,8 +1395,29 @@ class TerminalSessionManager:
             or self.clock() >= session.lease_until
         ):
             raise TerminalProtocolError("AUTH_REVOKED", "重绘期间终端授权已失效")
+
+    async def _capture_redraw_scrollback(self, session):
+        capture = getattr(session.tmux, "capture_scrollback", None)
+        if not callable(capture):
+            return b""
+        budget = min(131072, max(0, self.config.ring_bytes // 2))
+        if budget < 64:
+            return b""
+        raw = await capture(lines=200, max_bytes=budget)
+        if not raw or not raw.strip(b"\r\n"):
+            return b""
+        normalized = raw.replace(b"\r\n", b"\n").rstrip(b"\n").replace(b"\n", b"\r\n") + b"\r\n"
+        return trim_utf8_scrollback(normalized, budget) if len(normalized) > budget else normalized
+
+    async def _redraw_attachment(self, session, lifecycle):
+        await session.tmux.recover()
+        self._ensure_redraw_active(session, lifecycle)
+        scrollback = await self._capture_redraw_scrollback(session)
+        self._ensure_redraw_active(session, lifecycle)
         session.stream_epoch += 1
         session.ring = ByteRingBuffer(self.config.ring_bytes)
+        if scrollback:
+            session.ring.append(scrollback)
         session.ended, session.exit_sent = None, False
         await self._open_channel(session)
 

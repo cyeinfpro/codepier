@@ -36,7 +36,7 @@
 }
 #role-form select,
 #role-form textarea,
-#role-form input:not([type='checkbox']) {
+#role-form input:not([type="checkbox"]) {
   width: 100%;
   max-width: 100%;
 }

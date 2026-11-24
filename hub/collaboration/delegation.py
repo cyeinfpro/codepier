@@ -25,6 +25,33 @@ from shared import collaboration_contracts as contracts
 from shared.util import DevError
 
 
+def effective_target_projection(snapshot):
+    """Project only active target identity/endpoint fields, ignoring retired host-trust keys.
+
+    Preserves target, id, binding_id, connection_revision, host, port, and username
+    while ignoring legacy host_key_policy / host_key_fingerprint in historical snapshots.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    if snapshot.get("target") == "project_agent":
+        return snapshot
+    if not str(snapshot.get("target") or "").startswith("vps:"):
+        return snapshot
+    reference = snapshot.get("reference") or {}
+    endpoint = snapshot.get("endpoint") or {}
+    return {
+        "target": snapshot.get("target"),
+        "reference": {
+            key: reference.get(key)
+            for key in ("id", "binding_id", "connection_revision")
+        },
+        "endpoint": {
+            key: endpoint.get(key)
+            for key in ("host", "port", "username")
+        },
+    }
+
+
 def migrate(db):
     db.execute("""CREATE TABLE IF NOT EXISTS delegation_policies (
         id TEXT PRIMARY KEY,room_id TEXT NOT NULL REFERENCES collaboration_rooms(id),
@@ -83,16 +110,10 @@ class DelegationService:
         if reference["id"] != identifier:
             raise DevError("VPS_ID_REQUIRED", "委托必须选择保存的 VPS 精确 ID", 422)
         row = self.runtime.vps.get(identifier, principal)
-        if row["host_key_policy"] != "strict":
-            raise DevError(
-                "DELEGATION_HOST_KEY_REQUIRED",
-                "自动委托只支持 strict 主机校验；首次连接需先核对主机身份",
-                409,
-            )
         return {
             "target": target,
             "reference": reference,
-            "endpoint": {key: row[key] for key in ("host", "port", "username", "host_key_policy")},
+            "endpoint": {key: row[key] for key in ("host", "port", "username")},
         }
 
     def authorize_policy(self, principal, room, policy, *, active=True):
@@ -131,7 +152,9 @@ class DelegationService:
             for capability in spec["capabilities"]:
                 self.c.coordination.require_capability(subject, capability, project["id"])
         for target in spec["execution_targets"]:
-            if self.target_snapshot(owner, project, target) != spec["target_snapshots"][target]:
+            if effective_target_projection(
+                self.target_snapshot(owner, project, target)
+            ) != effective_target_projection(spec["target_snapshots"][target]):
                 raise DevError(
                     "DELEGATION_TARGET_CHANGED",
                     "原执行目标或 VPS 分配/连接已改变，请重新审阅委托",
@@ -531,7 +554,7 @@ class DelegationService:
         """Exact project-bound choices; discovery never edits an existing policy."""
         project = self.runtime.project(room["project_id"], principal)
         rows = self.store.all(
-            """SELECT v.id,v.name,v.enabled,v.host_key_policy
+            """SELECT v.id,v.name,v.enabled
             FROM vps_connections v JOIN vps_projects p ON p.vps_id=v.id
             WHERE p.project_id=? AND v.space_id=? ORDER BY v.name_key,v.id""",
             (project["id"], principal.space_id),
@@ -549,12 +572,8 @@ class DelegationService:
                 "id": "vps:" + row["id"],
                 "label": "VPS · " + row["name"],
                 "project_id": project["id"],
-                "available": bool(row["enabled"]) and row["host_key_policy"] == "strict",
-                "reason_code": "VPS_DISABLED"
-                if not row["enabled"]
-                else "DELEGATION_HOST_KEY_REQUIRED"
-                if row["host_key_policy"] != "strict"
-                else "",
+                "available": bool(row["enabled"]),
+                "reason_code": "VPS_DISABLED" if not row["enabled"] else "",
             }
             for row in rows
         ]

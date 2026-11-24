@@ -19,10 +19,22 @@ from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator, model_validator
 
 from shared.contracts import Args, SSHExec, VPSList
-from shared.ssh_host_pin import CONFIRM_CHANGE, normalize_host_pin
 from shared.ssh_terminal_protocol import TerminalProtocolError
 from shared.util import DevError
+from shared.vps_transport import (
+    VPS_HOST_IDENTITY_VERIFICATION,
+    VPS_SSH_PROTOCOL,
+    decode_legacy_ssh_request,
+    normalize_legacy_policy_ignored,
+)
 from hub import iam
+from hub.vps_connection import (
+    build_resolved_target,
+    compute_vps_capabilities,
+    hub_native_readiness_capability,
+    resolve_vps_connection_plan,
+    supports_vps_ssh_v2,
+)
 from hub.vps_readiness import HOST_VERIFICATION_SKIP
 
 _PUBLIC_PROJECT_KEYS = ("id", "alias", "device_id", "device_name", "mode", "allow_tasks")
@@ -67,8 +79,8 @@ class VPSInput(Args):
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(default="root", min_length=1, max_length=128)
     password: str | None = Field(default=None, min_length=1, max_length=4096, repr=False)
-    host_key_policy: str = Field(default="strict", pattern=r"^(strict|accept-new|confirm-change)$")
-    host_key_fingerprint: str = Field(default="", max_length=80)
+    host_key_policy: str | None = Field(default=None, max_length=64)
+    host_key_fingerprint: str | None = Field(default=None, max_length=256)
     provider: str = Field(default="", max_length=120)
     region: str = Field(default="", max_length=120)
     system: str = Field(default="", max_length=160)
@@ -83,11 +95,13 @@ class VPSInput(Args):
         self.host = canonical_host(self.host)
         if not self.name or any(ord(c) < 32 for c in self.name):
             raise ValueError("VPS 名称不能为空或含控制字符")
-        if self.host_key_policy == CONFIRM_CHANGE:
-            self.host_key_fingerprint = normalize_host_pin(self.host_key_fingerprint)
-        elif self.host_key_fingerprint:
-            raise ValueError("只有指纹变化时确认模式可保存控制台核验的指纹")
+        if (self.host_key_policy and "\x00" in self.host_key_policy) or (
+            self.host_key_fingerprint and "\x00" in self.host_key_fingerprint
+        ):
+            raise ValueError("历史主机信任字段不能包含控制字符")
         # Reuse the transport's host/user/password validation; never echo inputs.
+        # Legacy host_key_policy / host_key_fingerprint are accepted for backwards
+        # compatibility and ignored at runtime.
         SSHExec(
             project="validation",
             host=self.host,
@@ -95,9 +109,6 @@ class VPSInput(Args):
             username=self.username,
             password=self.password or "validation-only",
             command="true",
-            host_key_policy="strict"
-            if self.host_key_policy == CONFIRM_CHANGE
-            else self.host_key_policy,
             idempotency_key="validation-only",
         )
         if len(set(self.project_ids)) != len(self.project_ids):
@@ -151,16 +162,12 @@ def _member_actions(principal, perms, project_id):
     return set(perms.get(project_id, ())) & set(principal.scopes)
 
 
-def _saved_vps_password_supported(agent):
-    return bool(
-        agent is not None
-        and not agent.closed
-        and getattr(agent, "saved_vps_password_only_supported", False) is True
-    )
+def _vps_terminal_v2_supported(agent):
+    return supports_vps_ssh_v2(agent, "terminal")
 
 
 def _agent_probe_ready(agent, project):
-    if not _saved_vps_password_supported(agent) or not getattr(agent, "probe_supported", False):
+    if not supports_vps_ssh_v2(agent, "probe"):
         return False
     if project.get("_direct_vps") is True:
         return bool(
@@ -277,7 +284,7 @@ class VPSService:
         best = min(
             eligible_projects,
             key=lambda p: (
-                not _saved_vps_password_supported(terminal_service.agents.get(p["device_id"])),
+                not _vps_terminal_v2_supported(terminal_service.agents.get(p["device_id"])),
                 -terminal_service._candidate_tier(p["device_id"], counts.get(p["device_id"], 0)),
                 counts.get(p["device_id"], 0),
                 p["id"],
@@ -296,11 +303,22 @@ class VPSService:
         )
 
     def public(self, row, visible_ids=None, *, principal=None):
-        result = {key: row[key] for key in PUBLIC_FIELDS}
+        result = {
+            key: row[key]
+            for key in PUBLIC_FIELDS
+            if key not in {"host_key_policy", "host_key_fingerprint"}
+        }
         result["enabled"] = bool(result["enabled"])
         result["has_password"] = True
+        result["credential_available"] = True
         result["target"] = "vps:" + row["id"]
-        result["saved_vps_host_verification"] = HOST_VERIFICATION_SKIP
+        result["connection_contract"] = VPS_SSH_PROTOCOL
+        result["host_identity_verification"] = VPS_HOST_IDENTITY_VERIFICATION
+        if row.get("host_key_policy") or row.get("host_key_fingerprint"):
+            result["legacy_host_trust"] = normalize_legacy_policy_ignored(
+                row.get("host_key_policy"),
+                row.get("host_key_fingerprint"),
+            )
         readiness = getattr(self.runtime, "vps_readiness", None)
         result.update(
             readiness.summary(principal, row["id"], result["enabled"])
@@ -333,10 +351,22 @@ class VPSService:
             result["terminal"] = self._admin_terminal_summary(
                 row, enriched, principal, terminal_service
             )
+            eligible_exec = [
+                p
+                for p in enriched
+                if p["device_enabled"] and p["mode"] == "write" and p["allow_tasks"]
+            ]
         else:
             result["terminal"] = self._member_terminal_summary(
                 row, visible_enriched, principal, terminal_service
             )
+            eligible_exec = self._member_eligible_projects(visible_enriched, principal)
+        result["capabilities"] = compute_vps_capabilities(
+            self.runtime,
+            result,
+            eligible_exec_projects=eligible_exec,
+            terminal_summary=result["terminal"],
+        )
         return result
 
     def get(self, identifier, principal):
@@ -465,11 +495,27 @@ class VPSService:
                     else old["secret"]
                 )
                 version = old["version"] + 1 if old else 1
-                if old and not {"host_key_policy", "host_key_fingerprint"} & body.model_fields_set:
-                    # New panel clients omit these legacy settings. Metadata
-                    # for separately verified tooling never changes implicitly.
-                    data["host_key_policy"] = old["host_key_policy"]
-                    data["host_key_fingerprint"] = old["host_key_fingerprint"]
+                if old:
+                    stored_policy = (
+                        data["host_key_policy"]
+                        if "host_key_policy" in body.model_fields_set
+                        and data["host_key_policy"] is not None
+                        else old["host_key_policy"]
+                    )
+                    stored_fingerprint = (
+                        data["host_key_fingerprint"]
+                        if "host_key_fingerprint" in body.model_fields_set
+                        and data["host_key_fingerprint"] is not None
+                        else old["host_key_fingerprint"]
+                    )
+                else:
+                    stored_policy = (
+                        data["host_key_policy"]
+                        if data["host_key_policy"] is not None
+                        else VPS_HOST_IDENTITY_VERIFICATION
+                    )
+                    stored_fingerprint = data["host_key_fingerprint"] or ""
+                # Retired host-trust columns never affect connection_revision.
                 connection_changed = old and (
                     body.password is not None
                     or any(
@@ -478,8 +524,6 @@ class VPSService:
                             "host",
                             "port",
                             "username",
-                            "host_key_policy",
-                            "host_key_fingerprint",
                             "enabled",
                         )
                     )
@@ -492,8 +536,8 @@ class VPSService:
                     body.port,
                     body.username,
                     secret,
-                    data["host_key_policy"],
-                    data["host_key_fingerprint"],
+                    stored_policy,
+                    stored_fingerprint,
                     body.provider,
                     body.region,
                     body.system,
@@ -718,12 +762,21 @@ class VPSService:
         self, identifier, agent, project, target, password, timeout_seconds, principal
     ):
         timeout = min(60, max(5, int(timeout_seconds)))
+        source = "direct" if str(target.get("binding_id", "")).startswith("direct:") else "project_bound"
+        resolved = build_resolved_target(
+            target,
+            source=source,
+            project_id=project.get("id") or None,
+            binding_id=target.get("binding_id"),
+        )
         payload = {
-            "host": target["host"],
-            "port": target["port"],
-            "username": target["username"],
+            "host": resolved.host,
+            "port": resolved.port,
+            "username": resolved.username,
             "password": password,
-            "saved_vps_password_only": True,
+            "transport_contract": VPS_SSH_PROTOCOL,
+            "host_identity_verification": VPS_HOST_IDENTITY_VERIFICATION,
+            "vps_target": resolved.model_dump(),
             "timeout_seconds": timeout,
         }
         try:
@@ -772,8 +825,8 @@ class VPSService:
             )
         if (agent is not None and not agent.closed) or self.runtime.online(project["device_id"]):
             raise DevError(
-                "AGENT_UPGRADE_REQUIRED",
-                "当前节点不支持保存的 VPS 登录，请升级 Agent 后重试",
+                "VPS_TRANSPORT_UPGRADE_REQUIRED",
+                "当前节点缺少 vps_ssh_v2 连接探测能力，请升级 Agent 后重试",
                 409,
             )
         raise DevError("AGENT_OFFLINE", "关联节点当前离线，无法执行连接检查", 409)
@@ -788,7 +841,7 @@ class VPSService:
             if not terminal_service._current_terminal_agent(
                 project["device_id"], agent
             ) or not _agent_probe_ready(agent, project):
-                raise DevError("AGENT_UPGRADE_REQUIRED", "连接节点已变化，请重新检查", 409)
+                raise DevError("VPS_TRANSPORT_UPGRADE_REQUIRED", "连接节点已变化，请重新检查", 409)
             return await self._run_probe_check(
                 identifier, agent, project, target, password, body.timeout_seconds, principal
             )
@@ -822,14 +875,17 @@ class VPSService:
             return exc.message
         return None
 
-    def transport(self, request, project_id):
+    def transport(self, request, project_id, *, agent=None):
+        plan = resolve_vps_connection_plan(
+            self,
+            request=request,
+            source="project_bound",
+            project_id=project_id,
+            agent=agent,
+            operation="exec" if agent is not None else None,
+            device_online=agent is not None,
+        )
         row = self._authorized_row(request, project_id, credential=True)
-        if row["host_key_policy"] == CONFIRM_CHANGE:
-            raise DevError(
-                "SSH_HOST_PIN_REQUIRES_WEB_TERMINAL",
-                "此 VPS 使用控制台核验指纹，请使用 Web SSH 或面板连接检查",
-                409,
-            )
         try:
             password = self.store.decrypt(row["secret"])
         except Exception as exc:
@@ -838,27 +894,31 @@ class VPSService:
                 "VPS 凭据无法解密，请检查 Hub 数据库与 master.key 是否配套",
                 409,
             ) from exc
-        args = request["args"]
+        args = decode_legacy_ssh_request(request["args"])
         command = SSHExec(
             project=args["project"],
-            host=row["host"],
-            port=row["port"],
-            username=row["username"],
+            host=plan.target.host,
+            port=plan.target.port,
+            username=plan.target.username,
             password=password,
             command=args["command"],
-            host_key_policy=row["host_key_policy"],
             timeout_seconds=args["timeout_seconds"],
             idempotency_key=args["idempotency_key"],
         )
         envelope = {k: v for k, v in request.items() if k != "vps_ref"}
-        return {**envelope, "core_ssh": command.model_dump()}
+        return {
+            **envelope,
+            "vps_target": plan.target.model_dump(),
+            "vps_transport": plan.target.transport.model_dump(),
+            "core_ssh": command.model_dump(),
+        }
 
 
 def _add_readiness_routes(router, auth, runtime):
     @router.post("/api/vps/readiness/backfill")
     async def backfill_readiness(request: Request):
         principal = await runtime.store.run(auth.panel, request, True)
-        return await runtime.vps_readiness.activate_space(principal)
+        return await runtime.vps_readiness.activate_space(principal, HOST_VERIFICATION_SKIP)
 
     @router.post("/api/vps/readiness/scan")
     async def scan_readiness(request: Request):
@@ -898,7 +958,9 @@ def make_vps_router(auth, runtime):
         args = VPSList(project=project, query=query, offset=offset, limit=limit).model_dump()
         result = service.list(args, principal)
         result.update(runtime.vps_readiness.fleet_summary(principal))
-        result["saved_vps_host_verification"] = HOST_VERIFICATION_SKIP
+        result["connection_contract"] = VPS_SSH_PROTOCOL
+        result["host_identity_verification"] = VPS_HOST_IDENTITY_VERIFICATION
+        result["hub_native_vps_ssh"] = hub_native_readiness_capability(runtime)
         return result
 
     @router.post("/api/vps")

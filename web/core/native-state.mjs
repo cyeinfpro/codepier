@@ -3,35 +3,42 @@ import {
   assertSafeNonNegativeInt,
   decodeSnapshot,
   isVerifiedBatch,
-} from './native-contracts.mjs';
+} from "./native-contracts.mjs";
 
-const COMPACT_KINDS = new Set(['tool', 'reasoning']);
-const DONE_STATUSES = new Set(['completed', 'end', 'succeeded', 'ok']);
-const ACTIVE_STATUSES = new Set(['running', 'streaming', 'start', 'pending', 'in_progress']);
+const COMPACT_KINDS = new Set(["tool", "reasoning"]);
+const DONE_STATUSES = new Set(["completed", "end", "succeeded", "ok"]);
+const ACTIVE_STATUSES = new Set([
+  "running",
+  "streaming",
+  "start",
+  "pending",
+  "in_progress",
+]);
 const DEFAULT_LEDGER_MAX_COUNT = 128;
 const DEFAULT_LEDGER_MAX_BYTES = 64 * 1024;
 const TEXT_ENCODER = new TextEncoder();
 
 export const CHANGE_REASONS = Object.freeze([
-  'text',
-  'status',
-  'insert',
-  'remove',
-  'group_boundary',
-  'height',
-  'control',
+  "text",
+  "status",
+  "insert",
+  "remove",
+  "group_boundary",
+  "height",
+  "control",
 ]);
 
 function utf8ByteLength(text) {
-  return TEXT_ENCODER.encode(String(text ?? '')).length;
+  return TEXT_ENCODER.encode(String(text ?? "")).length;
 }
 
 function cloneItem(item) {
   return {
     ...item,
-    data: item.data && typeof item.data === 'object' ? { ...item.data } : undefined,
+    data:
+      item.data && typeof item.data === "object" ? { ...item.data } : undefined,
     body_ref:
-      item.body_ref && typeof item.body_ref === 'object'
+      item.body_ref && typeof item.body_ref === "object"
         ? { ...item.body_ref }
         : (item.body_ref ?? null),
   };
@@ -74,23 +81,25 @@ function insertOrderKey(order, items, key, item) {
 function isProcessFailure(item) {
   const status = item?.status ?? item?.data?.status;
   return (
-    status === 'error' ||
-    status === 'failed' ||
+    status === "error" ||
+    status === "failed" ||
     item?.is_error === true ||
     item?.data?.is_error === true
   );
 }
 
 function isCompactProcessItem(item) {
-  return Boolean(item && COMPACT_KINDS.has(item.kind) && !isProcessFailure(item));
+  return Boolean(
+    item && COMPACT_KINDS.has(item.kind) && !isProcessFailure(item),
+  );
 }
 
 function itemReceipt(item) {
-  return item?.receipt ?? item?.data?.receipt ?? '';
+  return item?.receipt ?? item?.data?.receipt ?? "";
 }
 
 function itemStatus(item) {
-  return item?.status ?? item?.data?.status ?? '';
+  return item?.status ?? item?.data?.status ?? "";
 }
 
 function addReason(reasonsMap, key, reason) {
@@ -110,7 +119,12 @@ function ledgerBytes(ledger) {
   return total;
 }
 
-export function rememberVerifiedBatch(recentBatches, interval, entry, limits = {}) {
+export function rememberVerifiedBatch(
+  recentBatches,
+  interval,
+  entry,
+  limits = {},
+) {
   const maxCount = limits.maxCount ?? DEFAULT_LEDGER_MAX_COUNT;
   const maxBytes = limits.maxBytes ?? DEFAULT_LEDGER_MAX_BYTES;
   const next = new Map(recentBatches);
@@ -118,8 +132,8 @@ export function rememberVerifiedBatch(recentBatches, interval, entry, limits = {
   const bytes = utf8ByteLength(JSON.stringify(entry));
   next.set(interval, {
     digest: String(entry.digest),
-    fromCursor: assertSafeNonNegativeInt(entry.fromCursor, 'fromCursor'),
-    toCursor: assertSafeNonNegativeInt(entry.toCursor, 'toCursor'),
+    fromCursor: assertSafeNonNegativeInt(entry.fromCursor, "fromCursor"),
+    toCursor: assertSafeNonNegativeInt(entry.toCursor, "toCursor"),
     bytes,
   });
   let totalBytes = ledgerBytes(next);
@@ -131,7 +145,11 @@ export function rememberVerifiedBatch(recentBatches, interval, entry, limits = {
   return next;
 }
 
-export function reconcileProcessGroups(items, order, existingGroups = new Map()) {
+export function reconcileProcessGroups(
+  items,
+  order,
+  existingGroups = new Map(),
+) {
   const groups = new Map();
   let current = null;
   for (const key of order) {
@@ -155,7 +173,7 @@ export function reconcileProcessGroups(items, order, existingGroups = new Map())
       groups.set(key, current);
     }
     current.itemKeys.push(key);
-    if (item.kind === 'tool') current.toolsCount += 1;
+    if (item.kind === "tool") current.toolsCount += 1;
     else current.thoughtsCount += 1;
     if (!DONE_STATUSES.has(itemStatus(item))) {
       current.live = true;
@@ -195,14 +213,14 @@ export function reconcileProcessGroups(items, order, existingGroups = new Map())
 }
 
 export function createInitialNativeState(identity) {
-  if (!identity || typeof identity !== 'object') {
-    throw new TypeError('identity must be an object');
+  if (!identity || typeof identity !== "object") {
+    throw new TypeError("identity must be an object");
   }
-  if (typeof identity.scopeKey !== 'string' || !identity.scopeKey) {
-    throw new TypeError('identity.scopeKey must be a non-empty string');
+  if (typeof identity.scopeKey !== "string" || !identity.scopeKey) {
+    throw new TypeError("identity.scopeKey must be a non-empty string");
   }
-  const sessionId = assertHex32(identity.sessionId, 'identity.sessionId');
-  const streamEpoch = identity.streamEpoch ? String(identity.streamEpoch) : '';
+  const sessionId = assertHex32(identity.sessionId, "identity.sessionId");
+  const streamEpoch = identity.streamEpoch ? String(identity.streamEpoch) : "";
   return {
     scopeKey: identity.scopeKey,
     sessionId,
@@ -240,11 +258,17 @@ export function createInitialNativeState(identity) {
 
 function normalizeSnapshotItem(rawItem) {
   const key = rawItem.item_key ?? rawItem.key;
-  if (typeof key !== 'string' || !key) {
-    throw new TypeError('Snapshot item missing item_key');
+  if (typeof key !== "string" || !key) {
+    throw new TypeError("Snapshot item missing item_key");
   }
-  const firstCursor = assertSafeNonNegativeInt(rawItem.first_cursor, 'item.first_cursor');
-  const itemRevision = assertSafeNonNegativeInt(rawItem.item_revision, 'item.item_revision');
+  const firstCursor = assertSafeNonNegativeInt(
+    rawItem.first_cursor,
+    "item.first_cursor",
+  );
+  const itemRevision = assertSafeNonNegativeInt(
+    rawItem.item_revision,
+    "item.item_revision",
+  );
   const item = cloneItem(rawItem);
   item.key = key;
   item.item_key = key;
@@ -259,17 +283,17 @@ function normalizeSnapshotItem(rawItem) {
 }
 
 export function installNativeSnapshot(rawSnapshot, identity) {
-  if (!identity || typeof identity !== 'object') {
-    throw new TypeError('identity must be an object');
+  if (!identity || typeof identity !== "object") {
+    throw new TypeError("identity must be an object");
   }
   const scopeKey = identity.scopeKey;
-  const sessionId = assertHex32(identity.sessionId, 'sessionId');
+  const sessionId = assertHex32(identity.sessionId, "sessionId");
   const snap = decodeSnapshot(rawSnapshot);
   if (snap.scope_key !== scopeKey) {
-    throw new Error('Snapshot scope_key mismatch');
+    throw new Error("Snapshot scope_key mismatch");
   }
   if (snap.session_id !== sessionId) {
-    throw new Error('Snapshot session_id mismatch');
+    throw new Error("Snapshot session_id mismatch");
   }
 
   const items = new Map();
@@ -284,39 +308,43 @@ export function installNativeSnapshot(rawSnapshot, identity) {
   }
   order.sort((a, b) => compareItemOrder(a, items.get(a), b, items.get(b)));
 
-  const activeKeys = new Set(Array.isArray(snap.active_keys) ? snap.active_keys : []);
+  const activeKeys = new Set(
+    Array.isArray(snap.active_keys) ? snap.active_keys : [],
+  );
   const pending = new Map();
   if (Array.isArray(snap.pending)) {
     for (const entry of snap.pending) {
-      if (entry && typeof entry === 'object' && entry.request_id) {
+      if (entry && typeof entry === "object" && entry.request_id) {
         pending.set(String(entry.request_id), { ...entry });
       }
     }
-  } else if (snap.pending && typeof snap.pending === 'object') {
+  } else if (snap.pending && typeof snap.pending === "object") {
     for (const [k, v] of Object.entries(snap.pending)) {
-      pending.set(k, v && typeof v === 'object' ? { ...v } : v);
+      pending.set(k, v && typeof v === "object" ? { ...v } : v);
     }
   }
   for (const [key, item] of items) {
     if (ACTIVE_STATUSES.has(itemStatus(item))) activeKeys.add(key);
-    if (item.kind === 'approval' && !item.resolved && !item.answered) {
+    if (item.kind === "approval" && !item.resolved && !item.answered) {
       const reqId = item.request_id ?? item.data?.request_id ?? key;
-      if (!pending.has(String(reqId))) pending.set(String(reqId), { key, ...item });
+      if (!pending.has(String(reqId)))
+        pending.set(String(reqId), { key, ...item });
     }
   }
 
   const { groups } = reconcileProcessGroups(items, order, new Map());
   const dirtyKeys = new Set(order);
   const changeReasons = new Map();
-  for (const key of order) addReason(changeReasons, key, 'insert');
+  for (const key of order) addReason(changeReasons, key, "insert");
 
   const historyMeta =
-    snap.history && typeof snap.history === 'object'
+    snap.history && typeof snap.history === "object"
       ? {
           hasMore: Boolean(snap.history.has_more ?? snap.history.hasMore),
           nextToken: snap.history.next_token ?? snap.history.nextToken ?? null,
           pageRevision: snap.history.page_revision ?? snap.projection_revision,
-          pageAppliedCursor: snap.history.page_applied_cursor ?? snap.applied_cursor,
+          pageAppliedCursor:
+            snap.history.page_applied_cursor ?? snap.applied_cursor,
         }
       : {
           hasMore: Boolean(snap.has_more),
@@ -364,7 +392,7 @@ function cloneProjection(projection) {
   for (const [k, v] of projection.items) items.set(k, cloneItem(v));
   const pending = new Map();
   for (const [k, v] of projection.pending)
-    pending.set(k, v && typeof v === 'object' ? { ...v } : v);
+    pending.set(k, v && typeof v === "object" ? { ...v } : v);
   return {
     items,
     order: [...projection.order],
@@ -373,8 +401,12 @@ function cloneProjection(projection) {
     session: projection.session ? { ...projection.session } : null,
     run: projection.run ? { ...projection.run } : null,
     settings: projection.settings ? { ...projection.settings } : null,
-    pendingSettings: projection.pendingSettings ? { ...projection.pendingSettings } : null,
-    capabilities: projection.capabilities ? { ...projection.capabilities } : null,
+    pendingSettings: projection.pendingSettings
+      ? { ...projection.pendingSettings }
+      : null,
+    capabilities: projection.capabilities
+      ? { ...projection.capabilities }
+      : null,
     stats: projection.stats ? { ...projection.stats } : null,
     history: { ...projection.history },
     groups: new Map(projection.groups),
@@ -383,63 +415,78 @@ function cloneProjection(projection) {
 
 function applyUpsertChange(next, change, dirtyKeys, reasons) {
   const key = change.key ?? change.item_key;
-  if (typeof key !== 'string' || !key) throw new TypeError('Change missing item key');
-  const itemRev = assertSafeNonNegativeInt(change.item_revision, 'change.item_revision');
+  if (typeof key !== "string" || !key)
+    throw new TypeError("Change missing item key");
+  const itemRev = assertSafeNonNegativeInt(
+    change.item_revision,
+    "change.item_revision",
+  );
   const existing = next.items.get(key);
   if (existing && existing.item_revision >= itemRev) return null;
 
-  const incoming = cloneItem(change.item && typeof change.item === 'object' ? change.item : change);
+  const incoming = cloneItem(
+    change.item && typeof change.item === "object" ? change.item : change,
+  );
   incoming.key = key;
   incoming.item_key = key;
   incoming.item_revision = itemRev;
   incoming.first_cursor = existing
     ? existing.first_cursor
-    : assertSafeNonNegativeInt(incoming.first_cursor ?? change.first_cursor ?? 0, 'first_cursor');
+    : assertSafeNonNegativeInt(
+        incoming.first_cursor ?? change.first_cursor ?? 0,
+        "first_cursor",
+      );
 
   next.items.set(key, incoming);
   dirtyKeys.add(key);
 
   if (!existing) {
     insertOrderKey(next.order, next.items, key, incoming);
-    addReason(reasons, key, 'insert');
-    addReason(reasons, key, 'height');
+    addReason(reasons, key, "insert");
+    addReason(reasons, key, "height");
   } else {
     if (incoming.text !== existing.text || incoming.body !== existing.body) {
-      addReason(reasons, key, 'text');
-      addReason(reasons, key, 'height');
+      addReason(reasons, key, "text");
+      addReason(reasons, key, "height");
     }
     if (itemStatus(incoming) !== itemStatus(existing)) {
-      addReason(reasons, key, 'status');
+      addReason(reasons, key, "status");
     }
   }
 
   if (ACTIVE_STATUSES.has(itemStatus(incoming))) next.activeKeys.add(key);
   else next.activeKeys.delete(key);
 
-  if (incoming.kind === 'approval') {
-    const reqId = String(incoming.request_id ?? incoming.data?.request_id ?? key);
+  if (incoming.kind === "approval") {
+    const reqId = String(
+      incoming.request_id ?? incoming.data?.request_id ?? key,
+    );
     if (incoming.resolved || incoming.answered) {
       next.pending.delete(reqId);
-      addReason(reasons, key, 'control');
+      addReason(reasons, key, "control");
     } else {
       next.pending.set(reqId, { key, ...incoming });
-      addReason(reasons, key, 'control');
+      addReason(reasons, key, "control");
     }
   }
-  return !existing ? 'insert' : 'update';
+  return !existing ? "insert" : "update";
 }
 
 function applyAppendTextChange(next, change, dirtyKeys, reasons) {
   const key = change.key ?? change.item_key;
-  if (typeof key !== 'string' || !key) throw new TypeError('append_text missing key');
-  const itemRev = assertSafeNonNegativeInt(change.item_revision, 'change.item_revision');
+  if (typeof key !== "string" || !key)
+    throw new TypeError("append_text missing key");
+  const itemRev = assertSafeNonNegativeInt(
+    change.item_revision,
+    "change.item_revision",
+  );
   const existing = next.items.get(key);
   if (!existing) {
     return {
       ok: false,
       result: {
-        kind: 'repair_required',
-        reason: 'missing_item',
+        kind: "repair_required",
+        reason: "missing_item",
         itemKey: key,
         expectedBaseRevision: change.base_item_revision ?? null,
         actualItemRevision: null,
@@ -451,14 +498,14 @@ function applyAppendTextChange(next, change, dirtyKeys, reasons) {
   if (change.base_item_revision !== undefined) {
     const baseRev = assertSafeNonNegativeInt(
       change.base_item_revision,
-      'change.base_item_revision',
+      "change.base_item_revision",
     );
     if (existing.item_revision !== baseRev) {
       return {
         ok: false,
         result: {
-          kind: 'repair_required',
-          reason: 'base_item_revision_mismatch',
+          kind: "repair_required",
+          reason: "base_item_revision_mismatch",
           itemKey: key,
           expectedBaseRevision: baseRev,
           actualItemRevision: existing.item_revision,
@@ -467,28 +514,35 @@ function applyAppendTextChange(next, change, dirtyKeys, reasons) {
     }
   }
 
-  const delta = typeof change.text === 'string' ? change.text : '';
+  const delta = typeof change.text === "string" ? change.text : "";
   const updated = cloneItem(existing);
   updated.item_revision = itemRev;
   if (updated.partial) {
-    updated.tail_text = (updated.tail_text ?? '') + delta;
+    updated.tail_text = (updated.tail_text ?? "") + delta;
   } else {
-    updated.text = (updated.text ?? '') + delta;
+    updated.text = (updated.text ?? "") + delta;
   }
   if (change.body_end_byte !== undefined) {
-    updated.body_end_byte = assertSafeNonNegativeInt(change.body_end_byte, 'change.body_end_byte');
+    updated.body_end_byte = assertSafeNonNegativeInt(
+      change.body_end_byte,
+      "change.body_end_byte",
+    );
   }
   next.items.set(key, updated);
   dirtyKeys.add(key);
-  addReason(reasons, key, 'text');
-  addReason(reasons, key, 'height');
+  addReason(reasons, key, "text");
+  addReason(reasons, key, "height");
   return { ok: true };
 }
 
 function applyReplaceBodyChange(next, change, dirtyKeys, reasons) {
   const key = change.key ?? change.item_key;
-  if (typeof key !== 'string' || !key) throw new TypeError('replace_body missing key');
-  const itemRev = assertSafeNonNegativeInt(change.item_revision, 'change.item_revision');
+  if (typeof key !== "string" || !key)
+    throw new TypeError("replace_body missing key");
+  const itemRev = assertSafeNonNegativeInt(
+    change.item_revision,
+    "change.item_revision",
+  );
   const existing = next.items.get(key);
   if (!existing || existing.item_revision >= itemRev) return;
 
@@ -501,24 +555,28 @@ function applyReplaceBodyChange(next, change, dirtyKeys, reasons) {
     updated.content_generation = change.content_generation;
   }
   if (change.body_end_byte !== undefined) {
-    updated.body_end_byte = assertSafeNonNegativeInt(change.body_end_byte, 'change.body_end_byte');
+    updated.body_end_byte = assertSafeNonNegativeInt(
+      change.body_end_byte,
+      "change.body_end_byte",
+    );
   }
   updated.partial = Boolean(change.partial);
   if (!updated.partial) delete updated.tail_text;
   if (change.status !== undefined) {
     updated.status = change.status;
     if (!ACTIVE_STATUSES.has(change.status)) next.activeKeys.delete(key);
-    addReason(reasons, key, 'status');
+    addReason(reasons, key, "status");
   }
   next.items.set(key, updated);
   dirtyKeys.add(key);
-  addReason(reasons, key, 'text');
-  addReason(reasons, key, 'height');
+  addReason(reasons, key, "text");
+  addReason(reasons, key, "height");
 }
 
 function applyRemoveChange(next, change, dirtyKeys, reasons) {
   const key = change.key ?? change.item_key;
-  if (typeof key !== 'string' || !key) throw new TypeError('remove missing key');
+  if (typeof key !== "string" || !key)
+    throw new TypeError("remove missing key");
   if (!next.items.has(key)) return false;
   const item = next.items.get(key);
   next.items.delete(key);
@@ -527,21 +585,21 @@ function applyRemoveChange(next, change, dirtyKeys, reasons) {
   const idx = next.order.indexOf(key);
   if (idx >= 0) next.order.splice(idx, 1);
   dirtyKeys.add(key);
-  addReason(reasons, key, 'remove');
+  addReason(reasons, key, "remove");
   return true;
 }
 
 function applySummaryPatch(next, patch) {
-  if (!patch || typeof patch !== 'object') return false;
+  if (!patch || typeof patch !== "object") return false;
   let controlChanged = false;
-  if (patch.session && typeof patch.session === 'object') {
+  if (patch.session && typeof patch.session === "object") {
     next.session = { ...(next.session || {}), ...patch.session };
     controlChanged = true;
   }
-  if (patch.run && typeof patch.run === 'object') {
+  if (patch.run && typeof patch.run === "object") {
     next.run = { ...(next.run || {}), ...patch.run };
     controlChanged = true;
-  } else if (typeof patch.run_status === 'string') {
+  } else if (typeof patch.run_status === "string") {
     next.run = { ...(next.run || {}), status: patch.run_status };
     controlChanged = true;
   }
@@ -549,13 +607,18 @@ function applySummaryPatch(next, patch) {
     next.settings = patch.settings ? { ...patch.settings } : null;
     controlChanged = true;
   }
-  if (patch.pending_settings !== undefined || patch.pendingSettings !== undefined) {
+  if (
+    patch.pending_settings !== undefined ||
+    patch.pendingSettings !== undefined
+  ) {
     const val =
-      patch.pending_settings !== undefined ? patch.pending_settings : patch.pendingSettings;
+      patch.pending_settings !== undefined
+        ? patch.pending_settings
+        : patch.pendingSettings;
     next.pendingSettings = val ? { ...val } : null;
     controlChanged = true;
   }
-  if (patch.capabilities && typeof patch.capabilities === 'object') {
+  if (patch.capabilities && typeof patch.capabilities === "object") {
     const incomingRev = patch.capabilities.revision ?? 0;
     const currentRev = next.capabilities?.revision ?? -1;
     if (incomingRev >= currentRev) {
@@ -563,13 +626,13 @@ function applySummaryPatch(next, patch) {
       controlChanged = true;
     }
   }
-  if (patch.stats && typeof patch.stats === 'object') {
+  if (patch.stats && typeof patch.stats === "object") {
     next.stats = { ...(next.stats || {}), ...patch.stats };
   }
-  if (patch.pending && typeof patch.pending === 'object') {
+  if (patch.pending && typeof patch.pending === "object") {
     for (const [reqId, val] of Object.entries(patch.pending)) {
       if (val === null) next.pending.delete(reqId);
-      else next.pending.set(reqId, typeof val === 'object' ? { ...val } : val);
+      else next.pending.set(reqId, typeof val === "object" ? { ...val } : val);
     }
     controlChanged = true;
   }
@@ -583,29 +646,29 @@ function reduceProjection(projection, changes, summaryPatch) {
   let needsGroupReconcile = false;
 
   for (const change of changes) {
-    if (!change || typeof change !== 'object') {
-      throw new TypeError('Invalid batch change entry');
+    if (!change || typeof change !== "object") {
+      throw new TypeError("Invalid batch change entry");
     }
     const op = change.op;
-    if (op === 'upsert') {
+    if (op === "upsert") {
       const outcome = applyUpsertChange(next, change, dirtyKeys, reasons);
-      if (outcome === 'insert') needsGroupReconcile = true;
-      else if (outcome === 'update') {
+      if (outcome === "insert") needsGroupReconcile = true;
+      else if (outcome === "update") {
         const item = next.items.get(change.key ?? change.item_key);
         if (item && (COMPACT_KINDS.has(item.kind) || isProcessFailure(item))) {
           needsGroupReconcile = true;
         }
       }
-    } else if (op === 'append_text') {
+    } else if (op === "append_text") {
       const res = applyAppendTextChange(next, change, dirtyKeys, reasons);
       if (!res.ok) return { ok: false, result: res.result };
-    } else if (op === 'replace_body') {
+    } else if (op === "replace_body") {
       applyReplaceBodyChange(next, change, dirtyKeys, reasons);
-    } else if (op === 'remove') {
+    } else if (op === "remove") {
       if (applyRemoveChange(next, change, dirtyKeys, reasons)) {
         needsGroupReconcile = true;
       }
-    } else if (op === 'display_ext') {
+    } else if (op === "display_ext") {
       // Safe display extension may be skipped if unrecognized.
       continue;
     } else {
@@ -615,18 +678,22 @@ function reduceProjection(projection, changes, summaryPatch) {
 
   const controlChanged = applySummaryPatch(next, summaryPatch);
   if (controlChanged) {
-    addReason(reasons, '__control__', 'control');
+    addReason(reasons, "__control__", "control");
   }
 
   let structureDirty = false;
   if (needsGroupReconcile) {
-    const groupRes = reconcileProcessGroups(next.items, next.order, next.groups);
+    const groupRes = reconcileProcessGroups(
+      next.items,
+      next.order,
+      next.groups,
+    );
     next.groups = groupRes.groups;
     if (groupRes.structureChanged) {
       structureDirty = true;
       for (const gk of groupRes.changedGroupKeys) {
         dirtyKeys.add(gk);
-        addReason(reasons, gk, 'group_boundary');
+        addReason(reasons, gk, "group_boundary");
       }
     }
   }
@@ -638,13 +705,13 @@ function autoReconcileOverlaysForRevision(pendingCommands, revision) {
   let next = null;
   for (const [receipt, overlay] of pendingCommands) {
     if (
-      overlay.status === 'accepted' &&
+      overlay.status === "accepted" &&
       overlay.appliedRevision !== null &&
       overlay.appliedRevision !== undefined &&
       revision >= overlay.appliedRevision
     ) {
       if (!next) next = new Map(pendingCommands);
-      next.set(receipt, { ...overlay, status: 'applied' });
+      next.set(receipt, { ...overlay, status: "applied" });
     }
   }
   return next || pendingCommands;
@@ -652,37 +719,52 @@ function autoReconcileOverlaysForRevision(pendingCommands, revision) {
 
 export function applyNativeBatch(current, verifiedBatch, ledgerLimits) {
   if (!isVerifiedBatch(verifiedBatch)) {
-    throw new TypeError('unverified batch');
+    throw new TypeError("unverified batch");
   }
   const batch = verifiedBatch.message;
-  if (batch.scope_key !== current.scopeKey || batch.session_id !== current.sessionId) {
-    return { kind: 'blocked', reason: 'scope' };
+  if (
+    batch.scope_key !== current.scopeKey ||
+    batch.session_id !== current.sessionId
+  ) {
+    return { kind: "blocked", reason: "scope" };
   }
   if (batch.schema_version !== current.schemaVersion) {
-    return { kind: 'blocked', reason: 'schema' };
+    return { kind: "blocked", reason: "schema" };
   }
   if (batch.stream_epoch !== current.streamEpoch) {
-    return { kind: 'reset', reason: 'stream_epoch' };
+    return { kind: "reset", reason: "stream_epoch" };
   }
 
   const interval = `${batch.from_revision}:${batch.to_revision}`;
   if (batch.to_revision <= current.revision) {
     const known = current.recentBatches.get(interval);
-    if (!known) return { kind: 'resume', reason: 'unproven_duplicate' };
+    if (!known) return { kind: "resume", reason: "unproven_duplicate" };
     const same =
       known.digest === verifiedBatch.digest &&
       known.fromCursor === batch.from_cursor &&
       known.toCursor === batch.to_cursor;
-    return same ? { kind: 'duplicate' } : { kind: 'reset', reason: 'conflicting_batch' };
+    return same
+      ? { kind: "duplicate" }
+      : { kind: "reset", reason: "conflicting_batch" };
   }
-  if (batch.from_revision !== current.revision || batch.to_revision !== batch.from_revision + 1) {
-    return { kind: 'reset', reason: 'revision_gap' };
+  if (
+    batch.from_revision !== current.revision ||
+    batch.to_revision !== batch.from_revision + 1
+  ) {
+    return { kind: "reset", reason: "revision_gap" };
   }
-  if (batch.from_cursor !== current.appliedCursor || batch.to_cursor < batch.from_cursor) {
-    return { kind: 'reset', reason: 'cursor' };
+  if (
+    batch.from_cursor !== current.appliedCursor ||
+    batch.to_cursor < batch.from_cursor
+  ) {
+    return { kind: "reset", reason: "cursor" };
   }
 
-  const reduced = reduceProjection(current.projection, batch.changes, batch.summary_patch);
+  const reduced = reduceProjection(
+    current.projection,
+    batch.changes,
+    batch.summary_patch,
+  );
   if (!reduced.ok) {
     return reduced.result;
   }
@@ -711,14 +793,17 @@ export function applyNativeBatch(current, verifiedBatch, ledgerLimits) {
       },
       ledgerLimits,
     ),
-    pendingCommands: autoReconcileOverlaysForRevision(current.pendingCommands, batch.to_revision),
+    pendingCommands: autoReconcileOverlaysForRevision(
+      current.pendingCommands,
+      batch.to_revision,
+    ),
     dirtyKeys: mergedDirty,
     changeReasons: mergedReasons,
     structureDirty: current.structureDirty || reduced.structureDirty,
   };
 
   return {
-    kind: 'applied',
+    kind: "applied",
     value: nextValue,
     dirtyKeys: reduced.dirtyKeys,
     changeReasons: reduced.reasons,
@@ -727,17 +812,20 @@ export function applyNativeBatch(current, verifiedBatch, ledgerLimits) {
 }
 
 export function mergeHistoryPage(current, page) {
-  if (!page || typeof page !== 'object' || !Array.isArray(page.items)) {
-    throw new TypeError('History page must include items array');
+  if (!page || typeof page !== "object" || !Array.isArray(page.items)) {
+    throw new TypeError("History page must include items array");
   }
   if (page.scope_key !== undefined && page.scope_key !== current.scopeKey) {
-    throw new Error('History page scope_key mismatch');
+    throw new Error("History page scope_key mismatch");
   }
   if (page.session_id !== undefined && page.session_id !== current.sessionId) {
-    throw new Error('History page session_id mismatch');
+    throw new Error("History page session_id mismatch");
   }
-  if (page.stream_epoch !== undefined && page.stream_epoch !== current.streamEpoch) {
-    throw new Error('History page stream_epoch mismatch');
+  if (
+    page.stream_epoch !== undefined &&
+    page.stream_epoch !== current.streamEpoch
+  ) {
+    throw new Error("History page stream_epoch mismatch");
   }
 
   const nextProj = cloneProjection(current.projection);
@@ -755,35 +843,42 @@ export function mergeHistoryPage(current, page) {
     dirtyKeys.add(incoming.key);
     if (!existing) {
       insertOrderKey(nextProj.order, nextProj.items, incoming.key, incoming);
-      addReason(reasons, incoming.key, 'insert');
-      addReason(reasons, incoming.key, 'height');
+      addReason(reasons, incoming.key, "insert");
+      addReason(reasons, incoming.key, "height");
       inserted = true;
     } else {
-      addReason(reasons, incoming.key, 'text');
-      addReason(reasons, incoming.key, 'height');
+      addReason(reasons, incoming.key, "text");
+      addReason(reasons, incoming.key, "height");
     }
   }
 
   let structureDirty = current.structureDirty;
   if (inserted) {
-    const groupRes = reconcileProcessGroups(nextProj.items, nextProj.order, nextProj.groups);
+    const groupRes = reconcileProcessGroups(
+      nextProj.items,
+      nextProj.order,
+      nextProj.groups,
+    );
     nextProj.groups = groupRes.groups;
     if (groupRes.structureChanged) {
       structureDirty = true;
       for (const gk of groupRes.changedGroupKeys) {
         dirtyKeys.add(gk);
-        addReason(reasons, gk, 'group_boundary');
+        addReason(reasons, gk, "group_boundary");
       }
     }
   }
 
   const pageRev =
     page.page_revision !== undefined
-      ? assertSafeNonNegativeInt(page.page_revision, 'page_revision')
+      ? assertSafeNonNegativeInt(page.page_revision, "page_revision")
       : nextProj.history.pageRevision;
   const pageCursor =
     page.page_applied_cursor !== undefined
-      ? assertSafeNonNegativeInt(page.page_applied_cursor, 'page_applied_cursor')
+      ? assertSafeNonNegativeInt(
+          page.page_applied_cursor,
+          "page_applied_cursor",
+        )
       : nextProj.history.pageAppliedCursor;
 
   nextProj.history = {
@@ -805,40 +900,48 @@ export function mergeHistoryPage(current, page) {
 }
 
 export function mergeBodyChunk(current, itemKey, chunk) {
-  if (typeof itemKey !== 'string' || !itemKey) {
-    throw new TypeError('itemKey must be a non-empty string');
+  if (typeof itemKey !== "string" || !itemKey) {
+    throw new TypeError("itemKey must be a non-empty string");
   }
-  if (!chunk || typeof chunk !== 'object') {
-    throw new TypeError('chunk must be an object');
+  if (!chunk || typeof chunk !== "object") {
+    throw new TypeError("chunk must be an object");
   }
   const existing = current.projection.items.get(itemKey);
   if (!existing) {
     throw new Error(`Unknown itemKey for body chunk: ${itemKey}`);
   }
-  const startByte = assertSafeNonNegativeInt(chunk.start_byte, 'chunk.start_byte');
-  const endByte = assertSafeNonNegativeInt(chunk.end_byte, 'chunk.end_byte');
-  const totalBytes = assertSafeNonNegativeInt(chunk.total_bytes, 'chunk.total_bytes');
+  const startByte = assertSafeNonNegativeInt(
+    chunk.start_byte,
+    "chunk.start_byte",
+  );
+  const endByte = assertSafeNonNegativeInt(chunk.end_byte, "chunk.end_byte");
+  const totalBytes = assertSafeNonNegativeInt(
+    chunk.total_bytes,
+    "chunk.total_bytes",
+  );
   if (endByte < startByte || endByte > totalBytes) {
-    throw new RangeError('Invalid body chunk byte range');
+    throw new RangeError("Invalid body chunk byte range");
   }
-  const text = typeof chunk.text === 'string' ? chunk.text : '';
+  const text = typeof chunk.text === "string" ? chunk.text : "";
   if (utf8ByteLength(text) !== endByte - startByte) {
-    throw new RangeError('Body chunk UTF-8 byte length mismatch');
+    throw new RangeError("Body chunk UTF-8 byte length mismatch");
   }
 
   const generation = chunk.content_generation;
-  if (generation === undefined || generation === null || generation === '') {
-    throw new TypeError('Body chunk missing content_generation');
+  if (generation === undefined || generation === null || generation === "") {
+    throw new TypeError("Body chunk missing content_generation");
   }
 
   const existingGen = existing.content_generation ?? null;
   const isNewGeneration = existingGen !== null && generation !== existingGen;
   if (isNewGeneration && startByte !== 0) {
-    throw new Error('Body content_generation mismatch on non-zero offset');
+    throw new Error("Body content_generation mismatch on non-zero offset");
   }
 
   const expectedStart =
-    isNewGeneration || existingGen === null ? 0 : (existing.body_loaded_bytes ?? 0);
+    isNewGeneration || existingGen === null
+      ? 0
+      : (existing.body_loaded_bytes ?? 0);
   if (startByte !== expectedStart) {
     throw new Error(
       `Body chunk byte offset discontinuity: expected ${expectedStart}, got ${startByte}`,
@@ -851,10 +954,10 @@ export function mergeBodyChunk(current, itemKey, chunk) {
   if (chunk.content_revision !== undefined) {
     updated.content_revision = assertSafeNonNegativeInt(
       chunk.content_revision,
-      'chunk.content_revision',
+      "chunk.content_revision",
     );
   }
-  updated.body = startByte === 0 ? text : (updated.body ?? '') + text;
+  updated.body = startByte === 0 ? text : (updated.body ?? "") + text;
   updated.text = updated.body;
   updated.body_loaded_bytes = endByte;
   updated.total_bytes = totalBytes;
@@ -865,8 +968,8 @@ export function mergeBodyChunk(current, itemKey, chunk) {
   const dirtyKeys = new Set(current.dirtyKeys);
   dirtyKeys.add(itemKey);
   const reasons = new Map(current.changeReasons);
-  addReason(reasons, itemKey, 'text');
-  addReason(reasons, itemKey, 'height');
+  addReason(reasons, itemKey, "text");
+  addReason(reasons, itemKey, "height");
 
   return {
     ...current,
@@ -877,32 +980,47 @@ export function mergeBodyChunk(current, itemKey, chunk) {
 }
 
 export function upsertCommandOverlay(current, overlay) {
-  if (!overlay || typeof overlay !== 'object') {
-    throw new TypeError('overlay must be an object');
+  if (!overlay || typeof overlay !== "object") {
+    throw new TypeError("overlay must be an object");
   }
-  const receipt = assertHex32(overlay.receipt, 'overlay.receipt');
-  const generation = assertSafeNonNegativeInt(overlay.generation ?? 0, 'overlay.generation');
+  const receipt = assertHex32(overlay.receipt, "overlay.receipt");
+  const generation = assertSafeNonNegativeInt(
+    overlay.generation ?? 0,
+    "overlay.generation",
+  );
   const existing = current.pendingCommands.get(receipt);
   if (existing && existing.generation > generation) {
     return current;
   }
   const appliedRevision =
     overlay.appliedRevision !== undefined && overlay.appliedRevision !== null
-      ? assertSafeNonNegativeInt(overlay.appliedRevision, 'overlay.appliedRevision')
+      ? assertSafeNonNegativeInt(
+          overlay.appliedRevision,
+          "overlay.appliedRevision",
+        )
       : (existing?.appliedRevision ?? null);
-  let status = overlay.status ?? 'pending';
-  if (status === 'accepted' && appliedRevision !== null && current.revision >= appliedRevision) {
-    status = 'applied';
+  let status = overlay.status ?? "pending";
+  if (
+    status === "accepted" &&
+    appliedRevision !== null &&
+    current.revision >= appliedRevision
+  ) {
+    status = "applied";
   }
   const nextCommands = new Map(current.pendingCommands);
   nextCommands.set(receipt, {
     receipt,
     generation,
-    action: String(overlay.action ?? existing?.action ?? 'command'),
+    action: String(overlay.action ?? existing?.action ?? "command"),
     status,
     requested:
-      overlay.requested !== undefined ? { ...overlay.requested } : (existing?.requested ?? null),
-    actual: overlay.actual !== undefined ? { ...overlay.actual } : (existing?.actual ?? null),
+      overlay.requested !== undefined
+        ? { ...overlay.requested }
+        : (existing?.requested ?? null),
+    actual:
+      overlay.actual !== undefined
+        ? { ...overlay.actual }
+        : (existing?.actual ?? null),
     partial: Boolean(overlay.partial ?? existing?.partial),
     outcome: overlay.outcome ?? existing?.outcome ?? null,
     appliedRevision,
@@ -915,14 +1033,17 @@ export function upsertCommandOverlay(current, overlay) {
 }
 
 export function reconcileCommandOverlay(current, signal) {
-  if (!signal || typeof signal !== 'object') {
-    throw new TypeError('signal must be an object');
+  if (!signal || typeof signal !== "object") {
+    throw new TypeError("signal must be an object");
   }
-  const receipt = assertHex32(signal.receipt, 'signal.receipt');
+  const receipt = assertHex32(signal.receipt, "signal.receipt");
   const existing = current.pendingCommands.get(receipt);
   if (!existing) return current;
   if (signal.generation !== undefined) {
-    const gen = assertSafeNonNegativeInt(signal.generation, 'signal.generation');
+    const gen = assertSafeNonNegativeInt(
+      signal.generation,
+      "signal.generation",
+    );
     if (gen < existing.generation) return current;
   }
 
@@ -931,21 +1052,26 @@ export function reconcileCommandOverlay(current, signal) {
   const outcome = signal.outcome ?? existing.outcome;
   const appliedRevision =
     signal.appliedRevision !== undefined && signal.appliedRevision !== null
-      ? assertSafeNonNegativeInt(signal.appliedRevision, 'signal.appliedRevision')
+      ? assertSafeNonNegativeInt(
+          signal.appliedRevision,
+          "signal.appliedRevision",
+        )
       : existing.appliedRevision;
 
-  if (signal.status === 'accepted') {
+  if (signal.status === "accepted") {
     status =
-      appliedRevision !== null && current.revision >= appliedRevision ? 'applied' : 'accepted';
-  } else if (signal.status === 'failed' || outcome === 'rejected') {
-    status = 'failed';
-  } else if (signal.status === 'uncertain' || outcome === 'unknown') {
-    status = 'uncertain';
-  } else if (outcome === 'partial') {
-    status = 'applied';
+      appliedRevision !== null && current.revision >= appliedRevision
+        ? "applied"
+        : "accepted";
+  } else if (signal.status === "failed" || outcome === "rejected") {
+    status = "failed";
+  } else if (signal.status === "uncertain" || outcome === "unknown") {
+    status = "uncertain";
+  } else if (outcome === "partial") {
+    status = "applied";
     partial = true;
-  } else if (signal.status === 'applied' || outcome === 'applied') {
-    status = 'applied';
+  } else if (signal.status === "applied" || outcome === "applied") {
+    status = "applied";
     partial = Boolean(signal.partial);
   }
 
@@ -956,19 +1082,21 @@ export function reconcileCommandOverlay(current, signal) {
     partial,
     outcome,
     appliedRevision,
-    actual: signal.actual !== undefined ? { ...signal.actual } : existing.actual,
+    actual:
+      signal.actual !== undefined ? { ...signal.actual } : existing.actual,
     error: signal.error !== undefined ? signal.error : existing.error,
   });
 
   const nextProj =
-    signal.actual !== undefined && existing.action === 'settings'
+    signal.actual !== undefined && existing.action === "settings"
       ? {
           ...current.projection,
           settings: {
             ...(current.projection.settings || {}),
             ...signal.actual,
           },
-          pendingSettings: status === 'applied' ? null : current.projection.pendingSettings,
+          pendingSettings:
+            status === "applied" ? null : current.projection.pendingSettings,
         }
       : current.projection;
 

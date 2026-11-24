@@ -1,5 +1,8 @@
 """Real Chromium/WebKit panel flows against an isolated Hub and fixture Agent."""
+import asyncio
+from concurrent.futures import Future
 from pathlib import Path
+from threading import Thread
 import json
 import re
 import uuid
@@ -9,17 +12,65 @@ from playwright.sync_api import expect, sync_playwright
 
 from shared.util import atomic_json
 from tests.browser_launch import launch_browser
-from tests.test_ssh import PASSWORD, fake_transport
+from tests.test_ssh import PASSWORD
+from tests.test_vps_ssh_v2_exec import _make_exec_server
 
 
 @pytest.fixture(scope='module')
 def ui_stack(stack):
     stack.stop_agent()
     stack.config['shell'] = {'enabled':True,'projects':['*','ProjectAlpha','ProjectGamma','ProjectBeta'],
-                             'command':['/bin/sh','-c'],'env':{'PATH':fake_transport(stack.directory/'vps-ui-bin')}}
+                             'command':['/bin/sh','-c']}
     atomic_json(stack.config_path, stack.config)
     stack.start_agent()
     return stack
+
+
+@pytest.fixture
+def managed_probe_peer():
+    ssh = pytest.importorskip("asyncssh")
+    started = Future()
+    commands = []
+
+    async def handle(channel, _username, command):
+        commands.append(command)
+        if not command.startswith("printf 'CODEPIER_VPS_OK"):
+            channel.exit(127)
+            return
+        channel.write(f"CODEPIER_VPS_OK\nfixture-node\nroot\n{PASSWORD}\n".encode())
+        channel.exit(0)
+
+    async def serve():
+        stop = asyncio.Event()
+        key = ssh.generate_private_key("ssh-ed25519")
+        peer = _make_exec_server(ssh, users={"root": PASSWORD}, handler=handle)
+        server = await ssh.create_server(
+            peer, "127.0.0.1", 0, server_host_keys=[key], encoding=None
+        )
+        started.set_result((server.get_port(), asyncio.get_running_loop(), stop))
+        try:
+            await stop.wait()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    def run():
+        try:
+            asyncio.run(serve())
+        except BaseException as error:
+            if started.done():
+                raise
+            started.set_exception(error)
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    port, loop, stop = started.result(timeout=15)
+    try:
+        yield {"host": "127.0.0.1", "port": port}, commands
+    finally:
+        loop.call_soon_threadsafe(stop.set)
+        worker.join(15)
+        assert not worker.is_alive()
 
 
 @pytest.fixture(params=['chromium','webkit'])
@@ -62,12 +113,13 @@ def open_details(page):
 
 
 def update_data(v, **changes):
-    keys=('name','host','port','username','host_key_policy','provider','region','system','notes','enabled','project_ids')
-    return {**{k:v[k] for k in keys},'expected_version':v['version'],**changes}
+    keys=('name','host','port','username','provider','region','system','notes','enabled','project_ids')
+    return {**{k:v[k] for k in keys if k in v},'expected_version':v['version'],**changes}
 
 
 @pytest.mark.parametrize('width',[1440,390])
-def test_create_edit_search_and_responsive_layout(browser,ui_stack,width):
+def test_create_edit_search_and_responsive_layout(browser,ui_stack,width,managed_probe_peer):
+    endpoint, commands = managed_probe_peer
     engine,kind=browser;s=ui_stack;page=open_page(engine,s,width)
     errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     try:
@@ -75,8 +127,8 @@ def test_create_edit_search_and_responsive_layout(browser,ui_stack,width):
         form=page.locator('#vps-form')
         name='面板测试-'+uuid.uuid4().hex[:8]
         form.locator('[name="name"]').fill(name)
-        form.locator('[name="host"]').fill('vps.example.invalid')
-        form.locator('[name="port"]').fill(str(10000+int(uuid.uuid4().hex[:4],16)%40000))
+        form.locator('[name="host"]').fill(endpoint['host'])
+        form.locator('[name="port"]').fill(str(endpoint['port']))
         form.locator('[name="password"]').fill(PASSWORD)
         for project in s.projects[:2]:form.locator(f'[name="project_ids"][value="{project["id"]}"]').check()
         expect(form.locator('[name="host_key_policy"], [name="host_key_fingerprint"]')).to_have_count(0)
@@ -112,6 +164,7 @@ def test_create_edit_search_and_responsive_layout(browser,ui_stack,width):
         page.fill('#vps-query','no-match-'+uuid.uuid4().hex)
         expect(page.locator('#vps-empty')).to_be_visible()
         assert not errors,errors
+        assert len(commands) == 2
     finally:page.close()
 
 
@@ -145,8 +198,9 @@ def test_project_and_vps_assignment_both_directions(browser,ui_stack):
     finally:page.close()
 
 
-def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
-    engine,_=browser;s=ui_stack;v=create_vps(s)
+def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack,managed_probe_peer):
+    endpoint, commands = managed_probe_peer
+    engine,_=browser;s=ui_stack;v=create_vps(s, **endpoint)
     page=open_page(engine,s)
     submissions=[]
     def capture(request):
@@ -167,12 +221,14 @@ def test_check_connection_real_operation_once_and_no_secret(browser,ui_stack):
         expect(button).to_have_text('重新检查')
         expect(page.locator('#vps-check-project')).to_have_count(0)
         assert len(submissions)==1
+        assert len(commands) == 1
         assert not re.search(r'[a-f0-9]{32}', page.locator('#vps-check-state').inner_text())
         button.click()
         expect(page.locator('#vps-check-state')).to_contain_text('连接检查成功',timeout=30000)
         expect(button).to_be_enabled()
         expect(button).to_have_text('重新检查')
         assert len(submissions)==2
+        assert len(commands) == 2
         assert submissions[0]['idempotency_key']!=submissions[1]['idempotency_key']
         assert all('password' not in submission for submission in submissions)
         assert PASSWORD not in json.dumps(submissions) and PASSWORD not in page.content()
@@ -292,7 +348,9 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
         page.fill('#vps-query',v['name'])
         open_details(page)
         button=page.locator('[data-vps-card]:visible [data-vps-action="edit"]')
-        page.evaluate('''() => {document.addEventListener('pointerdown',event=>{
+        page.evaluate('''async () => {
+          const first=await api('/api/vps?limit=200&offset=0');
+          document.addEventListener('pointerdown',event=>{
           const button=event.target.closest('[data-vps-action="edit"]');
           if(!button)return;
           window.heldVpsButton=button;
@@ -302,7 +360,10 @@ def test_background_refresh_preserves_held_click_target(browser,ui_stack):
             if(records.some(record=>[...record.removedNodes].some(node=>node===card||node.contains?.(card))))
               window.heldVpsDetachCount++;
           }).observe(document.querySelector('#page'),{childList:true,subtree:true});
-          vpsInventory=async()=>S.vps;
+          vpsInventory=async(observeFirstPage)=>{
+            observeFirstPage?.(first);
+            return S.vps;
+          };
           loadBasics=async()=>{};
           const original=uiWaitForPagePointer;
           uiWaitForPagePointer=()=>{

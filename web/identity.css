@@ -8,9 +8,9 @@
 }
 .iam-wrap,
 .code-box.secret,
-#page[data-page='identity'] .mono,
-#page[data-page='members'] .mono,
-#page[data-page='identity-admin'] .mono {
+#page[data-page="identity"] .mono,
+#page[data-page="members"] .mono,
+#page[data-page="identity-admin"] .mono {
   overflow-wrap: anywhere;
   word-break: break-all;
   max-width: 100%;
@@ -43,9 +43,9 @@
   margin-top: 16px;
 }
 @media (max-width: 760px) {
-  #page[data-page='identity'] :is(.page-tabs, .management-tabs),
-  #page[data-page='members'] :is(.page-tabs, .management-tabs),
-  #page[data-page='identity-admin'] :is(.page-tabs, .management-tabs) {
+  #page[data-page="identity"] :is(.page-tabs, .management-tabs),
+  #page[data-page="members"] :is(.page-tabs, .management-tabs),
+  #page[data-page="identity-admin"] :is(.page-tabs, .management-tabs) {
     position: sticky;
     top: var(--ui-topbar-height, 52px);
     z-index: calc(var(--ui-z-local, 1) + 2);
@@ -55,22 +55,22 @@
     scrollbar-width: none;
     padding-block: 6px;
   }
-  #page[data-page='identity'] .grant-row,
-  #page[data-page='members'] .grant-row,
-  #page[data-page='identity-admin'] .grant-row {
+  #page[data-page="identity"] .grant-row,
+  #page[data-page="members"] .grant-row,
+  #page[data-page="identity-admin"] .grant-row {
     flex-wrap: wrap;
     gap: 8px 12px;
     padding-block: 10px;
   }
-  #page[data-page='identity'] .grant-row > div:first-child,
-  #page[data-page='members'] .grant-row > div:first-child,
-  #page[data-page='identity-admin'] .grant-row > div:first-child {
+  #page[data-page="identity"] .grant-row > div:first-child,
+  #page[data-page="members"] .grant-row > div:first-child,
+  #page[data-page="identity-admin"] .grant-row > div:first-child {
     flex: 1 1 200px;
     min-width: 0;
   }
-  #page[data-page='identity'] .grant-row .btn,
-  #page[data-page='members'] .grant-row .btn,
-  #page[data-page='identity-admin'] .grant-row .btn {
+  #page[data-page="identity"] .grant-row .btn,
+  #page[data-page="members"] .grant-row .btn,
+  #page[data-page="identity-admin"] .grant-row .btn {
     min-height: var(--ui-touch-target);
   }
 }

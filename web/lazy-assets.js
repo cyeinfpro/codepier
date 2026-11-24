@@ -1,12 +1,14 @@
 (() => {
-  const groups = JSON.parse(document.getElementById('codepier-route-assets')?.textContent || '{}');
+  const groups = JSON.parse(
+    document.getElementById("codepier-route-assets")?.textContent || "{}",
+  );
   const loaded = new Map();
   function asset(url) {
     if (loaded.has(url)) return loaded.get(url);
-    const css = new URL(url, location.href).pathname.endsWith('.css');
-    const node = document.createElement(css ? 'link' : 'script');
+    const css = new URL(url, location.href).pathname.endsWith(".css");
+    const node = document.createElement(css ? "link" : "script");
     if (css) {
-      node.rel = 'stylesheet';
+      node.rel = "stylesheet";
       node.href = url;
     } else {
       node.src = url;
@@ -22,7 +24,7 @@
         } else resolve();
       }
       node.onload = () => finish();
-      node.onerror = () => finish(new Error('页面资源未能加载，请重试'));
+      node.onerror = () => finish(new Error("页面资源未能加载，请重试"));
       document.head.append(node);
     });
     loaded.set(url, promise);
@@ -33,7 +35,9 @@
       // Keep classic-script dependencies ordered. Successful assets survive a
       // later failure so retries never re-execute top-level declarations.
       const urls = groups[page] || [];
-      const styles = urls.filter((url) => new URL(url, location.href).pathname.endsWith('.css'));
+      const styles = urls.filter((url) =>
+        new URL(url, location.href).pathname.endsWith(".css"),
+      );
       const styleSet = new Set(styles);
       const scripts = async () => {
         for (const url of urls) if (!styleSet.has(url)) await asset(url);

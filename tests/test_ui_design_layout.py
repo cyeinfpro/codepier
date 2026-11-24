@@ -132,11 +132,26 @@ def test_current_room_theme_and_bounded_scrolling(
                 }"""), _geometry(page)
             page.locator("#cr-message").fill("合成草稿，仅检查不发送")
             expect(page.locator(".cr-send")).to_be_enabled()
+            room_menu = page.get_by_role("button", name="更多房间操作")
+            room_actions = page.locator(".cr-room-actions")
+            if width <= 640:
+                expect(room_actions).to_be_hidden()
+                menu_rect = room_menu.bounding_box()
+                assert menu_rect and menu_rect["height"] >= 44 and menu_rect["width"] >= 44
+                room_menu.click()
+                expect(room_menu).to_have_attribute("aria-expanded", "true")
+            expect(room_actions).to_be_visible()
+            expect(room_actions.get_by_role("button")).to_have_count(4)
             for selector in (".cr-send", '[data-cr-action="attach"]',
                              '.cr-recipient select', '.cr-room-actions .cr-button'):
                 for control in page.locator(selector).all():
                     rect = control.bounding_box()
                     assert rect and rect["height"] >= 44 and rect["width"] >= 44, (selector, rect)
+            if width <= 640:
+                page.keyboard.press("Escape")
+                expect(room_menu).to_have_attribute("aria-expanded", "false")
+                expect(room_actions).to_be_hidden()
+                expect(room_menu).to_be_focused()
             page.locator(".cr-send").click(trial=True)
             assert page.locator("#cr-message").evaluate(
                 "n => getComputedStyle(n).fontSize"

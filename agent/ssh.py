@@ -1,4 +1,9 @@
-"""Password SSH over the existing full-access, durable process execution path."""
+"""Legacy OpenSSH diagnostic helpers; active VPS exec uses agent.vps_exec (vps_ssh_v2).
+
+Active VPS execution paths no longer call prepare_ssh or depend on sshpass/known_hosts.
+Diagnostic and retry helpers are retained only for compatibility with existing callers
+and historical receipt parsing.
+"""
 
 from __future__ import annotations
 

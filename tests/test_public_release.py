@@ -3,12 +3,14 @@ from pathlib import Path
 import hashlib
 import json
 import stat
+import subprocess
 import zipfile
 
 import pytest
 
 from scripts import build_source_bundle as bundle
 from scripts import check_release as guard
+from scripts import update_source_inventory as inventory_updater
 
 
 @pytest.fixture
@@ -71,6 +73,36 @@ def test_public_inventory_drift_cannot_silently_omit_source(source_tree):
     with pytest.raises(RuntimeError, match='inventory is outdated'):
         bundle.build(source_tree / 'dist/source.zip', public=True)
     assert not (source_tree / 'dist/source.zip').exists()
+
+
+
+def test_source_inventory_uses_curated_tree_without_git(source_tree):
+    selected_source = source_tree / "agent" / "fixture_source.py"
+    selected_source.write_text("value = 1\n")
+    expected = sorted(set(bundle.BASE_REQUIRED) | set(guard.public_files(source_tree)))
+    assert "agent/fixture_source.py" in expected
+    assert inventory_updater.inventory(source_tree)["files"] == expected
+
+
+def test_unborn_git_does_not_change_curated_inventory(source_tree):
+    selected_source = source_tree / "agent" / "fixture_source.py"
+    selected_source.write_text("value = 1\n")
+    expected = sorted(set(bundle.BASE_REQUIRED) | set(guard.public_files(source_tree)))
+    assert "agent/fixture_source.py" in expected
+
+    subprocess.run(["git", "init", "--quiet", "--template="], cwd=source_tree, check=True)
+    exclude = source_tree / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("agent/fixture_source.py\n")
+    assert inventory_updater.inventory(source_tree)["files"] == expected
+
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "fixture"],
+        cwd=source_tree,
+        check=True,
+    )
+    assert "agent/fixture_source.py" not in inventory_updater.inventory(source_tree)["files"]
 
 
 def test_public_profile_ignores_local_evidence_symlinks(source_tree):

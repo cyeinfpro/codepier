@@ -1,25 +1,29 @@
-'use strict';
+"use strict";
 window.CodePierConnectionSetup = (() => {
-  const lifetime = CP.createPanel({ owner: () => String(S.session) + ':' + S.space_id });
+  const lifetime = CP.createPanel({
+    owner: () => String(S.session) + ":" + S.space_id,
+  });
   const labels = {
-    observed: '已连通',
-    allowed: '当前授权有效',
-    blocked: '当前阻止',
-    stale: '需要重新测试',
-    unknown: '未知',
-    online: '在线',
-    offline: '离线',
+    observed: "已连通",
+    allowed: "当前授权有效",
+    blocked: "当前阻止",
+    stale: "需要重新测试",
+    unknown: "未知",
+    online: "在线",
+    offline: "离线",
   };
   function html() {
     const active = S.grants.filter(
-      (g) => !g.revoked && (g.status === 'active' || (!g.status && g.expires > Date.now() / 1000)),
+      (g) =>
+        !g.revoked &&
+        (g.status === "active" || (!g.status && g.expires > Date.now() / 1000)),
     );
     const latest = active.find((g) => g.client_id) || active[0];
     return `<section class="panel connection-check-card" id="connection-setup"><div class="panel-head"><h2>连接检查</h2><small class="muted">在 ChatGPT 新建对话并启用 CodePier 后测试</small></div><div class="panel-body">
       <form id="connection-check-form" class="connection-check-inline">
-        <label class="field">要测试的连接<select name="grant_id" required><option value="">请选择连接</option>${S.grants.map((g) => `<option value="${esc(g.id)}" ${g.id === latest?.id ? 'selected' : ''}>${esc(g.label)}${g.client_id ? '' : ' · 访问令牌'}</option>`).join('')}</select></label>
+        <label class="field">要测试的连接<select name="grant_id" required><option value="">请选择连接</option>${S.grants.map((g) => `<option value="${esc(g.id)}" ${g.id === latest?.id ? "selected" : ""}>${esc(g.label)}${g.client_id ? "" : " · 访问令牌"}</option>`).join("")}</select></label>
         <details class="form-advanced"><summary>排查选项</summary>
-          <label class="field">项目<select name="project_id"><option value="">仅检查连接</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></label>
+          <label class="field">项目<select name="project_id"><option value="">仅检查连接</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join("")}</select></label>
           <label class="field">工具目录版本<input name="catalog" maxlength="64" pattern="[a-f0-9]{64}" autocomplete="off"></label>
         </details><button type="submit" class="btn primary">测试连接</button></form>
       <div id="connection-check-result" role="status" aria-live="polite"></div></div></section>`;
@@ -41,111 +45,125 @@ window.CodePierConnectionSetup = (() => {
     const last = result.last_actual_call;
     const layers = result.layers || [];
     const conclusion = layers.some(
-      (layer) => layer.status === 'blocked' || layer.status === 'offline',
+      (layer) => layer.status === "blocked" || layer.status === "offline",
     )
-      ? '连接存在阻塞，请先处理下列检查项'
-      : layers.some((layer) => layer.status === 'stale' || layer.status === 'unknown')
-        ? '连接尚未完整确认，请按下一步核实'
-        : '已取得分层检查结果，实际调用证据见下方';
-    const diagnostics = `<dl class="kv"><dt>Hub MCP</dt><dd>${esc(result.hub_mcp_url || '未知')}</dd>
+      ? "连接存在阻塞，请先处理下列检查项"
+      : layers.some(
+            (layer) => layer.status === "stale" || layer.status === "unknown",
+          )
+        ? "连接尚未完整确认，请按下一步核实"
+        : "已取得分层检查结果，实际调用证据见下方";
+    const diagnostics = `<dl class="kv"><dt>Hub MCP</dt><dd>${esc(result.hub_mcp_url || "未知")}</dd>
       <dt>当前空间 / 持有人</dt><dd>${esc(result.space.label)} / ${esc(result.owner.label)}</dd>
       <dt>当前服务版本 / 工具协议</dt><dd>${esc(result.server_info.version)} / ${esc(result.contract_protocol)}</dd>
-      <dt>当前工具目录版本</dt><dd><code>${esc(result.catalog.current_effective_sha256 || '未知')}</code></dd>
-      <dt>最近发送的目录版本</dt><dd><code>${esc(result.catalog.last_served_sha256 || '未知')}</code></dd>
-      <dt>最近实际调用</dt><dd>${last ? esc(last.tool) + ' · 服务 ' + esc(last.server_info.version) + ' · 工具协议 ' + esc(last.tool_contract_version) + ' · ' + esc(timeText(last.observed_at)) : '未知'}</dd>
+      <dt>当前工具目录版本</dt><dd><code>${esc(result.catalog.current_effective_sha256 || "未知")}</code></dd>
+      <dt>最近发送的目录版本</dt><dd><code>${esc(result.catalog.last_served_sha256 || "未知")}</code></dd>
+      <dt>最近实际调用</dt><dd>${last ? esc(last.tool) + " · 服务 " + esc(last.server_info.version) + " · 工具协议 " + esc(last.tool_contract_version) + " · " + esc(timeText(last.observed_at)) : "未知"}</dd>
       <dt>ChatGPT 工具扫描 / 缓存</dt><dd>尚未确认</dd>
-      <dt>客户端目录版本</dt><dd>${result.catalog.client_report_matches_last_served == null ? '未知' : result.catalog.client_report_matches_last_served ? '与最近发送的版本相同' : '版本不同，请刷新 ChatGPT 连接后再测试'}</dd></dl>`;
-    return `<h3>${esc(conclusion)}</h3><h4>下一步</h4><ul>${result.next_actions.map((item) => '<li>' + esc(item) + '</li>').join('') || '<li>暂无建议操作；不能据此推断客户端缓存已刷新。</li>'}</ul>
+      <dt>客户端目录版本</dt><dd>${result.catalog.client_report_matches_last_served == null ? "未知" : result.catalog.client_report_matches_last_served ? "与最近发送的版本相同" : "版本不同，请刷新 ChatGPT 连接后再测试"}</dd></dl>`;
+    return `<h3>${esc(conclusion)}</h3><h4>下一步</h4><ul>${result.next_actions.map((item) => "<li>" + esc(item) + "</li>").join("") || "<li>暂无建议操作；不能据此推断客户端缓存已刷新。</li>"}</ul>
       <ol class="integration-steps">${result.layers
         .map(
           (
             layer,
           ) => `<li data-connection-layer="${esc(layer.id)}"><strong>${esc(layer.label)}：${esc(labels[layer.status] || layer.status)}</strong>
-        <p>${esc(layer.evidence?.observed_at ? '观察时间：' + timeText(layer.evidence.observed_at) : layer.observed_at ? '最近心跳：' + timeText(layer.observed_at) : layer.checked_at ? '检查时间：' + timeText(layer.checked_at) : '尚无检查结果')}
-        ${layer.read_capability ? ' · 读取能力：' + esc(layer.read_capability) : ''}</p>${layer.note ? '<p>' + esc(layer.note) + '</p>' : ''}</li>`,
+        <p>${esc(layer.evidence?.observed_at ? "观察时间：" + timeText(layer.evidence.observed_at) : layer.observed_at ? "最近心跳：" + timeText(layer.observed_at) : layer.checked_at ? "检查时间：" + timeText(layer.checked_at) : "尚无检查结果")}
+        ${layer.read_capability ? " · 读取能力：" + esc(layer.read_capability) : ""}</p>${layer.note ? "<p>" + esc(layer.note) + "</p>" : ""}</li>`,
         )
-        .join('')}</ol>
+        .join("")}</ol>
       <details><summary>技术诊断与目录证据</summary>${diagnostics}<p>${esc(result.catalog.note)}</p></details>`;
   }
   function renderPreview(value) {
-    return `<h3>${value.configuration_valid ? '配置文本校验通过，尚未运行' : '配置需修正'}</h3>
+    return `<h3>${value.configuration_valid ? "配置文本校验通过，尚未运行" : "配置需修正"}</h3>
       <p>连接：未知 · 真实 Tunnel 验收：未运行 · PAT 实际范围：未验证</p>
-      <ul>${[...value.errors, ...value.warnings].map((item) => '<li>' + esc(item.message) + '</li>').join('')}</ul>
-      ${value.artifacts.map((item) => '<h4>' + esc(item.name) + '</h4><pre class="integration-page-text">' + esc(item.content) + '</pre>').join('')}
-      ${value.commands.map((item) => '<h4>' + esc(item.title) + '</h4><pre class="integration-page-text">' + esc(item.shell) + '</pre>').join('')}
-      <ol>${value.manual_steps.map((item) => '<li><strong>' + esc(item.title) + '</strong><p>' + esc(item.detail) + '</p></li>').join('')}</ol>`;
+      <ul>${[...value.errors, ...value.warnings].map((item) => "<li>" + esc(item.message) + "</li>").join("")}</ul>
+      ${value.artifacts.map((item) => "<h4>" + esc(item.name) + '</h4><pre class="integration-page-text">' + esc(item.content) + "</pre>").join("")}
+      ${value.commands.map((item) => "<h4>" + esc(item.title) + '</h4><pre class="integration-page-text">' + esc(item.shell) + "</pre>").join("")}
+      <ol>${value.manual_steps.map((item) => "<li><strong>" + esc(item.title) + "</strong><p>" + esc(item.detail) + "</p></li>").join("")}</ol>`;
   }
   function bind() {
-    const root = $('#connection-setup'),
+    const root = $("#connection-setup"),
       scope = lifetime.mount(root);
     if (!scope) return;
     let checkEpoch = 0,
       previewEpoch = 0;
-    const current = () => scope.current() && S.page === 'connect' && root.isConnected;
-    const check = $('#connection-check-form', root),
-      output = $('#connection-check-result', root);
+    const current = () =>
+      scope.current() && S.page === "connect" && root.isConnected;
+    const check = $("#connection-check-form", root),
+      output = $("#connection-check-result", root);
     const invalidate = () => {
       checkEpoch++;
       output.replaceChildren();
     };
-    scope.listen(check, 'change', invalidate);
-    scope.listen(check, 'submit', async (event) => {
+    scope.listen(check, "change", invalidate);
+    scope.listen(check, "submit", async (event) => {
       event.preventDefault();
       if (!check.reportValidity() || !current()) return;
       const epoch = ++checkEpoch,
-        button = $('button', check);
+        button = $("button", check);
       button.disabled = true;
-      output.textContent = '正在测试…';
+      output.textContent = "正在测试…";
       try {
         const query = new URLSearchParams({
           project_id: check.elements.project_id.value,
           client_catalog_sha256: check.elements.catalog.value,
         });
         const value = await api(
-          '/api/grants/' +
+          "/api/grants/" +
             encodeURIComponent(check.elements.grant_id.value) +
-            '/connection-status?' +
+            "/connection-status?" +
             query,
           { signal: scope.signal, retryDelays: [], retrySafe: false },
         );
-        if (current() && epoch === checkEpoch) output.innerHTML = renderStatus(value);
+        if (current() && epoch === checkEpoch)
+          output.innerHTML = renderStatus(value);
       } catch (error) {
-        if (current() && epoch === checkEpoch) output.textContent = error.message;
+        if (current() && epoch === checkEpoch)
+          output.textContent = error.message;
       } finally {
         if (current()) button.disabled = false;
       }
     });
     if (check.elements.grant_id.value) check.requestSubmit();
-    const form = $('#connection-tunnel-form'),
-      preview = $('#connection-tunnel-result');
+    const form = $("#connection-tunnel-form"),
+      preview = $("#connection-tunnel-result");
     if (!form || !preview) return;
-    scope.listen(form, 'input', () => {
+    scope.listen(form, "input", () => {
       previewEpoch++;
       preview.replaceChildren();
     });
-    scope.listen(form, 'submit', async (event) => {
+    scope.listen(form, "submit", async (event) => {
       event.preventDefault();
       if (!form.reportValidity() || !current()) return;
       const epoch = ++previewEpoch,
-        button = $('button', form);
+        button = $("button", form);
       button.disabled = true;
-      preview.textContent = '正在校验配置文本…';
+      preview.textContent = "正在校验配置文本…";
       const body = Object.fromEntries(new FormData(form));
       try {
-        const value = await api('/api/connection/tunnel-preview', {
-          method: 'POST',
+        const value = await api("/api/connection/tunnel-preview", {
+          method: "POST",
           body: JSON.stringify(body),
           signal: scope.signal,
           retryDelays: [],
           retrySafe: false,
         });
-        if (current() && epoch === previewEpoch) preview.innerHTML = renderPreview(value);
+        if (current() && epoch === previewEpoch)
+          preview.innerHTML = renderPreview(value);
       } catch (error) {
-        if (current() && epoch === previewEpoch) preview.textContent = error.message;
+        if (current() && epoch === previewEpoch)
+          preview.textContent = error.message;
       } finally {
         if (current()) button.disabled = false;
       }
     });
   }
-  return { html, tunnelHTML, bind, detach: lifetime.detach, renderStatus, renderPreview };
+  return {
+    html,
+    tunnelHTML,
+    bind,
+    detach: lifetime.detach,
+    renderStatus,
+    renderPreview,
+  };
 })();

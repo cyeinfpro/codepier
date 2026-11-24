@@ -157,15 +157,15 @@
   border-radius: 50%;
   background: var(--ui-muted);
 }
-.vt-tab[data-state='ready'] .vt-tab-dot {
+.vt-tab[data-state="ready"] .vt-tab-dot {
   background: var(--ui-success);
 }
-.vt-tab[data-state='blocked'] .vt-tab-dot,
-.vt-tab[data-state='failed'] .vt-tab-dot {
+.vt-tab[data-state="blocked"] .vt-tab-dot,
+.vt-tab[data-state="failed"] .vt-tab-dot {
   background: var(--ui-danger);
 }
-.vt-tab[data-state='reconnecting'] .vt-tab-dot,
-.vt-tab[data-state='restoring'] .vt-tab-dot {
+.vt-tab[data-state="reconnecting"] .vt-tab-dot,
+.vt-tab[data-state="restoring"] .vt-tab-dot {
   background: var(--ui-warning);
 }
 .vt-tab-lock {
@@ -174,7 +174,7 @@
   white-space: nowrap;
   color: var(--ui-muted);
 }
-.vt-tab-lock[aria-pressed='true'] {
+.vt-tab-lock[aria-pressed="true"] {
   color: var(--ui-warning);
 }
 .vt-tab-close {
@@ -366,7 +366,7 @@
   color: var(--ui-text);
   background-color: var(--ui-panel);
 }
-.vt-settings-row input[type='checkbox'] {
+.vt-settings-row input[type="checkbox"] {
   accent-color: var(--ui-primary);
   width: 16px;
   height: 16px;
@@ -399,7 +399,7 @@
   touch-action: none;
 }
 .vt-has-split .vt-gutter::after {
-  content: '';
+  content: "";
   width: 2px;
   height: 28px;
   border-radius: var(--ui-radius-xs);
@@ -475,7 +475,7 @@
   font-size: var(--ui-text-xs);
   color: var(--ui-muted);
 }
-.vt-pane-pill[data-mode='tmux'] {
+.vt-pane-pill[data-mode="tmux"] {
   background: var(--ui-accent-soft, var(--ui-hover));
   color: var(--ui-text);
 }
@@ -514,7 +514,7 @@
   flex-shrink: 0;
 }
 .vt-progress::after {
-  content: '';
+  content: "";
   display: block;
   width: 35%;
   height: 100%;
@@ -540,7 +540,7 @@
   min-width: 0;
   padding: var(--ui-space-2);
   overflow: hidden;
-  background: var(--ui-panel);
+  background: var(--vt-background, var(--ui-panel));
 }
 .vt-canvas > .xterm {
   height: 100%;
@@ -550,7 +550,8 @@
   background: inherit;
   overflow: visible;
 }
-.vt-canvas .xterm-viewport {
+/* Match xterm's opaque-viewport specificity; this follows the vendor CSS. */
+.vt-canvas > .xterm .xterm-viewport {
   scrollbar-width: thin;
   background-color: var(--vt-background, var(--ui-panel));
 }
@@ -605,7 +606,7 @@
   border-radius: var(--ui-radius-small);
   box-shadow: var(--ui-elev-1);
 }
-.vt-notice[data-severity='danger'],
+.vt-notice[data-severity="danger"],
 .vt-workspace-error {
   background: var(--ui-danger-bg);
   color: var(--ui-danger);
@@ -840,10 +841,10 @@
 .vt-diagnostics-link > strong {
   font-weight: var(--ui-weight-medium);
 }
-.vt-diagnostics-link[data-status='connected'] > strong {
+.vt-diagnostics-link[data-status="connected"] > strong {
   color: var(--ui-success);
 }
-.vt-diagnostics-link[data-status='disconnected'] > strong {
+.vt-diagnostics-link[data-status="disconnected"] > strong {
   color: var(--ui-warning);
 }
 .vt-diagnostics-values {
@@ -1069,16 +1070,16 @@
     color: var(--ui-text);
     background: var(--ui-accent-soft, var(--ui-hover));
   }
-  .vt-mobile-keys [aria-pressed='true'] {
+  .vt-mobile-keys [aria-pressed="true"] {
     background: var(--ui-accent-soft, var(--ui-hover));
     color: var(--ui-primary);
   }
-  .vt-mobile-keys [data-lock-state='latched'] {
+  .vt-mobile-keys [data-lock-state="latched"] {
     background: var(--ui-accent-soft, var(--ui-hover));
     color: var(--ui-primary);
     box-shadow: inset 0 0 0 1px var(--ui-primary);
   }
-  .vt-mobile-keys [data-lock-state='locked'] {
+  .vt-mobile-keys [data-lock-state="locked"] {
     background: var(--ui-primary);
     color: var(--ui-primary-text);
     box-shadow: inset 0 -3px 0 var(--ui-primary-text);
@@ -1253,13 +1254,13 @@
   .vt-has-split .vt-secondary-slot {
     display: none;
   }
-  .vt-screen > .vt-notice[data-transient='true'] {
+  .vt-screen > .vt-notice[data-transient="true"] {
     inset: 6px 6px auto 6px;
     flex-wrap: nowrap;
     padding: 4px 8px;
     font-size: var(--ui-text-xs);
   }
-  .vt-screen > .vt-notice[data-transient='true'] > span:first-child {
+  .vt-screen > .vt-notice[data-transient="true"] > span:first-child {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

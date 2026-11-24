@@ -111,7 +111,7 @@
 
 .cr-or::before,
 .cr-or::after {
-  content: '';
+  content: "";
   flex: 1;
   border-top: 1px solid var(--cr-line);
 }
@@ -242,7 +242,7 @@
 }
 
 .cr-inbound::before {
-  content: '';
+  content: "";
   width: 7px;
   height: 7px;
   border-radius: 50%;

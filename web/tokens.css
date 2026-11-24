@@ -78,11 +78,12 @@
   --ui-nav-selected: #27252b;
   --ui-nav-selected-text: #f8f7fa;
   --ui-display-font:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'PingFang SC', sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+    "PingFang SC", sans-serif;
   --ui-font:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
-    sans-serif;
-  --ui-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --ui-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
   /* Shared dimensions. Change these contracts, not page-specific copies. */
   --ui-space-1: 4px;
   --ui-space-2: 8px;
@@ -110,11 +111,18 @@
   --ui-control-radius: var(--ui-radius-small);
   --ui-panel-radius: var(--ui-radius-xl);
   --ui-window-radius: var(--ui-radius-xl);
-  --ui-shadow: 0 12px 36px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 5%);
+  --ui-shadow: var(--ui-elev-3);
   --ui-scrim: rgb(20 20 20 / 36%);
-  --ui-motion-fast: 120ms;
-  --ui-motion-normal: 180ms;
-  --ui-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ui-motion-press: 80ms;
+  --ui-motion-fast: 140ms;
+  --ui-motion-normal: 200ms;
+  --ui-motion-panel: 240ms;
+  --ui-motion-exit: 150ms;
+  --ui-ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --ui-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ui-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ui-ease-spring: cubic-bezier(0.22, 1.12, 0.36, 1);
+  --ui-ease: var(--ui-ease-out);
 
   /* One shared type, geometry and elevation scale. */
   --ui-text-2xs: 11px;
@@ -133,10 +141,17 @@
   --ui-radius-lg: 16px;
   --ui-radius-xl: 20px;
   --ui-radius-pill: 999px;
+  --ui-radius-inner-tight: 10px;
+  --ui-radius-inner-normal: 8px;
+  --ui-radius-inner-pill-seg: 9px;
   --ui-elev-0: none;
-  --ui-elev-1: 0 1px 2px rgb(0 0 0 / 4%), 0 0 0 1px rgb(0 0 0 / 2%);
-  --ui-elev-2: 0 6px 20px rgb(0 0 0 / 8%), 0 1px 3px rgb(0 0 0 / 4%);
-  --ui-elev-3: var(--ui-shadow);
+  --ui-elev-1: 0 1px 2px rgb(0 0 0 / 4%), 0 0 0 1px rgb(0 0 0 / 3%);
+  --ui-elev-2:
+    0 4px 12px rgb(0 0 0 / 6%), 0 1px 3px rgb(0 0 0 / 4%),
+    0 0 0 1px rgb(0 0 0 / 4%);
+  --ui-elev-3:
+    0 16px 40px rgb(0 0 0 / 11%), 0 4px 12px rgb(0 0 0 / 5%),
+    0 0 0 1px rgb(0 0 0 / 5%);
   /* Global layers; component-local stacking is limited to 0–9. */
   --ui-z-local: 1;
   --ui-z-sticky: 100;
@@ -160,7 +175,7 @@
   --ui-workspace-height: clamp(220px, calc(100dvh - 430px), 560px);
 }
 
-html[data-appearance='dark'] {
+html[data-appearance="dark"] {
   color-scheme: dark;
   --ui-bg: #141413;
   --ui-panel: #1c1c1b;
@@ -211,8 +226,14 @@ html[data-appearance='dark'] {
   --ui-message-bg: #343434;
   --ui-message-text: #e5e5e5;
   --ui-message-code-bg: #414141;
-  --ui-elev-1: 0 1px 2px rgb(0 0 0 / 18%), 0 0 0 1px rgb(255 255 255 / 4%);
-  --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
+  --ui-elev-1: inset 0 1px 0 rgb(255 255 255 / 5%), 0 1px 2px rgb(0 0 0 / 28%);
+  --ui-elev-2:
+    inset 0 1px 0 rgb(255 255 255 / 6%), 0 8px 24px rgb(0 0 0 / 34%),
+    0 2px 6px rgb(0 0 0 / 20%);
+  --ui-elev-3:
+    inset 0 1px 0 rgb(255 255 255 / 8%), 0 20px 48px rgb(0 0 0 / 48%),
+    0 4px 12px rgb(0 0 0 / 28%);
+  --ui-shadow: var(--ui-elev-3);
   --ui-scrim: rgb(0 0 0 / 46%);
   --ui-cover-project: #40374f;
   --ui-cover-device: #2d414c;
@@ -281,8 +302,15 @@ html[data-appearance='dark'] {
     --ui-message-bg: #343434;
     --ui-message-text: #e5e5e5;
     --ui-message-code-bg: #414141;
-    --ui-elev-1: 0 1px 2px rgb(0 0 0 / 18%), 0 0 0 1px rgb(255 255 255 / 4%);
-    --ui-shadow: 0 16px 40px rgb(0 0 0 / 24%), 0 2px 8px rgb(0 0 0 / 12%);
+    --ui-elev-1:
+      inset 0 1px 0 rgb(255 255 255 / 5%), 0 1px 2px rgb(0 0 0 / 28%);
+    --ui-elev-2:
+      inset 0 1px 0 rgb(255 255 255 / 6%), 0 8px 24px rgb(0 0 0 / 34%),
+      0 2px 6px rgb(0 0 0 / 20%);
+    --ui-elev-3:
+      inset 0 1px 0 rgb(255 255 255 / 8%), 0 20px 48px rgb(0 0 0 / 48%),
+      0 4px 12px rgb(0 0 0 / 28%);
+    --ui-shadow: var(--ui-elev-3);
     --ui-scrim: rgb(0 0 0 / 46%);
     --ui-cover-project: #40374f;
     --ui-cover-device: #2d414c;
