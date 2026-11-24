@@ -1,7 +1,7 @@
 -r requirements.in
 -r requirements-agent.in
 pytest==9.2.0
-pytest-asyncio==1.4.1
+pytest-asyncio==1.5.0
 # Starlette TestClient uses the same reviewed HTTP transport as MCP compatibility.
 httpx2==2.13.1
 # macOS default headless-shell stalls RAF; tests/browser_launch.py selects full Chromium.
