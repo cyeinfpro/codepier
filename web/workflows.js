@@ -2,7 +2,14 @@
 // Durable progress UI; commands are only run by the existing explicit tool paths.
 function workflowState() {
   return (
-    S.workflow || (S.workflow = { project: '', state: '', cursor: '', history: [], next: null })
+    S.workflow ||
+    (S.workflow = {
+      project: '',
+      state: '',
+      cursor: '',
+      history: [],
+      next: null,
+    })
   );
 }
 async function workflowsHTML(seq) {
@@ -34,7 +41,11 @@ function bindWorkflows() {
     ['workflow-state', 'state'],
   ]) {
     $('#' + id).onchange = (e) => {
-      Object.assign(workflowState(), { [key]: e.target.value, cursor: '', history: [] });
+      Object.assign(workflowState(), {
+        [key]: e.target.value,
+        cursor: '',
+        history: [],
+      });
       renderPage(false).catch((err) => toast(err.message, true));
     };
   }
@@ -150,6 +161,35 @@ function workflowEvidenceHTML(items) {
     )
     .join('');
 }
+function renderWorkflowStepHTML(s, index) {
+  return `<section class="workflow-step"><div class="workflow-step-head"><span class="step-number">${index + 1}</span><h3>${esc(s.title)}</h3>${badge(s.state)}</div><p class="muted">${esc(s.acceptance)}</p>${s.summary ? `<p class="workflow-summary">${esc(s.summary)}</p>` : ''}<div class="workflow-evidence-list">${workflowEvidenceHTML(s.evidence)}</div></section>`;
+}
+function renderWorkflowStepsHTML(w) {
+  const steps = w.steps || [];
+  let leadingDone = 0;
+  if (w.state !== 'completed') {
+    while (
+      leadingDone < steps.length &&
+      ['completed', 'skipped'].includes(steps[leadingDone].state)
+    )
+      leadingDone++;
+  }
+  if (leadingDone > 0 && leadingDone < steps.length) {
+    const compact =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(max-width: 900px), (pointer: coarse)')?.matches;
+    const doneHTML = steps
+      .slice(0, leadingDone)
+      .map((s, i) => renderWorkflowStepHTML(s, i))
+      .join('');
+    const activeHTML = steps
+      .slice(leadingDone)
+      .map((s, i) => renderWorkflowStepHTML(s, leadingDone + i))
+      .join('');
+    return `<details class="workflow-steps-completed"${compact ? '' : ' open'}><summary><span>已完成前置 ${leadingDone} 步</span><span>展开查看</span></summary>${doneHTML}</details>${activeHTML}`;
+  }
+  return steps.map((s, i) => renderWorkflowStepHTML(s, i)).join('');
+}
 async function workflowDetail(id, before = null, fresh = null) {
   if (!S.session) return;
   const session = S.session,
@@ -166,7 +206,7 @@ async function workflowDetail(id, before = null, fresh = null) {
       w.can_update !== false && !w.mapping_changed && !['completed', 'cancelled'].includes(w.state);
     const dialog = modal(
       w.title,
-      `<div class="workflow-detail-meta"><span>${esc(w.project_alias)} · ${w.assigned_to_mcp ? '已交接 MCP 授权' : '仅面板管理'}</span>${badge(w.state)}</div><p class="workflow-summary">${esc(w.goal)}</p>${w.mapping_changed ? notice('项目位置已改，这个任务只能查看。') : ''}<div class="workflow-steps">${w.steps.map((s, i) => `<section class="workflow-step"><div class="workflow-step-head"><span class="step-number">${i + 1}</span><h3>${esc(s.title)}</h3>${badge(s.state)}</div><p class="muted">${esc(s.acceptance)}</p>${s.summary ? `<p class="workflow-summary">${esc(s.summary)}</p>` : ''}<div class="workflow-evidence-list">${workflowEvidenceHTML(s.evidence)}</div></section>`).join('')}</div><h3>当前摘要</h3><p class="workflow-summary">${esc(w.summary || '尚未记录。')}</p><details class="workflow-history"><summary>${before ? '较早的' : '最近的'}进度记录</summary>${w.events.map((e) => `<article><div class="muted tiny">${esc(timeText(e.at))} · v${e.version} · ${esc(e.action)}</div><p class="workflow-summary">${esc(e.summary)}</p>${workflowEvidenceHTML(e.evidence)}</article>`).join('')}${w.next_before_event_id ? `<button class="btn ghost small" data-wf-action="older" data-id="${esc(id)}" data-before="${w.next_before_event_id}">更早记录</button>` : ''}${before ? `<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">回到最新记录</button>` : ''}</details><p class="form-note"></p>`,
+      `<div class="workflow-detail-meta"><span>${esc(w.project_alias)} · ${w.assigned_to_mcp ? '已交接 MCP 授权' : '仅面板管理'}</span>${badge(w.state)}</div><p class="workflow-summary">${esc(w.goal)}</p>${w.mapping_changed ? notice('项目位置已改，这个任务只能查看。') : ''}<div class="workflow-steps">${renderWorkflowStepsHTML(w)}</div><h3>当前摘要</h3><p class="workflow-summary">${esc(w.summary || '尚未记录。')}</p><details class="workflow-history"><summary>${before ? '较早的' : '最近的'}进度记录</summary>${w.events.map((e) => `<article><div class="muted tiny">${esc(timeText(e.at))} · v${e.version} · ${esc(e.action)}</div><p class="workflow-summary">${esc(e.summary)}</p>${workflowEvidenceHTML(e.evidence)}</article>`).join('')}${w.next_before_event_id ? `<button class="btn ghost small" data-wf-action="older" data-id="${esc(id)}" data-before="${w.next_before_event_id}">更早记录</button>` : ''}${before ? `<button class="btn ghost small" data-wf-action="detail" data-id="${esc(id)}">回到最新记录</button>` : ''}</details><p class="form-note"></p>`,
       `${uiMenu('更多', `<button class="btn ghost" data-devtools="handoff" data-project="${esc(w.project_id)}" data-workflow="${esc(id)}">交给开发工具</button><button class="btn ghost" data-devtools="validation" data-project="${esc(w.project_id)}">测试</button><button class="btn ghost" data-action="project-collaboration" data-id="${esc(w.project_id)}">协作中心</button>${typeof chatProjectButtons === 'function' ? chatProjectButtons(w.project_id) : ''}`)}${mutable ? '<button class="btn primary" id="workflow-edit">记录进度</button>' : '<button class="btn primary" data-action="close-modal">关闭</button>'}`,
       true,
     );
@@ -248,9 +288,12 @@ function workflowEdit(w) {
     $('#workflow-step-fields', dialog).hidden = action !== 'checkpoint';
     evidence.hidden = !['checkpoint', 'complete'].includes(action);
     $('#wf-summary-label', dialog).textContent =
-      { block: '遇到的阻碍', resume: '解决方式', complete: '检查结果', cancel: '取消原因' }[
-        action
-      ] || '实际结果';
+      {
+        block: '遇到的阻碍',
+        resume: '解决方式',
+        complete: '检查结果',
+        cancel: '取消原因',
+      }[action] || '实际结果';
   };
   form.addEventListener('change', sync);
   sync();
@@ -260,7 +303,11 @@ function workflowEdit(w) {
     busy(refreshEvidence, async () => {
       const { operations } = await api(
         '/api/operations?' +
-          new URLSearchParams({ project: w.project_id, status: 'succeeded', limit: '20' }),
+          new URLSearchParams({
+            project: w.project_id,
+            status: 'succeeded',
+            limit: '20',
+          }),
       );
       if (!dialog.isConnected) return;
       const checked = new Set($$('[name="evidence"]:checked', list).map((input) => input.value));
@@ -332,7 +379,13 @@ async function workflowReadDocument(project, path, start = 1, workspace_id = '')
   const session = S.session,
     loading = modal(path, '<p class="muted">读取文档…</p>');
   const r = await settled(
-    tool('fs_read', { project, workspace_id, path, start_line: start, max_lines: 400 }),
+    tool('fs_read', {
+      project,
+      workspace_id,
+      path,
+      start_line: start,
+      max_lines: 400,
+    }),
   );
   if (session !== S.session || !loading.isConnected) return;
   modal(
@@ -367,7 +420,12 @@ document.addEventListener('click', async (e) => {
         break;
       case 'project':
         if (!S.projects.some((project) => project.id === b.dataset.project)) break;
-        Object.assign(w, { project: b.dataset.project, state: '', cursor: '', history: [] });
+        Object.assign(w, {
+          project: b.dataset.project,
+          state: '',
+          cursor: '',
+          history: [],
+        });
         closeModal();
         if (S.page === 'workflows') await renderPage(false);
         else await navigate('workflows');

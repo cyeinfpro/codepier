@@ -15,7 +15,8 @@
   position: relative;
   flex: none;
   min-height: 64px;
-  padding: 8px 16px;
+  padding: 8px max(16px, var(--safe-right, env(safe-area-inset-right, 0px))) 8px
+    max(16px, var(--safe-left, env(safe-area-inset-left, 0px)));
   border-bottom: 1px solid var(--chat-line);
   background: var(--chat-bg);
   z-index: var(--chat-z-header);
@@ -139,7 +140,18 @@
   scrollbar-width: thin;
   scrollbar-color: var(--chat-border) transparent;
   overflow-anchor: none;
-  padding: 34px max(28px, calc((100% - var(--chat-content)) / 2)) 26px;
+  padding: 34px
+    max(
+      28px,
+      var(--safe-right, env(safe-area-inset-right, 0px)),
+      calc((100% - var(--chat-content)) / 2)
+    )
+    26px
+    max(
+      28px,
+      var(--safe-left, env(safe-area-inset-left, 0px)),
+      calc((100% - var(--chat-content)) / 2)
+    );
   scroll-padding-block: 24px;
 }
 .chat-scroll:focus-visible {
@@ -416,6 +428,11 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
 }
+.chat-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .chat-code-head button {
   min-height: 26px;
   padding: 2px 6px;
@@ -425,10 +442,17 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   font-size: var(--ui-text-xs, 12px);
   color: var(--chat-muted);
 }
+.chat-code-head button[aria-pressed='true'] {
+  background: var(--chat-selected);
+  color: var(--chat-fg);
+}
 .chat-code pre {
   tab-size: 2;
   scrollbar-width: thin;
   scrollbar-color: var(--chat-border) transparent;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   margin: 0;
   padding: 16px;
   border: 0;
@@ -440,9 +464,19 @@ html[data-appearance='dark'] .chat-workspace .chat-message-user .chat-message-bo
   background: none;
   white-space: pre;
 }
+.chat-code pre.is-wrapped,
+.chat-code pre.is-wrapped code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 .chat-table-scroll {
   max-width: 100%;
   overflow: auto;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
   margin: 16px 0;
   border: 1px solid var(--chat-line);
   border-radius: var(--ui-radius-md, 12px);

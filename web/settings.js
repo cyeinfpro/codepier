@@ -131,13 +131,13 @@ window.CodePierSettings = (() => {
       ['05', '查看用量', '查看调用、Token 与费用', 'overview', 'usage'],
     ];
     return (
-      '<section id="settings-start" aria-label="设置流程"><div class="settings-flow-head"><span>快速导航</span><button type="button" class="btn ghost small" data-settings-start-toggle aria-expanded="' +
+      '<section id="settings-start" aria-label="设置流程"><details class="settings-quickstart"' +
+      (state.startCollapsed ? '' : ' open') +
+      '><summary class="settings-quickstart-summary" data-settings-start-toggle aria-expanded="' +
       String(!state.startCollapsed) +
-      '">' +
-      (state.startCollapsed ? '展开引导' : '收起引导') +
-      '</button></div><div class="settings-flow-grid"' +
-      (state.startCollapsed ? ' hidden' : '') +
-      '>' +
+      '"><span>快速上手与环境配置向导</span><small class="settings-quickstart-meta">' +
+      (state.startCollapsed ? '5 步 · 展开引导' : '5 步 · 收起引导') +
+      '</small></summary><div class="settings-flow-grid">' +
       steps
         .map(
           ([number, title, description, entry, view]) =>
@@ -154,7 +154,7 @@ window.CodePierSettings = (() => {
             '">相关设置</button></div></article>',
         )
         .join('') +
-      '</div><div class="settings-shortcuts"><button type="button" class="btn" data-settings-group="files">文件传输</button>' +
+      '</div></details><div class="settings-shortcuts"><button type="button" class="btn" data-settings-group="files">文件传输</button>' +
       '<button type="button" class="btn" data-settings-group="tasks">并发与排队</button>' +
       '<button type="button" class="btn ghost" data-settings-group="advanced">账号与维护</button></div></section>'
     );
@@ -282,7 +282,7 @@ window.CodePierSettings = (() => {
       );
     if (item.id === 'public_url')
       return (
-        '<form id="settings-form" data-settings-form="public_url"><label class="field">基础地址<input name="public_url" type="url" maxlength="500" required value="' +
+        '<form id="settings-form" data-settings-form="public_url"><label class="field">基础地址<input name="public_url" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="500" required value="' +
         esc(value) +
         '"></label><p class="form-note">HTTP / HTTPS 根地址，不带 /mcp。</p>' +
         buttons() +
@@ -444,7 +444,7 @@ window.CodePierSettings = (() => {
     return (
       heading('设置') +
       '<section id="settings-center" class="settings-center"><div class="settings-toolbar">' +
-      '<label class="field">搜索设置<input id="settings-search" type="search" placeholder="搜索功能或设置…" value="' +
+      '<label class="field">搜索设置<input id="settings-search" type="search" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" placeholder="搜索功能或设置…" value="' +
       esc(state.query) +
       '"></label><label class="field" id="settings-project-field">项目<select id="settings-project">' +
       '<option value="">选择项目</option>' +
@@ -617,19 +617,19 @@ window.CodePierSettings = (() => {
         $('#settings-search', mounted).value = '';
         filter();
       });
-    const startToggle = $('[data-settings-start-toggle]', mounted);
-    if (startToggle)
-      listen(startToggle, 'click', () => {
-        state.startCollapsed = !state.startCollapsed;
+    const quickstart = $('.settings-quickstart', mounted);
+    if (quickstart)
+      listen(quickstart, 'toggle', () => {
+        state.startCollapsed = !quickstart.open;
         try {
           window.localStorage.setItem(START_KEY, state.startCollapsed ? '1' : '0');
         } catch {
           // Not remembered; the toggle still applies to this visit.
         }
-        const grid = $('.settings-flow-grid', mounted);
-        if (grid) grid.hidden = state.startCollapsed;
-        startToggle.setAttribute('aria-expanded', String(!state.startCollapsed));
-        startToggle.textContent = state.startCollapsed ? '展开引导' : '收起引导';
+        const summary = $('[data-settings-start-toggle]', quickstart);
+        summary?.setAttribute('aria-expanded', String(quickstart.open));
+        const meta = $('.settings-quickstart-meta', quickstart);
+        if (meta) meta.textContent = quickstart.open ? '5 步 · 收起引导' : '5 步 · 展开引导';
       });
     listen($('#settings-project', mounted), 'change', async (event) => {
       const next = event.target.value;
@@ -660,7 +660,9 @@ window.CodePierSettings = (() => {
           behavior: 'smooth',
           block: 'start',
         });
-        $('#file-import-settings-form select', mounted)?.focus({ preventScroll: true });
+        $('#file-import-settings-form select', mounted)?.focus({
+          preventScroll: true,
+        });
       });
     for (const button of $$('[data-devtools]', mounted))
       listen(button, 'click', (event) => {
@@ -752,7 +754,10 @@ window.CodePierSettings = (() => {
           } else {
             const saved = await api('/api/settings', {
               method: 'PUT',
-              body: JSON.stringify({ public_url: submitted, expected_public_url: baseline }),
+              body: JSON.stringify({
+                public_url: submitted,
+                expected_public_url: baseline,
+              }),
             });
             if (!current()) return;
             const fresh = await api(

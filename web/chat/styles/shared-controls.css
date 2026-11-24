@@ -138,13 +138,22 @@
     min-width: 0;
   }
 }
+@media (max-width: 900px) {
+  body.ui-keyboard-open.chat-mode #page {
+    padding: 0;
+  }
+  body.ui-keyboard-open .chat-workspace {
+    border: 0;
+    border-radius: 0;
+  }
+}
 @media (max-width: 760px) {
   .chat-header-right > :is(#chat-find-toggle, #chat-inspector-toggle) {
     display: inline-grid;
   }
   /* iOS keeps the layout viewport full-height while its keyboard is open. */
   body.ui-keyboard-open .chat-workspace {
-    height: max(0px, calc(100dvh - var(--ui-visual-viewport-bottom, 0px)));
+    height: max(0px, calc(100dvh - var(--ui-vv-bottom, var(--ui-visual-viewport-bottom, 0px))));
     min-height: 0;
   }
 }
@@ -250,5 +259,33 @@
   .chat-options .chat-setting-field > :is(select, button),
   .chat-options .chat-cli-segmented button {
     min-height: 44px;
+  }
+}
+@media (min-width: 761px) and (pointer: coarse) {
+  .chat-run-controls select {
+    max-width: 180px;
+  }
+}
+@media (max-width: 900px), (pointer: coarse) {
+  .chat-workspace
+    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+  .chat-workspace .chat-options .chat-setting-field > select,
+  .chat-workspace .chat-run-controls select,
+  .chat-workspace .chat-send-actions select,
+  .chat-workspace .chat-config-bar select,
+  .chat-workspace .chat-history-filter :is(input, select),
+  .chat-workspace .chat-history-scope select,
+  .chat-workspace .chat-project-label select,
+  .chat-workspace .chat-sidebar-preferences select,
+  .chat-workspace .chat-new-context select,
+  .chat-workspace .chat-project-sheet input,
+  #chat-project-search,
+  #chat-model-search,
+  #chat-cwd-input,
+  #chat-find-input,
+  #chat-history-search,
+  #chat-command-filter,
+  #chat-dialog-input {
+    font-size: var(--ui-text-input, 16px);
   }
 }

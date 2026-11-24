@@ -8,7 +8,23 @@ export function mountReview(parent, value, ctx) {
     notice(parent, '没有固定改动快照；不能用当前目录代替本轮结果。', true);
     return;
   }
-  parent.append(el('h2', '本轮改动'));
+  let wrapDiff = false;
+  const head = el('div', undefined, 'review-head');
+  const wrapToggle = el('button', '自动折行', 'wrap-toggle');
+  wrapToggle.type = 'button';
+  wrapToggle.setAttribute('aria-pressed', 'false');
+  function syncWrap() {
+    wrapToggle.setAttribute('aria-pressed', wrapDiff ? 'true' : 'false');
+    for (const pre of parent.querySelectorAll('pre')) {
+      pre.classList.toggle('is-wrapped', wrapDiff);
+    }
+  }
+  wrapToggle.addEventListener('click', () => {
+    wrapDiff = !wrapDiff;
+    syncWrap();
+  });
+  head.append(el('h2', '本轮改动'), wrapToggle);
+  parent.append(head);
   const facts = el('div', undefined, 'facts');
   facts.append(badge('unknown', (value.summary?.files ?? '—') + ' 个文件'),
     badge('unknown', '+' + (value.summary?.added_lines ?? '—') + ' / −' + (value.summary?.removed_lines ?? '—')));
@@ -38,7 +54,7 @@ export function mountReview(parent, value, ctx) {
       details.addEventListener('toggle', () => {
         if (!details.open || loaded || !alive()) return;
         loaded = true;
-        const pre = el('pre', '正在读取固定差异…');
+        const pre = el('pre', '正在读取固定差异…', wrapDiff ? 'is-wrapped' : '');
         const paging = el('div', undefined, 'toolbar');
         details.append(pre, paging);
         let offset = 0;

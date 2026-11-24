@@ -186,7 +186,14 @@
     padding: 14px;
   }
 
-  .roots-editor-actions > .btn {
+  .roots-editor-actions > .btn,
+  .roots-row-actions > .btn,
+  .project-root-access > .btn {
     min-height: var(--ui-touch-target);
+  }
+
+  .roots-row-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }

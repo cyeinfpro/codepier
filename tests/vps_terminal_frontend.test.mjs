@@ -655,12 +655,14 @@ test('only an explicit tmux reauthentication result reconnects an exited attachm
   assert.equal(other.transport.retryTimer, null);
 });
 
-test('uncertain create response retains one idempotency request id for retry', async () => {
+test('uncertain create response retains the exact original grid after rotation', async () => {
   const bodies = [];
   let attempts = 0;
+  let grid = { cols: 55, rows: 16 };
   const store = new TerminalStore({
     identity: 'user:space',
     runtime: {},
+    measureInitialGrid: () => grid,
     api: async (path, args) => {
       if (path.includes('capabilities')) return { available: true, saved_vps_host_verification: 'skip', limits: {} };
       bodies.push(JSON.parse(args.body));
@@ -677,9 +679,12 @@ test('uncertain create response retains one idempotency request id for retry', a
     newSession: true,
   };
   await assert.rejects(store.open(request));
+  grid = { cols: 85, rows: 27 };
   await store.open(request);
   assert.equal(bodies.length, 2);
-  assert.equal(bodies[0].request_id, bodies[1].request_id);
+  assert.equal(bodies[0].cols, 55);
+  assert.equal(bodies[0].rows, 16);
+  assert.deepEqual(bodies[1], bodies[0]);
   assert.equal(store.creationIntents.size, 0);
   store.dispose();
 });

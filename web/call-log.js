@@ -112,6 +112,7 @@ window.CodePierCallLog = (() => {
       triggerSource: '',
       preset: '',
       density: 'table',
+      mobileFiltersOpen: false,
       burst: true,
       live: true,
       rows: [],
@@ -125,6 +126,12 @@ window.CodePierCallLog = (() => {
     });
 
   const active = (r) => Array.isArray(ACTIVE_STATES) && ACTIVE_STATES.includes(r.state);
+  const isCompactAudit = () =>
+    typeof matchMedia === 'function' && matchMedia('(max-width: 859px)').matches;
+  const effectiveDensity = () => (isCompactAudit() ? 'cards' : st().density);
+  const activeFilterCount = () =>
+    [st().project, st().tool, S.auditStatus, S.auditSource, st().triggerSource].filter(Boolean)
+      .length;
   const objects = (value) =>
     Array.isArray(value) ? value.filter((x) => x && typeof x === 'object') : [];
   const duration = (n) =>
@@ -277,7 +284,13 @@ window.CodePierCallLog = (() => {
     }
     rest = rest.trim();
     if (rest.startsWith('command=')) {
-      return { kind: 'command', primary: rest.slice(8).trim(), dir: '', name: '', badges };
+      return {
+        kind: 'command',
+        primary: rest.slice(8).trim(),
+        dir: '',
+        name: '',
+        badges,
+      };
     }
     if (rest.startsWith('paths=')) {
       const p = rest.slice(6).trim();
@@ -694,7 +707,7 @@ window.CodePierCallLog = (() => {
   ) {
     const text = typeof value === 'string' ? value : json(value);
     if (text === undefined || text === null || text === '') return '';
-    return `<details class="call-section" data-call-section="${name}" ${open ? 'open' : ''}><summary>${esc(secTitle)}<small>${text.length.toLocaleString()} 字符${truncated ? ' · 已截断' : ''}</small></summary><div class="call-section-tools">${liveFollow ? '<label class="call-output-search-label">查找输出 <input type="search" class="call-output-search" aria-label="查找当前输出" maxlength="200"><span class="call-output-matches" role="status"></span></label><button type="button" class="btn ghost small" data-call-action="find-output-next">下一处</button><button type="button" class="btn ghost small call-jump-bottom" data-call-action="scroll-output-bottom" hidden>↓ 跳至最新输出</button>' : ''}<button type="button" class="btn ghost small" data-call-copy="${name}">${icon('copy')}复制已脱敏内容</button></div><div class="${liveFollow ? 'call-output-terminal' : 'call-section-content'}">${liveFollow ? '<div class="call-output-lines" aria-hidden="true">' + Array.from({ length: text.split('\n').length }, (_, i) => i + 1).join('\n') + '</div>' : ''}<pre tabindex="0">${esc(text)}</pre></div></details>`;
+    return `<details class="call-section" data-call-section="${name}" ${open ? 'open' : ''}><summary>${esc(secTitle)}<small>${text.length.toLocaleString()} 字符${truncated ? ' · 已截断' : ''}</small></summary><div class="call-section-tools">${liveFollow ? '<label class="call-output-search-label">查找输出 <input type="search" class="call-output-search" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="查找当前输出" maxlength="200"><span class="call-output-matches" role="status"></span></label><button type="button" class="btn ghost small" data-call-action="find-output-next">下一处</button><button type="button" class="btn ghost small call-jump-bottom" data-call-action="scroll-output-bottom" hidden>↓ 跳至最新输出</button>' : ''}<button type="button" class="btn ghost small" data-call-copy="${name}">${icon('copy')}复制已脱敏内容</button></div><div class="${liveFollow ? 'call-output-terminal' : 'call-section-content'}">${liveFollow ? '<div class="call-output-lines" aria-hidden="true">' + Array.from({ length: text.split('\n').length }, (_, i) => i + 1).join('\n') + '</div>' : ''}<pre tabindex="0">${esc(text)}</pre></div></details>`;
   }
 
   function detailHTML(d) {
@@ -878,10 +891,12 @@ window.CodePierCallLog = (() => {
     const pinnedMarkup = st().pinnedOp
       ? `<div class="panel call-pinned-inspector" data-cp-key="pinned:${esc(st().pinnedOp.id)}"><div class="call-pinned-head"><strong>定位操作详情 · #${esc(st().pinnedOp.id.slice(0, 12))}</strong><button type="button" class="btn ghost small" data-call-action="close-pinned">关闭定位</button></div><div class="call-detail" data-detail-id="${esc(st().pinnedOp.id)}">${detailHTML(st().pinnedOp)}</div></div>`
       : '';
+    const filterTotal = activeFilterCount();
+    const densityNow = effectiveDensity();
     return (
       `<div class="call-audit-shell">` +
       heading('操作审计', '调用记录', '', syncPodHTML()) +
-      `<div class="filters call-filters"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(projects, st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(tools, st().tool, 'name')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select><form id="call-search"><div class="call-search-box"><input id="audit-query" type="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号（/ 聚焦）" value="${esc(S.auditQuery || '')}"><span role="button" tabindex="0" class="call-search-clear" data-call-action="clear-query" aria-label="清空搜索词" ${S.auditQuery ? '' : 'hidden'}>×</span></div><button type="submit" class="btn small">搜索</button></form><details id="call-more-filters" class="call-more-filters"${st().moreFilters ? ' open' : ''}><summary>更多筛选${[S.auditSource, st().triggerSource].filter(Boolean).length ? `<span class="call-more-count">${[S.auditSource, st().triggerSource].filter(Boolean).length}</span>` : ''}</summary><div class="call-more-body"><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
+      `<div class="filters call-filters" data-mobile-filters="${st().mobileFiltersOpen ? 'open' : 'closed'}"><div class="tabs"><button class="active" data-action="audit-mode" data-mode="operations">工具执行</button><button data-action="audit-mode" data-mode="events">全部事件</button></div><div class="call-primary-selects"><select id="call-project" aria-label="筛选调用项目"><option value="">全部项目</option>${options(projects, st().project, 'alias')}</select><select id="call-tool" aria-label="筛选调用工具"><option value="">全部工具</option>${options(tools, st().tool, 'name')}</select><select id="audit-status" aria-label="操作状态"><option value="">全部状态</option>${[...ACTIVE_STATES, ...TERMINAL_STATES].map((x) => `<option value="${x}" ${S.auditStatus === x ? 'selected' : ''}>${esc(stateNames[x] || x)}</option>`).join('')}</select></div><form id="call-search"><div class="call-search-box"><input id="audit-query" type="search" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="搜索调用" maxlength="200" placeholder="搜索路径、命令、调用者或编号（/ 聚焦）" value="${esc(S.auditQuery || '')}"><span role="button" tabindex="0" class="call-search-clear" data-call-action="clear-query" aria-label="清空搜索词" ${S.auditQuery ? '' : 'hidden'}>×</span></div><button type="submit" class="btn small">搜索</button></form><button type="button" class="btn small call-mobile-filter-btn${filterTotal ? ' is-active' : ''}" data-call-action="toggle-mobile-filters" aria-expanded="${Boolean(st().mobileFiltersOpen)}">筛选${filterTotal ? `<span class="call-more-count">${filterTotal}</span>` : ''}</button><details id="call-more-filters" class="call-more-filters"${st().moreFilters || st().mobileFiltersOpen ? ' open' : ''}><summary>更多筛选${[S.auditSource, st().triggerSource].filter(Boolean).length ? `<span class="call-more-count">${[S.auditSource, st().triggerSource].filter(Boolean).length}</span>` : ''}</summary><div class="call-more-body"><select id="audit-source" aria-label="来源"><option value="">全部来源</option>${['mcp', 'panel'].map((x) => `<option value="${x}" ${S.auditSource === x ? 'selected' : ''}>${x.toUpperCase()}</option>`).join('')}</select><select id="call-trigger-source" aria-label="触发来源"><option value="">全部触发来源</option>${[
         ['system_maintenance', '自动维护'],
         ['request', '请求发起'],
         ['unknown', '未记录'],
@@ -892,9 +907,9 @@ window.CodePierCallLog = (() => {
         )
         .join('')}
       </select></div></details></div>` +
-      `<div class="call-subtoolbar"><div class="call-presets" role="group" aria-label="快捷筛选视图">${PRESET_DEFS.map(([presetKey, label]) => `<button type="button" class="call-preset-pill${st().preset === presetKey ? ' is-active' : ''}" data-call-action="preset" data-preset="${presetKey}" aria-pressed="${st().preset === presetKey}">${esc(label)}</button>`).join('')}</div><div class="call-view-toggles"><button type="button" class="call-chip-toggle" data-call-action="toggle-burst" aria-pressed="${st().burst}"><i class="call-toggle-dot" aria-hidden="true"></i>聚合连续探查</button><span class="call-toolbar-sep" aria-hidden="true"></span><div class="call-density-switch" role="group" aria-label="列表视图密度"><button type="button" class="call-chip-toggle${st().density === 'cards' ? ' is-active' : ''}" data-call-action="density" data-density="cards" aria-pressed="${st().density === 'cards'}">卡片</button><button type="button" class="call-chip-toggle${st().density === 'table' ? ' is-active' : ''}" data-call-action="density" data-density="table" aria-pressed="${st().density === 'table'}">紧凑表格</button></div></div></div>` +
+      `<div class="call-subtoolbar"><div class="call-presets" role="group" aria-label="快捷筛选视图">${PRESET_DEFS.map(([presetKey, label]) => `<button type="button" class="call-preset-pill${st().preset === presetKey ? ' is-active' : ''}" data-call-action="preset" data-preset="${presetKey}" aria-pressed="${st().preset === presetKey}">${esc(label)}</button>`).join('')}</div><div class="call-view-toggles"><button type="button" class="call-chip-toggle" data-call-action="toggle-burst" aria-pressed="${st().burst}"><i class="call-toggle-dot" aria-hidden="true"></i>聚合连续探查</button><span class="call-toolbar-sep" aria-hidden="true"></span><div class="call-density-switch" role="group" aria-label="列表视图密度"><button type="button" class="call-chip-toggle${densityNow === 'cards' ? ' is-active' : ''}" data-call-action="density" data-density="cards" aria-pressed="${densityNow === 'cards'}">卡片</button><button type="button" class="call-chip-toggle${densityNow === 'table' ? ' is-active' : ''}" data-call-action="density" data-density="table" aria-pressed="${densityNow === 'table'}">紧凑表格</button></div></div></div>` +
       pinnedMarkup +
-      `<div class="call-workspace"><div class="call-list-pane"><div class="call-stream-banner"><button type="button" id="call-new" class="btn small call-new-pill" data-call-action="latest" hidden>↑ 列表有更新，显示最新</button><div class="call-loading-bar" data-call-progress hidden aria-hidden="true"></div></div><section class="call-log${st().density === 'table' ? ' call-log-table' : ''}" aria-label="工具调用流水">${rowsMarkup}</section></div><aside class="call-inspector" aria-label="调用详情抽屉" hidden></aside></div>` +
+      `<div class="call-workspace"><div class="call-list-pane"><div class="call-stream-banner"><button type="button" id="call-new" class="btn small call-new-pill" data-call-action="latest" hidden>↑ 列表有更新，显示最新</button><div class="call-loading-bar" data-call-progress hidden aria-hidden="true"></div></div><section class="call-log${densityNow === 'table' ? ' call-log-table' : ''}" aria-label="工具调用流水">${rowsMarkup}</section></div><aside class="call-inspector" aria-label="调用详情抽屉" hidden></aside></div>` +
       `<div class="pagination"><span id="call-count">${esc(countTextHTML(rowsLen))}</span><div class="actions"><button type="button" class="btn ghost small" data-call-action="prev" ${st().history.length ? '' : 'disabled'}>上一页</button><button type="button" class="btn ghost small" data-call-action="next" ${hasNext ? '' : 'disabled'}>下一页</button></div></div>` +
       (window.CodePierQueue?.placeholder() || '') +
       uiHelp(
@@ -923,7 +938,11 @@ window.CodePierCallLog = (() => {
       (_, idx) =>
         `<div class="call-skeleton-row" data-cp-key="skel:${idx}" aria-hidden="true"></div>`,
     ).join('');
-    return shellInnerHTML({ rowsMarkup: skeletons, rowsLen: 0, hasNext: false });
+    return shellInnerHTML({
+      rowsMarkup: skeletons,
+      rowsLen: 0,
+      hasNext: false,
+    });
   }
 
   async function html(seq) {
@@ -1071,6 +1090,13 @@ window.CodePierCallLog = (() => {
         '更多筛选' +
         (moreCountValues ? `<span class="call-more-count">${moreCountValues}</span>` : '');
     }
+    const filterTotal = activeFilterCount();
+    const mobileBtn = root.querySelector('.call-mobile-filter-btn');
+    if (mobileBtn) {
+      mobileBtn.classList.toggle('is-active', filterTotal > 0);
+      mobileBtn.innerHTML =
+        '筛选' + (filterTotal ? `<span class="call-more-count">${filterTotal}</span>` : '');
+    }
     root.querySelectorAll('[data-call-action="preset"]').forEach((btn) => {
       const on = btn.dataset.preset === st().preset;
       btn.classList.toggle('is-active', on);
@@ -1151,7 +1177,9 @@ window.CodePierCallLog = (() => {
         updateOptions('#call-project', st().projects, st().project, 'alias', '全部项目');
         updateOptions('#call-tool', st().tools, st().tool, 'name', '全部工具');
       }
-      lastSyncedTime = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      lastSyncedTime = new Date().toLocaleTimeString('zh-CN', {
+        hour12: false,
+      });
       consecutiveFailures = 0;
       prepareProjectColors(st().projects, r.operations || []);
       st().rows = r.operations || [];
@@ -1173,7 +1201,9 @@ window.CodePierCallLog = (() => {
       }
       if (st().inspectedId && (clearDetails || !st().rows.some((x) => x.id === st().inspectedId)))
         closeInspector();
-      reconcileListDOM(listEl, buildRowsMarkup(st().rows), { syncOpenState: clearDetails });
+      reconcileListDOM(listEl, buildRowsMarkup(st().rows), {
+        syncOpenState: clearDetails,
+      });
       const banner = root.querySelector('#call-new');
       if (banner) banner.hidden = true;
       updatePaginationControls();
@@ -1316,7 +1346,13 @@ window.CodePierCallLog = (() => {
       onExtAbort = () => ctrl.abort();
       externalSignal.addEventListener('abort', onExtAbort, { once: true });
     }
-    const reqEntry = { controller: ctrl, force, manual, prefetch, promise: null };
+    const reqEntry = {
+      controller: ctrl,
+      force,
+      manual,
+      prefetch,
+      promise: null,
+    };
     const run = (async () => {
       try {
         let canIncremental =
@@ -1656,7 +1692,9 @@ window.CodePierCallLog = (() => {
       )
         return;
       consecutiveFailures = 0;
-      lastSyncedTime = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      lastSyncedTime = new Date().toLocaleTimeString('zh-CN', {
+        hour12: false,
+      });
       window.CodePierOperationStore?.ingestCallLog(r);
       if (r.queue && typeof r.queue === 'object') {
         window.CodePierQueue?.hydrate(r.queue);
@@ -2477,7 +2515,9 @@ window.CodePierCallLog = (() => {
           target === document.body ||
           target === document.documentElement ||
           !!target.closest?.('.call-log');
-        stepInspector(e.key === 'ArrowDown' ? 1 : -1, { syncSummaryFocus: fromListOrBody });
+        stepInspector(e.key === 'ArrowDown' ? 1 : -1, {
+          syncSummaryFocus: fromListOrBody,
+        });
       } else if (e.key === 'j' || e.key === 'k') {
         if (target?.closest?.('#operation-queue, details.tool-menu, #call-more-filters')) return;
         if (st().inspectedId && useInspectorDrawer()) {
@@ -2487,7 +2527,9 @@ window.CodePierCallLog = (() => {
             target === document.body ||
             target === document.documentElement ||
             !!target.closest?.('.call-log');
-          stepInspector(e.key === 'j' ? 1 : -1, { syncSummaryFocus: fromListOrBody });
+          stepInspector(e.key === 'j' ? 1 : -1, {
+            syncSummaryFocus: fromListOrBody,
+          });
           return;
         }
         const summaries = [...root.querySelectorAll('.call-log .call-entry > summary')].filter(
@@ -2716,7 +2758,11 @@ window.CodePierCallLog = (() => {
       if (wideMql.addEventListener) wideMql.addEventListener('change', wideMqlHandler);
       else wideMql.addListener?.(wideMqlHandler);
     }
-    resizeListener = () => syncWorkspaceSplitHeight();
+    resizeListener = () => {
+      const listEl = root?.querySelector('.call-log');
+      if (listEl) listEl.classList.toggle('call-log-table', effectiveDensity() === 'table');
+      syncWorkspaceSplitHeight();
+    };
     window.addEventListener('resize', resizeListener);
     installKeyboardShortcuts();
     syncLiveTicker();
@@ -2730,6 +2776,15 @@ window.CodePierCallLog = (() => {
     } else if (st().inspectedId && st().rows.length) {
       syncDetailLayoutMode();
     }
+  }
+
+  function toggleMobileFilters(b) {
+    st().mobileFiltersOpen = !st().mobileFiltersOpen;
+    const filtersBar = root?.querySelector('.call-filters');
+    if (filtersBar) filtersBar.dataset.mobileFilters = st().mobileFiltersOpen ? 'open' : 'closed';
+    b.setAttribute('aria-expanded', String(st().mobileFiltersOpen));
+    const more = root?.querySelector('#call-more-filters');
+    if (more && st().mobileFiltersOpen) more.open = true;
   }
 
   async function action(b) {
@@ -2836,13 +2891,15 @@ window.CodePierCallLog = (() => {
       }
       return;
     }
+    if (name === 'toggle-mobile-filters') return toggleMobileFilters(b);
     if (name === 'density') {
+      if (isCompactAudit()) return;
       st().density = b.dataset.density === 'table' ? 'table' : 'cards';
       syncUrlHash();
       const listEl = root?.querySelector('.call-log');
-      if (listEl) listEl.classList.toggle('call-log-table', st().density === 'table');
+      if (listEl) listEl.classList.toggle('call-log-table', effectiveDensity() === 'table');
       root?.querySelectorAll('[data-call-action="density"]').forEach((btn) => {
-        const on = btn.dataset.density === st().density;
+        const on = btn.dataset.density === effectiveDensity();
         btn.classList.toggle('is-active', on);
         btn.setAttribute('aria-pressed', String(on));
       });
@@ -2851,7 +2908,10 @@ window.CodePierCallLog = (() => {
     }
     if (name === 'detail-refresh') {
       if (b.closest('.call-pinned-inspector') && st().pinnedOp)
-        return focusOperation(st().pinnedOp.id, { refreshPinned: true, manual: true });
+        return focusOperation(st().pinnedOp.id, {
+          refreshPinned: true,
+          manual: true,
+        });
       if (b.closest('.call-inspector') && st().inspectedId)
         return openInspector(st().inspectedId, { force: true, manual: true });
       return detail(node, true, true);
@@ -2859,7 +2919,11 @@ window.CodePierCallLog = (() => {
     if (name === 'export')
       return download(
         'codepier-calls-page.json',
-        json({ scope: 'visible_page', exported_at: new Date().toISOString(), calls: st().rows }),
+        json({
+          scope: 'visible_page',
+          exported_at: new Date().toISOString(),
+          calls: st().rows,
+        }),
         'application/json',
       );
     if (name === 'export-all-csv') return exportFilteredAll('csv');

@@ -1,5 +1,60 @@
 'use strict';
 // Explicit desktop inspection only. Screenshots and session IDs are never persisted in browser storage.
+function syncComputerFrameFullscreen(frame, active) {
+  if (!frame) return;
+  frame.classList.toggle('is-fullscreen', active);
+  const toggle = frame.querySelector('.computer-frame-toggle');
+  if (toggle) {
+    toggle.setAttribute('aria-pressed', String(active));
+    toggle.textContent = active ? '退出全屏' : '全屏检视';
+  }
+}
+
+function populateComputerFrame(frame, r) {
+  syncComputerFrameFullscreen(frame, false);
+  frame.replaceChildren();
+  let hasImage = false;
+  if (!r.media_expired) {
+    for (const b of r._computer_content || []) {
+      if (
+        b.type !== 'image' ||
+        !['image/png', 'image/jpeg'].includes(b.mimeType) ||
+        typeof b.data !== 'string'
+      )
+        continue;
+      if (!hasImage) {
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'computer-frame-toggle';
+        toggle.setAttribute('aria-pressed', 'false');
+        toggle.textContent = '全屏检视';
+        toggle.onclick = (ev) => {
+          ev.stopPropagation();
+          syncComputerFrameFullscreen(frame, !frame.classList.contains('is-fullscreen'));
+        };
+        frame.append(toggle);
+      }
+      hasImage = true;
+      const img = document.createElement('img');
+      img.alt = '当前应用截图';
+      img.src = `data:${b.mimeType};base64,${b.data}`;
+      img.onclick = () =>
+        syncComputerFrameFullscreen(frame, !frame.classList.contains('is-fullscreen'));
+      frame.append(img);
+    }
+  }
+  if (hasImage) frame.dataset.inspectable = 'true';
+  else delete frame.dataset.inspectable;
+  if (!hasImage) {
+    const p = document.createElement('p');
+    p.className = 'muted';
+    p.textContent = r.media_expired
+      ? '截图已过期，请重新读取。'
+      : '本次没有截图，请查看应用内容或本机授权提示。';
+    frame.append(p);
+  }
+}
+
 async function computerPanel(project = S.work.project) {
   if (!project) {
     toast('请先选择项目', true);
@@ -8,7 +63,7 @@ async function computerPanel(project = S.work.project) {
   const login = S.session;
   const dialog = modal(
     '桌面控制 · 本机联调',
-    `<section class="computer-panel"><div class="computer-toolbar"><strong id="computer-state" role="status">检查本机…</strong><span id="computer-ttl" class="muted tiny"></span><button class="btn small" id="computer-probe">检查接口</button><button class="btn small" id="computer-apps">应用列表</button><button class="btn small danger" id="computer-stop">停止桌面会话</button></div><form id="computer-open-form" class="computer-open"><input name="app" aria-label="应用名称或 Bundle ID" placeholder="已授权的应用名称或 Bundle ID" maxlength="512" required><button class="btn primary">连接并读取</button></form><div class="actions"><button class="btn" id="computer-observe" disabled>重新读屏</button><button class="btn ghost" id="computer-close" disabled>结束联调</button></div><p id="computer-message" class="form-note" role="status"></p><div id="computer-frame" class="computer-frame"><p class="muted">此处只在你点击后读取画面，不自动录屏。</p></div><details class="computer-accessibility"><summary>应用内容与接口信息</summary><pre id="computer-tree"></pre></details><p class="form-note">联调会话属于本面板；交给 ChatGPT 操作前先结束联调。ChatGPT 使用 computer_action 进行点击、拖拽、滚动、按键和文本操作。</p></section>`,
+    `<section class="computer-panel"><div class="computer-toolbar"><strong id="computer-state" role="status">检查本机…</strong><span id="computer-ttl" class="muted tiny"></span><button class="btn small" id="computer-probe">检查接口</button><button class="btn small" id="computer-apps">应用列表</button><button class="btn small danger" id="computer-stop">停止桌面会话</button></div><form id="computer-open-form" class="computer-open"><input name="app" aria-label="应用名称或 Bundle ID" placeholder="已授权的应用名称或 Bundle ID" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="512" required><button class="btn primary">连接并读取</button></form><div class="actions"><button class="btn" id="computer-observe" disabled>重新读屏</button><button class="btn ghost" id="computer-close" disabled>结束联调</button></div><p id="computer-message" class="form-note" role="status"></p><div id="computer-frame" class="computer-frame"><p class="muted">此处只在你点击后读取画面，不自动录屏。</p></div><details class="computer-accessibility"><summary>应用内容与接口信息</summary><pre id="computer-tree"></pre></details><p class="form-note">联调会话属于本面板；交给 ChatGPT 操作前先结束联调。ChatGPT 使用 computer_action 进行点击、拖拽、滚动、按键和文本操作。</p></section>`,
     '',
     true,
   );
@@ -56,34 +111,23 @@ async function computerPanel(project = S.work.project) {
   }
   function show(r) {
     q('#computer-tree').textContent = r.text || r.note || '';
-    const frame = q('#computer-frame');
-    frame.replaceChildren();
-    if (!r.media_expired) {
-      for (const b of r._computer_content || []) {
-        if (
-          b.type !== 'image' ||
-          !['image/png', 'image/jpeg'].includes(b.mimeType) ||
-          typeof b.data !== 'string'
-        )
-          continue;
-        const img = document.createElement('img');
-        img.alt = '当前应用截图';
-        img.src = `data:${b.mimeType};base64,${b.data}`;
-        frame.append(img);
-      }
-    }
-    if (!frame.childElementCount) {
-      const p = document.createElement('p');
-      p.className = 'muted';
-      p.textContent = r.media_expired
-        ? '截图已过期，请重新读取。'
-        : '本次没有截图，请查看应用内容或本机授权提示。';
-      frame.append(p);
-    }
+    populateComputerFrame(q('#computer-frame'), r);
     message.textContent = r.native_is_error
       ? '原生工具拒绝读取；请在本机处理权限提示。'
       : r.note || '本次画面已读取，不会自动连续录屏。';
   }
+  dialog.addEventListener(
+    'keydown',
+    (ev) => {
+      const frame = q('#computer-frame');
+      if (ev.key === 'Escape' && frame?.classList.contains('is-fullscreen')) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        syncComputerFrameFullscreen(frame, false);
+      }
+    },
+    true,
+  );
   async function observe(n) {
     const r = await settled(tool('computer_observe', { project, session_id: lease }));
     if (current(n)) show(r);
@@ -264,11 +308,34 @@ function approvalInboxToggle(box) {
   toggle.setAttribute('aria-expanded', 'false');
   toggle.setAttribute('aria-controls', 'computer-approval-inbox');
   toggle.addEventListener('click', () => {
-    const open = box.dataset.expanded !== 'true';
+    const wasCollapsed = box.dataset.collapsed === 'true';
+    const open = wasCollapsed ? true : box.dataset.expanded !== 'true';
+    if (open) delete box.dataset.collapsed;
+    else box.dataset.collapsed = 'true';
     box.dataset.expanded = String(open);
     toggle.setAttribute('aria-expanded', String(open));
   });
   return toggle;
+}
+function approvalInboxBar(box, toggle) {
+  const bar = document.createElement('div');
+  bar.className = 'approval-inbox-bar';
+  const badgeNode = document.createElement('span');
+  badgeNode.className = 'approval-inbox-badge';
+  badgeNode.textContent = '需要确认';
+  const minimize = document.createElement('button');
+  minimize.type = 'button';
+  minimize.className = 'btn ghost small approval-inbox-minimize';
+  minimize.setAttribute('aria-controls', 'computer-approval-inbox');
+  minimize.textContent = '收起为待批胶囊';
+  minimize.addEventListener('click', () => {
+    box.dataset.collapsed = 'true';
+    box.dataset.expanded = 'false';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.focus({ preventScroll: true });
+  });
+  bar.append(badgeNode, minimize);
+  return bar;
 }
 function updateApprovalInboxCount() {
   const toggle = document.querySelector('#computer-approval-inbox .approval-inbox-toggle');
@@ -299,7 +366,9 @@ function updateComputerApproval(entry) {
       ? '授权请求已过期，请重新读屏。'
       : entry.verified
         ? '等待你选择 · ' +
-          new Date(entry.item.expires_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) +
+          new Date(entry.item.expires_at * 1000).toLocaleTimeString('zh-CN', {
+            hour12: false,
+          }) +
           ' 到期'
         : '授权状态暂时无法确认，正在重新连接…';
 }
@@ -344,7 +413,16 @@ function createComputerApproval(item, login, box) {
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
   card.append(status);
-  const entry = { item, card, details, text, status, buttons: [], pending: false, verified: true };
+  const entry = {
+    item,
+    card,
+    details,
+    text,
+    status,
+    buttons: [],
+    pending: false,
+    verified: true,
+  };
   for (const [action, label] of [
     ['accept', '允许应用访问'],
     ['decline', '拒绝'],
@@ -408,7 +486,8 @@ function renderComputerApprovals(items, login) {
     box = document.createElement('aside');
     box.id = 'computer-approval-inbox';
     box.setAttribute('aria-label', '本机应用授权请求');
-    box.append(approvalInboxToggle(box));
+    const toggle = approvalInboxToggle(box);
+    box.append(toggle, approvalInboxBar(box, toggle));
     (window.CP?.ui.layerHost?.() || document.body).append(box);
   }
   for (const item of items) {
@@ -443,7 +522,10 @@ async function refreshComputerApprovals() {
   let delay = computerApprovals.connected ? 15000 : 5000;
   try {
     // The inbox owns its retry schedule; a stalled GET must not hide newer SSE events for a minute.
-    const result = await api('/api/computer/approvals', { retryDelays: [], requestTimeout: 5000 });
+    const result = await api('/api/computer/approvals', {
+      retryDelays: [],
+      requestTimeout: 5000,
+    });
     if (S.session !== login || computerApprovals.login !== login) return;
     renderComputerApprovals(result.approvals, login);
     computerApprovals.backoff = 5000;

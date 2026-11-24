@@ -366,7 +366,8 @@ class FakeTmuxTransport(FakeTransport):
     async def run_control(self, command, **kwargs):
         self.remote.setdefault("commands", []).append(command)
         if "command -v tmux" in command:
-            return 0, b"/usr/bin/tmux\ntmux 3.5a\n"
+            version_line = self.remote.get("tmux_version", b"tmux 3.5a")
+            return 0, b"/usr/bin/tmux\n" + version_line + b"\n"
         if "has-session" in command:
             return (0, b"") if self.remote.get("exists") else (1, b"no server running\n")
         if "new-session" in command:
@@ -381,6 +382,27 @@ class FakeTmuxTransport(FakeTransport):
                 raise SSHTransportError("SSH_CONTROL_UNCERTAIN", "fixture unknown close result")
             return 0, b""
         raise AssertionError("Unexpected control command")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("version", "sizing"),
+    [(b"tmux 2.8", "aggressive-resize on"), (b"tmux 3.5a", "window-size latest")],
+)
+async def test_tmux_mobile_create_options_preserve_legacy_window_sizing(version, sizing):
+    remote = {"tmux_version": version}
+    controller = TmuxController(FakeTmuxTransport(remote), uuid.uuid4().hex, DEFAULT_CONFIG)
+    await controller.create(96, 28)
+    command = next(cmd for cmd in remote["commands"] if "new-session" in cmd)
+    for option in (
+        "-f /dev/null",
+        "set-option -sg escape-time 10",
+        "set-option -g status off",
+        "set-option -g mouse on",
+        f"set-window-option -g {sizing}",
+        "-x 96 -y 28",
+    ):
+        assert option in command
 
 
 def maintenance_owner(manager, lifecycle):

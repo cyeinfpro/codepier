@@ -386,7 +386,124 @@ const dateTime = (value) =>
     : new Date(typeof value === 'number' ? value * 1000 : value).toLocaleString('zh-CN');
 const supplied = (value) => (value === null || value === undefined ? '未提供' : String(value));
 const identifier = (value) => (value ? '#' + String(value).slice(0, 12) : '未提供');
+function syncRoomImmersion() {
+  const active =
+    !!root &&
+    root.isConnected &&
+    (typeof S === 'undefined' || S.page === 'collaboration') &&
+    window.innerWidth <= 900 &&
+    !!state.roomId &&
+    !!state.room &&
+    !root.classList.contains('cr-show-rooms');
+  document.body.classList.toggle('cr-immersion', active);
+}
+function closeRoomActionsMenu() {
+  const topbar = root?.querySelector('.cr-topbar');
+  if (!topbar?.classList.contains('is-actions-open')) return;
+  topbar.classList.remove('is-actions-open');
+  root.querySelector('[data-cr-room-menu]')?.setAttribute('aria-expanded', 'false');
+}
+function setRoomsDrawer(open) {
+  if (!root) return;
+  const visible = !!open;
+  if (visible) closeRoomActionsMenu();
+  root.classList.toggle('cr-show-rooms', visible);
+  root.querySelector('[data-cr-action="rooms"]')?.setAttribute('aria-expanded', String(visible));
+  syncRoomImmersion();
+}
+function bindRoomShellExtras(shell, signal) {
+  let swipeStart = null;
+  shell.addEventListener(
+    'touchstart',
+    (event) => {
+      if (!shell.classList.contains('cr-show-rooms')) return;
+      if (event.touches.length !== 1) return;
+      swipeStart = {
+        x: event.touches[0].clientX,
+        y: event.touches[0].clientY,
+      };
+    },
+    { signal, passive: true },
+  );
+  shell.addEventListener(
+    'touchend',
+    (event) => {
+      if (!swipeStart || !shell.classList.contains('cr-show-rooms')) {
+        swipeStart = null;
+        return;
+      }
+      const touch = event.changedTouches?.[0];
+      if (touch) {
+        const dx = touch.clientX - swipeStart.x,
+          dy = touch.clientY - swipeStart.y;
+        if (dx <= -48 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+          setRoomsDrawer(false);
+        }
+      }
+      swipeStart = null;
+    },
+    { signal, passive: true },
+  );
+  document.addEventListener(
+    'click',
+    (event) => {
+      if (
+        !event.target.closest('.cr-room-actions, [data-cr-room-menu]') &&
+        shell.querySelector('.cr-topbar.is-actions-open')
+      ) {
+        closeRoomActionsMenu();
+      }
+    },
+    { signal },
+  );
+  shell.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      const dialogOpen = shell.querySelector('dialog')?.open;
+      if (event.key === 'Escape' && !dialogOpen) {
+        if (shell.querySelector('.cr-topbar.is-actions-open')) {
+          event.preventDefault();
+          closeRoomActionsMenu();
+          shell.querySelector('[data-cr-room-menu]')?.focus();
+          return;
+        }
+        if (shell.classList.contains('cr-show-rooms')) {
+          event.preventDefault();
+          setRoomsDrawer(false);
+          shell.querySelector('[data-cr-action="rooms"]')?.focus();
+          return;
+        }
+      }
+      if (!dialogOpen && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'b') {
+        event.preventDefault();
+        if (window.innerWidth <= 720) {
+          setRoomsDrawer(!shell.classList.contains('cr-show-rooms'));
+        } else {
+          shell.querySelector('[data-cr-room-filter]')?.focus();
+        }
+        return;
+      }
+      if (!dialogOpen && (event.metaKey || event.ctrlKey) && event.key === '/') {
+        event.preventDefault();
+        shell.querySelector('#cr-message')?.focus();
+      }
+    },
+    { signal },
+  );
+  window.addEventListener(
+    'resize',
+    () => {
+      if (window.innerWidth > 640) closeRoomActionsMenu();
+      if (window.innerWidth > 720 && shell.classList.contains('cr-show-rooms'))
+        setRoomsDrawer(false);
+      else syncRoomImmersion();
+    },
+    { signal },
+  );
+}
 function detach() {
+  document.body.classList.remove('cr-immersion');
   remember();
   rememberReading();
   clearTimeout(timer);
@@ -421,7 +538,13 @@ function openPanel(name, heading, content, data = {}) {
   panel?.impactController?.abort();
   if (panel?.name === 'work') state.workDetail = null;
   panelEpoch++;
-  panel = { name, roomId: state.roomId, epoch: panelEpoch, key: store.key(), ...data };
+  panel = {
+    name,
+    roomId: state.roomId,
+    epoch: panelEpoch,
+    key: store.key(),
+    ...data,
+  };
   const dialog = root.querySelector('dialog');
   dialog._crOpeningEpoch = panel.epoch;
   dialog.dataset.panel = name;
@@ -527,7 +650,10 @@ async function recoverAction(id) {
   try {
     // The exact serialized request survives dialog closure. A new form or
     // newer scope projection must never silently mint a replacement write.
-    const result = await api(receipt.url, { method: receipt.method, body: receipt.body });
+    const result = await api(receipt.url, {
+      method: receipt.method,
+      body: receipt.body,
+    });
     if (receipt.owner !== state.owner) return;
     saved = true;
     state.mutations.delete(id);
@@ -726,8 +852,7 @@ async function selectRoom(id) {
   accessBlocked = false;
   closePanel();
   announce('');
-  root?.classList.remove('cr-show-rooms');
-  root?.querySelector('[data-cr-action="rooms"]')?.setAttribute('aria-expanded', 'false');
+  setRoomsDrawer(false);
   const list = root?.querySelector('[data-cr-messages]');
   list?.replaceChildren();
   try {
@@ -1297,6 +1422,8 @@ function bind() {
     },
     { signal },
   );
+  bindRoomShellExtras(root, signal);
+  syncRoomImmersion();
   schedule();
 }
 async function open(project) {
@@ -1362,6 +1489,7 @@ export {
   click,
   closeHints,
   closePanel,
+  closeRoomActionsMenu,
   collectPermissionScope,
   connectHints,
   connectionChoice,
@@ -1523,6 +1651,7 @@ export {
   schedule,
   selectRoom,
   selection,
+  setRoomsDrawer,
   settingsPanel,
   sizeEditor,
   stages,
@@ -1535,6 +1664,7 @@ export {
   supplied,
   supportsHostReuse,
   suspended,
+  syncRoomImmersion,
   time,
   timer,
   title,

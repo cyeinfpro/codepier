@@ -102,7 +102,9 @@ function chatMountChrome() {
       media.addEventListener('change', listener, { signal });
     else if (typeof media.addListener === 'function') {
       media.addListener(listener);
-      signal.addEventListener('abort', () => media.removeListener(listener), { once: true });
+      signal.addEventListener('abort', () => media.removeListener(listener), {
+        once: true,
+      });
     }
   }
   $('#chat-command-menu').addEventListener(
@@ -117,7 +119,9 @@ function chatMountChrome() {
   c.resizeObserver = new ResizeObserver(() => chatScheduleLayout());
   for (const el of [root, $('.chat-composer-wrap'), $('.chat-header')])
     if (el) c.resizeObserver.observe(el);
-  window.visualViewport?.addEventListener('scroll', chatScheduleLayout, { signal });
+  window.visualViewport?.addEventListener('scroll', chatScheduleLayout, {
+    signal,
+  });
   root.addEventListener('keydown', chatInteractionKey, { signal });
   root.addEventListener(
     'click',
@@ -211,6 +215,9 @@ function chatUnmountChrome() {
   ChatUI.resizeObserver = null;
   cancelAnimationFrame(ChatUI.layoutFrame);
   ChatUI.layoutFrame = 0;
+  cancelAnimationFrame(ChatUI.viewportFrame);
+  ChatUI.viewportFrame = 0;
+  $('#chat-root')?.style.removeProperty('transform');
   document.body.classList.remove('chat-mode');
 }
 function chatScheduleLayout() {
@@ -237,6 +244,19 @@ function chatPositionLayers() {
     const box = $('#' + id),
       anchor = $('#' + anchorId);
     if (!box || box.hidden || !anchor) continue;
+    if (id === 'chat-popover' && innerWidth <= 760) {
+      const vv = window.visualViewport,
+        visTop = vv ? vv.offsetTop : 0,
+        visBottom = vv ? vv.offsetTop + vv.height : innerHeight,
+        overlap = Math.max(0, bounds.bottom - visBottom);
+      box.style.top = 'auto';
+      box.style.left = '8px';
+      box.style.right = '8px';
+      box.style.width = 'auto';
+      box.style.bottom = Math.max(8, overlap + 8) + 'px';
+      box.style.maxHeight = Math.max(140, visBottom - Math.max(bounds.top, visTop) - 20) + 'px';
+      continue;
+    }
     const a = anchor.getBoundingClientRect(),
       margin = 10;
     const width = Math.min(id === 'chat-slash' ? 440 : 420, bounds.width - 2 * margin);
@@ -423,6 +443,16 @@ function chatInteractionKey(e) {
     chatDrawer(innerWidth > 760 ? !!c.historyCollapsed : !root.classList.contains('drawer-open'));
     return;
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+    e.preventDefault();
+    $('#chat-compose')?.focus({ preventScroll: true });
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && key === 'i') {
+    e.preventDefault();
+    chatInspector(c.inspector ? '' : 'overview');
+    return;
+  }
   if (e.key === 'Escape') {
     if (!box.hidden) {
       e.preventDefault();
@@ -583,7 +613,7 @@ function chatPalette() {
   dialog.className = 'chat-sheet chat-palette';
   dialog.setAttribute('aria-label', '快捷操作');
   dialog.innerHTML =
-    '<div class="chat-palette-search"><input type="search" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="chat-palette-results" aria-label="搜索操作与会话" placeholder="搜索操作、当前列表会话或页面…"><kbd>esc</kbd></div><div class="chat-palette-results" id="chat-palette-results" role="listbox" aria-label="操作与会话"></div><footer>↑ ↓ 选择 <span>↵ 打开</span></footer>';
+    '<div class="chat-palette-search"><input type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="chat-palette-results" aria-label="搜索操作与会话" placeholder="搜索操作、当前列表会话或页面…"><kbd>esc</kbd></div><div class="chat-palette-results" id="chat-palette-results" role="listbox" aria-label="操作与会话"></div><footer>↑ ↓ 选择 <span>↵ 打开</span></footer>';
   root.append(dialog);
   const input = dialog.querySelector('input'),
     results = dialog.querySelector('.chat-palette-results'),
@@ -597,7 +627,11 @@ function chatPalette() {
   ChatUI.dialogCancel = close;
   const modifier = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
   const actions = [
-    { label: '新对话', hint: modifier + ' ⇧ O', action: () => chatNewSession() },
+    {
+      label: '新对话',
+      hint: modifier + ' ⇧ O',
+      action: () => chatNewSession(),
+    },
     {
       label: '搜索全部会话',
       hint: '跨项目',
@@ -607,8 +641,16 @@ function chatPalette() {
         $('#chat-history-search').focus({ preventScroll: true });
       },
     },
-    { label: '会话设置', hint: '项目、CLI 与模型', action: () => chatOptions(true) },
-    { label: '搜索当前对话', hint: modifier + ' F', action: () => chatFindToggle(true) },
+    {
+      label: '会话设置',
+      hint: '项目、CLI 与模型',
+      action: () => chatOptions(true),
+    },
+    {
+      label: '搜索当前对话',
+      hint: modifier + ' F',
+      action: () => chatFindToggle(true),
+    },
     { label: '消息队列', hint: '会话', action: () => chatInspector('queue') },
     { label: '文件与图片', hint: '会话', action: () => chatInspector('files') },
     // After the built-in actions (keeps their order): start a new chat directly on a given CLI, in the current project.
@@ -633,7 +675,11 @@ function chatPalette() {
               n[0] !== 'native' &&
               (typeof CodePierIdentity === 'undefined' || CodePierIdentity.canNavigate(n[0])),
           )
-          .map(([id, ico, label]) => ({ label, hint: '控制台', action: () => navigate(id) }))
+          .map(([id, ico, label]) => ({
+            label,
+            hint: '控制台',
+            action: () => navigate(id),
+          }))
       : []),
   ];
   let filtered = [],

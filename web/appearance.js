@@ -1,4 +1,5 @@
 'use strict';
+// Storage keys: 'codepier-appearance' and 'codepier-chat-appearance'.
 (function initCodePierAppearance(window, document) {
   const KEY = 'codepier-appearance';
   const LEGACY_KEY = 'codepier-chat-appearance';
@@ -9,6 +10,18 @@
       : null;
   let preference = 'auto';
   let scheme = 'light';
+  let themeColorOverride = '';
+
+  function validThemeColor(value) {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (typeof window.CSS?.supports === 'function') return window.CSS.supports('color', trimmed);
+    return (
+      /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed) ||
+      /^(?:rgb|hsl)a?\([^()]+\)$/i.test(trimmed)
+    );
+  }
 
   function read(key) {
     try {
@@ -40,22 +53,39 @@
       if (control.matches('[data-ui-appearance]')) control.setAttribute('aria-label', '全站外观');
     });
   }
-  function syncThemeColor() {
+  function applyThemeColor() {
     let meta = document.querySelector('meta[name="theme-color"]');
     if (!meta && document.head) {
       meta = document.createElement('meta');
       meta.name = 'theme-color';
       document.head.append(meta);
     }
-    if (!meta) return;
+    if (!meta) return '';
+    if (themeColorOverride) {
+      meta.content = themeColorOverride;
+      return meta.content;
+    }
     const token = getComputedStyle(document.documentElement).getPropertyValue('--ui-bg').trim();
     meta.content = token || (scheme === 'dark' ? '#141413' : '#f5f5f4');
+    return meta.content;
+  }
+  function syncThemeColor(overrideColor) {
+    if (
+      overrideColor === undefined ||
+      overrideColor === null ||
+      (typeof overrideColor === 'string' && !overrideColor.trim())
+    ) {
+      themeColorOverride = '';
+    } else if (validThemeColor(overrideColor)) {
+      themeColorOverride = overrideColor.trim();
+    }
+    return applyThemeColor();
   }
   function apply(emit) {
     scheme = resolve(preference);
     document.documentElement.dataset.appearance = scheme;
     document.documentElement.style.colorScheme = scheme;
-    syncThemeColor();
+    applyThemeColor();
     syncControls();
     if (emit) window.dispatchEvent(new CustomEvent('codepier:appearance', { detail: detail() }));
   }
@@ -102,6 +132,7 @@
     getScheme: () => scheme,
     setPreference,
     subscribe,
+    syncThemeColor,
   });
 
   document.addEventListener('change', (event) => {

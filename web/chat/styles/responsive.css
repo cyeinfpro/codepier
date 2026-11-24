@@ -11,12 +11,12 @@
     min-height: 24px;
   }
   .chat-history-filter {
-    grid-template-columns: minmax(0, 1fr) 80px;
+    grid-template-columns: minmax(0, 1fr) 104px;
     align-items: center;
   }
   .chat-history-filter select {
     width: 100%;
-    min-height: 40px;
+    min-height: 44px;
   }
   .chat-sidebar-footer {
     gap: 2px;
@@ -52,7 +52,7 @@
     gap: 4px;
   }
   .chat-sidebar-preferences select {
-    max-width: 90px;
+    max-width: 112px;
   }
   .chat-scroll {
     padding-block: 4px;

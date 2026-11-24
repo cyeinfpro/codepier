@@ -120,12 +120,6 @@
 .panel-update-popover .panel-body {
   padding: 16px;
 }
-@media (max-width: 480px) {
-  .panel-update-popover {
-    top: calc(var(--ui-topbar-height) + 12px);
-    max-height: calc(100dvh - var(--ui-topbar-height) - 24px);
-  }
-}
 :where(.btn, .icon-btn, .quick-jump, .panel-update-entry, .settings-groups button) {
   transition:
     background-color var(--ui-motion-fast) var(--ui-ease),
@@ -139,7 +133,13 @@
   color: var(--ui-muted);
   font-size: var(--ui-text-sm);
 }
-.panel-update-entry:hover {
+@media (hover: hover) and (pointer: fine) {
+  .panel-update-entry:hover {
+    border-color: var(--ui-border);
+    color: var(--ui-text);
+  }
+}
+.panel-update-entry:active {
   border-color: var(--ui-border);
   color: var(--ui-text);
 }
@@ -172,4 +172,27 @@
 .panel-update-popover {
   border-radius: var(--ui-radius-xl);
   box-shadow: var(--ui-elev-2);
+}
+@media (max-width: 640px) {
+  .panel-update-popover {
+    inset: auto 8px calc(var(--ui-dock-space, 0px) + 8px) 8px;
+    width: auto;
+    max-height: 78dvh;
+    overscroll-behavior: contain;
+  }
+  .panel-update-popover .panel-head {
+    position: sticky;
+    top: 0;
+    z-index: var(--ui-z-local);
+    background: var(--ui-panel);
+    border-bottom: 1px solid var(--ui-line);
+  }
+  .panel-update-popover [data-panel-update-close] {
+    min-height: var(--ui-touch-target);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-update-entry {
+    transition: none;
+  }
 }

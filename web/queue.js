@@ -127,7 +127,12 @@ if (!window.CodePierOperationStore) {
         const previous = byId.get(message.data.id);
         const merged = upsertRow(message.data);
         if (merged !== previous)
-          emit({ type: 'operation', id: message.data.id, row: merged, raw: merged });
+          emit({
+            type: 'operation',
+            id: message.data.id,
+            row: merged,
+            raw: merged,
+          });
       } else if ((message.type === 'output' || message.type === 'trace') && message.data?.id) {
         emit({ type: message.type, id: message.data.id });
       }
@@ -183,10 +188,15 @@ window.CodePierQueue = (() => {
     lastSyncedClock = '',
     unsubscribeStore = null,
     pendingPaint = false,
-    flushTimer = null;
+    flushTimer = null,
+    mobileExpanded = false;
   const pending = new Set();
   const rows = new Map();
-  const stages = { hub_queue: 'Hub 待投递', agent_waiting: 'Agent 等资源', running: '运行中' };
+  const stages = {
+    hub_queue: 'Hub 待投递',
+    agent_waiting: 'Agent 等资源',
+    running: '运行中',
+  };
   const reasons = {
     resource_conflict: '资源冲突',
     hub_delivery: '等待 Hub 投递',
@@ -205,7 +215,13 @@ window.CodePierQueue = (() => {
   const seconds = (value) =>
     Number.isFinite(value) ? Math.max(0, Math.round(value)) + ' 秒' : '未记录';
   const age = (value) => seconds(Number.isFinite(value) ? value / 1000 : NaN);
-  const context = () => ({ session: S.session, space: S.space_id, page: S.page, epoch, root });
+  const context = () => ({
+    session: S.session,
+    space: S.space_id,
+    page: S.page,
+    epoch,
+    root,
+  });
   const current = (c) =>
     c.session === S.session &&
     c.space === S.space_id &&
@@ -232,6 +248,7 @@ window.CodePierQueue = (() => {
     stageFilter = '';
     truncated = false;
     lastSyncedClock = '';
+    mobileExpanded = false;
   }
   function placeholder() {
     return '<section class="panel queue-panel" id="operation-queue" data-cp-key="operation-queue" data-queue-mode="idle" aria-label="当前操作队列"><div class="panel-head queue-heading"><div class="queue-title-group"><h2>当前队列</h2><p class="queue-sync" role="status" data-queue-status>正在读取活动操作…</p></div><button class="btn ghost small" type="button" data-queue-refresh>刷新队列</button></div><div class="panel-body"><div data-queue-content></div><div data-queue-diagnostics></div></div></section>';
@@ -413,7 +430,9 @@ window.CodePierQueue = (() => {
         })
         .join('') +
       '</div>' +
-      '<div class="queue-list" tabindex="0" role="region" aria-label="活动操作列表">' +
+      '<div class="queue-list" data-expanded="' +
+      mobileExpanded +
+      '" tabindex="0" role="region" aria-label="活动操作列表">' +
       (items.map(card).join('') ||
         '<div class="queue-empty"><strong>' +
           (truncated
@@ -425,6 +444,13 @@ window.CodePierQueue = (() => {
           (stageFilter ? '可切换到全部活动查看其他操作。' : '新的活动操作将在同步后显示。') +
           '</span></div>') +
       '</div>' +
+      (items.length > 1
+        ? '<button type="button" class="btn ghost small queue-expand-toggle" data-queue-expand aria-expanded="' +
+          mobileExpanded +
+          '">' +
+          (mobileExpanded ? '收起队列高度' : '展开全部队列 · ' + items.length) +
+          '</button>'
+        : '') +
       (truncated
         ? '<p class="form-note queue-limit">' +
           (completenessReason === 'bounded_authorization_scan'
@@ -510,7 +536,9 @@ window.CodePierQueue = (() => {
       request = new AbortController();
     controller = request;
     try {
-      const data = await api('/api/operations/queue', { signal: request.signal });
+      const data = await api('/api/operations/queue', {
+        signal: request.signal,
+      });
       if (!current(c)) return;
       applySnapshot(data);
     } catch (error) {
@@ -781,6 +809,12 @@ window.CodePierQueue = (() => {
         root.querySelectorAll('[data-queue-stage]').forEach((node) => {
           if (node.dataset.queueStage === stageFilter) node.focus({ preventScroll: true });
         });
+        return;
+      }
+      if (button.hasAttribute('data-queue-expand')) {
+        mobileExpanded = !mobileExpanded;
+        paint();
+        root.querySelector('[data-queue-expand]')?.focus({ preventScroll: true });
         return;
       }
       if (button.hasAttribute('data-queue-cancel')) return cancel(button);

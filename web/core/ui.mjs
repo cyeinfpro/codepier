@@ -157,13 +157,113 @@ export function toast(message, error = false) {
   return node;
 }
 
-export function download(name, text, type = 'application/json') {
-  const u = URL.createObjectURL(new Blob([text], { type }));
+function triggerAnchorDownload(name, blob) {
+  const u = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = u;
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(u), 3000);
+}
+
+export function download(name, text, type = 'application/json') {
+  const blob = text instanceof Blob ? text : new Blob([text], { type });
+  const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches;
+  if (
+    coarse &&
+    typeof File === 'function' &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.share === 'function' &&
+    typeof navigator.canShare === 'function'
+  ) {
+    try {
+      const fileObj = new File([blob], name, {
+        type: blob.type || type || 'application/octet-stream',
+      });
+      if (navigator.canShare({ files: [fileObj] })) {
+        void navigator.share({ files: [fileObj], title: name }).catch((err) => {
+          if (err?.name === 'AbortError') return;
+          triggerAnchorDownload(name, blob);
+        });
+        return;
+      }
+    } catch {
+      /* Fall back to standard download link when Web Share files is rejected. */
+    }
+  }
+  triggerAnchorDownload(name, blob);
+}
+
+export function applyKeyboardHygiene(root = document) {
+  if (!root?.querySelectorAll) return;
+  const controls = root.querySelectorAll(
+    'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea',
+  );
+  for (const control of controls) {
+    const type = (control.getAttribute('type') || 'text').toLowerCase();
+    const key = [control.name, control.id].filter(Boolean).join(' ');
+    const labelEl =
+      control.labels?.[0] ||
+      control.closest('.field')?.querySelector(':scope > label, .field-label');
+    const hint = [
+      labelEl?.textContent || '',
+      control.getAttribute('aria-label') || '',
+      control.getAttribute('placeholder') || '',
+    ].join(' ');
+    const setAttr = (attr, val) => {
+      if (!control.hasAttribute(attr)) control.setAttribute(attr, val);
+    };
+    if (
+      type === 'search' ||
+      /(?:^|[_-])(query|search|filter)(?:$|[_-])/i.test(key) ||
+      /(搜索|筛选|查找)/.test(hint)
+    ) {
+      setAttr('autocapitalize', 'none');
+      setAttr('autocorrect', 'off');
+      setAttr('spellcheck', 'false');
+      setAttr('enterkeyhint', 'search');
+      continue;
+    }
+    if (
+      type === 'url' ||
+      /(?:^|[_-])(url|uri|endpoint|webhook|callback|redirect|origin|issuer)(?:$|[_-])/i.test(key) ||
+      /(回调地址|连接地址|服务地址|网关地址|Webhook|URL)/i.test(hint)
+    ) {
+      setAttr('inputmode', 'url');
+      setAttr('autocapitalize', 'none');
+      setAttr('autocorrect', 'off');
+      setAttr('spellcheck', 'false');
+      continue;
+    }
+    if (
+      control.tagName === 'INPUT' &&
+      (type === 'number' ||
+        /(?:^|[_-])(port|timeout|ttl|seconds|days|limit|offset|quota|retries|interval)(?:$|[_-])/i.test(
+          key,
+        ) ||
+        /(端口|超时|秒数|配额|阈值|上限)/.test(hint))
+    ) {
+      setAttr('inputmode', 'numeric');
+      setAttr('autocapitalize', 'none');
+      setAttr('autocorrect', 'off');
+      setAttr('spellcheck', 'false');
+      continue;
+    }
+    if (
+      type === 'password' ||
+      type === 'email' ||
+      /(user|account|login|email|host|ip|domain|addr|path|root|dir|file|glob|slug|token|secret|bearer|cmd|command|shell|arg|env|repo|branch|sha|hash|bundle|app|network|group|issuer|client|audience|scope|key_id)/i.test(
+        key,
+      ) ||
+      /(账号|用户名|主机|域名|路径|目录|文件|命令|令牌|密钥|标识|编号|作用域|分支|包名|Bundle|Token|SSH|IP|Slug)/i.test(
+        hint,
+      )
+    ) {
+      setAttr('autocapitalize', 'none');
+      setAttr('autocorrect', 'off');
+      setAttr('spellcheck', 'false');
+    }
+  }
 }
 
 export function buttons(primary, label = '保存') {
@@ -399,6 +499,9 @@ export function confirmSheet({
     input = document.createElement('input');
     input.id = inputId || id + '-input';
     input.autocomplete = 'off';
+    input.setAttribute('autocapitalize', 'none');
+    input.setAttribute('autocorrect', 'off');
+    input.spellcheck = false;
     input.required = true;
     label.append(input);
     form.append(label);
@@ -467,6 +570,77 @@ export function confirmSheet({
       finish(false);
     }
   });
+}
+
+function canScrollElementAxis(el, delta, vertical) {
+  const style = getComputedStyle(el);
+  if (vertical) {
+    if (!/(auto|scroll|overlay)/.test(style.overflowY) || el.scrollHeight <= el.clientHeight + 1)
+      return null;
+    return (
+      (delta < 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) ||
+      (delta > 0 && el.scrollTop > 0)
+    );
+  }
+  if (!/(auto|scroll|overlay)/.test(style.overflowX) || el.scrollWidth <= el.clientWidth + 1)
+    return null;
+  return (
+    (delta < 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) ||
+    (delta > 0 && el.scrollLeft > 0)
+  );
+}
+
+function bindModalTouchGuard(backdrop, dialog) {
+  if (!backdrop) return () => {};
+  let touchStartX = 0,
+    touchStartY = 0;
+  const onTouchStart = (event) => {
+    const t = event.touches?.[0];
+    if (!t) return;
+    touchStartX = t.clientX;
+    touchStartY = t.clientY;
+  };
+  const onTouchMove = (event) => {
+    if (!event.cancelable || event.touches?.length !== 1) return;
+    const t = event.touches[0];
+    const dx = t.clientX - touchStartX;
+    const dy = t.clientY - touchStartY;
+    const vertical = Math.abs(dy) >= Math.abs(dx);
+    const delta = vertical ? dy : dx;
+    for (
+      let el = event.target instanceof Element ? event.target : null;
+      el && dialog.contains(el);
+      el = el.parentElement
+    ) {
+      if (el.matches?.('input[type="range"]')) return;
+      const scrollable = canScrollElementAxis(el, delta, vertical);
+      if (scrollable === null) continue;
+      if (scrollable) return;
+      break;
+    }
+    event.preventDefault();
+  };
+  backdrop.addEventListener('touchstart', onTouchStart, { passive: true });
+  backdrop.addEventListener('touchmove', onTouchMove, { passive: false });
+  return () => {
+    backdrop.removeEventListener('touchstart', onTouchStart);
+    backdrop.removeEventListener('touchmove', onTouchMove);
+  };
+}
+
+function focusModalInitialControl(dialog, uiFocusable) {
+  const controls = uiFocusable(dialog);
+  const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches;
+  if (coarse) {
+    const explicitAutofocus = controls.find((control) => control.matches('[autofocus]'));
+    const closeBtn = dialog.querySelector('.modal-header [data-action="close-modal"]');
+    (explicitAutofocus || dialog || closeBtn)?.focus({ preventScroll: true });
+    return;
+  }
+  const preferred =
+    controls.find((control) => control.matches('[autofocus]')) ||
+    controls.find((control) => control.matches('input,textarea,select'));
+  (preferred || controls[0] || dialog).focus({ preventScroll: true });
 }
 
 export function createModal({
@@ -632,6 +806,8 @@ export function createModal({
       }
     }
     uiLabelFields(dialog);
+    applyKeyboardHygiene(dialog);
+    const unbindTouchGuard = bindModalTouchGuard($('.modal-backdrop'), dialog);
     const key = (e) => {
       if (e.defaultPrevented || layerHost() !== document.body || e.target?.closest?.('dialog'))
         return;
@@ -646,20 +822,17 @@ export function createModal({
     scope.listen(document, 'keydown', key);
     const editorBack = dialog.querySelector('.editor-back');
     if (editorBack) {
-      const mobile = matchMedia('(max-width:640px)');
+      const mobile = matchMedia('(max-width:760px)');
       const syncLabel = () =>
         editorBack.setAttribute('aria-label', mobile.matches ? '返回上一页' : '关闭');
       syncLabel();
       scope.listen(mobile, 'change', syncLabel);
     }
-    S.modalCleanup = () => scope.dispose();
-    // Establish focus while opening; a delayed callback could steal focus after
-    // the user has already moved to another field or started submitting the form.
-    const controls = uiFocusable(dialog);
-    const preferred =
-      controls.find((control) => control.matches('[autofocus]')) ||
-      controls.find((control) => control.matches('input,textarea,select'));
-    (preferred || controls[0] || dialog).focus({ preventScroll: true });
+    S.modalCleanup = () => {
+      unbindTouchGuard();
+      scope.dispose();
+    };
+    focusModalInitialControl(dialog, uiFocusable);
     return dialog;
   }
   return { modal, closeModal, requestClose };

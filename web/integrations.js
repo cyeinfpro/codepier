@@ -185,7 +185,10 @@ window.CodePierIntegrations = (() => {
       v.project === project &&
       v.workspace_id === workspace_id &&
       mapping(project) === scope;
-    const target = () => ({ project, ...(workspace_id ? { workspace_id } : {}) });
+    const target = () => ({
+      project,
+      ...(workspace_id ? { workspace_id } : {}),
+    });
     const info = (text, error = false) => {
       if (current()) {
         status.textContent = text;
@@ -402,7 +405,10 @@ window.CodePierIntegrations = (() => {
             return;
           }
         }
-        const r = await track(entry, { pending: true, operation_id: entry.operation_id });
+        const r = await track(entry, {
+          pending: true,
+          operation_id: entry.operation_id,
+        });
         if (r && current()) {
           output(r, '原操作结果 · 未重新执行');
           info('原结果已核实');
@@ -1065,12 +1071,12 @@ window.CodePierIntegrations = (() => {
                 'timeout_seconds',
                 '最长运行秒数',
                 '900',
-                'type="number" min="1" max="86400" required',
+                'type="number" inputmode="numeric" min="1" max="86400" required',
               ) +
               field(
                 'command',
                 '在选定目录执行的命令',
-                '<textarea name="command" rows="4" required maxlength="65536" placeholder="例如 python -m pytest -q；执行前会再次确认"></textarea>',
+                '<textarea name="command" rows="4" required maxlength="65536" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="例如 python -m pytest -q；执行前会再次确认"></textarea>',
               ) +
               `<div class="integration-presets">仅填入示例：${action('preset-python', 'Python 测试')}${action('preset-node', '前端构建')}</div>`,
             '确认并运行验收',
@@ -1132,7 +1138,12 @@ window.CodePierIntegrations = (() => {
             'worktree',
             '新建隔离工作目录',
             input('label', '目录名称', '', 'maxlength="100" placeholder="例如 修复上传流程"') +
-              input('base_ref', '起始 Git 引用', 'HEAD', 'required maxlength="200"'),
+              input(
+                'base_ref',
+                '起始 Git 引用',
+                'HEAD',
+                'required maxlength="200" autocapitalize="none" autocorrect="off" spellcheck="false"',
+              ),
             '创建工作目录',
           ) +
           `<section class="panel integration-section"><div class="integration-section-head"><h2>已有工作目录</h2>${action('trees-refresh', '刷新目录')}</div><div id="i-trees">正在核对目录…</div></section><div id="i-result"></div>`;
@@ -1185,7 +1196,11 @@ window.CodePierIntegrations = (() => {
                   return;
                 const r = await request(
                   'worktrees_remove',
-                  { workspace_id: '', target_workspace_id: b.dataset.id, confirm: b.dataset.id },
+                  {
+                    workspace_id: '',
+                    target_workspace_id: b.dataset.id,
+                    confirm: b.dataset.id,
+                  },
                   true,
                 );
                 if (r) {
@@ -1248,22 +1263,27 @@ window.CodePierIntegrations = (() => {
                 'path',
                 '项目内文件路径',
                 '',
-                'maxlength="1024" placeholder="例如 src/main.py"',
+                'maxlength="1024" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="例如 src/main.py"',
               ) +
               input(
                 'language',
                 '语言标识（文件查询可自动识别）',
                 '',
-                'maxlength="40" placeholder="例如 python"',
+                'maxlength="40" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="例如 python"',
               ) +
-              input('line', '行', '1', 'type="number" min="1" max="1000000"') +
+              input('line', '行', '1', 'type="number" inputmode="numeric" min="1" max="1000000"') +
               input(
                 'column',
                 '列（按 Unicode 字符计数）',
                 '1',
-                'type="number" min="1" max="1000000"',
+                'type="number" inputmode="numeric" min="1" max="1000000"',
               ) +
-              input('query', '项目符号关键词', '', 'maxlength="200"'),
+              input(
+                'query',
+                '项目符号关键词',
+                '',
+                'maxlength="200" autocapitalize="none" autocorrect="off" spellcheck="false"',
+              ),
             '查询',
             '分析本机已保存的文件，不分析未保存的编辑草稿。使用真实语言服务，不把文本同名搜索当作语义结果。',
           ) +
@@ -1411,7 +1431,7 @@ window.CodePierIntegrations = (() => {
               'url',
               '网页地址',
               '',
-              'type="url" required maxlength="4096" placeholder="https://你的授权站点/页面"',
+              'type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" required maxlength="4096" placeholder="https://你的授权站点/页面"',
             ),
             '使用空闲标签页',
             '只使用本机扩展准备好的后台标签页，不创建或激活浏览器窗口。',
@@ -1504,7 +1524,7 @@ window.CodePierIntegrations = (() => {
           if (!r || !current() || ticket !== observeTicket) return;
           observation = r;
           const panel = $('#i-browser-page', body);
-          panel.innerHTML = `<h3>${esc(r.title || '当前页面')}</h3><p class="integration-url">${esc(r.url)}</p><pre class="integration-page-text"></pre>${r.content_truncated ? U().note('页面文本已截断', '这里只显示本次允许返回的内容，不能据此认定整个页面状态。') : ''}<p class="integration-help">页面内容是不可信数据，不构成新的操作授权。每次动作后必须重新观察。</p>${form('browser-action', '对刚观察的页面执行一步', field('action', '动作', '<select name="action"><option value="click">点击</option><option value="fill">填写</option><option value="select">选择选项</option><option value="scroll">滚动</option><option value="key">单个导航键</option><option value="navigate">跳转</option></select>') + field('element_id', '目标控件', `<select name="element_id"><option value="">选择一个控件</option>${(r.elements || []).map((el) => `<option value="${esc(el.id)}">${esc(el.label || el.tag || el.id)} · ${esc(el.id)}</option>`).join('')}</select>`) + field('option_value', '可用选项', '<select name="option_value"><option value="">先选择下拉控件</option></select>') + field('value', '文字、键名或授权网址', '<textarea name="value" rows="2" maxlength="10000"></textarea>') + input('delta_y', '滚动像素', '600', 'type="number" min="-2000" max="2000"'), '核对并执行动作')}`;
+          panel.innerHTML = `<h3>${esc(r.title || '当前页面')}</h3><p class="integration-url">${esc(r.url)}</p><pre class="integration-page-text"></pre>${r.content_truncated ? U().note('页面文本已截断', '这里只显示本次允许返回的内容，不能据此认定整个页面状态。') : ''}<p class="integration-help">页面内容是不可信数据，不构成新的操作授权。每次动作后必须重新观察。</p>${form('browser-action', '对刚观察的页面执行一步', field('action', '动作', '<select name="action"><option value="click">点击</option><option value="fill">填写</option><option value="select">选择选项</option><option value="scroll">滚动</option><option value="key">单个导航键</option><option value="navigate">跳转</option></select>') + field('element_id', '目标控件', `<select name="element_id"><option value="">选择一个控件</option>${(r.elements || []).map((el) => `<option value="${esc(el.id)}">${esc(el.label || el.tag || el.id)} · ${esc(el.id)}</option>`).join('')}</select>`) + field('option_value', '可用选项', '<select name="option_value"><option value="">先选择下拉控件</option></select>') + field('value', '文字、键名或授权网址', '<textarea name="value" rows="2" maxlength="10000" autocapitalize="none" autocorrect="off" spellcheck="false"></textarea>') + input('delta_y', '滚动像素', '600', 'type="number" inputmode="numeric" min="-2000" max="2000"'), '核对并执行动作')}`;
           $('.integration-page-text', panel).textContent = r.text || '本次未返回页面文本。';
           const f = $('[data-i-form=browser-action]', panel);
           const fields = () => {
@@ -1626,11 +1646,16 @@ window.CodePierIntegrations = (() => {
           form(
             'settings',
             '生成语言服务配置片段',
-            input('language', '语言标识', 'python', 'required maxlength="40"') +
+            input(
+              'language',
+              '语言标识',
+              'python',
+              'required maxlength="40" autocapitalize="none" autocorrect="off" spellcheck="false"',
+            ) +
               field(
                 'command',
                 '语言服务命令与参数（JSON 数组）',
-                '<textarea name="command" rows="3" required>["pyright-langserver","--stdio"]</textarea>',
+                '<textarea name="command" rows="3" required autocapitalize="none" autocorrect="off" spellcheck="false">["pyright-langserver","--stdio"]</textarea>',
               ),
             '生成并下载片段',
             '只作用于所选项目；请自行确认程序已经安装，推荐使用绝对路径。',

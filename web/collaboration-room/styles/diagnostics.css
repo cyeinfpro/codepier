@@ -129,6 +129,8 @@
 .cr-inspection-section > details,
 .cr-inspection-section > article {
   border-top: 1px solid var(--cr-line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .cr-facts {
@@ -157,6 +159,8 @@
   margin: 18px 0;
   padding-top: 16px;
   border-top: 1px solid var(--cr-line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .cr-context-fact h3 {

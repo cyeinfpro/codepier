@@ -229,6 +229,21 @@
     flex: 1 1 100%;
   }
 }
+@media (max-width: 420px) {
+  .runtime-resource-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (hover: hover) and (pointer: fine) {
+  .runtime-option:hover,
+  .runtime-credential-option:hover {
+    border-color: var(--ui-text);
+  }
+}
+.runtime-option:active,
+.runtime-credential-option:active {
+  background: var(--ui-surface);
+}
 @media (prefers-reduced-motion: reduce) {
   .runtime-option {
     transition: none;

@@ -186,7 +186,7 @@ function chatModelPopover() {
     return;
   }
   box.hidden = false;
-  box.innerHTML = `<div class="chat-popover-head"><strong>选择模型</strong><button type="button" id="chat-model-refresh" title="重新读取本机模型" aria-label="刷新模型目录">${chatIcon('refresh')}</button><button type="button" id="chat-popover-close" aria-label="关闭模型选择">${chatIcon('close')}</button></div><input id="chat-model-search" type="search" placeholder="搜索名称、模型 ID 或服务商" aria-label="搜索模型" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-model-results"><div id="chat-model-results" role="listbox" aria-label="模型目录"></div><div class="chat-popover-foot">↑ ↓ 选择 · Enter 确认 · Esc 关闭</div>`;
+  box.innerHTML = `<div class="chat-popover-head"><strong>选择模型</strong><button type="button" id="chat-model-refresh" title="重新读取本机模型" aria-label="刷新模型目录">${chatIcon('refresh')}</button><button type="button" id="chat-popover-close" aria-label="关闭模型选择">${chatIcon('close')}</button></div><input id="chat-model-search" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="搜索名称、模型 ID 或服务商" aria-label="搜索模型" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-model-results"><div id="chat-model-results" role="listbox" aria-label="模型目录"></div><div class="chat-popover-foot">↑ ↓ 选择 · Enter 确认 · Esc 关闭</div>`;
   $('#chat-model-picker').setAttribute('aria-expanded', 'true');
   $('#chat-popover-close').onclick = () => chatClosePopover(true);
   $('#chat-model-refresh').onclick = () => chatLoadCatalog(true);

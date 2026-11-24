@@ -23,7 +23,19 @@ window.CodePierProjectMap = (() => {
     workspaceMessage = '',
     workspaceOperation = '';
   let host = null,
-    auditSequence = 0;
+    auditSequence = 0,
+    controlsCollapsed = false;
+  const isNarrowMap = () =>
+    typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 760px)')?.matches;
+  const scrollMapResults = () => {
+    const target = host?.querySelector('.map-results');
+    target?.scrollIntoView?.({
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+        ? 'auto'
+        : 'smooth',
+      block: 'start',
+    });
+  };
   const safe = (value) => esc(String(value ?? ''));
   const isCurrent = (seq, login, selectedSpace, target, selectedWorkspace) =>
     seq === generation &&
@@ -70,6 +82,7 @@ window.CodePierProjectMap = (() => {
       auditCursor = '';
       auditPrevious = [];
       auditError = '';
+      controlsCollapsed = false;
     }
     if (!S.projects.some((p) => p.id === project)) {
       project = S.projects[0]?.id || '';
@@ -80,6 +93,7 @@ window.CodePierProjectMap = (() => {
       result = null;
       audit = null;
       previous = [];
+      controlsCollapsed = false;
     }
     return (
       heading('项目地图', '只读浏览电脑上已有的项目地图，无需模型。') +
@@ -107,7 +121,11 @@ window.CodePierProjectMap = (() => {
         ? '<ul class="project-map-entries">' +
           entries
             .map((entry) => {
-              const states = { current: '文件已核验', stale: '文件已变化', missing: '文件缺失' };
+              const states = {
+                current: '文件已核验',
+                stale: '文件已变化',
+                missing: '文件缺失',
+              };
               const label = states[entry.state] || '状态未知';
               return (
                 '<li><div class="map-entry-head"><h3><code>' +
@@ -216,12 +234,33 @@ window.CodePierProjectMap = (() => {
       '>下一页</button></div></div></section>'
     );
   }
-  function paint() {
-    if (!host?.isConnected) return;
-    const selected = S.projects.find((p) => p.id === project);
-    const selectedWorkspace = workspaces.find((w) => w.workspace_id === workspace);
-    host.innerHTML =
-      '<section class="panel map-controls"><div class="map-fields map-target-fields"><label>项目<select id="map-project" aria-label="地图项目">' +
+  function mapControlsHTML(selected, selectedWorkspace) {
+    const workspaceLabel = selectedWorkspace
+      ? selectedWorkspace.label || selectedWorkspace.workspace_id
+      : '项目根目录';
+    const summaryText = selected
+      ? selected.alias + ' / ' + workspaceLabel + (query.trim() ? ' · ' + query.trim() : '')
+      : '选择目标项目';
+    const quickDisabled =
+      !project || busy || workspaceBusy || (workspace && selectedWorkspace?.state !== 'ready');
+    return (
+      '<section class="panel map-controls" data-has-project="' +
+      Boolean(project) +
+      '" data-collapsed="' +
+      Boolean(project && controlsCollapsed) +
+      '"><div class="map-mobile-summary"><button type="button" class="btn ghost small map-breadcrumb-trigger" data-map="toggle-controls" aria-expanded="' +
+      String(!(project && controlsCollapsed)) +
+      '"><span class="map-breadcrumb-text">' +
+      safe(summaryText) +
+      '</span><span class="map-breadcrumb-action">' +
+      (project && controlsCollapsed ? '修改条件' : '收起条件') +
+      '</span></button>' +
+      (project && controlsCollapsed
+        ? '<button type="button" class="btn primary small" data-map="quick-read" ' +
+          (quickDisabled ? 'disabled' : '') +
+          '>读取地图</button>'
+        : '') +
+      '</div><div class="map-controls-body"><div class="map-fields map-target-fields"><label>项目<select id="map-project" aria-label="地图项目">' +
       S.projects
         .map(
           (p) =>
@@ -250,15 +289,13 @@ window.CodePierProjectMap = (() => {
         .join('') +
       '</select></label><button class="btn ghost" data-map="workspaces" ' +
       (busy || workspaceBusy ? 'disabled' : '') +
-      '>读取工作目录</button></div><div class="map-fields map-query-fields"><label>查找文件或内容<input id="map-query" maxlength="300" value="' +
+      '>读取工作目录</button></div><div class="map-fields map-query-fields"><label>查找文件或内容<input id="map-query" maxlength="300" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" value="' +
       safe(query) +
       '" ' +
       (busy ? 'disabled' : '') +
       ' placeholder="文件路径、符号或关键词"></label>' +
       '<button class="btn primary" data-map="read" ' +
-      (!project || busy || workspaceBusy || (workspace && selectedWorkspace?.state !== 'ready')
-        ? 'disabled'
-        : '') +
+      (quickDisabled ? 'disabled' : '') +
       '>读取现有地图</button>' +
       (busy || workspaceBusy ? '<button class="btn ghost" data-map="stop">停止等待</button>' : '') +
       '</div>' +
@@ -279,7 +316,15 @@ window.CodePierProjectMap = (() => {
               ? '已读取就绪工作目录列表；地图是否存在需逐个只读核实。'
               : '工作目录列表状态未知。'),
       ) +
-      '</p></section>' +
+      '</p></div></section>'
+    );
+  }
+  function paint() {
+    if (!host?.isConnected) return;
+    const selected = S.projects.find((p) => p.id === project);
+    const selectedWorkspace = workspaces.find((w) => w.workspace_id === workspace);
+    host.innerHTML =
+      mapControlsHTML(selected, selectedWorkspace) +
       '<section class="panel map-results" aria-busy="' +
       busy +
       '"><p class="map-status" role="status">' +
@@ -309,6 +354,7 @@ window.CodePierProjectMap = (() => {
       auditCursor = '';
       auditPrevious = [];
       auditError = '';
+      controlsCollapsed = Boolean(project) && isNarrowMap();
       paint();
       void loadAudit();
     };
@@ -336,8 +382,15 @@ window.CodePierProjectMap = (() => {
       (button) =>
         (button.onclick = () => {
           const action = button.dataset.map;
+          if (action === 'toggle-controls') {
+            controlsCollapsed = !controlsCollapsed;
+            paint();
+            if (!controlsCollapsed)
+              host?.querySelector('#map-query')?.focus({ preventScroll: true });
+            return;
+          }
           if (action === 'workspaces') void loadWorkspaces();
-          if (action === 'read') void read(0, 'new');
+          if (action === 'read' || action === 'quick-read') void read(0, 'new');
           if (action === 'next') void read(result.next_offset, 'next');
           if (action === 'previous') void read(previous[previous.length - 1], 'previous');
           if (action === 'stop') {
@@ -422,7 +475,10 @@ window.CodePierProjectMap = (() => {
     workspaceMessage = '正在读取现有工作目录列表…';
     paint();
     try {
-      let out = await tool('worktrees_list', { project: target, workspace_id: '' });
+      let out = await tool('worktrees_list', {
+        project: target,
+        workspace_id: '',
+      });
       if (!current()) return;
       const id = out.operation_id;
       workspaceOperation = id || '';
@@ -432,7 +488,10 @@ window.CodePierProjectMap = (() => {
       }
       while (out.pending) {
         if (!id) throw new Error('目录读取缺少操作编号，请先核实调用记录。');
-        out = await tool('operations_wait', { operation_id: id, wait_seconds: 2 });
+        out = await tool('operations_wait', {
+          operation_id: id,
+          wait_seconds: 2,
+        });
         if (!current()) return;
         if (!out.pending) {
           if (out.state !== 'succeeded' || !out.result?.ok)
@@ -530,7 +589,10 @@ window.CodePierProjectMap = (() => {
           throw new Error('读取状态未确认且缺少操作编号；先核实调用记录，避免重复提交。');
         message = '读取已保存，正在等待原操作结果。';
         paint();
-        out = await tool('operations_wait', { operation_id: operation, wait_seconds: 2 });
+        out = await tool('operations_wait', {
+          operation_id: operation,
+          wait_seconds: 2,
+        });
         if (!isCurrent(seq, login, selectedSpace, target, selectedWorkspace)) return;
         if (!out.pending) {
           if (out.state !== 'succeeded' || !out.result?.ok)
@@ -561,7 +623,9 @@ window.CodePierProjectMap = (() => {
     } finally {
       if (isCurrent(seq, login, selectedSpace, target, selectedWorkspace)) {
         busy = false;
+        if (result && isNarrowMap()) controlsCollapsed = true;
         paint();
+        if (result && isNarrowMap()) scrollMapResults();
         void loadAudit();
       }
     }

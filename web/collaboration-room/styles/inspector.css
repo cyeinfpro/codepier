@@ -265,6 +265,8 @@
   gap: 12px;
   padding: 13px 0;
   border-bottom: 1px solid var(--cr-line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .cr-member > div {
@@ -320,6 +322,8 @@
 .cr-panel .cr-scope {
   padding: 6px 0;
   border-bottom: 1px solid var(--cr-line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .cr-permission-row-main {

@@ -3,7 +3,7 @@
   "packages": [
     {
       "name": "@xterm/xterm",
-      "version": "6.0.0",
+      "version": "6.1.0-beta.339",
       "license": "MIT"
     },
     {
@@ -29,16 +29,16 @@
   ],
   "outputs": {
     "vps-terminal.js": {
-      "bytes": 617851,
-      "sha256": "d188b3471e167a81c78aaf683f13bd3846773dc6a0dbd76db2790f2696ca228e"
+      "bytes": 656691,
+      "sha256": "1a9a963510ca27e6767f0853d7146ff7e827b5e79c0e1e0d5a1c3db2d91c5066"
     },
     "vps-terminal.css": {
-      "bytes": 24617,
-      "sha256": "745e81cad5b330b5cce02ee9dc59486e44e50433186fee03a681082392e492b9"
+      "bytes": 30164,
+      "sha256": "591beafd91d0d63fca6d7308f3c4878b7ebb5591c36d5a2a8c4c3569191f293e"
     },
     "vps-terminal/THIRD_PARTY_NOTICES.txt": {
-      "bytes": 6308,
-      "sha256": "78863e7c92bcf7419d2827a4233c753627ddac455aa6390e4217c8ab8f8efcc0"
+      "bytes": 6317,
+      "sha256": "3aa4d0c5704701420d7455d6954fc0713f55f2b86b721a8be91b1a5675809c0c"
     }
   }
 }

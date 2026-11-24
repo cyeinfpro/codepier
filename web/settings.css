@@ -189,6 +189,37 @@
   }
 }
 
+.settings-quickstart {
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-md);
+  background: var(--ui-panel);
+  padding: 4px 14px;
+}
+.settings-quickstart[open] {
+  padding-bottom: 14px;
+}
+.settings-quickstart-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--ui-touch-target);
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--ui-text-sm);
+  font-weight: var(--ui-weight-semibold);
+}
+.settings-quickstart-summary::-webkit-details-marker {
+  display: none;
+}
+.settings-quickstart-meta {
+  font-size: var(--ui-text-xs);
+  font-weight: var(--ui-weight-regular);
+  color: var(--ui-muted);
+}
+.settings-quickstart[open] > .settings-flow-grid {
+  margin-top: 10px;
+}
 /* Task-first navigation; technical controls stay available on demand. */
 .settings-flow-grid {
   display: grid;
@@ -334,5 +365,13 @@
   }
   .settings-toolbar .field {
     max-width: 100%;
+  }
+  .settings-groups {
+    position: sticky;
+    top: var(--ui-topbar-height, 52px);
+    z-index: calc(var(--ui-z-local, 1) + 2);
+    background: var(--ui-bg, var(--ui-panel));
+    padding-block: 8px;
+    scrollbar-width: none;
   }
 }

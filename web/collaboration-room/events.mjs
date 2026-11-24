@@ -8,6 +8,7 @@ import {
   base,
   btn,
   closePanel,
+  closeRoomActionsMenu,
   contextSource,
   controlWork,
   createPanel,
@@ -54,6 +55,7 @@ import {
   revokeHost,
   root,
   selectRoom,
+  setRoomsDrawer,
   settingsPanel,
   startHostBatch,
   startWeixin,
@@ -67,6 +69,7 @@ import {
 export async function click(button) {
   const action = button.dataset.crAction,
     id = button.dataset.id;
+  if (button.closest('.cr-room-actions')) closeRoomActionsMenu();
   if (
     [
       'reply',
@@ -88,9 +91,18 @@ export async function click(button) {
   else if (action === 'more-rooms') await store.list({ more: true });
   else if (action === 'archives') await store.list({ includeArchived: !state.includeArchived });
   else if (action === 'select') await selectRoom(id);
-  else if (action === 'rooms') {
-    const visible = root.classList.toggle('cr-show-rooms');
-    button.setAttribute('aria-expanded', String(visible));
+  else if (action === 'rooms') setRoomsDrawer(!root.classList.contains('cr-show-rooms'));
+  else if (action === 'close-rooms') setRoomsDrawer(false);
+  else if (action === 'room-menu') {
+    const topbar = root.querySelector('.cr-topbar'),
+      open = topbar ? topbar.classList.toggle('is-actions-open') : false;
+    button.setAttribute('aria-expanded', String(open));
+  } else if (action === 'work-bar-toggle') {
+    const bar = root.querySelector('[data-cr-work]');
+    if (bar) {
+      const expanded = bar.classList.toggle('is-expanded');
+      button.setAttribute('aria-expanded', String(expanded));
+    }
   } else if (action === 'open-member') await memberPanel(id);
   else if (action === 'migration') migrationPanel();
   else if (action === 'refresh-migration') await store.refresh();
@@ -171,14 +183,21 @@ export async function click(button) {
     const result = await mutation(
       'POST',
       base + '/channel-connect-flows/' + encodeURIComponent(panel.flowId) + '/actions',
-      { action: 'select_account', account_id: account, expected_version: panel.channel.version },
+      {
+        action: 'select_account',
+        account_id: account,
+        expected_version: panel.channel.version,
+      },
     );
     if (result) renderChannel(result);
   } else if (action === 'channel-action') {
     const result = await mutation(
       'POST',
       base + '/channel-connect-flows/' + encodeURIComponent(panel.flowId) + '/actions',
-      { action: button.dataset.channelAction, expected_version: panel.channel.version },
+      {
+        action: button.dataset.channelAction,
+        expected_version: panel.channel.version,
+      },
     );
     if (result) {
       renderChannel(result);
@@ -287,7 +306,11 @@ export async function click(button) {
     const result = await mutation(
       'POST',
       base + '/connect-flows/' + encodeURIComponent(current.flowId) + '/actions',
-      { action: 'set_renewal', expected_version: flow.version, keep_connected: keepConnected },
+      {
+        action: 'set_renewal',
+        expected_version: flow.version,
+        keep_connected: keepConnected,
+      },
       current,
     );
     if (result) {

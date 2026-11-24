@@ -1,4 +1,5 @@
 import { computeTerminalViewport } from './viewport.mjs';
+import { DEFAULT_LIMITS } from './protocol.mjs';
 
 const MOBILE_LAYOUT = '(max-width: 700px), (pointer: coarse) and (max-height: 500px)';
 const EDITABLE =
@@ -41,6 +42,16 @@ export class TerminalLayout {
     this.quickIndex = 0;
     this.confirmSessionId = null;
     this.lastFocusedTabId = null;
+    this.keepAwake = false;
+    this.wakeLockSentinel = null;
+    this.wakeLockPending = false;
+    this.themePreference = 'system';
+    this.screenReaderPreference = false;
+    this.appliedExpandedTheme = false;
+    if (store && !store.measureInitialGrid) {
+      this.ownsMeasureInitialGrid = true;
+      store.measureInitialGrid = (limits) => this.measureInitialGrid(limits);
+    }
 
     this.root = el('section', 'vt-workspace');
     this.root.setAttribute('aria-label', 'VPS 终端工作区');
@@ -53,15 +64,30 @@ export class TerminalLayout {
     this.heading.append(back, this.title, this.summary, this.recentButton);
 
     this.tabRow = el('div', 'vt-tab-row');
+    this.mobileBackButton = action('←', () => onBack?.(), 'vt-mobile-back');
+    this.mobileBackButton.setAttribute('aria-label', '返回 VPS');
     this.tabList = el('div', 'vt-tabs');
     this.tabList.setAttribute('role', 'tablist');
     this.tabList.setAttribute('aria-label', 'SSH 会话');
     this.newButton = action('＋ 新建', () => this.toggleQuickConnect(), 'vt-new');
+    this.newButton.setAttribute('aria-label', '新建终端会话');
     this.newButton.setAttribute('aria-haspopup', 'dialog');
     this.newButton.setAttribute('aria-expanded', 'false');
     this.newButton.setAttribute('aria-controls', 'vt-server-picker');
+    this.moreButton = action('⋯', () => this.toggleMoreMenu(), 'vt-more-trigger');
+    this.moreButton.setAttribute('aria-label', '更多终端操作');
+    this.moreButton.setAttribute('aria-haspopup', 'menu');
+    this.moreButton.setAttribute('aria-expanded', 'false');
     this.quickConnect = this.makeQuickConnect();
-    this.tabRow.append(this.tabList, this.newButton, this.quickConnect);
+    this.moreMenu = this.makeMoreMenu();
+    this.tabRow.append(
+      this.mobileBackButton,
+      this.tabList,
+      this.newButton,
+      this.moreButton,
+      this.quickConnect,
+      this.moreMenu,
+    );
 
     this.toolbar = el('div', 'vt-toolbar');
     this.toolbar.setAttribute('aria-label', '终端操作');
@@ -137,8 +163,8 @@ export class TerminalLayout {
     window.screen?.orientation?.addEventListener?.('change', this.viewport);
     this.root.addEventListener('focusin', this.viewport);
     this.root.addEventListener('focusout', this.viewport);
-    globalThis.visualViewport?.addEventListener('resize', this.viewport);
-    globalThis.visualViewport?.addEventListener('scroll', this.viewport);
+    globalThis.visualViewport?.addEventListener?.('resize', this.viewport);
+    globalThis.visualViewport?.addEventListener?.('scroll', this.viewport);
 
     this.fullscreen = () => {
       this.syncFullscreenLabel();
@@ -146,12 +172,24 @@ export class TerminalLayout {
     };
     document.addEventListener('fullscreenchange', this.fullscreen);
 
+    this.lifecycleResume = () => this.handleForegroundChange();
+    document.addEventListener('visibilitychange', this.lifecycleResume);
+    window.addEventListener('pageshow', this.lifecycleResume);
+    window.addEventListener('online', this.lifecycleResume);
+
     this.outsidePointer = (event) => {
       if (!this.visible || this.disposed) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (this.settingsDetails?.open && !this.settingsDetails.contains(target)) {
         this.settingsDetails.open = false;
+      }
+      if (
+        !this.moreMenu.hidden &&
+        !this.moreMenu.contains(target) &&
+        !this.moreButton.contains(target)
+      ) {
+        this.closeMoreMenu();
       }
       if (
         !this.quickConnect.hidden &&
@@ -163,7 +201,8 @@ export class TerminalLayout {
       if (
         !this.recent.hidden &&
         !this.recent.contains(target) &&
-        !this.recentButton.contains(target)
+        !this.recentButton.contains(target) &&
+        !this.moreRecentButton?.contains(target)
       ) {
         this.recent.hidden = true;
       }
@@ -182,6 +221,11 @@ export class TerminalLayout {
       if (!this.confirm.hidden) {
         event.preventDefault();
         this.dismissConfirm(true);
+        return;
+      }
+      if (!this.moreMenu.hidden) {
+        event.preventDefault();
+        this.closeMoreMenu({ restoreFocus: true });
         return;
       }
       if (!this.quickConnect.hidden) {
@@ -248,6 +292,7 @@ export class TerminalLayout {
     if (this.root.parentNode !== container) container.replaceChildren(this.root);
     this.root.hidden = false;
     this.visible = true;
+    this.syncFullscreenLabel();
     this.render();
     this.fitViewport();
   }
@@ -257,10 +302,69 @@ export class TerminalLayout {
     this.visible = false;
     this.dismissConfirm();
     this.closeQuickConnect();
+    this.closeMoreMenu();
     if (this.settingsDetails) this.settingsDetails.open = false;
+    for (const record of this.store.records.values())
+      record.view?.syncHardwareAcceleration?.(false);
+    this.releaseWakeLock();
+    this.syncFullscreenThemeColor(true);
     if (document.fullscreenElement === this.root) document.exitFullscreen().catch(() => {});
     this.root.hidden = true;
     this.parking.append(this.root);
+  }
+
+  measureInitialGrid(limits = DEFAULT_LIMITS) {
+    if (!this.visible || !this.root?.isConnected) return null;
+    const narrow = !!globalThis.matchMedia?.(MOBILE_LAYOUT).matches;
+    const mobileFont = !!globalThis.matchMedia?.('(max-width: 700px)').matches;
+    const fontSize = this.focused()?.view?.fontSize || (mobileFont ? 13.5 : 14);
+    const lineHeight = mobileFont ? 1.18 : 1.2;
+    const activeCanvas = this.store.active?.view?.canvas;
+    let usableWidth = 0;
+    let usableHeight = 0;
+    if (
+      activeCanvas?.isConnected &&
+      activeCanvas.clientWidth >= 40 &&
+      activeCanvas.clientHeight >= 40
+    ) {
+      const pad = narrow ? 12 : 16;
+      usableWidth = activeCanvas.clientWidth - pad;
+      usableHeight = activeCanvas.clientHeight - pad;
+    } else {
+      const rect = this.root.getBoundingClientRect?.();
+      const totalWidth = rect?.width || 0;
+      const totalHeight = this.viewportState?.availableHeight || rect?.height || 0;
+      if (totalWidth < 80 || totalHeight < 120) return null;
+      const chromeHeight = narrow ? 92 : 146;
+      const pad = narrow ? 12 : 16;
+      usableWidth = totalWidth - pad;
+      usableHeight = totalHeight - chromeHeight;
+    }
+    if (usableWidth < 40 || usableHeight < 40) return null;
+    const cellWidth = Math.max(5, fontSize * 0.6);
+    const cellHeight = Math.max(10, fontSize * lineHeight);
+    return {
+      cols: Math.max(
+        limits.min_cols,
+        Math.min(limits.max_cols, Math.floor(usableWidth / cellWidth)),
+      ),
+      rows: Math.max(
+        limits.min_rows,
+        Math.min(limits.max_rows, Math.floor(usableHeight / cellHeight)),
+      ),
+    };
+  }
+
+  handleForegroundChange() {
+    if (this.disposed) return;
+    const visible = globalThis.document?.visibilityState !== 'hidden';
+    this.syncWakeLock();
+    if (!this.visible) return;
+    this.render();
+    if (visible) {
+      for (const record of this.store.records.values()) record.transport?.resumeOnForeground?.();
+      this.fitViewport();
+    }
   }
 
   makeEmpty() {
@@ -425,6 +529,7 @@ export class TerminalLayout {
       this.closeQuickConnect();
       return;
     }
+    this.closeMoreMenu();
     if (this.settingsDetails) this.settingsDetails.open = false;
     this.recent.hidden = true;
     this.quickConnect.hidden = false;
@@ -500,8 +605,10 @@ export class TerminalLayout {
     const store = this.store,
       records = [...store.records.values()];
     const narrow = window.matchMedia(MOBILE_LAYOUT).matches;
+    const coarse = window.matchMedia('(pointer: coarse)').matches;
     this.narrow = narrow;
     this.splitButton.hidden = narrow;
+    this.newButton.textContent = narrow ? '＋' : '＋ 新建';
     // Rotation changes visible slots, not the store's split or its order.
     const primaryId =
       narrow && store.secondaryId && store.focusedId === store.secondaryId
@@ -531,126 +638,7 @@ export class TerminalLayout {
         this.paneHosts.delete(id);
       }
     for (const record of records) {
-      let tab = this.tabs.get(record.id);
-      if (!tab) {
-        tab = el('div', 'vt-tab');
-        tab.dataset.sessionId = record.id;
-        tab.addEventListener('mousedown', (event) => {
-          if (event.button === 1) event.preventDefault();
-        });
-        tab.addEventListener('auxclick', (event) => {
-          if (event.button === 1) {
-            event.preventDefault();
-            this.confirmClose(record, tab.querySelector('.vt-tab-close'), true);
-          }
-        });
-        const choose = action('', () => store.activate(record.id));
-        choose.className = 'vt-tab-select';
-        choose.setAttribute('role', 'tab');
-        choose.id = `vt-tab-${record.id}`;
-        choose.setAttribute('aria-controls', `vt-pane-${record.id}`);
-        const dot = el('span', 'vt-tab-dot');
-        dot.setAttribute('aria-hidden', 'true');
-        const label = el('span', 'vt-tab-label');
-        const badge = el('span', 'vt-tab-badge', 'tmux');
-        badge.setAttribute('aria-hidden', 'true');
-        choose.append(dot, label, badge);
-        choose.addEventListener('dblclick', () => this.rename(record, tab));
-        choose.addEventListener('keydown', (event) => {
-          if (event.key === 'F2') {
-            event.preventDefault();
-            this.rename(record, tab);
-          }
-          if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-            event.preventDefault();
-            const ids = [...store.records.keys()],
-              current = ids.indexOf(record.id);
-            const index =
-              event.key === 'Home'
-                ? 0
-                : event.key === 'End'
-                  ? ids.length - 1
-                  : (current + (event.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
-            store.activate(ids[index]);
-            this.tabs.get(ids[index])?.querySelector('[role=tab]')?.focus();
-          }
-        });
-        const close = action('×', () => this.confirmClose(record, close, true), 'vt-tab-close');
-        const lock = action(
-          '锁',
-          () => {
-            record.tabLocked = !record.tabLocked;
-            this.render();
-          },
-          'vt-tab-lock',
-        );
-        tab.append(choose, lock, close);
-        this.tabs.set(record.id, tab);
-        this.tabList.append(tab);
-      }
-      const selected = record.id === primaryId || record.id === secondaryId,
-        focused = record.id === store.focusedId;
-      const choose = tab.querySelector('[role=tab]');
-      choose.setAttribute('aria-selected', String(selected));
-      choose.tabIndex = focused || (!store.focusedId && record.id === store.activeId) ? 0 : -1;
-      tab.classList.toggle('vt-tab-active', selected);
-      tab.classList.toggle('vt-tab-focused', focused);
-      tab.dataset.state = record.state;
-      const close = tab.querySelector('.vt-tab-close');
-      const lock = tab.querySelector('.vt-tab-lock');
-      close.disabled = !!record.tabLocked || !!record.closing;
-      close.title = record.tabLocked
-        ? '标签已锁定，解锁后可关闭'
-        : record.state === 'close_unknown'
-          ? '结束结果待确认，点击重试'
-          : record.closing
-            ? '正在结束会话'
-            : '结束会话并关闭标签';
-      close.setAttribute('aria-label', `${record.label}：${close.title}`);
-      lock.textContent = record.tabLocked ? '解锁' : '锁';
-      lock.title = record.tabLocked ? '解锁标签' : '锁定标签，防止误关';
-      lock.setAttribute('aria-label', `${record.label}：${lock.title}`);
-      lock.setAttribute('aria-pressed', String(!!record.tabLocked));
-      lock.disabled = !!record.closing;
-      tab.querySelector('.vt-tab-label').textContent = record.label;
-      const badge = tab.querySelector('.vt-tab-badge');
-      if (badge) badge.hidden = record.session.mode !== 'tmux';
-      choose.title = [
-        record.label,
-        formatVpsEndpoint(record.session) || record.session.device_name || 'SSH',
-        record.session.mode === 'tmux' && 'tmux 持久会话',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-      if (focused && this.lastFocusedTabId !== record.id) {
-        this.lastFocusedTabId = record.id;
-        tab.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-      }
-      const viewRoot = record.view.root;
-      viewRoot.id = `vt-pane-${record.id}`;
-      viewRoot.setAttribute('role', 'tabpanel');
-      viewRoot.setAttribute('aria-labelledby', choose.id);
-      // Keep the xterm canvas under one parent for the lifetime of the tab.
-      // Changing a grid position does not detach the renderer from the DOM.
-      let host = this.paneHosts.get(record.id);
-      if (!host) {
-        host = el('div', 'vt-slot');
-        host.hidden = true;
-        host.append(viewRoot);
-        this.deck.append(host);
-        this.paneHosts.set(record.id, host);
-      }
-      const primary = record.id === primaryId,
-        secondary = record.id === secondaryId,
-        displayed = primary || secondary,
-        changed =
-          host.hidden !== !displayed || host.classList.contains('vt-primary-slot') !== primary;
-      host.classList.toggle('vt-primary-slot', primary);
-      host.classList.toggle('vt-secondary-slot', secondary);
-      host.hidden = !displayed;
-      host.inert = !displayed;
-      viewRoot.classList.toggle('vt-pane-focused', focused);
-      if (displayed && this.visible && (changed || !record.view.terminal)) record.view.show();
+      this.renderSessionTabAndSlot(record, { primaryId, secondaryId, coarse });
     }
 
     const record = this.focused();
@@ -678,8 +666,158 @@ export class TerminalLayout {
     this.endButton.disabled =
       !record || record.closing || ['exited', 'closed', 'revoked'].includes(record.state);
     this.endButton.textContent = record?.closing ? '正在结束' : '结束会话';
+    this.syncMoreMenu(record);
+    this.syncWakeLock();
     if (!this.recent.hidden) this.renderRecent();
     if (!this.quickConnect.hidden) this.renderQuickConnect();
+  }
+
+  createTabElement(record) {
+    const store = this.store;
+    const tab = el('div', 'vt-tab');
+    tab.dataset.sessionId = record.id;
+    tab.addEventListener('mousedown', (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+    tab.addEventListener('auxclick', (event) => {
+      if (event.button === 1) {
+        event.preventDefault();
+        this.confirmClose(record, tab.querySelector('.vt-tab-close'), true);
+      }
+    });
+    const choose = action('', () => store.activate(record.id));
+    choose.className = 'vt-tab-select';
+    choose.setAttribute('role', 'tab');
+    choose.id = `vt-tab-${record.id}`;
+    choose.setAttribute('aria-controls', `vt-pane-${record.id}`);
+    const dot = el('span', 'vt-tab-dot');
+    dot.setAttribute('aria-hidden', 'true');
+    const label = el('span', 'vt-tab-label');
+    const lockBadge = el('span', 'vt-tab-lock-badge', '锁');
+    lockBadge.setAttribute('aria-hidden', 'true');
+    lockBadge.hidden = true;
+    const badge = el('span', 'vt-tab-badge', 'tmux');
+    badge.setAttribute('aria-hidden', 'true');
+    choose.append(dot, label, lockBadge, badge);
+    choose.addEventListener('dblclick', () => this.rename(record, tab));
+    choose.addEventListener('keydown', (event) => this.handleTabKeydown(event, record, tab));
+    const close = action('×', () => this.confirmClose(record, close, true), 'vt-tab-close');
+    const lock = action(
+      '锁',
+      () => {
+        record.tabLocked = !record.tabLocked;
+        this.render();
+      },
+      'vt-tab-lock',
+    );
+    tab.append(choose, lock, close);
+    this.tabs.set(record.id, tab);
+    this.tabList.append(tab);
+    return tab;
+  }
+
+  handleTabKeydown(event, record, tab) {
+    if (event.key === 'F2') {
+      event.preventDefault();
+      this.rename(record, tab);
+      return;
+    }
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const ids = [...this.store.records.keys()];
+    const current = ids.indexOf(record.id);
+    const index =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? ids.length - 1
+          : (current + (event.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
+    this.store.activate(ids[index]);
+    this.tabs.get(ids[index])?.querySelector('[role=tab]')?.focus();
+  }
+
+  renderSessionTabAndSlot(record, { primaryId, secondaryId, coarse }) {
+    const store = this.store;
+    const tab = this.tabs.get(record.id) || this.createTabElement(record);
+    const selected = record.id === primaryId || record.id === secondaryId;
+    const focused = record.id === store.focusedId;
+    const choose = tab.querySelector('[role=tab]');
+    choose.setAttribute('aria-selected', String(selected));
+    choose.tabIndex = focused || (!store.focusedId && record.id === store.activeId) ? 0 : -1;
+    tab.classList.toggle('vt-tab-active', selected);
+    tab.classList.toggle('vt-tab-focused', focused);
+    tab.dataset.state = record.state;
+    this.syncTabControls(tab, choose, record);
+    if (focused && this.lastFocusedTabId !== record.id) {
+      this.lastFocusedTabId = record.id;
+      tab.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    }
+    this.syncPaneSlot(record, choose, {
+      primaryId,
+      secondaryId,
+      focused,
+      coarse,
+    });
+  }
+
+  syncTabControls(tab, choose, record) {
+    const close = tab.querySelector('.vt-tab-close');
+    const lock = tab.querySelector('.vt-tab-lock');
+    close.disabled = !!record.tabLocked || !!record.closing;
+    close.title = record.tabLocked
+      ? '标签已锁定，解锁后可关闭'
+      : record.state === 'close_unknown'
+        ? '结束结果待确认，点击重试'
+        : record.closing
+          ? '正在结束会话'
+          : '结束会话并关闭标签';
+    close.setAttribute('aria-label', `${record.label}：${close.title}`);
+    lock.textContent = record.tabLocked ? '解锁' : '锁';
+    lock.title = record.tabLocked ? '解锁标签' : '锁定标签，防止误关';
+    lock.setAttribute('aria-label', `${record.label}：${lock.title}`);
+    lock.setAttribute('aria-pressed', String(!!record.tabLocked));
+    lock.disabled = !!record.closing;
+    const lockBadge = tab.querySelector('.vt-tab-lock-badge');
+    if (lockBadge) lockBadge.hidden = !record.tabLocked;
+    tab.querySelector('.vt-tab-label').textContent = record.label;
+    const badge = tab.querySelector('.vt-tab-badge');
+    if (badge) badge.hidden = record.session.mode !== 'tmux';
+    choose.title = [
+      record.label,
+      formatVpsEndpoint(record.session) || record.session.device_name || 'SSH',
+      record.session.mode === 'tmux' && 'tmux 持久会话',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
+
+  syncPaneSlot(record, choose, { primaryId, secondaryId, focused, coarse }) {
+    const viewRoot = record.view.root;
+    viewRoot.id = `vt-pane-${record.id}`;
+    viewRoot.setAttribute('role', 'tabpanel');
+    viewRoot.setAttribute('aria-labelledby', choose.id);
+    let host = this.paneHosts.get(record.id);
+    if (!host) {
+      host = el('div', 'vt-slot');
+      host.hidden = true;
+      host.append(viewRoot);
+      this.deck.append(host);
+      this.paneHosts.set(record.id, host);
+    }
+    const primary = record.id === primaryId;
+    const secondary = record.id === secondaryId;
+    const displayed = primary || secondary;
+    const changed =
+      host.hidden !== !displayed || host.classList.contains('vt-primary-slot') !== primary;
+    host.classList.toggle('vt-primary-slot', primary);
+    host.classList.toggle('vt-secondary-slot', secondary);
+    host.hidden = !displayed;
+    host.inert = !displayed;
+    viewRoot.classList.toggle('vt-pane-focused', focused);
+    const gpuEligible =
+      displayed && this.visible && (!coarse || record.id === (this.store.focusedId || primaryId));
+    record.view.syncHardwareAcceleration?.(gpuEligible);
+    if (displayed && this.visible && (changed || !record.view.terminal)) record.view.show();
   }
 
   rename(record, tab) {
@@ -717,6 +855,7 @@ export class TerminalLayout {
 
   async toggleRecent() {
     this.closeQuickConnect();
+    this.closeMoreMenu();
     if (this.settingsDetails) this.settingsDetails.open = false;
     this.recent.hidden = !this.recent.hidden;
     if (this.recent.hidden) return;
@@ -764,12 +903,255 @@ export class TerminalLayout {
     this.recent.replaceChildren(heading, list);
   }
 
+  applyThemePreference(value) {
+    this.themePreference = value;
+    if (this.themeSelect) this.themeSelect.value = value;
+    if (this.moreThemeSelect) this.moreThemeSelect.value = value;
+    for (const record of this.store.records.values()) record.view.setTheme(value);
+  }
+
+  applyScreenReaderPreference(enabled) {
+    this.screenReaderPreference = !!enabled;
+    if (this.screenReaderCheckbox) this.screenReaderCheckbox.checked = !!enabled;
+    if (this.moreScreenReaderCheckbox) this.moreScreenReaderCheckbox.checked = !!enabled;
+    for (const record of this.store.records.values()) record.view.setScreenReader(!!enabled);
+  }
+
+  setKeepAwake(enabled) {
+    this.keepAwake = !!enabled;
+    if (this.wakeLockCheckbox) this.wakeLockCheckbox.checked = this.keepAwake;
+    if (this.moreWakeLockCheckbox) this.moreWakeLockCheckbox.checked = this.keepAwake;
+    this.syncWakeLock();
+  }
+
+  shouldHoldWakeLock() {
+    const current = this.focused() || this.store.active;
+    return (
+      this.keepAwake &&
+      !!this.visible &&
+      !this.disposed &&
+      globalThis.document?.visibilityState !== 'hidden' &&
+      current?.state === 'ready'
+    );
+  }
+
+  async syncWakeLock() {
+    if (!this.shouldHoldWakeLock()) {
+      await this.releaseWakeLock();
+      return;
+    }
+    if (this.wakeLockSentinel || this.wakeLockPending) return;
+    const wakeLock = globalThis.navigator?.wakeLock;
+    if (typeof wakeLock?.request !== 'function') return;
+    this.wakeLockPending = true;
+    try {
+      const sentinel = await wakeLock.request('screen');
+      if (!this.shouldHoldWakeLock()) {
+        await sentinel?.release?.().catch(() => {});
+        return;
+      }
+      this.wakeLockSentinel = sentinel;
+      sentinel?.addEventListener?.('release', () => {
+        if (this.wakeLockSentinel === sentinel) this.wakeLockSentinel = null;
+      });
+    } catch {
+      /* Battery saver or browser policy denied wake lock. */
+    } finally {
+      this.wakeLockPending = false;
+    }
+  }
+
+  async releaseWakeLock() {
+    const sentinel = this.wakeLockSentinel;
+    this.wakeLockSentinel = null;
+    if (sentinel) await sentinel.release?.().catch(() => {});
+  }
+
+  makeMoreMenu() {
+    const menu = el('div', 'vt-more-menu');
+    menu.hidden = true;
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', '更多终端操作');
+    this.moreMeta = el('div', 'vt-more-meta');
+    this.moreMeta.hidden = true;
+    const actionsGrid = this.buildMoreActionsGrid();
+    const settingsRows = this.buildMoreSettingsRows();
+    this.moreEndButton = action(
+      '结束会话',
+      () => {
+        const record = this.focused();
+        this.closeMoreMenu();
+        this.confirmClose(record, this.moreButton);
+      },
+      'vt-danger vt-more-end',
+    );
+    menu.append(this.moreMeta, actionsGrid, ...settingsRows, this.moreEndButton);
+    return menu;
+  }
+
+  buildMoreActionsGrid() {
+    const actionsGrid = el('div', 'vt-more-actions');
+    this.moreFindButton = action('查找', () => {
+      this.closeMoreMenu();
+      this.focused()?.view.toggleSearch();
+    });
+    this.moreCopyButton = action('复制选中', () => {
+      this.closeMoreMenu();
+      this.focused()?.view.copy();
+    });
+    this.moreFullscreenButton = action('全屏', () => {
+      this.closeMoreMenu();
+      this.toggleFullscreen();
+    });
+    this.moreDiagnosticsButton = action('诊断', () => {
+      this.closeMoreMenu();
+      this.focused()?.view.toggleDiagnostics();
+    });
+    this.moreLockButton = action('锁定标签', () => {
+      const record = this.focused();
+      if (record) {
+        record.tabLocked = !record.tabLocked;
+        this.render();
+      }
+      this.closeMoreMenu();
+    });
+    this.moreDetachButton = action('分离标签', () => {
+      const record = this.focused();
+      this.closeMoreMenu();
+      if (record) this.store.detach(record.id);
+    });
+    this.moreRecentButton = action('最近会话', () => {
+      this.closeMoreMenu();
+      this.toggleRecent();
+    });
+    actionsGrid.append(
+      this.moreFindButton,
+      this.moreCopyButton,
+      this.moreFullscreenButton,
+      this.moreDiagnosticsButton,
+      this.moreLockButton,
+      this.moreDetachButton,
+      this.moreRecentButton,
+    );
+    return actionsGrid;
+  }
+
+  buildMoreSettingsRows() {
+    const fontRow = el('div', 'vt-settings-row');
+    this.moreFontValue = el('span', '', '字号');
+    fontRow.append(
+      this.moreFontValue,
+      action('−', () => {
+        const view = this.focused()?.view;
+        if (view) view.setFontSize(view.fontSize - 0.5);
+        this.syncMoreMenu();
+      }),
+      action('＋', () => {
+        const view = this.focused()?.view;
+        if (view) view.setFontSize(view.fontSize + 0.5);
+        this.syncMoreMenu();
+      }),
+    );
+    const themeRow = el('label', 'vt-settings-row', '主题');
+    this.moreThemeSelect = this.makeThemeSelect();
+    themeRow.append(this.moreThemeSelect);
+
+    const wakeRow = el('label', 'vt-settings-row');
+    this.moreWakeLockCheckbox = el('input');
+    this.moreWakeLockCheckbox.type = 'checkbox';
+    this.moreWakeLockCheckbox.addEventListener('change', () =>
+      this.setKeepAwake(this.moreWakeLockCheckbox.checked),
+    );
+    wakeRow.append(this.moreWakeLockCheckbox, document.createTextNode('保持屏幕常亮'));
+
+    const readerRow = el('label', 'vt-settings-row');
+    this.moreScreenReaderCheckbox = el('input');
+    this.moreScreenReaderCheckbox.type = 'checkbox';
+    this.moreScreenReaderCheckbox.addEventListener('change', () =>
+      this.applyScreenReaderPreference(this.moreScreenReaderCheckbox.checked),
+    );
+    readerRow.append(this.moreScreenReaderCheckbox, document.createTextNode('屏幕阅读器模式'));
+    return [fontRow, themeRow, wakeRow, readerRow];
+  }
+
+  toggleMoreMenu(force = this.moreMenu.hidden) {
+    if (!force) {
+      this.closeMoreMenu();
+      return;
+    }
+    this.closeQuickConnect();
+    if (this.settingsDetails) this.settingsDetails.open = false;
+    this.recent.hidden = true;
+    this.syncMoreMenu();
+    this.moreMenu.hidden = false;
+    this.moreButton.setAttribute('aria-expanded', 'true');
+  }
+
+  closeMoreMenu({ restoreFocus = false } = {}) {
+    if (!this.moreMenu || this.moreMenu.hidden) return;
+    this.moreMenu.hidden = true;
+    this.moreButton?.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) this.moreButton?.focus();
+  }
+
+  syncMoreMenu(record = this.focused()) {
+    if (!this.moreMenu) return;
+    const expanded =
+      globalThis.document?.fullscreenElement === this.root ||
+      this.root.classList.contains('vt-expanded');
+    this.moreFullscreenButton.textContent = expanded ? '退出全屏' : '全屏';
+    for (const node of [
+      this.moreFindButton,
+      this.moreCopyButton,
+      this.moreDiagnosticsButton,
+      this.moreLockButton,
+    ])
+      node.disabled = !record;
+    this.moreLockButton.textContent = record?.tabLocked ? '解锁标签' : '锁定标签';
+    this.moreDetachButton.disabled =
+      !record || !!record.tabLocked || !!record.closing || !!record.dismissOnEnd;
+    this.moreEndButton.disabled =
+      !record || record.closing || ['exited', 'closed', 'revoked'].includes(record.state);
+    this.moreEndButton.textContent = record?.closing ? '正在结束' : '结束会话';
+    if (record?.view) {
+      this.moreFontValue.textContent = `字号 ${record.view.fontSize}`;
+      const parts = [
+        formatVpsEndpoint(record.session) || record.session.device_name,
+        record.session.mode === 'tmux' ? 'tmux 持久' : '直连',
+        record.rttMs != null ? `${Math.round(record.rttMs)} ms` : null,
+        record.view.sizeBadge?.textContent || null,
+      ].filter(Boolean);
+      this.moreMeta.textContent = parts.join(' · ');
+      this.moreMeta.hidden = !parts.length;
+    } else {
+      this.moreFontValue.textContent = '字号';
+      this.moreMeta.hidden = true;
+    }
+  }
+
+  makeThemeSelect() {
+    const themes = el('select');
+    themes.setAttribute('aria-label', '终端主题');
+    for (const [value, label] of [
+      ['system', '跟随面板'],
+      ['light', '浅色'],
+      ['dark', '深色'],
+    ]) {
+      const option = el('option', '', label);
+      option.value = value;
+      themes.append(option);
+    }
+    themes.addEventListener('change', () => this.applyThemePreference(themes.value));
+    return themes;
+  }
+
   makeSettings() {
     const details = el('details', 'vt-settings'),
       summary = el('summary', 'vt-button', '显示');
     details.addEventListener('toggle', () => {
       if (details.open) {
         this.closeQuickConnect();
+        this.closeMoreMenu();
         this.recent.hidden = true;
       }
     });
@@ -786,28 +1168,21 @@ export class TerminalLayout {
         if (view) view.setFontSize(view.fontSize + 1);
       }),
     );
-    const themeLabel = el('label', 'vt-settings-row', '主题'),
-      themes = el('select');
-    themes.setAttribute('aria-label', '终端主题');
-    for (const [value, label] of [
-      ['system', '跟随面板'],
-      ['light', '浅色'],
-      ['dark', '深色'],
-    ]) {
-      const option = el('option', '', label);
-      option.value = value;
-      themes.append(option);
-    }
-    themes.addEventListener('change', () => {
-      for (const record of this.store.records.values()) record.view.setTheme(themes.value);
-    });
-    themeLabel.append(themes);
+    const themeLabel = el('label', 'vt-settings-row', '主题');
+    this.themeSelect = this.makeThemeSelect();
+    themeLabel.append(this.themeSelect);
+    const wakeLabel = el('label', 'vt-settings-row');
+    this.wakeLockCheckbox = el('input');
+    this.wakeLockCheckbox.type = 'checkbox';
+    this.wakeLockCheckbox.addEventListener('change', () =>
+      this.setKeepAwake(this.wakeLockCheckbox.checked),
+    );
+    wakeLabel.append(this.wakeLockCheckbox, document.createTextNode('保持屏幕常亮'));
     const accessible = el('label', 'vt-settings-row'),
       check = el('input');
     check.type = 'checkbox';
-    check.addEventListener('change', () => {
-      for (const record of this.store.records.values()) record.view.setScreenReader(check.checked);
-    });
+    this.screenReaderCheckbox = check;
+    check.addEventListener('change', () => this.applyScreenReaderPreference(check.checked));
     accessible.append(check, document.createTextNode('屏幕阅读器模式'));
     this.detachButton = action('分离标签', () => {
       const record = this.focused();
@@ -815,7 +1190,7 @@ export class TerminalLayout {
       details.open = false;
     });
     this.detachButton.title = '只关闭当前标签，保留远端会话';
-    panel.append(sizes, themeLabel, accessible, this.detachButton);
+    panel.append(sizes, themeLabel, wakeLabel, accessible, this.detachButton);
     details.append(summary, panel);
     return details;
   }
@@ -864,10 +1239,27 @@ export class TerminalLayout {
     cancel.focus();
   }
 
+  syncFullscreenThemeColor(forceReset = false) {
+    const active =
+      !forceReset &&
+      !!this.visible &&
+      !this.disposed &&
+      (globalThis.document?.fullscreenElement === this.root ||
+        this.root.classList.contains('vt-expanded'));
+    if (this.appliedExpandedTheme === active) return;
+    this.appliedExpandedTheme = active;
+    const appearance = globalThis.window?.CodePierAppearance ?? globalThis.CodePierAppearance;
+    appearance?.syncThemeColor?.(active ? '#171716' : null);
+  }
+
   syncFullscreenLabel() {
     const active =
-      document.fullscreenElement === this.root || this.root.classList.contains('vt-expanded');
+      globalThis.document?.fullscreenElement === this.root ||
+      this.root.classList.contains('vt-expanded');
     this.fullscreenButton.textContent = active ? '退出全屏' : '全屏';
+    if (this.moreFullscreenButton)
+      this.moreFullscreenButton.textContent = active ? '退出全屏' : '全屏';
+    this.syncFullscreenThemeColor();
   }
 
   async toggleFullscreen() {
@@ -926,9 +1318,14 @@ export class TerminalLayout {
       const availableHeight = `${this.viewportState.availableHeight}px`;
       if (this.root.style.getPropertyValue('--vt-available-height') !== availableHeight)
         this.root.style.setProperty('--vt-available-height', availableHeight);
+      const fitOpts = {
+        keyboardTransition: !!this.viewportState.keyboardTransition,
+      };
+      this.store.active?.view.syncSoftKeyboardOpen?.(this.viewportState.keyboardOpen);
+      this.store.secondary?.view.syncSoftKeyboardOpen?.(this.viewportState.keyboardOpen);
       if (this.viewportState.zoomed) return;
-      this.store.active?.view.fit();
-      this.store.secondary?.view.fit();
+      this.store.active?.view.fit(fitOpts);
+      this.store.secondary?.view.fit(fitOpts);
     });
   }
 
@@ -975,14 +1372,20 @@ export class TerminalLayout {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.ownsMeasureInitialGrid && this.store) this.store.measureInitialGrid = null;
+    this.releaseWakeLock();
+    this.syncFullscreenThemeColor(true);
     window.removeEventListener('resize', this.viewport);
     window.removeEventListener('orientationchange', this.viewport);
     window.screen?.orientation?.removeEventListener?.('change', this.viewport);
     this.root.removeEventListener('focusin', this.viewport);
     this.root.removeEventListener('focusout', this.viewport);
-    globalThis.visualViewport?.removeEventListener('resize', this.viewport);
-    globalThis.visualViewport?.removeEventListener('scroll', this.viewport);
+    globalThis.visualViewport?.removeEventListener?.('resize', this.viewport);
+    globalThis.visualViewport?.removeEventListener?.('scroll', this.viewport);
     document.removeEventListener('fullscreenchange', this.fullscreen);
+    document.removeEventListener('visibilitychange', this.lifecycleResume);
+    window.removeEventListener('pageshow', this.lifecycleResume);
+    window.removeEventListener('online', this.lifecycleResume);
     document.removeEventListener('pointerdown', this.outsidePointer);
     document.removeEventListener('keydown', this.escapeHandler);
     if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);

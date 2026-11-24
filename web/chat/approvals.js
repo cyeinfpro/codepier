@@ -1,3 +1,70 @@
+function chatBuildClaudeQuestionField(q) {
+  const field = document.createElement('fieldset'),
+    legend = document.createElement('legend');
+  legend.textContent = q.question;
+  field.append(legend);
+  const other = document.createElement('input');
+  other.placeholder = '其他答案';
+  other.maxLength = 10000;
+  other.setAttribute('aria-label', q.question + ' · 其他答案');
+  if (q.multiSelect) {
+    const list = document.createElement('div'),
+      checkboxes = [];
+    list.className = 'check-list approval-option-list';
+    list.setAttribute('role', 'group');
+    list.setAttribute('aria-label', q.question);
+    for (const o of q.options || []) {
+      const card = document.createElement('label'),
+        checkbox = document.createElement('input'),
+        textWrap = document.createElement('div'),
+        title = document.createElement('strong');
+      card.className = 'approval-option-card';
+      checkbox.type = 'checkbox';
+      checkbox.value = o.label;
+      checkbox.checked = !!(o.selected || o.default);
+      title.textContent = o.label;
+      textWrap.append(title);
+      if (o.description) {
+        const desc = document.createElement('small');
+        desc.textContent = o.description;
+        textWrap.append(desc);
+      }
+      card.append(checkbox, textWrap);
+      list.append(card);
+      checkboxes.push(checkbox);
+    }
+    field.append(list, other);
+    return {
+      field,
+      q,
+      other,
+      getSelected: () =>
+        checkboxes
+          .filter((cb) => cb.checked)
+          .map((cb) => cb.value)
+          .filter(Boolean),
+    };
+  }
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', q.question);
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = '请选择，或填写其他答案';
+  select.append(empty);
+  for (const o of q.options || []) {
+    const option = document.createElement('option');
+    option.value = o.label;
+    option.textContent = o.label + (o.description ? ' — ' + o.description : '');
+    select.append(option);
+  }
+  field.append(select, other);
+  return {
+    field,
+    q,
+    other,
+    getSelected: () => [...select.selectedOptions].map((o) => o.value).filter(Boolean),
+  };
+}
 function chatApproval(item) {
   if (!item.node) return;
   item.node
@@ -57,7 +124,12 @@ function chatApproval(item) {
     try {
       const result = await chatAPI(
         'chat_answer',
-        { id: op.id, receipt: op.receipt, request_id: data.request_id, answer: op.value },
+        {
+          id: op.id,
+          receipt: op.receipt,
+          request_id: data.request_id,
+          answer: op.value,
+        },
         op.project,
       );
       if (op.identity !== S.session) return;
@@ -119,39 +191,15 @@ function chatApproval(item) {
     button('提交回答', () => input.value);
     button('取消', null);
   } else if (data.method === 'claude/question') {
-    const inputs = [];
-    for (const q of data.details?.questions || []) {
-      const field = document.createElement('fieldset'),
-        legend = document.createElement('legend');
-      legend.textContent = q.question;
-      field.append(legend);
-      const select = document.createElement('select');
-      select.multiple = !!q.multiSelect;
-      select.setAttribute('aria-label', q.question);
-      if (!q.multiSelect) {
-        const empty = document.createElement('option');
-        empty.value = '';
-        empty.textContent = '请选择，或填写其他答案';
-        select.append(empty);
-      }
-      for (const o of q.options || []) {
-        const option = document.createElement('option');
-        option.value = o.label;
-        option.textContent = o.label + (o.description ? ' — ' + o.description : '');
-        select.append(option);
-      }
-      const other = document.createElement('input');
-      other.placeholder = '其他答案';
-      other.maxLength = 10000;
-      other.setAttribute('aria-label', q.question + ' · 其他答案');
-      field.append(select, other);
-      box.append(field);
-      inputs.push({ q, select, other });
-    }
+    const inputs = (data.details?.questions || []).map((q) => {
+      const entry = chatBuildClaudeQuestionField(q);
+      box.append(entry.field);
+      return entry;
+    });
     button('提交回答', () =>
       Object.fromEntries(
-        inputs.map(({ q, select, other }) => {
-          let values = [...select.selectedOptions].map((o) => o.value).filter(Boolean),
+        inputs.map(({ q, getSelected, other }) => {
+          let values = getSelected(),
             custom = other.value.trim();
           if (custom) values = q.multiSelect ? [...values, custom] : [custom];
           if (!values.length) throw new Error('请回答：' + q.question);
@@ -177,7 +225,12 @@ function chatApproval(item) {
         }
       } else {
         input = document.createElement('input');
-        if (q.isSecret) input.type = 'password';
+        if (q.isSecret) {
+          input.type = 'password';
+          input.setAttribute('autocapitalize', 'none');
+          input.setAttribute('autocorrect', 'off');
+          input.spellcheck = false;
+        }
       }
       input.setAttribute('aria-label', label.textContent);
       label.append(input);
@@ -191,9 +244,12 @@ function chatApproval(item) {
       const value = typeof choice === 'string' ? choice : (choice.value ?? choice.id ?? choice);
       const label =
         typeof choice === 'string'
-          ? { accept: '允许本次', acceptForSession: '本会话允许', decline: '拒绝', cancel: '取消' }[
-              choice
-            ] || choice
+          ? {
+              accept: '允许本次',
+              acceptForSession: '本会话允许',
+              decline: '拒绝',
+              cancel: '取消',
+            }[choice] || choice
           : choice.label || JSON.stringify(value);
       button(label, value);
     }

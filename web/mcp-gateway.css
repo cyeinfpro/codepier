@@ -29,8 +29,82 @@
   font-size: var(--ui-text-sm);
   color: var(--ui-muted);
 }
+.gw-published-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ui-line);
+}
+.gw-published-toolbar input {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: var(--ui-text-input);
+}
+#gw-published-count {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-muted);
+  font-variant-numeric: tabular-nums;
+}
+.gw-binding-checklist {
+  margin-top: 8px;
+}
+.gw-binding-checklist > summary {
+  cursor: pointer;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-muted);
+}
+.gw-binding-checks {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius-small);
+  background: var(--ui-surface);
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.gw-sticky-save-bar {
+  position: fixed;
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  bottom: calc(var(--ui-dock-space, 0px) + 8px);
+  z-index: var(--ui-z-popover);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  max-width: 560px;
+  margin-inline: auto;
+  padding: 10px 14px;
+  border: 1px solid var(--ui-accent-line);
+  border-radius: var(--ui-radius-xl);
+  background: var(--ui-panel);
+  box-shadow: var(--ui-elev-2);
+}
+.gw-sticky-save-bar[hidden] {
+  display: none;
+}
+.gw-sticky-save-bar > span {
+  font-size: var(--ui-text-sm);
+  font-weight: var(--ui-weight-medium);
+  min-width: 0;
+}
 .gw-tools {
   margin: 16px 0;
+}
+.gw-tool-row,
+.gateway-tool-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 .gw-tool-row {
   padding: 16px;
@@ -95,6 +169,25 @@
 .gw-filter-empty {
   padding: 24px 0;
   color: var(--ui-muted);
+}
+@media (max-width: 760px) {
+  .gw-published-toolbar {
+    position: sticky;
+    top: var(--ui-topbar-height, 52px);
+    z-index: calc(var(--ui-z-local, 1) + 2);
+    background: var(--ui-panel);
+    padding-block: 8px;
+  }
+  .gw-review-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: calc(var(--ui-z-local, 1) + 2);
+    background: var(--ui-panel);
+    padding-block: 10px;
+  }
+  .gw-binding-checklist > summary {
+    min-height: var(--ui-touch-target);
+  }
 }
 @media (max-width: 640px) {
   #gateway-page .actions {

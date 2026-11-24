@@ -109,7 +109,13 @@ window.CodePierTokenUsage = (() => {
     String(value).replace(
       /[&<>"']/g,
       (character) =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character],
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        })[character],
     );
 
   function side(usage, direction) {
@@ -307,7 +313,10 @@ window.CodePierTokenUsage = (() => {
         ? '<label class="token-cache-assumption">参考计价模型 <select data-token-filter="reference_model" aria-label="参考计价模型">' +
           (
             p.available_models || [
-              { id: p.model || 'gpt-6-astra', label: p.model_label || 'GPT-6 Astra' },
+              {
+                id: p.model || 'gpt-6-astra',
+                label: p.model_label || 'GPT-6 Astra',
+              },
             ]
           )
             .map(
@@ -450,7 +459,11 @@ window.CodePierTokenUsage = (() => {
     const trend = (Array.isArray(data?.trend) ? data.trend : []).map((point) => {
       if (!useContext) return point;
       const context = modelEstimate(point);
-      return { ...point, input: context?.input || {}, output: context?.output || {} };
+      return {
+        ...point,
+        input: context?.input || {},
+        output: context?.output || {},
+      };
     });
     if (!trend.length)
       return '<p class="token-dashboard-note">此范围没有保留的调用记录；缺失时段不会补成 0。</p>';
@@ -654,7 +667,7 @@ window.CodePierTokenUsage = (() => {
         dashboardState?.authority === data?.authority_key ? dashboardState?.expanded : false;
     if (!data?.summary)
       return (
-        '<div class="token-dashboard token-dashboard-placeholder" data-token-dashboard aria-busy="' +
+        '<div class="token-dashboard token-dashboard-placeholder" data-token-dashboard data-details-open="false" aria-busy="' +
         !!data?.loading +
         '"><div class="token-dashboard-head"><h3>今日工具用量</h3><span class="token-estimate-badge">估算</span><span class="token-dashboard-freshness" aria-hidden="true">等待统计时间</span></div>' +
         '<div class="token-dashboard-metrics" aria-hidden="true"><div class="token-dashboard-metric is-total"><span>Token 估算</span><strong>—</strong></div><div class="token-dashboard-metric is-cost"><span>参考费用 · USD</span><strong>—</strong></div></div>' +
@@ -679,7 +692,9 @@ window.CodePierTokenUsage = (() => {
         .join('') +
       '</select></label>';
     return (
-      '<div class="token-dashboard" data-token-dashboard>' +
+      '<div class="token-dashboard" data-token-dashboard data-details-open="' +
+      (expanded ? 'true' : 'false') +
+      '">' +
       `<div class="token-dashboard-head"><h3>${title}工具用量</h3><span class="token-estimate-badge">估算</span>` +
       (Number.isFinite(data.freshness?.as_of)
         ? '<span class="token-dashboard-freshness" title="统计最多每30秒更新">更新于 ' +
@@ -763,7 +778,10 @@ window.CodePierTokenUsage = (() => {
             previous !== details.open
           ) {
             if (key) state.panels[key] = details.open;
-            else state.expanded = details.open;
+            else {
+              state.expanded = details.open;
+              root.dataset.detailsOpen = String(details.open);
+            }
             state.revision += 1;
           }
         };

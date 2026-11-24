@@ -46,3 +46,64 @@
 .role-policy-summary p {
   margin: 8px 0;
 }
+[data-access-preview] dd {
+  overflow-wrap: anywhere;
+}
+.policy-rule-mobile-bar {
+  display: none;
+}
+@media (max-width: 760px) {
+  #profiles-page .grant-row,
+  #roles-page .grant-row {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  #profiles-page .grant-row > button,
+  #roles-page .grant-row > button {
+    min-height: var(--ui-touch-target);
+  }
+  .policy-rule-mobile-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: var(--ui-text-xs);
+    color: var(--ui-muted);
+  }
+  .policy-rule-mobile-bar[hidden] {
+    display: none;
+  }
+  .policy-rule-count {
+    font-weight: var(--ui-weight-semibold);
+    color: var(--ui-text);
+  }
+  .policy-rule-jumper {
+    flex: 1 1 160px;
+    max-width: 240px;
+    min-height: var(--ui-touch-target);
+    font-size: var(--ui-text-input);
+  }
+  #role-form .policy-rule-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 148px), 1fr));
+    gap: 6px;
+    max-height: 168px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    padding-bottom: 2px;
+  }
+  #role-form .policy-rule-list button {
+    min-height: var(--ui-touch-target);
+    width: 100%;
+    justify-content: flex-start;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  body.ui-keyboard-open .modal:has(#profile-form, #role-form) .modal-footer {
+    padding-block: 8px;
+  }
+}

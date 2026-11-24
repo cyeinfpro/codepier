@@ -282,9 +282,12 @@ export function renderChannel(result) {
         ],
         [
           '状态',
-          { paused: '已暂停', active: '使用中', pairing: '等待配对', awaiting_owner: '等待确认' }[
-            existing.state
-          ] || existing.state,
+          {
+            paused: '已暂停',
+            active: '使用中',
+            pairing: '等待配对',
+            awaiting_owner: '等待确认',
+          }[existing.state] || existing.state,
         ],
       ]),
     );
@@ -450,7 +453,7 @@ export function channelField(item) {
     return `<label class="cr-choice"><input type="checkbox" name="${E(name)}" ${name === 'allow_replies' ? 'checked' : item.required ? 'required' : ''} ${item.depends_on ? `data-depends-on="${E(item.depends_on)}"` : ''}><span>${E(label)}</span></label>`;
   return field(
     E(label),
-    `<input name="${E(name)}" value="${E(item.value || '')}" ${item.required ? 'required' : ''} autocomplete="off" ${name === 'verify_code' ? 'inputmode="numeric"' : ''}>`,
+    `<input name="${E(name)}" value="${E(item.value || '')}" ${item.required ? 'required' : ''} autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" ${name === 'verify_code' ? 'inputmode="numeric"' : ''}>`,
   );
 }
 
@@ -463,7 +466,10 @@ export async function submitChannel(form) {
     else delete values[input.name];
   }
   if (form.dataset.channelAction === 'start_qr')
-    Object.assign(values, { confirm_credential_storage: true, confirm_provider_terms: true });
+    Object.assign(values, {
+      confirm_credential_storage: true,
+      confirm_provider_terms: true,
+    });
   if (form.dataset.channelAction === 'bind') {
     Object.assign(values, {
       confirm_external_data_ingress: true,

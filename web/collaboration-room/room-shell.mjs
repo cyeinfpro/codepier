@@ -30,9 +30,11 @@ import {
   state,
   store,
   supplied,
+  syncRoomImmersion,
 } from './index.mjs';
 
 export function clear() {
+  document.body.classList.remove('cr-immersion');
   detach();
   store.reset();
 }
@@ -61,13 +63,14 @@ export async function html() {
     }
   } else await store.select('');
   return `<section class="collaboration cr-shell" aria-label="协作中心">
-    <aside class="cr-sidebar" aria-label="房间列表"><header class="cr-side-head"><div><h2>房间</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>新建</span>', 'aria-label="新建房间"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">搜索房间</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter placeholder="搜索房间或项目" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '加载更多房间', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
-    <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div><nav class="cr-room-actions" aria-label="房间管理">${btn('permissions', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', '···', 'aria-label="房间设置"', 'cr-icon')}</nav></header>
+    <button type="button" class="cr-scrim" data-cr-action="close-rooms" aria-label="关闭房间列表" tabindex="-1"></button>
+    <aside class="cr-sidebar" aria-label="房间列表"><header class="cr-side-head"><div><h2>房间</h2><span class="cr-count" data-cr-room-count></span></div>${btn('create', icon('plus') + '<span>新建</span>', 'aria-label="新建房间"', 'cr-primary cr-new-room')}</header><label class="cr-search"><span class="sr-only">搜索房间</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg><input type="search" data-cr-room-filter enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="搜索房间或项目" autocomplete="off"></label><div class="cr-room-list" data-cr-rooms></div>${btn('more-rooms', '加载更多房间', 'data-cr-more-rooms hidden', 'cr-text-button cr-full')}<footer>${btn('archives', '显示已归档', 'aria-pressed="false"', 'cr-text-button')}</footer></aside>
+    <main class="cr-main"><header class="cr-topbar"><div class="cr-room-heading">${btn('rooms', icon('menu'), 'aria-label="显示房间列表" aria-expanded="false"', 'cr-icon cr-mobile')}<div class="cr-heading-text"><h1 tabindex="-1" data-cr-title></h1><div class="cr-heading-meta"><span class="cr-chip" data-cr-chip hidden></span><span class="cr-subtitle" data-cr-status></span></div></div></div>${btn('room-menu', '<span class="cr-channel-dot" data-cr-menu-dot aria-hidden="true"></span>···', 'aria-label="更多房间操作" aria-expanded="false" data-cr-room-menu', 'cr-icon cr-mobile-actions-toggle')}<nav class="cr-room-actions" aria-label="房间管理">${btn('permissions', icon('folder') + '<span data-cr-project-count>项目</span>')}${btn('members', '<span class="cr-avatars" data-cr-avatars></span><span>成员</span>')}${btn('weixin', '<span class="cr-channel-dot" data-cr-weixin-dot aria-hidden="true"></span>' + icon('message') + '<span data-cr-weixin-label>连接微信</span>')}${btn('settings', '<span class="cr-settings-dots" aria-hidden="true">···</span><span class="cr-settings-label">房间设置</span>', 'aria-label="房间设置"', 'cr-icon')}</nav></header>
       <div class="cr-legacy-note" data-cr-legacy hidden><span class="cr-legacy-icon" aria-hidden="true">!</span><div><strong>原房间当前只读</strong><p data-cr-legacy-progress>历史和原工作已保留。处理完旧连接后，由你明确启用新房间界面。</p></div>${btn('migration', '查看迁移要求', 'data-cr-migration-open')}</div>
       <div class="cr-feedback" role="status" aria-live="polite" data-cr-feedback></div>
       <section class="cr-feed" aria-label="房间对话" tabindex="0"><p class="cr-window-note" data-cr-message-window hidden></p><div class="cr-load-older" data-cr-older hidden>${btn('older', '更早的消息')}</div><div data-cr-empty></div><div class="cr-messages" role="log" aria-live="polite" aria-relevant="additions text" data-cr-messages></div><div class="cr-history-end" data-cr-history-end hidden>${btn('latest', '回到最新')}</div><div class="cr-pending" data-cr-pending></div></section><div class="cr-work-bar" data-cr-work hidden></div>
       ${btn('latest', '查看新消息 ↓', 'data-cr-latest hidden', 'cr-latest')}
-      <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" aria-label="消息" aria-describedby="cr-compose-status" placeholder="继续对话，或交办工作…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span id="cr-compose-status" data-cr-compose-status role="status" aria-live="polite">Enter 发送 · Shift + Enter 换行</span></footer></form>
+      <form class="cr-composer" id="cr-composer"><div class="cr-reply cr-context-correction" data-cr-correction hidden></div><div class="cr-reply" data-cr-reply hidden></div><div class="cr-draft-files" data-cr-files aria-label="待发送的附件" aria-live="polite" hidden></div><div class="cr-composer-line"><textarea id="cr-message" name="body_text" enterkeyhint="send" aria-label="消息" aria-describedby="cr-compose-status" placeholder="继续对话，或交办工作…" rows="1" maxlength="8000"></textarea><button type="submit" class="cr-send" aria-label="发送消息">${icon('arrow')}</button></div><footer><div class="cr-composer-tools">${btn('attach', icon('plus'), 'aria-label="添加附件" title="每个附件最多 8 MiB"', 'cr-icon cr-attach')}<input type="file" id="cr-file" multiple hidden aria-label="选择附件"><label class="cr-recipient"><span>发送给</span><select name="member_id" aria-label="选择处理成员"><option value="">主责 dot</option></select></label></div><span id="cr-compose-status" data-cr-compose-status role="status" aria-live="polite">Enter 发送 · Shift + Enter 换行</span></footer></form>
     </main><dialog class="cr-panel" aria-labelledby="cr-panel-title"><header><h2 id="cr-panel-title"></h2>${btn('close', icon('close'), 'aria-label="关闭面板"', 'cr-icon')}</header><div class="cr-panel-content"></div><p role="alert" class="cr-error" data-cr-panel-error hidden></p><div class="cr-mutation-recovery" data-cr-panel-recovery hidden></div></dialog>
   </section>`;
 }
@@ -165,18 +168,24 @@ export function patchHeader() {
         : pending
           ? '继续连接微信'
           : '连接微信';
-  root.querySelector('[data-cr-weixin-dot]').dataset.state = connected
-    ? 'ready'
-    : attention
-      ? 'attention'
-      : pending
-        ? 'pending'
-        : '';
+  const dotState = connected ? 'ready' : attention ? 'attention' : pending ? 'pending' : '';
+  root.querySelector('[data-cr-weixin-dot]').dataset.state = dotState;
+  const menuDot = root.querySelector('[data-cr-menu-dot]');
+  if (menuDot) menuDot.dataset.state = attention || pending ? dotState : '';
+  const menuTrigger = root.querySelector('[data-cr-room-menu]');
+  if (menuTrigger) {
+    menuTrigger.disabled = !room;
+    if (!room) {
+      root.querySelector('.cr-topbar')?.classList.remove('is-actions-open');
+      menuTrigger.setAttribute('aria-expanded', 'false');
+    }
+  }
   for (const node of root.querySelectorAll('.cr-room-actions button')) node.disabled = !room;
   patchRooms();
   patchComposer();
   patchEmpty();
   patchRoomPermissions();
+  syncRoomImmersion();
   if (panel?.name === 'migration') renderMigration();
 }
 

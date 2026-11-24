@@ -53,12 +53,23 @@ test('extension copy and operation feedback do not overwrite connection evidence
   const nodes=new Map();
   const get=id=>{if(!nodes.has(id))nodes.set(id,{textContent:'',disabled:false,hidden:false,replaceChildren(){},append(){},value:'4'});return nodes.get(id);};
   const navigatorDescriptor=Object.getOwnPropertyDescriptor(globalThis,'navigator');
-  globalThis.document={getElementById:get};
+  const makeInput=(id,type)=>{
+    const attrs=new Map();
+    return Object.assign(get(id),{id,type,attrs,hasAttribute:key=>attrs.has(key),setAttribute:(key,value)=>attrs.set(key,value)});
+  };
+  const origin=makeInput('origin','url'),size=makeInput('size','number');
+  globalThis.document={getElementById:get,querySelectorAll:selector=>{
+    assert.equal(selector,'input');return [origin,size];
+  }};
   globalThis.chrome={runtime:{sendMessage:async()=>({ok:true,data:{extension_id:'extension',profile_id:'profile',pool_size:4,available:4,leased:0,connection:'桥接已核实',connection_observed_at:123,origins:[]}})}};
   Object.defineProperty(globalThis,'navigator',{configurable:true,value:{clipboard:{writeText:async()=>{}}}});
   try {
     await import('../web/browser-extension/popup.js');
     await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(origin.attrs.get('inputmode'),'url');
+    assert.equal(origin.attrs.get('autocorrect'),'off');
+    assert.equal(origin.attrs.get('spellcheck'),'false');
+    assert.equal(size.attrs.get('inputmode'),'numeric');
     await get('copy').onclick();
     assert.equal(get('connection').textContent,'桥接已核实');
     assert.match(get('feedback').textContent,/已复制/);

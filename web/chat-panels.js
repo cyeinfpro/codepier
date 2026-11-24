@@ -12,10 +12,18 @@ function chatInspector(tab) {
       : $('.chat-overflow').open
         ? $('.chat-overflow summary')
         : document.activeElement;
-  if (tab) chatOptions(false);
+  if (tab) {
+    chatOptions(false);
+    if (innerWidth <= 760 && $('#chat-root')?.classList.contains('drawer-open'))
+      chatDrawer(false, true);
+  }
   ChatUI.inspector = tab;
   $('#chat-inspector').hidden = !tab;
   $('#chat-root').classList.toggle('inspector-open', !!tab);
+  $('#chat-shade')?.setAttribute(
+    'aria-label',
+    tab && innerWidth <= 760 ? '关闭会话详情' : '关闭会话历史',
+  );
   $('#chat-inspector-toggle')?.setAttribute('aria-expanded', String(!!tab));
   if (!tab) {
     if (previous) {
@@ -118,7 +126,12 @@ function chatInspectorRender() {
       const links = chatSection(holder, '项目');
       chatPanelButton(links, '协作中心', () => CodePierCollaboration.open(c.project));
       chatPanelButton(links, '任务进度', () => {
-        Object.assign(workflowState(), { project: c.project, state: '', cursor: '', history: [] });
+        Object.assign(workflowState(), {
+          project: c.project,
+          state: '',
+          cursor: '',
+          history: [],
+        });
         return navigate('workflows');
       });
     }
@@ -176,6 +189,10 @@ function chatInspectorRender() {
       input = document.createElement('input'),
       list = document.createElement('div');
     input.type = 'search';
+    input.setAttribute('enterkeyhint', 'search');
+    input.setAttribute('autocapitalize', 'none');
+    input.setAttribute('autocorrect', 'off');
+    input.spellcheck = false;
     input.placeholder = '搜索指令、技能';
     input.setAttribute('aria-label', '搜索指令');
     input.id = 'chat-command-filter';
@@ -483,7 +500,12 @@ async function chatRestoreQueueDraft() {
         const saved = library.files?.find((entry) => entry.file === file.file);
         return saved?.ready
           ? { ...file, ...saved, ready: true, error: false }
-          : { ...file, ready: false, error: true, errorMessage: '附件已不可用，请移除后重新添加' };
+          : {
+              ...file,
+              ready: false,
+              error: true,
+              errorMessage: '附件已不可用，请移除后重新添加',
+            };
       });
     }
     chatApplyQueueDraft(v, restored);
@@ -645,7 +667,12 @@ async function chatRunCommand(name, extra = {}) {
     v.controlOps.set(key, receipt);
   }
   try {
-    const result = await chatAPI('chat_command', { id: c.selected.id, receipt, name, ...extra });
+    const result = await chatAPI('chat_command', {
+      id: c.selected.id,
+      receipt,
+      name,
+      ...extra,
+    });
     if (chatCurrent(gen, v)) chatStatus('原生指令已提交：' + name);
     if (!['queued', 'claimed', 'uncertain'].includes(result.state)) v.controlOps.delete(key);
   } catch (e) {
@@ -766,7 +793,10 @@ async function chatLoadReview(item) {
   status.setAttribute('role', 'status');
   list.append(status);
   try {
-    const data = await chatReviewRequest(item, { offset: item.reviewOffset, limit: 40 });
+    const data = await chatReviewRequest(item, {
+      offset: item.reviewOffset,
+      limit: 40,
+    });
     if (!data) return;
     for (const file of data.files || []) list.append(chatReviewFile(item, file));
     item.reviewLoaded = true;
@@ -826,20 +856,41 @@ function chatReviewFile(item, file) {
   async function load() {
     if (loading) return;
     loading = true;
-    body.querySelector('button')?.remove();
+    body.querySelectorAll('.chat-review-action').forEach((n) => n.remove());
     const status = document.createElement('p');
     status.className = 'chat-review-loading';
     status.textContent = '读取差异…';
     body.append(status);
     try {
-      const data = await chatReviewRequest(item, { path: file.path, offset, max_chars: 16000 });
+      const data = await chatReviewRequest(item, {
+        path: file.path,
+        offset,
+        max_chars: 16000,
+      });
       if (!data) return;
       let pre = body.querySelector('pre');
       if (!pre) {
+        const toolbar = document.createElement('div'),
+          wrapBtn = document.createElement('button'),
+          copyBtn = document.createElement('button');
+        toolbar.className = 'chat-review-toolbar';
         pre = document.createElement('pre');
         pre.tabIndex = 0;
         pre.setAttribute('aria-label', file.path + ' 的差异');
-        body.append(pre);
+        wrapBtn.type = 'button';
+        wrapBtn.className = 'chat-diff-wrap';
+        wrapBtn.textContent = '折行';
+        wrapBtn.setAttribute('aria-pressed', 'false');
+        wrapBtn.onclick = () => {
+          const wrapped = pre.classList.toggle('is-wrapped');
+          wrapBtn.setAttribute('aria-pressed', String(wrapped));
+          wrapBtn.textContent = wrapped ? '取消折行' : '折行';
+        };
+        copyBtn.type = 'button';
+        copyBtn.textContent = '复制';
+        copyBtn.onclick = () => chatCopyText(pre.textContent);
+        toolbar.append(wrapBtn, copyBtn);
+        body.append(toolbar, pre);
       }
       // Text nodes only: filenames and patch lines never become HTML or links.
       pre.append(
@@ -852,7 +903,7 @@ function chatReviewFile(item, file) {
         offset = data.next_offset;
         const more = document.createElement('button');
         more.type = 'button';
-        more.className = 'chat-text-button';
+        more.className = 'chat-text-button chat-review-action';
         more.textContent = '继续读取差异';
         more.onclick = load;
         body.append(more);
@@ -867,7 +918,7 @@ function chatReviewFile(item, file) {
       status.classList.add('is-error');
       const retry = document.createElement('button');
       retry.type = 'button';
-      retry.className = 'chat-text-button';
+      retry.className = 'chat-text-button chat-review-action';
       retry.textContent = '重新读取';
       retry.onclick = () => {
         status.remove();

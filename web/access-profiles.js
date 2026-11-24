@@ -1,6 +1,11 @@
 'use strict';
 window.CodePierProfiles = (() => {
-  const scopeNames = { read: '读取', write: '写入', execute: '执行', computer: '浏览器 / 桌面' };
+  const scopeNames = {
+    read: '读取',
+    write: '写入',
+    execute: '执行',
+    computer: '浏览器 / 桌面',
+  };
   const allScopes = ['read', 'write', 'execute', 'computer'];
   const boundary =
     'Profile 限制连接凭据，不会将 ChatGPT 聊天或 Project 绑定为安全边界。Shell 仍受 Agent 系统账号权限控制，不是项目沙箱。';
@@ -39,7 +44,7 @@ window.CodePierProfiles = (() => {
       let submission = null;
       const dialog = modal(
         saved ? '编辑访问 Profile' : '新建访问 Profile',
-        `<form id="profile-form" class="profile-editor-grid"><section class="form-section"><h3>连接身份</h3><div class="field"><label for="profile-label">名称</label><input id="profile-label" name="label" required maxlength="80" value="${esc(saved?.label || '')}" placeholder="例如 NewAPI Dev / Codex Review"></div><div class="field"><label class="check"><input name="enabled" type="checkbox" ${!saved || saved.enabled ? 'checked' : ''}>启用此身份</label></div><div class="field"><label for="profile-role">关联角色</label><select id="profile-role" name="role_id"><option value="">不关联（固定授权）</option>${roles.map((role) => `<option value="${esc(role.id)}" ${saved?.role_id === role.id ? 'selected' : ''}>${esc(role.label)}${role.enabled ? '' : ' · 已暂停'}</option>`).join('')}</select><small>关联角色不会静默转换旧 grant。改绑另一个角色会令旧角色连接失效，需要明确重新授权。</small></div></section><section class="form-section" data-fixed-policy><h3>固定授权范围</h3>${permissionsHTML(S.projects, allScopes, {})}</section><section class="form-section" data-role-policy hidden><h3>当前角色政策</h3><div data-role-summary></div><p class="form-note">角色的后续能力与项目变化会作用于已同意的角色连接。</p></section><section class="form-section form-review profile-policy-note"><h3>影响范围</h3><p class="form-note">${esc(boundary)}</p><p class="form-note">固定连接仍取首次同意与 Profile 上限的交集；角色连接跟随关联角色的最新政策，包括新增项目。停用身份不等于停止命令，重新启用也不会复活已撤销的 grant。</p><p id="profile-save-status" class="form-note" role="status"></p></section></form>`,
+        `<form id="profile-form" class="profile-editor-grid"><section class="form-section"><h3>连接身份</h3><div class="field"><label for="profile-label">名称</label><input id="profile-label" name="label" required maxlength="80" autocomplete="off" value="${esc(saved?.label || '')}" placeholder="例如 NewAPI Dev / Codex Review"></div><div class="field"><label class="check"><input name="enabled" type="checkbox" ${!saved || saved.enabled ? 'checked' : ''}>启用此身份</label></div><div class="field"><label for="profile-role">关联角色</label><select id="profile-role" name="role_id"><option value="">不关联（固定授权）</option>${roles.map((role) => `<option value="${esc(role.id)}" ${saved?.role_id === role.id ? 'selected' : ''}>${esc(role.label)}${role.enabled ? '' : ' · 已暂停'}</option>`).join('')}</select><small>关联角色不会静默转换旧 grant。改绑另一个角色会令旧角色连接失效，需要明确重新授权。</small></div></section><section class="form-section" data-fixed-policy><h3>固定授权范围</h3>${permissionsHTML(S.projects, allScopes, {})}</section><section class="form-section" data-role-policy hidden><h3>当前角色政策</h3><div data-role-summary></div><p class="form-note">角色的后续能力与项目变化会作用于已同意的角色连接。</p></section><section class="form-section form-review profile-policy-note"><h3>影响范围</h3><p class="form-note">${esc(boundary)}</p><p class="form-note">固定连接仍取首次同意与 Profile 上限的交集；角色连接跟随关联角色的最新政策，包括新增项目。停用身份不等于停止命令，重新启用也不会复活已撤销的 grant。</p><p id="profile-save-status" class="form-note" role="status"></p></section></form>`,
         `<button class="btn ghost" data-action="close-modal">取消</button><button class="btn primary" type="submit" form="profile-form">保存 Profile</button>`,
       );
       const form = $('#profile-form', dialog),

@@ -541,13 +541,13 @@ async function chatPage() {
   <button id="chat-shade" class="chat-shade" aria-label="关闭会话历史"></button>
   <aside class="chat-sidebar" aria-label="会话历史"><button type="button" id="chat-new" class="chat-new-button" title="新对话" aria-label="新对话">${chatIcon('plus')}<span>新对话</span><kbd data-chat-shortcut="new">⌘ ⇧ O</kbd></button>
   <div class="chat-history-heading"><strong>全部会话</strong><button type="button" id="chat-history-clear" class="chat-text-button" hidden>清除筛选</button></div>
-  <div class="chat-history-filter"><input id="chat-history-search" type="search" placeholder="搜索会话、项目或内容" aria-label="查找对话"></div>
+  <div class="chat-history-filter"><input id="chat-history-search" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="搜索会话、项目或内容" aria-label="查找对话"></div>
   <div class="chat-history-chips"><details><summary>项目</summary><select id="chat-history-project" aria-label="筛选历史项目"><option value="">所有项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></details><details><summary>状态</summary><select id="chat-history-filter" aria-label="筛选会话"><option value="">全部</option><option value="running">运行中</option><option value="exited">已停止</option><option value="interrupted">已中断</option></select></details></div>
   <div id="chat-history-notice" class="chat-history-notice" role="alert" hidden><span></span><button type="button" id="chat-history-retry">重试列表</button></div>
   <div id="chat-history" class="chat-history" aria-label="历史对话列表" aria-busy="false"></div><div class="chat-history-pages"><button id="chat-history-prev" hidden>较新</button><span id="chat-history-count"></span><button id="chat-history-next" hidden>较早</button></div>
   <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button></footer></aside>
   <div class="chat-main">
-  <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
+  <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
   <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button><span id="chat-resume-hint" class="chat-availability-hint" role="status" hidden></span></div>
   <button id="chat-latest" class="chat-latest" hidden>↓ 回到最新</button>
   <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">等这轮结束再发</option><option value="steer">插入当前回复</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
@@ -555,7 +555,7 @@ async function chatPage() {
 
 
   <div class="chat-compose-frame">
-  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
+  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" enterkeyhint="send" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
   <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden><button type="button" id="chat-options-toggle" class="chat-model-picker" aria-label="会话设置" aria-haspopup="dialog" aria-controls="chat-options" aria-expanded="false">${chatIcon('settings')}<span id="chat-config-summary">会话设置</span>${chatIcon('chevron')}</button></div>
   <div class="chat-send-actions"><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
@@ -697,7 +697,10 @@ async function chatPage() {
       innerWidth > 760 ? !!c.historyCollapsed : !$('#chat-root').classList.contains('drawer-open'),
     ),
   );
-  on('chat-shade', 'click', () => chatDrawer(false));
+  on('chat-shade', 'click', () => {
+    if ($('#chat-root').classList.contains('drawer-open')) chatDrawer(false);
+    if (c.inspector && innerWidth <= 760) chatInspector('');
+  });
   on('chat-root', 'keydown', (e) => {
     if (
       (e.metaKey || e.ctrlKey) &&
@@ -868,10 +871,7 @@ async function chatPage() {
     },
     { signal: c.listeners.signal },
   );
-  for (const target of [window, window.visualViewport].filter(Boolean))
-    target.addEventListener('resize', chatViewport, {
-      signal: c.listeners.signal,
-    });
+  chatBindViewportEvents(c);
   chatMountChrome();
   chatMountHistory();
   chatDrawer(false, true);
@@ -883,19 +883,82 @@ async function chatPage() {
   if (c.selected) chatConnect();
   if (c.inspector) chatInspector(c.inspector);
 }
+function chatScheduleViewport() {
+  if (ChatUI.viewportFrame) return;
+  ChatUI.viewportFrame = requestAnimationFrame(() => {
+    ChatUI.viewportFrame = 0;
+    chatViewport();
+  });
+}
+function chatBindViewportEvents(c) {
+  const signal = c.listeners.signal;
+  window.addEventListener('resize', chatScheduleViewport, { signal });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', chatScheduleViewport, {
+      signal,
+    });
+    window.visualViewport.addEventListener('scroll', chatScheduleViewport, {
+      signal,
+    });
+  }
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      const root = $('#chat-root');
+      if (!root || e.isComposing || e.keyCode === 229) return;
+      const vv = window.visualViewport;
+      const keyboardHeight = innerHeight - (vv?.height || innerHeight);
+      if (
+        keyboardHeight < 60 &&
+        (e.metaKey || e.ctrlKey || e.key.length === 1 || e.key === 'Enter' || e.key === 'Tab')
+      ) {
+        root.dataset.hardwareKeyboard = 'true';
+      }
+    },
+    { signal },
+  );
+}
 function chatViewport() {
   const root = $('#chat-root');
   if (!root) return;
-  const viewport = window.visualViewport;
-  const gap = innerWidth <= 760 ? 0 : 14;
-  // Focusing a control during a resize can scroll the still-tall document.
-  // A negative viewport-relative top is NOT extra layout space: counting it
-  // keeps the old oversized height and strands controls below the new viewport.
-  const top = Math.max(gap, root.getBoundingClientRect().top);
-  root.style.height =
-    Math.max(220, (viewport?.height || innerHeight) + (viewport?.offsetTop || 0) - top - gap) +
-    'px';
+  const v = chatView(),
+    wasAtBottom = !!v.order.length && (v.follow !== false || chatAtBottom()),
+    viewport = window.visualViewport,
+    offsetTop = Math.max(0, viewport?.offsetTop || 0);
+  if (viewport && innerHeight - viewport.height >= 100) {
+    delete root.dataset.hardwareKeyboard;
+  }
+  if (offsetTop > 0 && viewport) {
+    root.style.transform = `translateY(${offsetTop}px)`;
+    root.style.height = `${viewport.height}px`;
+  } else {
+    root.style.removeProperty('transform');
+    if (innerWidth <= 760 && viewport) {
+      root.style.height = `${viewport.height}px`;
+    } else {
+      const gap = innerWidth <= 760 ? 0 : 14;
+      // Focusing a control during a resize can scroll the still-tall document.
+      // A negative viewport-relative top is NOT extra layout space: counting it
+      // keeps the old oversized height and strands controls below the new viewport.
+      const top = Math.max(gap, root.getBoundingClientRect().top);
+      root.style.height = Math.max(220, (viewport?.height || innerHeight) - top - gap) + 'px';
+    }
+  }
   chatResizeComposer();
+  if (wasAtBottom) {
+    const el = $('#chat-scroll');
+    if (el) {
+      if (!chatViewportActive(v) && typeof el.scrollTo === 'function') {
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        });
+      } else {
+        chatBottom();
+      }
+      if ($('#chat-latest')) $('#chat-latest').hidden = true;
+    }
+  }
 }
 function chatDrawer(open, switching = false) {
   const root = $('#chat-root');
@@ -909,9 +972,11 @@ function chatDrawer(open, switching = false) {
     root.classList.toggle('history-collapsed', !!ChatUI.historyCollapsed);
     root.classList.remove('drawer-open');
   } else {
+    if (open && ChatUI.inspector) chatInspector('');
     root.classList.toggle('drawer-open', open);
     $('.chat-main').inert = open;
     if (open) {
+      $('#chat-shade')?.setAttribute('aria-label', '关闭会话历史');
       chatOptions(false);
       $('#chat-new').focus();
     } else if (!switching) $('#chat-history-toggle').focus({ preventScroll: true });

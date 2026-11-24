@@ -82,7 +82,12 @@ function chatRichBlocks(text) {
       continue;
     }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(lines[i])) {
-      out.push({ start: offsets[blockStart], type: 'hr', text: '', raw: lines[i++] });
+      out.push({
+        start: offsets[blockStart],
+        type: 'hr',
+        text: '',
+        raw: lines[i++],
+      });
       continue;
     }
     if (i + 1 < lines.length && lines[i].includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1])) {
@@ -177,7 +182,10 @@ function chatRichMarkdown(holder, text) {
       tail = previous[keep].start ?? 0;
     blocks = [
       ...previous.slice(0, keep),
-      ...chatRichBlocks(text.slice(tail)).map((block) => ({ ...block, start: block.start + tail })),
+      ...chatRichBlocks(text.slice(tail)).map((block) => ({
+        ...block,
+        start: block.start + tail,
+      })),
     ];
   } else blocks = chatRichBlocks(text);
   holder._chatSource = text;
@@ -191,7 +199,8 @@ function chatRichMarkdown(holder, text) {
       if (code.firstChild?.nodeType === 3 && block.text.startsWith(code.textContent))
         code.firstChild.appendData(block.text.slice(code.textContent.length));
       else code.textContent = block.text;
-      node.querySelector('button')._copyText = block.text;
+      const copyBtn = node.querySelector('.chat-code-copy') || node.querySelector('button');
+      if (copyBtn) copyBtn._copyText = block.text;
       node._chatRaw = block.raw;
       return;
     }
@@ -217,16 +226,31 @@ function chatRichMarkdown(holder, text) {
       next.className = 'chat-code';
       const header = document.createElement('div'),
         label = document.createElement('span'),
+        actions = document.createElement('div'),
+        wrapButton = document.createElement('button'),
         copyButton = document.createElement('button'),
         pre = document.createElement('pre'),
         code = document.createElement('code');
       header.className = 'chat-code-head';
       label.textContent = block.language || '代码';
+      actions.className = 'chat-code-actions';
+      wrapButton.type = 'button';
+      wrapButton.className = 'chat-code-wrap';
+      wrapButton.textContent = '折行';
+      wrapButton.setAttribute('aria-pressed', 'false');
+      wrapButton.addEventListener('click', () => {
+        const wrapped = pre.classList.toggle('is-wrapped');
+        next.classList.toggle('is-wrapped', wrapped);
+        wrapButton.setAttribute('aria-pressed', String(wrapped));
+        wrapButton.textContent = wrapped ? '取消折行' : '折行';
+      });
       copyButton.type = 'button';
+      copyButton.className = 'chat-code-copy';
       copyButton.textContent = '复制';
       copyButton._copyText = block.text;
       copyButton.addEventListener('click', () => chatCopyText(copyButton._copyText));
-      header.append(label, copyButton);
+      actions.append(wrapButton, copyButton);
+      header.append(label, actions);
       code.textContent = block.text;
       pre.append(code);
       next.append(header, pre);

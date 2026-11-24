@@ -17,6 +17,8 @@ import {
 const RETRIES = 8;
 const ACK_INTERVAL_MS = 16;
 const ACK_BYTES = 64 * 1024;
+const FOREGROUND_STALE_MS = 2500;
+const FOREGROUND_PROBE_TIMEOUT_MS = 1200;
 const encoder = new TextEncoder();
 
 export function websocketUrl(path, base = globalThis.location?.href) {
@@ -77,6 +79,78 @@ export class TerminalTransport {
     this.inputUncertain = false;
     this.pauseReconnect = false;
     this.lastSeen = this.now();
+    this.probeTimer = null;
+    this.bindLifecycleListeners();
+  }
+
+  bindLifecycleListeners() {
+    this.lifecycleDisposers = [];
+    const onVisibility = () => {
+      if (globalThis.document?.visibilityState === 'visible') this.resumeOnForeground();
+    };
+    const onWake = () => this.resumeOnForeground();
+    if (typeof globalThis.document?.addEventListener === 'function') {
+      globalThis.document.addEventListener('visibilitychange', onVisibility);
+      this.lifecycleDisposers.push(() =>
+        globalThis.document?.removeEventListener?.('visibilitychange', onVisibility),
+      );
+    }
+    const win = globalThis.window || globalThis;
+    if (typeof win?.addEventListener === 'function') {
+      win.addEventListener('pageshow', onWake);
+      win.addEventListener('online', onWake);
+      this.lifecycleDisposers.push(() => {
+        win.removeEventListener?.('pageshow', onWake);
+        win.removeEventListener?.('online', onWake);
+      });
+    }
+  }
+
+  clearProbe() {
+    clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+  }
+
+  resumeOnForeground() {
+    if (
+      this.disposed ||
+      this.pauseReconnect ||
+      (this.lastFailureCode && STOP_RETRY_CODES.has(this.lastFailureCode)) ||
+      [
+        'idle',
+        'exited',
+        'closed',
+        'failed',
+        'revoked',
+        'detached',
+        'closing',
+        'close_unknown',
+      ].includes(this.state)
+    )
+      return false;
+    if (globalThis.document?.visibilityState === 'hidden') return false;
+    if (!this.socket && !this.connecting) {
+      this.clearRetry();
+      this.retryAttempts = 0;
+      this.connect();
+      return true;
+    }
+    if (this.isOpen() && this.now() - this.lastSeen >= FOREGROUND_STALE_MS) {
+      if (this.probeTimer) return true;
+      const baselineSeen = this.lastSeen;
+      const version = this.connectionVersion;
+      if (!this.sendPing()) {
+        this.fail('NETWORK_ERROR');
+        return true;
+      }
+      this.probeTimer = setTimeout(() => {
+        this.probeTimer = null;
+        if (!this.current(version) || !this.isOpen()) return;
+        if (this.lastSeen <= baselineSeen) this.fail('NETWORK_ERROR');
+      }, FOREGROUND_PROBE_TIMEOUT_MS);
+      return true;
+    }
+    return false;
   }
 
   get canInput() {
@@ -166,6 +240,7 @@ export class TerminalTransport {
       socket.onmessage = (event) => {
         if (!this.current(version)) return;
         this.lastSeen = this.now();
+        this.clearProbe();
         try {
           if (typeof event.data === 'string') {
             if (encoder.encode(event.data).byteLength > this.limits.control_bytes)
@@ -566,7 +641,7 @@ export class TerminalTransport {
     }
   }
 
-  resize(cols, rows) {
+  resize(cols, rows, { coalesceMs } = {}) {
     if (!Number.isFinite(cols) || !Number.isFinite(rows)) return;
     const size = {
       cols: Math.max(this.limits.min_cols, Math.min(this.limits.max_cols, Math.floor(cols))),
@@ -574,8 +649,12 @@ export class TerminalTransport {
     };
     if (this.lastSize?.cols === size.cols && this.lastSize?.rows === size.rows) return;
     this.lastSize = size;
+    const delay =
+      Number.isFinite(coalesceMs) && coalesceMs > 0
+        ? Math.max(this.limits.resize_coalesce_ms, Math.floor(coalesceMs))
+        : this.limits.resize_coalesce_ms;
     clearTimeout(this.resizeTimer);
-    this.resizeTimer = setTimeout(() => this.sendResize(size), this.limits.resize_coalesce_ms);
+    this.resizeTimer = setTimeout(() => this.sendResize(size), delay);
   }
 
   sendResize(size) {
@@ -690,6 +769,7 @@ export class TerminalTransport {
     this.flushOutputAck();
     clearTimeout(this.openTimer);
     clearTimeout(this.resizeTimer);
+    this.clearProbe();
     this.stopHeartbeat();
     this.pendingPings.clear();
     const socket = this.socket;
@@ -764,6 +844,9 @@ export class TerminalTransport {
     this.flushOutputAck();
     this.disposed = true;
     this.live = false;
+    this.clearProbe();
+    for (const off of this.lifecycleDisposers || []) off();
+    this.lifecycleDisposers = [];
     this.clearRetry();
     this.closeSocket();
     this.pendingInputs.clear();

@@ -4,7 +4,9 @@
   min-width: 0;
   flex: none;
   margin: 0 auto;
-  padding: 8px 32px 16px;
+  padding: 8px max(32px, var(--safe-right, env(safe-area-inset-right, 0px)))
+    max(16px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))
+    max(32px, var(--safe-left, env(safe-area-inset-left, 0px)));
   background: var(--chat-bg);
 }
 .chat-composer {
@@ -346,7 +348,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
-  max-height: 108px;
+  max-height: 136px;
   overflow: auto;
 }
 .chat-files:not(:empty) {
@@ -362,6 +364,23 @@
   border-radius: var(--ui-radius-lg, 16px);
   background: var(--chat-surface);
   font-size: var(--ui-text-xs, 12px);
+}
+.chat-file.is-error {
+  flex-wrap: wrap;
+  row-gap: 4px;
+  border-color: var(--chat-danger);
+  background: var(--chat-danger-bg);
+}
+.chat-file .chat-file-error {
+  flex: 1 0 100%;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-danger);
+  font-size: var(--ui-text-xs, 12px);
+  line-height: 1.4;
 }
 .chat-file img {
   width: 34px;

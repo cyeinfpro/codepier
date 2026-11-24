@@ -116,6 +116,8 @@
   border-radius: var(--ui-radius-md, 12px);
   background: none;
   text-align: left;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 .chat-command-list button:hover:not(:disabled) {
   background: var(--chat-hover);
@@ -136,6 +138,8 @@
 .chat-queue-card {
   padding: 14px 0;
   border-bottom: 1px solid var(--chat-line);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 .chat-library-file strong {
   display: block;

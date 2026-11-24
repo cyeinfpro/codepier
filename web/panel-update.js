@@ -98,6 +98,32 @@ window.CodePierPanelUpdate = (() => {
     trigger?.setAttribute('aria-expanded', 'false');
     if (focus) trigger?.focus({ preventScroll: true });
   }
+  function bindSheetSwipe(section) {
+    const sheetHead = section.querySelector('.panel-head');
+    let touchStartY = null,
+      touchStartX = null;
+    sheetHead?.addEventListener(
+      'touchstart',
+      (ev) => {
+        if (ev.touches.length === 1) {
+          touchStartY = ev.touches[0].clientY;
+          touchStartX = ev.touches[0].clientX;
+        }
+      },
+      { passive: true },
+    );
+    sheetHead?.addEventListener(
+      'touchend',
+      (ev) => {
+        if (touchStartY === null || !ev.changedTouches.length) return;
+        const dy = ev.changedTouches[0].clientY - touchStartY,
+          dx = ev.changedTouches[0].clientX - touchStartX;
+        touchStartY = touchStartX = null;
+        if (dy > 56 && Math.abs(dx) < 48 && section.scrollTop <= 4) closeDetails();
+      },
+      { passive: true },
+    );
+  }
   function showDetails() {
     if (!document.getElementById('panel-update-popover')) {
       const section = document.createElement('aside');
@@ -116,6 +142,7 @@ window.CodePierPanelUpdate = (() => {
       $('#panel-update-float-retry').onclick = () => submit(pending?.action, true);
       $('#panel-update-float-reload').onclick = manualReload;
       $('#panel-update-float-agents').onchange = (event) => setConsent(event.target.checked);
+      bindSheetSwipe(section);
     }
     document.querySelector('[data-panel-update-open]')?.setAttribute('aria-expanded', 'true');
     paint();
@@ -587,7 +614,12 @@ window.CodePierPanelUpdate = (() => {
       const key = pending?.body?.idempotency_key;
       const result = await api(
         '/api/panel-update/status' + (key ? '?request_key=' + encodeURIComponent(key) : ''),
-        { signal: control.signal, retryDelays: [], requestTimeout: 10000, cache: 'no-store' },
+        {
+          signal: control.signal,
+          retryDelays: [],
+          requestTimeout: 10000,
+          cache: 'no-store',
+        },
       );
       if (!current(gen) || reader !== control) return;
       const wasWatching = watching;
@@ -659,7 +691,11 @@ window.CodePierPanelUpdate = (() => {
           )
             return;
           if (!pending && !submitting) {
-            discovery = { candidate: null, available: false, error: { message: error.message } };
+            discovery = {
+              candidate: null,
+              available: false,
+              error: { message: error.message },
+            };
             checkFailures++;
             nextCheckAt = Date.now() + failureDelay();
             accessDenied = [401, 403, 404].includes(error.status);
@@ -829,7 +865,11 @@ window.CodePierPanelUpdate = (() => {
           return;
         savePending({
           action,
-          body: { idempotency_key: 'panel-rollback-' + uid(), version, confirmation: version },
+          body: {
+            idempotency_key: 'panel-rollback-' + uid(),
+            version,
+            confirmation: version,
+          },
         });
       } else
         savePending({

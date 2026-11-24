@@ -197,30 +197,185 @@ document.addEventListener(
 window.visualViewport?.addEventListener('resize', uiRepositionMenus);
 window.visualViewport?.addEventListener('scroll', uiRepositionMenus);
 const uiMobileMedia = matchMedia('(max-width:900px)');
-const uiDockPages = new Set(['overview', 'projects', 'native', 'workflows']);
+const uiCompactSheetMedia = matchMedia('(max-width:640px)');
+const uiDockPages = new Set(['overview', 'projects', 'vps', 'native']);
+function uiSyncDockSpace(keyboardOpen = document.body?.classList.contains('ui-keyboard-open')) {
+  const root = document.documentElement;
+  if (!uiMobileMedia.matches) {
+    root.style.setProperty('--ui-dock-space', '0px');
+    return;
+  }
+  const immersed =
+    Boolean(keyboardOpen) ||
+    Boolean(document.body?.classList.contains('chat-mode')) ||
+    Boolean(document.body?.classList.contains('cr-immersion')) ||
+    Boolean(document.querySelector('.vt-expanded')) ||
+    Boolean(document.querySelector('.modal'));
+  root.style.setProperty(
+    '--ui-dock-space',
+    immersed ? 'var(--safe-bottom)' : 'calc(84px + var(--safe-bottom))',
+  );
+}
+function uiSyncTopbarBack() {
+  const backBtn = document.querySelector('.topbar-back');
+  if (!backBtn || typeof S === 'undefined') return;
+  let target = '';
+  if (uiMobileMedia.matches && S.session) {
+    if (S.page === 'workbench') {
+      const prev = typeof mainPathContext === 'function' ? mainPathContext().previous : '';
+      if (prev && prev !== 'workbench' && CodePierIdentity?.canNavigate?.(prev)) target = prev;
+      else if (CodePierIdentity?.canNavigate?.('projects')) target = 'projects';
+    } else if (
+      typeof tabParent !== 'undefined' &&
+      tabParent[S.page] &&
+      tabParent[S.page] !== S.page &&
+      CodePierIdentity?.canNavigate?.(tabParent[S.page])
+    ) {
+      target = tabParent[S.page];
+    }
+  }
+  if (target) {
+    const label =
+      (typeof nav !== 'undefined' && nav.find((item) => item[0] === target)?.[2]) || '上一级';
+    backBtn.hidden = false;
+    backBtn.dataset.backTarget = target;
+    backBtn.setAttribute('aria-label', `返回${label}`);
+  } else {
+    backBtn.hidden = true;
+    delete backBtn.dataset.backTarget;
+  }
+}
+function uiSyncVpsDockBadge() {
+  const vpsBtn = document.querySelector('.mobile-dock [data-nav="vps"]');
+  if (!vpsBtn) return;
+  const activeCount = (window.CodePierVpsTerminal?.list?.() || []).filter(
+    (item) => item && !['closed', 'exited', 'failed', 'revoked'].includes(item.state),
+  ).length;
+  let badgeNode = vpsBtn.querySelector('.dock-badge');
+  if (activeCount > 0) {
+    if (!badgeNode) {
+      badgeNode = document.createElement('span');
+      badgeNode.className = 'dock-badge';
+      badgeNode.setAttribute('aria-hidden', 'true');
+      vpsBtn.append(badgeNode);
+    }
+    badgeNode.textContent = String(activeCount);
+    vpsBtn.setAttribute('aria-label', `VPS，${activeCount} 个活跃终端`);
+  } else {
+    badgeNode?.remove();
+    vpsBtn.setAttribute('aria-label', 'VPS');
+  }
+}
 function uiSyncNavigation() {
   $$('[data-nav]').forEach((b) => {
-    const chosen = b.dataset.navGroup
-      ? b.dataset.navGroup === (tabParent[S.page] || S.page)
-      : b.dataset.nav === S.page;
+    const inDock = Boolean(b.closest('.mobile-dock'));
+    const chosen =
+      inDock && b.dataset.nav === 'projects'
+        ? S.page === 'projects' || S.page === 'workbench'
+        : b.dataset.navGroup
+          ? b.dataset.navGroup === (tabParent[S.page] || S.page)
+          : b.dataset.nav === S.page;
     b.classList.toggle('active', chosen);
     if (chosen) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   });
+  $$('[data-sheet-nav]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.sheetNav === S.page);
+  });
   const more = $('.mobile-dock [data-action="toggle-menu"]');
-  if (more) more.classList.toggle('active', !uiDockPages.has(S.page));
+  const onDockRoute = uiDockPages.has(S.page) || S.page === 'workbench';
+  if (more) more.classList.toggle('active', !onDockRoute);
+  uiSyncVpsDockBadge();
+  uiSyncTopbarBack();
+  uiSyncDockSpace();
   if (typeof navActivitySync === 'function') navActivitySync();
+}
+function uiResetNavSheetFilter(side) {
+  if (!side) return;
+  const search = side.querySelector('.nav-sheet-search');
+  if (search) search.value = '';
+  side.querySelectorAll('.nav button, .nav-group').forEach((el) => {
+    el.hidden = false;
+  });
+}
+function uiFilterNavSheet(side, rawQuery) {
+  if (!side) return;
+  const q = String(rawQuery || '')
+    .trim()
+    .toLocaleLowerCase();
+  side.querySelectorAll('.nav-group').forEach((group) => {
+    let visibleCount = 0;
+    group.querySelectorAll('button').forEach((btn) => {
+      const match = !q || btn.textContent.toLocaleLowerCase().includes(q);
+      btn.hidden = !match;
+      if (match) visibleCount++;
+    });
+    group.hidden = visibleCount === 0;
+  });
+}
+function uiBindSidebarSheetGestures(side, scrim) {
+  if (!side || side.dataset.sheetGestureBound === 'true') return;
+  side.dataset.sheetGestureBound = 'true';
+  const search = side.querySelector('.nav-sheet-search');
+  if (search) {
+    search.addEventListener('input', () => uiFilterNavSheet(side, search.value));
+  }
+  if (scrim && scrim.dataset.touchBound !== 'true') {
+    scrim.dataset.touchBound = 'true';
+    scrim.addEventListener(
+      'touchmove',
+      (ev) => {
+        if (ev.cancelable) ev.preventDefault();
+      },
+      { passive: false },
+    );
+  }
+  let startX = 0,
+    startY = 0,
+    canSwipeSheet = false;
+  side.addEventListener(
+    'touchstart',
+    (ev) => {
+      const t = ev.touches?.[0];
+      if (!t || !side.classList.contains('open')) return;
+      startX = t.clientX;
+      startY = t.clientY;
+      const navEl = side.querySelector('.nav');
+      const atTop =
+        side.scrollTop <= 2 && (!navEl || !navEl.contains(ev.target) || navEl.scrollTop <= 2);
+      canSwipeSheet = !uiCompactSheetMedia.matches || atTop;
+    },
+    { passive: true },
+  );
+  side.addEventListener(
+    'touchend',
+    (ev) => {
+      const t = ev.changedTouches?.[0];
+      if (!t || !side.classList.contains('open')) return;
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (uiCompactSheetMedia.matches) {
+        if (canSwipeSheet && dy > 56 && dy > Math.abs(dx) * 1.35) uiSetMenu(false);
+      } else if (dx < -56 && Math.abs(dx) > Math.abs(dy) * 1.35) {
+        uiSetMenu(false);
+      }
+    },
+    { passive: true },
+  );
 }
 function uiSetMenu(value, restore = true, origin = null) {
   const side = $('.sidebar'),
     main = $('.main'),
     scrim = $('.sidebar-scrim');
   if (!side) return;
+  uiBindSidebarSheetGestures(side, scrim);
   const mobile = uiMobileMedia.matches;
   const open = mobile && (value === undefined ? !side.classList.contains('open') : !!value);
   if (open) {
     const trigger = origin || document.activeElement?.closest?.('[data-action="toggle-menu"]');
     if (trigger?.isConnected) S.uiMenuTrigger = trigger;
+  } else {
+    uiResetNavSheetFilter(side);
   }
   side.classList.toggle('open', open);
   side.inert = mobile && !open;
@@ -260,7 +415,7 @@ function uiSetPane(pane, focus = false) {
     b.classList.toggle('active', selected);
     b.setAttribute('aria-pressed', String(selected));
   });
-  if (focus && matchMedia('(max-width:640px)').matches) {
+  if (focus && uiMobileMedia.matches) {
     const target =
       pane === 'output'
         ? $('#task-output')
@@ -269,6 +424,84 @@ function uiSetPane(pane, focus = false) {
           : $('[data-action="tree-home"]');
     target?.focus({ preventScroll: true });
   }
+}
+function uiApplyInputSemantics(root) {
+  if (typeof CP?.ui?.applyKeyboardHygiene === 'function') {
+    CP.ui.applyKeyboardHygiene(root);
+    return;
+  }
+  if (!root?.querySelectorAll) return;
+  root
+    .querySelectorAll(
+      'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea',
+    )
+    .forEach((control) => {
+      const type = (control.getAttribute('type') || 'text').toLowerCase();
+      const key = [control.name, control.id].filter(Boolean).join(' ');
+      const labelEl =
+        control.labels?.[0] ||
+        control.closest('.field')?.querySelector(':scope > label, .field-label');
+      const hint = [
+        labelEl?.textContent || '',
+        control.getAttribute('aria-label') || '',
+        control.getAttribute('placeholder') || '',
+      ].join(' ');
+      const setAttr = (attr, val) => {
+        if (!control.hasAttribute(attr)) control.setAttribute(attr, val);
+      };
+      if (
+        type === 'search' ||
+        /(?:^|[_-])(query|search|filter)(?:$|[_-])/i.test(key) ||
+        /(搜索|筛选|查找)/.test(hint)
+      ) {
+        setAttr('autocapitalize', 'none');
+        setAttr('autocorrect', 'off');
+        setAttr('spellcheck', 'false');
+        setAttr('enterkeyhint', 'search');
+        return;
+      }
+      if (
+        type === 'url' ||
+        /(?:^|[_-])(url|uri|endpoint|webhook|callback|redirect|origin|issuer)(?:$|[_-])/i.test(
+          key,
+        ) ||
+        /(回调地址|连接地址|服务地址|网关地址|Webhook|URL)/i.test(hint)
+      ) {
+        setAttr('inputmode', 'url');
+        setAttr('autocapitalize', 'none');
+        setAttr('autocorrect', 'off');
+        setAttr('spellcheck', 'false');
+        return;
+      }
+      if (
+        control.tagName === 'INPUT' &&
+        (type === 'number' ||
+          /(?:^|[_-])(port|timeout|ttl|seconds|days|limit|offset|quota|retries|interval)(?:$|[_-])/i.test(
+            key,
+          ) ||
+          /(端口|超时|秒数|配额|阈值|上限)/.test(hint))
+      ) {
+        setAttr('inputmode', 'numeric');
+        setAttr('autocapitalize', 'none');
+        setAttr('autocorrect', 'off');
+        setAttr('spellcheck', 'false');
+        return;
+      }
+      if (
+        type === 'password' ||
+        type === 'email' ||
+        /(user|account|login|email|host|ip|domain|addr|path|root|dir|file|glob|slug|token|secret|bearer|cmd|command|shell|arg|env|repo|branch|sha|hash|bundle|app|network|group|issuer|client|audience|scope|key_id)/i.test(
+          key,
+        ) ||
+        /(账号|用户名|主机|域名|路径|目录|文件|命令|令牌|密钥|标识|编号|作用域|分支|包名|Bundle|Token|SSH|IP|Slug)/i.test(
+          hint,
+        )
+      ) {
+        setAttr('autocapitalize', 'none');
+        setAttr('autocorrect', 'off');
+        setAttr('spellcheck', 'false');
+      }
+    });
 }
 function uiLabelFields(root) {
   $$('.field', root).forEach((field) => {
@@ -312,6 +545,7 @@ function uiLabelFields(root) {
     });
     if (descriptions.size) control.setAttribute('aria-describedby', [...descriptions].join(' '));
   });
+  uiApplyInputSemantics(root);
 }
 // Native constraints remain authoritative. No validation request or global DOM scan.
 document.addEventListener(
@@ -409,6 +643,85 @@ function uiCapturePage() {
         : null,
   };
 }
+const UI_FULL_SPAN_HEADER_RE =
+  /(路径|目录|哈希|摘要|指纹|地址|链接|作用域|范围|命令|参数|目标|说明|备注|公钥|凭据|sha|hash|token|url|uri|host|endpoint|path|scope|command|fingerprint)/i;
+
+function uiEnhanceResponsiveTables(page) {
+  $$('.data-table', page).forEach((table) => {
+    table.classList.add('responsive-table');
+    table.setAttribute('role', 'table');
+    const headers = $$('thead th', table);
+    headers.forEach((th) => th.setAttribute('scope', 'col'));
+    $$('tbody tr', table).forEach((row) => {
+      row.setAttribute('role', 'row');
+      [...row.cells].forEach((cell, i) => {
+        const label = headers[i]?.textContent?.trim() || '';
+        cell.dataset.label = label;
+        cell.setAttribute('role', 'cell');
+        const textLen = (cell.textContent || '').trim().length;
+        if (
+          cell.classList.contains('mono') ||
+          cell.querySelector('code, .mono, .actions, pre') ||
+          textLen > 28 ||
+          UI_FULL_SPAN_HEADER_RE.test(label)
+        ) {
+          cell.dataset.span = 'full';
+        } else {
+          delete cell.dataset.span;
+        }
+      });
+    });
+  });
+}
+
+function uiBindTabScrollFades(page) {
+  $$('.page-tabs, .management-tabs', page).forEach((bar) => {
+    const syncFade = () => {
+      bar.dataset.scrollFade = String(
+        bar.scrollWidth > bar.clientWidth + 4 &&
+          bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 4,
+      );
+    };
+    bar.addEventListener('scroll', syncFade, { passive: true });
+    requestAnimationFrame(syncFade);
+  });
+}
+
+function uiEnhanceArtifactCards(page) {
+  if (S.page !== 'artifacts') return;
+  $$('.artifact-card', page).forEach((card) => {
+    if (!card.querySelector('.artifact-type-badge')) {
+      const rawName = (card.querySelector('h2')?.textContent || '').trim();
+      const ext = /\.tar\.(?:gz|xz|bz2)$/i.test(rawName)
+        ? 'TAR'
+        : (rawName.includes('.') ? rawName.split('.').pop() : 'FILE')
+            .replace(/[^a-z0-9]/gi, '')
+            .slice(0, 4)
+            .toUpperCase() || 'FILE';
+      const badgeEl = document.createElement('span');
+      badgeEl.className = 'artifact-type-badge';
+      badgeEl.setAttribute('aria-hidden', 'true');
+      badgeEl.textContent = ext;
+      card.prepend(badgeEl);
+    }
+    const shaCode = card.querySelector('.artifact-hash code');
+    const sha = shaCode?.textContent?.trim() || '';
+    if (shaCode && sha && !shaCode.dataset.copy) {
+      shaCode.dataset.copy = sha;
+      shaCode.classList.add('artifact-sha-copy');
+      shaCode.setAttribute('role', 'button');
+      shaCode.tabIndex = 0;
+      shaCode.setAttribute('title', '点击复制 SHA-256');
+      shaCode.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          shaCode.click();
+        }
+      };
+    }
+  });
+}
+
 function uiPageReady(animate = false, presentation = null) {
   const page = $('#page');
   if (!page) return;
@@ -422,20 +735,10 @@ function uiPageReady(animate = false, presentation = null) {
     page.classList.add('page-arrive');
   }
   uiSyncNavigation();
-  $$('.data-table', page).forEach((table) => {
-    table.classList.add('responsive-table');
-    table.setAttribute('role', 'table');
-    const headers = $$('thead th', table);
-    headers.forEach((th) => th.setAttribute('scope', 'col'));
-    $$('tbody tr', table).forEach((row) => {
-      row.setAttribute('role', 'row');
-      [...row.cells].forEach((cell, i) => {
-        cell.dataset.label = headers[i]?.textContent?.trim() || '';
-        cell.setAttribute('role', 'cell');
-      });
-    });
-  });
+  uiEnhanceResponsiveTables(page);
   uiManagementLayout(page);
+  uiBindTabScrollFades(page);
+  uiEnhanceArtifactCards(page);
   uiLabelFields(page);
   const projectInput = $('#project-query');
   if (projectInput) {
@@ -476,7 +779,7 @@ async function uiCommand() {
   const session = S.session;
   const dialog = modal(
     '快速前往',
-    `<div class="command-search">${icon('search')}<input id="command-query" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="搜索页面或项目" placeholder="搜索页面或项目" autocomplete="off" aria-controls="command-results"></div><div class="command-results" id="command-results" role="listbox" aria-label="页面与项目"></div><p class="command-hint">↑ ↓ 选择 · Enter 打开 · Esc 关闭</p>`,
+    `<div class="command-search">${icon('search')}<input id="command-query" autofocus role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="搜索页面或项目" placeholder="搜索页面或项目" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-controls="command-results"></div><div class="command-results" id="command-results" role="listbox" aria-label="页面与项目"></div><p class="command-hint">↑ ↓ 选择 · Enter 打开 · Esc 关闭</p>`,
   );
   dialog.classList.add('command-dialog');
   const input = $('#command-query', dialog),
@@ -696,6 +999,9 @@ document.addEventListener('click', (e) => {
       uiCommand().catch((err) => toast(err.message, true));
     }
     if (button.dataset.ui === 'close-menu') uiSetMenu(false);
+    if (button.dataset.ui === 'topbar-back' && button.dataset.backTarget) {
+      navigate(button.dataset.backTarget).catch((err) => toast(err.message, true));
+    }
     if (button.dataset.ui === 'clear-project-query') {
       const input = $('#project-query');
       if (input) {
@@ -743,19 +1049,29 @@ document.addEventListener('keydown', (e) => {
     });
   }
 });
-const uiViewportChanged = () => uiSetMenu(false, false);
+const uiViewportChanged = () => {
+  uiSetMenu(false, false);
+  uiSyncTopbarBack();
+  uiSyncDockSpace();
+};
 if (typeof uiMobileMedia.addEventListener === 'function')
   uiMobileMedia.addEventListener('change', uiViewportChanged);
 else if (typeof uiMobileMedia.addListener === 'function')
   uiMobileMedia.addListener(uiViewportChanged);
 function uiSyncVisualViewport(event) {
   const viewport = window.visualViewport;
+  const vvHeight = Math.max(0, viewport?.height || window.innerHeight || 0);
   const top = Math.max(0, viewport?.offsetTop || 0);
   const covered = viewport ? Math.max(0, window.innerHeight - viewport.height - top) : 0;
-  document.documentElement.style.setProperty('--ui-visual-viewport-top', top + 'px');
-  document.documentElement.style.setProperty('--ui-visual-viewport-bottom', covered + 'px');
+  const root = document.documentElement;
+  if (vvHeight) root.style.setProperty('--ui-vv-height', vvHeight + 'px');
+  root.style.setProperty('--ui-vv-top', top + 'px');
+  root.style.setProperty('--ui-vv-bottom', covered + 'px');
+  root.style.setProperty('--ui-visual-viewport-top', top + 'px');
+  root.style.setProperty('--ui-visual-viewport-bottom', covered + 'px');
   const keyboardOpen = covered > 96;
-  document.body.classList.toggle('ui-keyboard-open', keyboardOpen);
+  document.body?.classList.toggle('ui-keyboard-open', keyboardOpen);
+  uiSyncDockSpace(keyboardOpen);
   if (!keyboardOpen || event?.type !== 'resize') return;
   const field = document.activeElement;
   if (!field?.matches('input,textarea,[contenteditable="true"]')) return;
@@ -766,10 +1082,17 @@ function uiSyncVisualViewport(event) {
   if (control.top < bounds.top || control.bottom > bounds.bottom)
     field.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
+window.addEventListener('resize', uiSyncVisualViewport);
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', uiSyncVisualViewport);
   window.visualViewport.addEventListener('scroll', uiSyncVisualViewport);
-  uiSyncVisualViewport();
+}
+uiSyncVisualViewport();
+if (typeof MutationObserver === 'function' && document.body) {
+  new MutationObserver(() => uiSyncDockSpace()).observe(document.body, {
+    attributes: true,
+    attributeFilter: ['class'],
+  });
 }
 
 // Shared management composition. Only presentation state is retained in memory.

@@ -14,12 +14,22 @@ const ENDED = new Set(['exited', 'closed', 'failed', 'revoked']);
 // This store belongs to one authenticated user/Space identity. Nothing here is
 // persisted in browser storage: no transcript, credentials, tickets or keystrokes.
 export class TerminalStore {
-  constructor({ api, runtime, onChange, onEdit, onNavigate, identity, isCurrent = () => true }) {
+  constructor({
+    api,
+    runtime,
+    onChange,
+    onEdit,
+    onNavigate,
+    measureInitialGrid,
+    identity,
+    isCurrent = () => true,
+  } = {}) {
     this.api = api;
     this.runtime = runtime;
     this.onChange = onChange;
     this.onEdit = onEdit;
     this.onNavigate = onNavigate;
+    this.measureInitialGrid = measureInitialGrid;
     this.identity = identity;
     this.isCurrent = isCurrent;
     this.records = new Map();
@@ -248,20 +258,21 @@ export class TerminalStore {
       throw Object.assign(new Error(reasonText('SESSION_LIMIT')), {
         code: 'SESSION_LIMIT',
       });
-    // Keep this request id across a lost POST response. A retry reconciles the
-    // original create on the server instead of launching another shell.
-    let requestId = this.creationIntents.get(key);
-    if (!requestId) {
-      requestId = uuid();
-      this.creationIntents.set(key, requestId);
+    // The Hub binds idempotency to the entire request, not only the ID.
+    // Keep the initial dimensions across a lost response, even after rotation.
+    let intent = this.creationIntents.get(key);
+    if (!intent) {
+      intent = { requestId: uuid(), initialGrid: this.resolveInitialGrid(limits) };
+      this.creationIntents.set(key, intent);
     }
+    const { requestId, initialGrid } = intent;
     const body = {
       vps_id: targetVps.id,
       ...(resolvedProjectId ? { project_id: resolvedProjectId } : {}),
       request_id: requestId,
       mode: mode || 'tmux',
-      cols: 100,
-      rows: 30,
+      cols: initialGrid.cols,
+      rows: initialGrid.rows,
     };
     const session = await this.api('/api/vps-terminal/sessions', {
       method: 'POST',
@@ -364,6 +375,7 @@ export class TerminalStore {
         this.refresh(record).catch((error) =>
           record.view.showNotice(errorCode(error), error.message),
         ),
+      onSwitchTab: (delta) => this.switchAdjacentTab(delta),
     });
     this.records.set(id, record);
     this.changed();
@@ -440,6 +452,34 @@ export class TerminalStore {
       this.changed();
     }
   }
+  resolveInitialGrid(limits = DEFAULT_LIMITS) {
+    let measured = null;
+    try {
+      measured = this.measureInitialGrid?.(limits);
+    } catch {
+      measured = null;
+    }
+    const clampAxis = (value, min, max, fallback) => {
+      const target = Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+      return Math.max(min, Math.min(max, target));
+    };
+    return {
+      cols: clampAxis(measured?.cols, limits.min_cols, limits.max_cols, 100),
+      rows: clampAxis(measured?.rows, limits.min_rows, limits.max_rows, 30),
+    };
+  }
+
+  switchAdjacentTab(delta = 1) {
+    const ids = [...this.records.keys()];
+    if (ids.length < 2) return false;
+    const currentId = this.focusedId || this.activeId;
+    const index = ids.indexOf(currentId);
+    if (index < 0) return false;
+    const nextIndex = (index + (delta >= 0 ? 1 : -1) + ids.length) % ids.length;
+    this.activate(ids[nextIndex]);
+    return true;
+  }
+
   unsplit() {
     this.secondaryId = null;
     this.focusedId = this.activeId;

@@ -57,10 +57,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .extension-popup {
-  width: 380px;
+  width: min(380px, 100vw);
+  max-width: 100%;
+  box-sizing: border-box;
 }
 header {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
   padding-bottom: 12px;
@@ -97,6 +100,7 @@ header span {
   margin: 12px 0;
   font-size: 13px;
   color: var(--ui-muted);
+  overflow-wrap: anywhere;
 }
 #connection::before {
   content: '';
@@ -124,7 +128,16 @@ label {
   color: var(--ui-text);
 }
 button,
-input {
+input,
+select,
+textarea,
+summary {
+  touch-action: manipulation;
+}
+button,
+input,
+select,
+textarea {
   font: inherit;
   min-height: 44px;
   border: 1px solid var(--ui-control-border);
@@ -134,16 +147,20 @@ input {
   color: var(--ui-text);
   transition:
     background-color 120ms ease,
-    border-color 120ms ease;
+    border-color 120ms ease,
+    transform 80ms ease;
 }
 button {
   cursor: pointer;
   margin: 4px 4px 4px 0;
+  max-width: 100%;
   font-size: 13px;
   font-weight: 600;
   border-color: var(--ui-border);
+  overflow-wrap: anywhere;
 }
-button:hover:not(:disabled) {
+button:active:not(:disabled) {
+  transform: scale(0.98);
   background: var(--ui-hover);
   border-color: var(--ui-muted);
 }
@@ -151,20 +168,21 @@ button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-input {
+input,
+select,
+textarea {
   width: 100%;
   margin: 6px 0 8px;
   font-size: 14px;
 }
-input:hover:not(:disabled) {
-  border-color: var(--ui-muted);
-}
 input[type='number'] {
-  width: 72px;
+  width: 80px;
   font-variant-numeric: tabular-nums;
 }
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--ui-focus) 26%, transparent);
   outline-offset: 0;
   border-color: var(--ui-focus);
@@ -177,8 +195,9 @@ input:focus-visible {
   font-weight: 700;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 35%);
 }
-#prepare:hover:not(:disabled),
-#allow-form button:hover:not(:disabled) {
+#prepare:active:not(:disabled),
+#allow-form button:active:not(:disabled) {
+  transform: scale(0.98);
   background: var(--ui-primary-hover);
   border-color: var(--ui-primary-hover);
 }
@@ -186,6 +205,22 @@ input:focus-visible {
   color: var(--ui-danger);
   border-color: color-mix(in srgb, var(--ui-danger) 35%, var(--ui-border));
   background: var(--ui-danger-bg);
+}
+@media (hover: hover) and (pointer: fine) {
+  button:hover:not(:disabled) {
+    background: var(--ui-hover);
+    border-color: var(--ui-muted);
+  }
+  input:hover:not(:disabled),
+  select:hover:not(:disabled),
+  textarea:hover:not(:disabled) {
+    border-color: var(--ui-muted);
+  }
+  #prepare:hover:not(:disabled),
+  #allow-form button:hover:not(:disabled) {
+    background: var(--ui-primary-hover);
+    border-color: var(--ui-primary-hover);
+  }
 }
 dl {
   margin: 10px 0;
@@ -220,9 +255,15 @@ li {
   padding: 8px 0;
   border-bottom: 1px solid var(--ui-line);
   font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.origin-label {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 li button {
+  flex-shrink: 0;
   margin: 0;
   min-height: 36px;
   padding: 6px 10px;
@@ -231,10 +272,12 @@ li button {
 #error {
   color: var(--ui-danger);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 .hint {
   font-size: 12px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 [hidden] {
   display: none !important;
@@ -266,17 +309,32 @@ li button {
   font-weight: 500;
   margin-top: 20px;
 }
+@media (max-width: 640px), (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  li button {
+    min-height: 40px;
+    min-width: 44px;
+  }
+}
 @media (max-width: 420px) {
   .extension-idle {
     margin: 32px auto;
     padding: 24px;
   }
   .extension-popup {
-    padding: 16px;
+    padding: 14px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  * {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition: none !important;
   }

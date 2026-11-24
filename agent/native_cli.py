@@ -345,14 +345,20 @@ class NativeCLI:
         self.review_worker.pump_due(now=now)
         return {"claims": claims_report, "recovered": recovered}
 
+    def _provider_instance_binding(self, project, provider, executable):
+        return {
+            "execution_account": str(
+                project.get("_native_owner") or project.get("owner_user_id") or "local"
+            ),
+            "provider_kind": provider,
+            "executable_and_config_digest": self.instance_registry.compute_config_digest(
+                executable or provider, ""
+            ),
+        }
+
     def _resolve_provider_instance_id(self, project, provider, executable):
-        cfg_digest = self.instance_registry.compute_config_digest(executable or provider, "")
-        account = str(project.get("_native_owner") or project.get("owner_user_id") or "local")
-        return self.instance_registry.resolve(
-            execution_account=account,
-            provider_kind=provider,
-            executable_and_config_digest=cfg_digest,
-        ).provider_instance_id
+        binding = self._provider_instance_binding(project, provider, executable)
+        return self.instance_registry.resolve(**binding).provider_instance_id
 
     def _persist_start_metadata(
         self, db, sid, project, provider, executable, signature, mode, native_thread, settings
@@ -431,9 +437,17 @@ class NativeCLI:
             provider = args.get("cli", "pi")
             if provider not in ("pi", "codex", "claude"):
                 raise ValueError("CLI must be pi, codex or claude")
-            executable = shutil.which(provider, path=self.environment()["PATH"]) or provider
-            pid = self._resolve_provider_instance_id(project, provider, executable)
-            resolved_pid = pid
+        executable = shutil.which(provider, path=self.environment()["PATH"])
+        if not sid:
+            record = (
+                self.instance_registry.lookup(
+                    **self._provider_instance_binding(project, provider, executable)
+                )
+                if executable
+                else None
+            )
+            resolved_pid = record.provider_instance_id if record else "legacy_unresolved"
+            pid = record.provider_instance_id if record else "0" * 32
         support = structured_chat_platform_support(
             self._current_flags(),
             os_name=os.name,
@@ -458,6 +472,7 @@ class NativeCLI:
             session_status=session_status,
             has_active_run=has_active_run,
             pending_approvals=int(args.get("pending_approvals", 0)),
+            provider_executable_present=executable is not None,
         )
         return {
             "provider": provider,

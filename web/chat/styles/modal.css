@@ -80,6 +80,8 @@
   border: 1px solid transparent;
   border-radius: var(--ui-radius-md, 12px);
   background: none;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 .chat-project-option > span:last-child {
   display: grid;

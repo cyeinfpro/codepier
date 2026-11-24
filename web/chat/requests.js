@@ -93,7 +93,7 @@ function chatCwdPopover() {
   const box = $('#chat-popover');
   box.hidden = false;
   box.setAttribute('aria-label', '工作目录');
-  box.innerHTML = `<div class="chat-popover-head"><strong>工作目录</strong><button type="button" id="chat-cwd-close" aria-label="关闭工作目录">×</button></div><p class="chat-popover-help">使用项目根目录或项目内子目录，不改变项目授权。不同目录的草稿分别保留。</p><input id="chat-cwd-input" aria-label="项目子目录" aria-describedby="chat-cwd-error" placeholder="例如 src"><p id="chat-cwd-error" role="alert" class="chat-popover-help"></p><button type="button" id="chat-cwd-apply" class="chat-primary-button">应用目录</button>`;
+  box.innerHTML = `<div class="chat-popover-head"><strong>工作目录</strong><button type="button" id="chat-cwd-close" aria-label="关闭工作目录">×</button></div><p class="chat-popover-help">使用项目根目录或项目内子目录，不改变项目授权。不同目录的草稿分别保留。</p><input id="chat-cwd-input" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="项目子目录" aria-describedby="chat-cwd-error" placeholder="例如 src"><p id="chat-cwd-error" role="alert" class="chat-popover-help"></p><button type="button" id="chat-cwd-apply" class="chat-primary-button">应用目录</button>`;
   const input = $('#chat-cwd-input');
   input.value = ChatUI.cwd;
   $('#chat-cwd-close').onclick = () => chatClosePopover(true);

@@ -152,10 +152,76 @@
   background: var(--chat-primary);
   color: var(--chat-primary-text);
 }
+.chat-approval-actions fieldset {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+}
+.chat-approval-actions legend {
+  padding: 0;
+  margin-bottom: 6px;
+  font-size: var(--ui-text-sm, 13px);
+  font-weight: var(--ui-weight-semibold, 600);
+  color: var(--chat-fg);
+}
 .chat-approval-actions label {
   display: grid;
   width: 100%;
   gap: 8px;
+}
+.approval-option-list {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+.chat-approval-actions label.approval-option-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--chat-touch-target);
+  padding: 10px 12px;
+  border: 1px solid var(--chat-border);
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-raised);
+  cursor: pointer;
+}
+.chat-approval-actions label.approval-option-card:has(input:checked) {
+  border-color: var(--chat-accent);
+  background: var(--chat-accent-soft);
+}
+.approval-option-card input[type='checkbox'] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: var(--chat-accent);
+}
+.approval-option-card > div {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.approval-option-card strong {
+  display: block;
+  font-size: var(--ui-text-sm, 13px);
+  font-weight: var(--ui-weight-semibold, 600);
+  line-height: 1.45;
+  color: var(--chat-fg);
+  overflow-wrap: anywhere;
+}
+.approval-option-card small {
+  display: block;
+  font-size: var(--ui-text-xs, 12px);
+  line-height: 1.55;
+  color: var(--chat-muted);
+  overflow-wrap: anywhere;
 }
 .chat-approval-actions textarea {
   width: 100%;
@@ -188,7 +254,8 @@
   align-items: center;
   flex: none;
   gap: 8px;
-  padding: 9px 22px;
+  padding: 9px max(22px, var(--safe-right, env(safe-area-inset-right, 0px))) 9px
+    max(22px, var(--safe-left, env(safe-area-inset-left, 0px)));
   border-bottom: 1px solid var(--chat-line);
   background: var(--chat-side);
 }

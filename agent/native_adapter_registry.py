@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -41,26 +42,47 @@ class ProviderInstanceRegistry:
     def __init__(self, native_dir: Path | str) -> None:
         self.native_dir = Path(native_dir)
         self.path = self.native_dir / "provider-instances.json"
-        self._records: dict[str, dict[str, Any]] = {}
-        self._load()
+        self.lock_path = self.native_dir / ".provider-instances.lock"
 
-    def _load(self) -> None:
-        if not self.path.exists():
-            return
+    def _load(self) -> dict[str, dict[str, Any]]:
         if self.path.is_symlink():
             raise ValueError("Provider instance registry cannot be a symlink")
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if isinstance(raw, dict) and isinstance(raw.get("instances"), dict):
-            self._records = dict(raw["instances"])
+        except FileNotFoundError:
+            return {}
+        if not isinstance(raw, dict) or not isinstance(raw.get("instances"), dict):
+            raise ValueError("Invalid provider instance registry; refusing to replace it")
+        return raw["instances"]
 
-    def _save(self) -> None:
+    @contextmanager
+    def _write_lock(self) -> Iterator[None]:
+        # Keep the lock inode stable; the JSON inode is replaced on each save.
         self.native_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.native_dir, 0o700)
-        atomic_json(self.path, {"schema_version": 1, "instances": self._records})
-        os.chmod(self.path, 0o600)
+        if self.lock_path.is_symlink():
+            raise ValueError("Provider instance registry lock cannot be a symlink")
+        fd = os.open(
+            self.lock_path,
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            # Closing this descriptor releases the lock on both platforms.
+            os.close(fd)
+
+    def _save(self, records: dict[str, dict[str, Any]]) -> None:
+        atomic_json(self.path, {"schema_version": 1, "instances": records})
 
     @staticmethod
     def compute_config_digest(executable_path: str, config_fingerprint: str = "") -> str:
@@ -75,6 +97,26 @@ class ProviderInstanceRegistry:
             raise ValueError(f"Unsupported provider_kind: {provider_kind}")
         return _digest_parts(execution_account, provider_kind, executable_and_config_digest)
 
+    @staticmethod
+    def _record(row: Mapping[str, Any], provider_kind: str) -> ProviderInstanceRecord:
+        return ProviderInstanceRecord(
+            provider_instance_id=row["provider_instance_id"],
+            instance_revision=row["instance_revision"],
+            provider_kind=provider_kind,
+        )
+
+    def lookup(
+        self,
+        *,
+        execution_account: str,
+        provider_kind: str,
+        executable_and_config_digest: str,
+    ) -> ProviderInstanceRecord | None:
+        """Return a registered binding without creating files or reserving an ID."""
+        key = self._binding_key(execution_account, provider_kind, executable_and_config_digest)
+        row = self._load().get(key)
+        return self._record(row, provider_kind) if row is not None else None
+
     def resolve(
         self,
         *,
@@ -85,61 +127,52 @@ class ProviderInstanceRegistry:
     ) -> ProviderInstanceRecord:
         """Return existing or newly registered opaque 32-hex provider_instance_id + revision."""
         key = self._binding_key(execution_account, provider_kind, executable_and_config_digest)
-        existing = self._records.get(key)
-        if existing is not None:
-            return ProviderInstanceRecord(
-                provider_instance_id=existing["provider_instance_id"],
-                instance_revision=existing["instance_revision"],
-                provider_kind=provider_kind,
-            )
-        if existing_instance_id is not None:
-            record = self._bump_existing_instance(key, provider_kind, existing_instance_id)
-            self._save()
+        with self._write_lock():
+            records = self._load()
+            existing = records.get(key)
+            if existing is not None:
+                record = self._record(existing, provider_kind)
+                if (
+                    existing_instance_id is not None
+                    and record.provider_instance_id != existing_instance_id
+                ):
+                    raise ValueError("Target provider binding already belongs to another instance")
+                return record
+            if existing_instance_id is None:
+                record = ProviderInstanceRecord(uuid.uuid4().hex, 1, provider_kind)
+            else:
+                record = self._bump_existing_instance(records, provider_kind, existing_instance_id)
+            records[key] = {
+                "provider_instance_id": record.provider_instance_id,
+                "instance_revision": record.instance_revision,
+                "provider_kind": record.provider_kind,
+            }
+            self._save(records)
             return record
-        instance_id = uuid.uuid4().hex
-        self._records[key] = {
-            "provider_instance_id": instance_id,
-            "instance_revision": 1,
-            "provider_kind": provider_kind,
-        }
-        self._save()
-        return ProviderInstanceRecord(
-            provider_instance_id=instance_id,
-            instance_revision=1,
-            provider_kind=provider_kind,
-        )
 
+    @staticmethod
     def _bump_existing_instance(
-        self, new_key: str, provider_kind: str, existing_instance_id: str
+        records: dict[str, dict[str, Any]], provider_kind: str, existing_instance_id: str
     ) -> ProviderInstanceRecord:
-        max_rev = 0
-        for old_key, row in list(self._records.items()):
-            if row.get("provider_instance_id") == existing_instance_id:
-                if row.get("provider_kind") != provider_kind:
-                    raise ValueError("Cannot reassign provider_instance_id across provider_kind")
-                max_rev = max(max_rev, int(row.get("instance_revision", 1)))
-                self._records.pop(old_key)
-        if max_rev == 0:
+        prior = [
+            (key, row)
+            for key, row in records.items()
+            if row.get("provider_instance_id") == existing_instance_id
+        ]
+        if not prior:
             raise ValueError("Unknown existing provider_instance_id")
-        new_rev = max_rev + 1
-        self._records[new_key] = {
-            "provider_instance_id": existing_instance_id,
-            "instance_revision": new_rev,
-            "provider_kind": provider_kind,
-        }
-        return ProviderInstanceRecord(
-            provider_instance_id=existing_instance_id,
-            instance_revision=new_rev,
-            provider_kind=provider_kind,
-        )
+        if any(row.get("provider_kind") != provider_kind for _, row in prior):
+            raise ValueError("Cannot reassign provider_instance_id across provider_kind")
+        revision = max(int(row.get("instance_revision", 1)) for _, row in prior)
+        for key, _ in prior:
+            del records[key]
+        return ProviderInstanceRecord(existing_instance_id, revision + 1, provider_kind)
 
     def resolve_legacy_session(self, session_row: Mapping[str, Any]) -> str:
         """Return persisted instance ID if verifiable, otherwise 'legacy_unresolved'."""
         instance_id = session_row.get("provider_instance_id")
         if isinstance(instance_id, str) and len(instance_id) == 32:
-            if any(
-                row.get("provider_instance_id") == instance_id for row in self._records.values()
-            ):
+            if any(row.get("provider_instance_id") == instance_id for row in self._load().values()):
                 return instance_id
         return LEGACY_UNRESOLVED_INSTANCE_ID
 

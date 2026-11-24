@@ -63,12 +63,31 @@
 .cr-message-body pre {
   max-width: 100%;
   overflow: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   padding: 10px 12px;
   border-radius: var(--ui-radius-small);
   background: var(--ui-code-bg);
   color: var(--ui-code);
   white-space: pre;
   font-size: var(--ui-text-xs);
+}
+
+.cr-message-body pre.is-wrapped,
+.cr-message-body pre.is-wrapped code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.cr-message-body .chat-table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x pan-y;
 }
 
 .cr-message > footer {
@@ -219,6 +238,8 @@
   padding: 12px 15px;
   border-radius: var(--ui-radius-md);
   background: var(--ui-side);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
 }
 
 .cr-work > div {

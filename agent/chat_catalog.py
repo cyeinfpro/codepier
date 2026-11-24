@@ -647,6 +647,7 @@ def _action_ready(
     *,
     platform_available: bool,
     platform_reason: str | None,
+    provider_executable_present: bool,
     device_enabled: bool,
     mode: str,
     session_status: str | None,
@@ -660,7 +661,14 @@ def _action_ready(
         return False, reason, "select_node" if reason == "CLI_CHAT_PLATFORM" else "update_agent"
     if mode != "chat":
         return False, "INVALID_SESSION_MODE", "choose_supported_option"
-    return _session_state_ready(action, session_status, has_active_run, pending_approvals)
+    state = _session_state_ready(action, session_status, has_active_run, pending_approvals)
+    if (
+        state[0]
+        and action in {"start_session", "resume_session"}
+        and not provider_executable_present
+    ):
+        return False, "CLI_MISSING", "select_node"
+    return state
 
 
 def _session_state_ready(
@@ -721,6 +729,7 @@ def compute_action_availabilities(
     has_active_run: bool = False,
     pending_approvals: int = 0,
     observed_revision: str = "1",
+    provider_executable_present: bool = True,
 ) -> list[ActionAvailability]:
     """Compute independent supported, authorized, and ready states for native actions."""
     results: list[ActionAvailability] = []
@@ -735,6 +744,7 @@ def compute_action_availabilities(
             action,
             platform_available=plat_ok,
             platform_reason=plat_reason,
+            provider_executable_present=provider_executable_present,
             device_enabled=device_enabled,
             mode=mode,
             session_status=session_status,

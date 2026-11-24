@@ -93,10 +93,34 @@
 .chat-review-diff {
   min-width: 0;
 }
+.chat-review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.chat-review-toolbar button {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--chat-line);
+  border-radius: var(--ui-radius-md, 12px);
+  background: var(--chat-surface);
+  font-size: var(--ui-text-xs, 12px);
+  color: var(--chat-muted);
+}
+.chat-review-toolbar button[aria-pressed='true'] {
+  background: var(--chat-selected);
+  border-color: var(--chat-border);
+  color: var(--chat-fg);
+}
 .chat-review-diff pre {
   max-width: 100%;
   max-height: 360px;
   overflow: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
   margin: 0 0 10px;
   padding: 13px;
   border-radius: var(--ui-radius-md, 12px);
@@ -106,6 +130,11 @@
   tab-size: 2;
   white-space: pre;
   scrollbar-width: thin;
+}
+.chat-review-diff pre.is-wrapped {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .chat-review-body button {
   min-height: 38px;
@@ -189,7 +218,9 @@
     visibility: hidden;
     transform: translateX(-100%);
     border-right: 1px solid var(--chat-border);
-    padding: 18px 14px max(14px, env(safe-area-inset-bottom));
+    padding: max(18px, var(--safe-top, env(safe-area-inset-top, 0px))) 14px
+      max(14px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))
+      max(14px, var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .drawer-open .chat-sidebar {
     visibility: visible;
@@ -202,7 +233,8 @@
     border: 0;
     background: var(--chat-scrim);
   }
-  .drawer-open .chat-shade {
+  .drawer-open .chat-shade,
+  .inspector-open .chat-shade {
     display: block;
   }
   .chat-heading #chat-subtitle {
@@ -246,7 +278,9 @@
     border-radius: var(--ui-radius-lg, 16px);
   }
   .chat-composer-wrap {
-    padding: 6px 10px max(9px, env(safe-area-inset-bottom));
+    padding: 6px max(10px, var(--safe-right, env(safe-area-inset-right, 0px)))
+      max(9px, var(--safe-bottom, env(safe-area-inset-bottom, 0px)))
+      max(10px, var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .chat-composer {
     padding: 10px 10px 8px;
@@ -266,8 +300,8 @@
     gap: 5px;
   }
   .chat-send-actions select {
-    max-width: 84px;
-    font-size: var(--ui-text-xs, 12px);
+    max-width: 120px;
+    font-size: var(--ui-text-input, 16px);
   }
   .chat-stop-turn {
     padding: 6px 8px;
@@ -295,7 +329,17 @@
     padding-bottom: 8px;
   }
   .chat-popover {
-    padding: 11px;
+    inset: auto max(8px, var(--safe-right, env(safe-area-inset-right, 0px)))
+      max(
+        8px,
+        var(--ui-vv-bottom, var(--ui-visual-viewport-bottom, 0px)),
+        var(--safe-bottom, env(safe-area-inset-bottom, 0px))
+      )
+      max(8px, var(--safe-left, env(safe-area-inset-left, 0px)));
+    width: auto;
+    max-width: none;
+    max-height: min(78dvh, calc(var(--ui-vv-height, 100dvh) - 20px));
+    padding: 12px;
     border-radius: var(--ui-radius-xl, 20px);
   }
   .chat-model-option {
@@ -308,14 +352,28 @@
     font-size: var(--ui-text-xs, 12px);
   }
   .chat-inspector {
-    width: min(334px, 100%);
+    position: absolute;
+    inset: auto 0 0 0;
+    width: 100%;
+    max-width: 100%;
+    max-height: min(82dvh, calc(var(--ui-vv-height, 100dvh) - 24px));
+    z-index: var(--chat-z-sidebar);
+    border-left: 0;
+    border-top: 1px solid var(--chat-border);
+    border-top-left-radius: var(--ui-radius-xl);
+    border-top-right-radius: var(--ui-radius-xl);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    padding-bottom: var(--safe-bottom, env(safe-area-inset-bottom, 0px));
+    box-shadow: var(--chat-shadow);
   }
   .chat-file {
     max-width: 100%;
   }
   .chat-find-bar {
     gap: 5px;
-    padding: 8px 10px;
+    padding: 8px max(10px, var(--safe-right, env(safe-area-inset-right, 0px))) 8px
+      max(10px, var(--safe-left, env(safe-area-inset-left, 0px)));
   }
   .chat-find-bar span {
     font-size: var(--ui-text-xs, 12px);
@@ -382,10 +440,11 @@
     min-height: 36px;
   }
 }
-@media (max-width: 760px), (pointer: coarse) {
-  .chat-workspace :is(input:not([type='checkbox']), textarea),
-  .chat-sheet :is(input, textarea),
-  #chat-inspector-body input {
+@media (max-width: 900px), (pointer: coarse) {
+  .chat-workspace
+    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+  .chat-sheet :is(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea),
+  #chat-inspector-body :is(input, select, textarea) {
     font-size: var(--ui-text-input, 16px);
   }
   .chat-workspace :is(.chat-square, .chat-drawer-toggle, .chat-overflow summary, .chat-send),
@@ -414,7 +473,9 @@
     min-width: var(--chat-touch-target);
     min-height: var(--chat-touch-target);
   }
-  .chat-workspace :is(.chat-file, .chat-message-actions, .chat-code-head) button {
+  .chat-workspace
+    :is(.chat-file, .chat-message-actions, .chat-code-head, .chat-review-toolbar)
+    button {
     min-width: var(--chat-touch-target);
     min-height: var(--chat-touch-target);
   }

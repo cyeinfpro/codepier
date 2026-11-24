@@ -134,6 +134,10 @@
   background: transparent;
   text-align: left;
 }
+.chat-session:not(.active) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+}
 .chat-session::after {
   content: '→';
   display: grid;

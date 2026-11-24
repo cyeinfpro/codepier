@@ -937,13 +937,13 @@ async function chatPage() {
   <button id="chat-shade" class="chat-shade" aria-label="关闭会话历史"></button>
   <aside class="chat-sidebar" aria-label="会话历史"><button type="button" id="chat-new" class="chat-new-button" title="新对话" aria-label="新对话">${chatIcon('plus')}<span>新对话</span><kbd data-chat-shortcut="new">⌘ ⇧ O</kbd></button>
   <div class="chat-history-heading"><strong>全部会话</strong><button type="button" id="chat-history-clear" class="chat-text-button" hidden>清除筛选</button></div>
-  <div class="chat-history-filter"><input id="chat-history-search" type="search" placeholder="搜索会话、项目或内容" aria-label="查找对话"></div>
+  <div class="chat-history-filter"><input id="chat-history-search" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="搜索会话、项目或内容" aria-label="查找对话"></div>
   <div class="chat-history-chips"><details><summary>项目</summary><select id="chat-history-project" aria-label="筛选历史项目"><option value="">所有项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}">${esc(p.alias)}</option>`).join('')}</select></details><details><summary>状态</summary><select id="chat-history-filter" aria-label="筛选会话"><option value="">全部</option><option value="running">运行中</option><option value="exited">已停止</option><option value="interrupted">已中断</option></select></details></div>
   <div id="chat-history-notice" class="chat-history-notice" role="alert" hidden><span></span><button type="button" id="chat-history-retry">重试列表</button></div>
   <div id="chat-history" class="chat-history" aria-label="历史对话列表" aria-busy="false"></div><div class="chat-history-pages"><button id="chat-history-prev" hidden>较新</button><span id="chat-history-count"></span><button id="chat-history-next" hidden>较早</button></div>
   <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button></footer></aside>
   <div class="chat-main">
-  <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
+  <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
   <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button><span id="chat-resume-hint" class="chat-availability-hint" role="status" hidden></span></div>
   <button id="chat-latest" class="chat-latest" hidden>↓ 回到最新</button>
   <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">等这轮结束再发</option><option value="steer">插入当前回复</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
@@ -951,7 +951,7 @@ async function chatPage() {
 
 
   <div class="chat-compose-frame">
-  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
+  <form id="chat-form" class="chat-composer"><textarea id="chat-compose" rows="1" enterkeyhint="send" aria-label="消息" aria-describedby="chat-status chat-text-limit" placeholder="描述任务，输入 / 查看指令…" maxlength="${CHAT_MESSAGE_MAX_BYTES}"></textarea>
   <div class="chat-compose-bottom"><div class="chat-compose-controls"><button class="chat-square" type="button" id="chat-attach" aria-label="添加文件或图片" title="上传图片与文件">${chatIcon('plus')}</button><input type="file" id="chat-file-input" multiple hidden><button type="button" id="chat-options-toggle" class="chat-model-picker" aria-label="会话设置" aria-haspopup="dialog" aria-controls="chat-options" aria-expanded="false">${chatIcon('settings')}<span id="chat-config-summary">会话设置</span>${chatIcon('chevron')}</button></div>
   <div class="chat-send-actions"><button type="submit" id="chat-send" class="chat-send" aria-label="发送消息">${chatIcon('send')}</button></div></div></form>
   <button type="button" id="chat-options-shade" class="chat-options-shade" aria-label="关闭会话设置" tabindex="-1" hidden></button>
@@ -1093,7 +1093,10 @@ async function chatPage() {
       innerWidth > 760 ? !!c.historyCollapsed : !$('#chat-root').classList.contains('drawer-open'),
     ),
   );
-  on('chat-shade', 'click', () => chatDrawer(false));
+  on('chat-shade', 'click', () => {
+    if ($('#chat-root').classList.contains('drawer-open')) chatDrawer(false);
+    if (c.inspector && innerWidth <= 760) chatInspector('');
+  });
   on('chat-root', 'keydown', (e) => {
     if (
       (e.metaKey || e.ctrlKey) &&
@@ -1264,10 +1267,7 @@ async function chatPage() {
     },
     { signal: c.listeners.signal },
   );
-  for (const target of [window, window.visualViewport].filter(Boolean))
-    target.addEventListener('resize', chatViewport, {
-      signal: c.listeners.signal,
-    });
+  chatBindViewportEvents(c);
   chatMountChrome();
   chatMountHistory();
   chatDrawer(false, true);
@@ -1279,19 +1279,82 @@ async function chatPage() {
   if (c.selected) chatConnect();
   if (c.inspector) chatInspector(c.inspector);
 }
+function chatScheduleViewport() {
+  if (ChatUI.viewportFrame) return;
+  ChatUI.viewportFrame = requestAnimationFrame(() => {
+    ChatUI.viewportFrame = 0;
+    chatViewport();
+  });
+}
+function chatBindViewportEvents(c) {
+  const signal = c.listeners.signal;
+  window.addEventListener('resize', chatScheduleViewport, { signal });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', chatScheduleViewport, {
+      signal,
+    });
+    window.visualViewport.addEventListener('scroll', chatScheduleViewport, {
+      signal,
+    });
+  }
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      const root = $('#chat-root');
+      if (!root || e.isComposing || e.keyCode === 229) return;
+      const vv = window.visualViewport;
+      const keyboardHeight = innerHeight - (vv?.height || innerHeight);
+      if (
+        keyboardHeight < 60 &&
+        (e.metaKey || e.ctrlKey || e.key.length === 1 || e.key === 'Enter' || e.key === 'Tab')
+      ) {
+        root.dataset.hardwareKeyboard = 'true';
+      }
+    },
+    { signal },
+  );
+}
 function chatViewport() {
   const root = $('#chat-root');
   if (!root) return;
-  const viewport = window.visualViewport;
-  const gap = innerWidth <= 760 ? 0 : 14;
-  // Focusing a control during a resize can scroll the still-tall document.
-  // A negative viewport-relative top is NOT extra layout space: counting it
-  // keeps the old oversized height and strands controls below the new viewport.
-  const top = Math.max(gap, root.getBoundingClientRect().top);
-  root.style.height =
-    Math.max(220, (viewport?.height || innerHeight) + (viewport?.offsetTop || 0) - top - gap) +
-    'px';
+  const v = chatView(),
+    wasAtBottom = !!v.order.length && (v.follow !== false || chatAtBottom()),
+    viewport = window.visualViewport,
+    offsetTop = Math.max(0, viewport?.offsetTop || 0);
+  if (viewport && innerHeight - viewport.height >= 100) {
+    delete root.dataset.hardwareKeyboard;
+  }
+  if (offsetTop > 0 && viewport) {
+    root.style.transform = `translateY(${offsetTop}px)`;
+    root.style.height = `${viewport.height}px`;
+  } else {
+    root.style.removeProperty('transform');
+    if (innerWidth <= 760 && viewport) {
+      root.style.height = `${viewport.height}px`;
+    } else {
+      const gap = innerWidth <= 760 ? 0 : 14;
+      // Focusing a control during a resize can scroll the still-tall document.
+      // A negative viewport-relative top is NOT extra layout space: counting it
+      // keeps the old oversized height and strands controls below the new viewport.
+      const top = Math.max(gap, root.getBoundingClientRect().top);
+      root.style.height = Math.max(220, (viewport?.height || innerHeight) - top - gap) + 'px';
+    }
+  }
   chatResizeComposer();
+  if (wasAtBottom) {
+    const el = $('#chat-scroll');
+    if (el) {
+      if (!chatViewportActive(v) && typeof el.scrollTo === 'function') {
+        el.scrollTo({
+          top: el.scrollHeight,
+          behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        });
+      } else {
+        chatBottom();
+      }
+      if ($('#chat-latest')) $('#chat-latest').hidden = true;
+    }
+  }
 }
 function chatDrawer(open, switching = false) {
   const root = $('#chat-root');
@@ -1305,9 +1368,11 @@ function chatDrawer(open, switching = false) {
     root.classList.toggle('history-collapsed', !!ChatUI.historyCollapsed);
     root.classList.remove('drawer-open');
   } else {
+    if (open && ChatUI.inspector) chatInspector('');
     root.classList.toggle('drawer-open', open);
     $('.chat-main').inert = open;
     if (open) {
+      $('#chat-shade')?.setAttribute('aria-label', '关闭会话历史');
       chatOptions(false);
       $('#chat-new').focus();
     } else if (!switching) $('#chat-history-toggle').focus({ preventScroll: true });
@@ -1571,7 +1636,7 @@ function chatModelPopover() {
     return;
   }
   box.hidden = false;
-  box.innerHTML = `<div class="chat-popover-head"><strong>选择模型</strong><button type="button" id="chat-model-refresh" title="重新读取本机模型" aria-label="刷新模型目录">${chatIcon('refresh')}</button><button type="button" id="chat-popover-close" aria-label="关闭模型选择">${chatIcon('close')}</button></div><input id="chat-model-search" type="search" placeholder="搜索名称、模型 ID 或服务商" aria-label="搜索模型" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-model-results"><div id="chat-model-results" role="listbox" aria-label="模型目录"></div><div class="chat-popover-foot">↑ ↓ 选择 · Enter 确认 · Esc 关闭</div>`;
+  box.innerHTML = `<div class="chat-popover-head"><strong>选择模型</strong><button type="button" id="chat-model-refresh" title="重新读取本机模型" aria-label="刷新模型目录">${chatIcon('refresh')}</button><button type="button" id="chat-popover-close" aria-label="关闭模型选择">${chatIcon('close')}</button></div><input id="chat-model-search" type="search" enterkeyhint="search" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="搜索名称、模型 ID 或服务商" aria-label="搜索模型" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="chat-model-results"><div id="chat-model-results" role="listbox" aria-label="模型目录"></div><div class="chat-popover-foot">↑ ↓ 选择 · Enter 确认 · Esc 关闭</div>`;
   $('#chat-model-picker').setAttribute('aria-expanded', 'true');
   $('#chat-popover-close').onclick = () => chatClosePopover(true);
   $('#chat-model-refresh').onclick = () => chatLoadCatalog(true);
@@ -1924,7 +1989,7 @@ function chatCwdPopover() {
   const box = $('#chat-popover');
   box.hidden = false;
   box.setAttribute('aria-label', '工作目录');
-  box.innerHTML = `<div class="chat-popover-head"><strong>工作目录</strong><button type="button" id="chat-cwd-close" aria-label="关闭工作目录">×</button></div><p class="chat-popover-help">使用项目根目录或项目内子目录，不改变项目授权。不同目录的草稿分别保留。</p><input id="chat-cwd-input" aria-label="项目子目录" aria-describedby="chat-cwd-error" placeholder="例如 src"><p id="chat-cwd-error" role="alert" class="chat-popover-help"></p><button type="button" id="chat-cwd-apply" class="chat-primary-button">应用目录</button>`;
+  box.innerHTML = `<div class="chat-popover-head"><strong>工作目录</strong><button type="button" id="chat-cwd-close" aria-label="关闭工作目录">×</button></div><p class="chat-popover-help">使用项目根目录或项目内子目录，不改变项目授权。不同目录的草稿分别保留。</p><input id="chat-cwd-input" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-label="项目子目录" aria-describedby="chat-cwd-error" placeholder="例如 src"><p id="chat-cwd-error" role="alert" class="chat-popover-help"></p><button type="button" id="chat-cwd-apply" class="chat-primary-button">应用目录</button>`;
   const input = $('#chat-cwd-input');
   input.value = ChatUI.cwd;
   $('#chat-cwd-close').onclick = () => chatClosePopover(true);
@@ -3743,6 +3808,73 @@ async function chatCopyText(text) {
   }
 }
 
+function chatBuildClaudeQuestionField(q) {
+  const field = document.createElement('fieldset'),
+    legend = document.createElement('legend');
+  legend.textContent = q.question;
+  field.append(legend);
+  const other = document.createElement('input');
+  other.placeholder = '其他答案';
+  other.maxLength = 10000;
+  other.setAttribute('aria-label', q.question + ' · 其他答案');
+  if (q.multiSelect) {
+    const list = document.createElement('div'),
+      checkboxes = [];
+    list.className = 'check-list approval-option-list';
+    list.setAttribute('role', 'group');
+    list.setAttribute('aria-label', q.question);
+    for (const o of q.options || []) {
+      const card = document.createElement('label'),
+        checkbox = document.createElement('input'),
+        textWrap = document.createElement('div'),
+        title = document.createElement('strong');
+      card.className = 'approval-option-card';
+      checkbox.type = 'checkbox';
+      checkbox.value = o.label;
+      checkbox.checked = !!(o.selected || o.default);
+      title.textContent = o.label;
+      textWrap.append(title);
+      if (o.description) {
+        const desc = document.createElement('small');
+        desc.textContent = o.description;
+        textWrap.append(desc);
+      }
+      card.append(checkbox, textWrap);
+      list.append(card);
+      checkboxes.push(checkbox);
+    }
+    field.append(list, other);
+    return {
+      field,
+      q,
+      other,
+      getSelected: () =>
+        checkboxes
+          .filter((cb) => cb.checked)
+          .map((cb) => cb.value)
+          .filter(Boolean),
+    };
+  }
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', q.question);
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = '请选择，或填写其他答案';
+  select.append(empty);
+  for (const o of q.options || []) {
+    const option = document.createElement('option');
+    option.value = o.label;
+    option.textContent = o.label + (o.description ? ' — ' + o.description : '');
+    select.append(option);
+  }
+  field.append(select, other);
+  return {
+    field,
+    q,
+    other,
+    getSelected: () => [...select.selectedOptions].map((o) => o.value).filter(Boolean),
+  };
+}
 function chatApproval(item) {
   if (!item.node) return;
   item.node
@@ -3802,7 +3934,12 @@ function chatApproval(item) {
     try {
       const result = await chatAPI(
         'chat_answer',
-        { id: op.id, receipt: op.receipt, request_id: data.request_id, answer: op.value },
+        {
+          id: op.id,
+          receipt: op.receipt,
+          request_id: data.request_id,
+          answer: op.value,
+        },
         op.project,
       );
       if (op.identity !== S.session) return;
@@ -3864,39 +4001,15 @@ function chatApproval(item) {
     button('提交回答', () => input.value);
     button('取消', null);
   } else if (data.method === 'claude/question') {
-    const inputs = [];
-    for (const q of data.details?.questions || []) {
-      const field = document.createElement('fieldset'),
-        legend = document.createElement('legend');
-      legend.textContent = q.question;
-      field.append(legend);
-      const select = document.createElement('select');
-      select.multiple = !!q.multiSelect;
-      select.setAttribute('aria-label', q.question);
-      if (!q.multiSelect) {
-        const empty = document.createElement('option');
-        empty.value = '';
-        empty.textContent = '请选择，或填写其他答案';
-        select.append(empty);
-      }
-      for (const o of q.options || []) {
-        const option = document.createElement('option');
-        option.value = o.label;
-        option.textContent = o.label + (o.description ? ' — ' + o.description : '');
-        select.append(option);
-      }
-      const other = document.createElement('input');
-      other.placeholder = '其他答案';
-      other.maxLength = 10000;
-      other.setAttribute('aria-label', q.question + ' · 其他答案');
-      field.append(select, other);
-      box.append(field);
-      inputs.push({ q, select, other });
-    }
+    const inputs = (data.details?.questions || []).map((q) => {
+      const entry = chatBuildClaudeQuestionField(q);
+      box.append(entry.field);
+      return entry;
+    });
     button('提交回答', () =>
       Object.fromEntries(
-        inputs.map(({ q, select, other }) => {
-          let values = [...select.selectedOptions].map((o) => o.value).filter(Boolean),
+        inputs.map(({ q, getSelected, other }) => {
+          let values = getSelected(),
             custom = other.value.trim();
           if (custom) values = q.multiSelect ? [...values, custom] : [custom];
           if (!values.length) throw new Error('请回答：' + q.question);
@@ -3922,7 +4035,12 @@ function chatApproval(item) {
         }
       } else {
         input = document.createElement('input');
-        if (q.isSecret) input.type = 'password';
+        if (q.isSecret) {
+          input.type = 'password';
+          input.setAttribute('autocapitalize', 'none');
+          input.setAttribute('autocorrect', 'off');
+          input.spellcheck = false;
+        }
       }
       input.setAttribute('aria-label', label.textContent);
       label.append(input);
@@ -3936,9 +4054,12 @@ function chatApproval(item) {
       const value = typeof choice === 'string' ? choice : (choice.value ?? choice.id ?? choice);
       const label =
         typeof choice === 'string'
-          ? { accept: '允许本次', acceptForSession: '本会话允许', decline: '拒绝', cancel: '取消' }[
-              choice
-            ] || choice
+          ? {
+              accept: '允许本次',
+              acceptForSession: '本会话允许',
+              decline: '拒绝',
+              cancel: '取消',
+            }[choice] || choice
           : choice.label || JSON.stringify(value);
       button(label, value);
     }
@@ -4270,6 +4391,131 @@ function chatFind() {
   $('#chat-find-count').textContent = v.match + 1 + ' / ' + keys.length;
 }
 
+const CHAT_HASH_SLICE_BYTES = 512 * 1024;
+const CHAT_BASE64_SUBCHUNK_BYTES = 8 * 1024;
+const CHAT_SHA256_K = new Int32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function chatSha256Block(H, W, block, off) {
+  for (let i = 0; i < 16; i++) {
+    const j = off + i * 4;
+    W[i] = (block[j] << 24) | (block[j + 1] << 16) | (block[j + 2] << 8) | block[j + 3] | 0;
+  }
+  for (let i = 16; i < 64; i++) {
+    const x = W[i - 15],
+      y = W[i - 2];
+    const s0 = (((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3)) | 0;
+    const s1 = (((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10)) | 0;
+    W[i] = (W[i - 16] + s0 + W[i - 7] + s1) | 0;
+  }
+  let [a, b, c, d, e, f, g, h] = H;
+  for (let i = 0; i < 64; i++) {
+    const s1 = (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) | 0;
+    const ch = ((e & f) ^ (~e & g)) | 0;
+    const t1 = (h + s1 + ch + CHAT_SHA256_K[i] + W[i]) | 0;
+    const s0 = (((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) | 0;
+    const maj = ((a & b) ^ (a & c) ^ (b & c)) | 0;
+    const t2 = (s0 + maj) | 0;
+    h = g;
+    g = f;
+    f = e;
+    e = (d + t1) | 0;
+    d = c;
+    c = b;
+    b = a;
+    a = (t1 + t2) | 0;
+  }
+  H[0] = (H[0] + a) | 0;
+  H[1] = (H[1] + b) | 0;
+  H[2] = (H[2] + c) | 0;
+  H[3] = (H[3] + d) | 0;
+  H[4] = (H[4] + e) | 0;
+  H[5] = (H[5] + f) | 0;
+  H[6] = (H[6] + g) | 0;
+  H[7] = (H[7] + h) | 0;
+}
+
+function chatCreateSha256() {
+  const H = new Int32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const W = new Int32Array(64);
+  const tail = new Uint8Array(64);
+  let tailLen = 0,
+    totalBytes = 0;
+  return {
+    update(chunk) {
+      totalBytes += chunk.length;
+      let pos = 0;
+      if (tailLen > 0) {
+        const take = Math.min(64 - tailLen, chunk.length);
+        tail.set(chunk.subarray(0, take), tailLen);
+        tailLen += take;
+        pos += take;
+        if (tailLen === 64) {
+          chatSha256Block(H, W, tail, 0);
+          tailLen = 0;
+        }
+      }
+      while (pos + 64 <= chunk.length) {
+        chatSha256Block(H, W, chunk, pos);
+        pos += 64;
+      }
+      if (pos < chunk.length) {
+        tailLen = chunk.length - pos;
+        tail.set(chunk.subarray(pos), 0);
+      }
+    },
+    digest() {
+      tail[tailLen++] = 0x80;
+      if (tailLen > 56) {
+        tail.fill(0, tailLen, 64);
+        chatSha256Block(H, W, tail, 0);
+        tailLen = 0;
+      }
+      tail.fill(0, tailLen, 56);
+      const view = new DataView(tail.buffer);
+      view.setUint32(56, Math.floor((totalBytes * 8) / 0x100000000) >>> 0, false);
+      view.setUint32(60, (totalBytes * 8) >>> 0, false);
+      chatSha256Block(H, W, tail, 0);
+      return Array.from(H, (v) => (v >>> 0).toString(16).padStart(8, '0')).join('');
+    },
+  };
+}
+
+function chatBytesToBase64(bytes) {
+  const parts = [];
+  for (let i = 0; i < bytes.length; i += CHAT_BASE64_SUBCHUNK_BYTES) {
+    parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHAT_BASE64_SUBCHUNK_BYTES)));
+  }
+  return btoa(parts.join(''));
+}
+
+async function chatStreamFileSha256(file, valid) {
+  const totalSize = Number(file.size || 0);
+  if (totalSize <= CHAT_HASH_SLICE_BYTES) {
+    const slice = new Uint8Array(await file.slice(0, totalSize).arrayBuffer());
+    if (!valid()) return null;
+    return nativeSha256(slice);
+  }
+  const hasher = chatCreateSha256();
+  for (let offset = 0; offset < totalSize; offset += CHAT_HASH_SLICE_BYTES) {
+    if (!valid()) return null;
+    const end = Math.min(totalSize, offset + CHAT_HASH_SLICE_BYTES);
+    const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+    hasher.update(chunk);
+  }
+  return hasher.digest();
+}
+
 function chatFileLocked(view, file) {
   return !!view.busy || !!view.pending?.attachments?.includes(file?.file);
 }
@@ -4279,7 +4525,7 @@ function chatFiles() {
   holder.replaceChildren();
   for (const f of chatView().files) {
     const chip = document.createElement('span');
-    chip.className = 'chat-file';
+    chip.className = 'chat-file' + (f.error ? ' is-error' : '');
     if (f.preview) {
       const image = document.createElement('img');
       image.src = f.preview;
@@ -4314,6 +4560,14 @@ function chatFiles() {
       chip.append(retry);
     }
     chip.append(remove);
+    if (f.errorMessage) {
+      const errLine = document.createElement('small');
+      errLine.className = 'chat-file-error';
+      errLine.setAttribute('role', 'alert');
+      errLine.textContent = f.errorMessage;
+      errLine.title = f.errorMessage;
+      chip.append(errLine);
+    }
     holder.append(chip);
   }
   chatSyncChrome();
@@ -4358,6 +4612,19 @@ async function chatUpload(files) {
     if (!entry.removed) await chatUploadEntry(entry, v, project, identity);
   }
 }
+async function chatUploadChunkWithRetry(payload, project, valid) {
+  let error;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!valid()) return null;
+    try {
+      return await chatAPI('upload_chunk', payload, project);
+    } catch (e) {
+      error = e;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+    }
+  }
+  throw error;
+}
 async function chatUploadEntry(
   entry,
   v = chatView(),
@@ -4384,52 +4651,45 @@ async function chatUploadEntry(
   entry.errorMessage = '';
   if (visible()) chatFiles();
   try {
-    if (!file.size || file.size > CHAT_ATTACHMENT_MAX_BYTES)
+    const totalSize = Number(file.size || 0);
+    if (!totalSize || totalSize > CHAT_ATTACHMENT_MAX_BYTES)
       throw new Error('每个附件须为 1 字节–20 MiB');
-    const raw = new Uint8Array(await file.arrayBuffer()),
-      sha256 = await nativeSha256(raw);
-    if (!valid()) return;
+    const sha256 = await chatStreamFileSha256(file, valid);
+    if (!sha256 || !valid()) return;
     const catalog = await chatAPI('upload_list', {}, project);
     if (!valid()) return;
     const existing = (catalog.files || []).find(
-        (x) => x.name === file.name && x.size === raw.length && x.sha256 === sha256,
+        (x) => x.name === file.name && x.size === totalSize && x.sha256 === sha256,
       ),
       id = existing?.file || entry.file || uid();
     entry.file = id;
     let reply = await chatAPI(
       'upload_begin',
-      { file: id, name: file.name, size: raw.length, sha256 },
+      { file: id, name: file.name, size: totalSize, sha256 },
       project,
     );
-    if (!Number.isInteger(reply.received) || reply.received < 0 || reply.received > raw.length)
+    if (!Number.isInteger(reply.received) || reply.received < 0 || reply.received > totalSize)
       throw new Error('附件进度无效，请重试。');
-    while (reply.received < raw.length) {
+    while (reply.received < totalSize) {
       if (!valid()) return;
       const offset = reply.received,
-        part = raw.slice(offset, offset + CHAT_UPLOAD_CHUNK_BYTES);
-      let binary = '';
-      for (const byte of part) binary += String.fromCharCode(byte);
-      const payload = { file: id, offset, data: btoa(binary), sha256: await nativeSha256(part) };
-      let error;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (!valid()) return;
-        try {
-          reply = await chatAPI('upload_chunk', payload, project);
-          error = null;
-          break;
-        } catch (e) {
-          error = e;
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
-        }
-      }
-      if (error) throw error;
+        end = Math.min(totalSize, offset + CHAT_UPLOAD_CHUNK_BYTES),
+        part = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      const payload = {
+        file: id,
+        offset,
+        data: chatBytesToBase64(part),
+        sha256: await nativeSha256(part),
+      };
+      reply = await chatUploadChunkWithRetry(payload, project, valid);
+      if (!reply) return;
       if (
         !Number.isInteger(reply.received) ||
         reply.received <= offset ||
-        reply.received > raw.length
+        reply.received > totalSize
       )
         throw new Error('附件进度未得到有效确认，请重试原附件。');
-      entry.progress = Math.round((reply.received / raw.length) * 100);
+      entry.progress = Math.round((reply.received / totalSize) * 100);
       if (visible()) chatFiles();
     }
     if (!valid()) return;

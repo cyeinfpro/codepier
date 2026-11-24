@@ -9,7 +9,12 @@ window.CodePierIdentity = (() => {
     invites = [],
     users = [];
   let switchSequence = 0;
-  const levels = { owner: '主理人', admin: '管理员', member: '成员', guest: '访客' };
+  const levels = {
+    owner: '主理人',
+    admin: '管理员',
+    member: '成员',
+    guest: '访客',
+  };
   const check = (name, label, value = false) =>
     `<label class="check"><input type="checkbox" name="${name}" ${value ? 'checked' : ''}>${esc(label)}</label>`;
   const field = (name, label, value = '', extra = '') =>
@@ -70,7 +75,11 @@ window.CodePierIdentity = (() => {
       me.spaces[0];
     S.space_id = selected?.id || null;
     if (S.space_id) sessionValue('codepier-space:' + me.id, S.space_id);
-    S.session = { ...S.session, instance_admin: me.instance_admin, spaces: me.spaces };
+    S.session = {
+      ...S.session,
+      instance_admin: me.instance_admin,
+      spaces: me.spaces,
+    };
     if (!selected) S.page = 'identity';
   }
   function selector() {
@@ -314,7 +323,7 @@ window.CodePierIdentity = (() => {
         `<button class="btn" data-iam="sync">校验群组权限</button><button class="btn primary" data-iam="new-provider">添加 OIDC 提供者</button>`,
       ) +
       `<section class="panel"><div class="panel-head"><h2>身份提供者</h2></div><div class="panel-body">${providers.map((p) => `<div class="grant-row"><div><h3>${esc(p.label)} · ${p.enabled ? '已启用' : '已停用'}</h3><p class="iam-wrap">${esc(p.issuer)}</p><small>加入策略：${esc(p.admission)} · 权限校验窗口 ${p.freshness_seconds} 秒</small></div><div class="actions"><button class="btn small" data-iam-provider="${esc(p.id)}">编辑</button><button class="btn small" data-iam-check="${esc(p.id)}">测试发现</button><button class="btn small" data-iam-mappings="${esc(p.id)}">群组映射</button></div></div>`).join('') || empty('没有 OIDC 提供者。本地恢复登录继续有效。')}</div></section>` +
-      `<section class="panel"><div class="panel-head"><h2>用户</h2></div><div class="panel-body">${users.map((u) => `<div class="grant-row"><div><strong>${esc(u.display_name || u.username)}</strong><p>${u.active ? '有效' : '已停用'} · ${u.instance_admin ? '实例管理员' : '普通用户'} · ${u.local_login ? '本地登录' : '外部登录'}</p><small class="mono">${esc(u.id)}</small></div><button class="btn small" data-iam-user="${esc(u.id)}">管理</button></div>`).join('')}</div></section>`
+      `<section class="panel"><div class="panel-head"><h2>用户</h2></div><div class="panel-body">${users.map((u) => `<div class="grant-row"><div><strong>${esc(u.display_name || u.username)}</strong><p>${u.active ? '有效' : '已停用'} · ${u.instance_admin ? '实例管理员' : '普通用户'} · ${u.local_login ? '本地登录' : '外部登录'}</p><small class="mono iam-wrap">${esc(u.id)}</small></div><button class="btn small" data-iam-user="${esc(u.id)}">管理</button></div>`).join('')}</div></section>`
     );
   }
   function memberEdit(userId) {
@@ -335,7 +344,9 @@ window.CodePierIdentity = (() => {
             expected_version: old?.version || 0,
           }),
         }),
-      { confirm: () => '确认更新此人的人工成员来源？其他来源保留；已运行的操作不会被自动终止。' },
+      {
+        confirm: () => '确认更新此人的人工成员来源？其他来源保留；已运行的操作不会被自动终止。',
+      },
     );
   }
   function assignEdit(roleId = '', userId = '') {
@@ -494,13 +505,24 @@ window.CodePierIdentity = (() => {
     const body =
       '<div class="form-sections"><section class="form-section"><h3>连接信息</h3><p class="form-note">先填写身份提供者的基本连接信息。</p><div class="form-grid">' +
       field('label', '显示名称', p?.label || '', 'required maxlength="80"') +
-      field('issuer', '精确 Issuer', p?.issuer || '', 'required type="url"') +
-      field('client_id', 'Client ID', p?.client_id || '', 'required') +
+      field(
+        'issuer',
+        '精确 Issuer',
+        p?.issuer || '',
+        'required type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false"',
+      ) +
+      field(
+        'client_id',
+        'Client ID',
+        p?.client_id || '',
+        'required autocapitalize="none" autocorrect="off" spellcheck="false"',
+      ) +
       field(
         'client_secret',
         p ? 'Client secret（留空保留）' : 'Client secret',
         '',
-        'type="password" autocomplete="new-password" ' + (p ? '' : 'required'),
+        'type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" ' +
+          (p ? '' : 'required'),
       ) +
       '</div></section><section class="form-section"><h3>登录准入与群组</h3><div class="form-grid">' +
       select(
@@ -512,13 +534,23 @@ window.CodePierIdentity = (() => {
         ],
         p?.admission || 'closed',
       ) +
-      field('required_group', '允许登录的群组（可空）', p?.required_group || '') +
-      field('group_claim', '群组 claim', p?.group_claim || 'groups', 'required') +
+      field(
+        'required_group',
+        '允许登录的群组（可空）',
+        p?.required_group || '',
+        'autocapitalize="none" autocorrect="off" spellcheck="false"',
+      ) +
+      field(
+        'group_claim',
+        '群组 claim',
+        p?.group_claim || 'groups',
+        'required autocapitalize="none" autocorrect="off" spellcheck="false"',
+      ) +
       field(
         'freshness_seconds',
         '权限校验最大有效期（秒）',
         p?.freshness_seconds || 900,
-        'type="number" min="60" max="86400" required',
+        'type="number" inputmode="numeric" min="60" max="86400" required',
       ) +
       '</div>' +
       notice(
@@ -530,13 +562,19 @@ window.CodePierIdentity = (() => {
         'discovery_url',
         'Discovery URL（留空使用默认）',
         p?.discovery_url || '',
-        'type="url"',
+        'type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false"',
       ) +
-      field('scopes', 'OIDC scopes', p?.scopes || 'openid profile', 'required') +
+      field(
+        'scopes',
+        'OIDC scopes',
+        p?.scopes || 'openid profile',
+        'required autocapitalize="none" autocorrect="off" spellcheck="false"',
+      ) +
       field(
         'endpoint_origins',
         '额外批准的端点来源（逗号分隔）',
         p?.endpoint_origins?.join(', ') || '',
+        'autocapitalize="none" autocorrect="off" spellcheck="false"',
       ) +
       '</div></details><section class="form-section form-review"><h3>启用与安全检查</h3>' +
       check('enabled', '启用外部登录', !!p?.enabled) +
@@ -591,7 +629,12 @@ window.CodePierIdentity = (() => {
           true,
         ) +
         '<div class="form-grid">' +
-        field('group_name', '精确群组名称', '', 'required') +
+        field(
+          'group_name',
+          '精确群组名称',
+          '',
+          'required autocapitalize="none" autocorrect="off" spellcheck="false"',
+        ) +
         select(
           'space_id',
           '团队空间',
@@ -643,7 +686,9 @@ window.CodePierIdentity = (() => {
       (button) =>
         (button.onclick = () =>
           busy(button, async () => {
-            await api('/api/iam/oidc/mappings/' + button.dataset.deleteMap, { method: 'DELETE' });
+            await api('/api/iam/oidc/mappings/' + button.dataset.deleteMap, {
+              method: 'DELETE',
+            });
             if (login !== S.session || space !== S.space_id || !dialog.isConnected) return;
             closeModal(dialog);
             await mappingEditor(id);
@@ -683,7 +728,9 @@ window.CodePierIdentity = (() => {
       (x) =>
         (x.onclick = () =>
           busy(x, async () => {
-            await api('/api/iam/sessions/' + x.dataset.iamSession, { method: 'DELETE' });
+            await api('/api/iam/sessions/' + x.dataset.iamSession, {
+              method: 'DELETE',
+            });
             const checkSession = await api('/api/session');
             if (!checkSession.authenticated) endSession(true);
             else await renderPage(false);
@@ -834,9 +881,16 @@ window.CodePierIdentity = (() => {
               case 'accept-invite':
                 form(
                   '接受团队邀请',
-                  field('invitation', '邀请凭据', '', 'required autocomplete="off"'),
+                  field(
+                    'invitation',
+                    '邀请凭据',
+                    '',
+                    'required autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"',
+                  ),
                   (f) =>
-                    post('/api/iam/invites/accept', { invitation: f.elements.invitation.value }),
+                    post('/api/iam/invites/accept', {
+                      invitation: f.elements.invitation.value,
+                    }),
                   {
                     submit: '接受并进入团队',
                     done: async (result) => {
@@ -863,7 +917,12 @@ window.CodePierIdentity = (() => {
                     ],
                     'member',
                   ) +
-                    field('days', '有效天数', 7, 'type="number" min="1" max="30" required') +
+                    field(
+                      'days',
+                      '有效天数',
+                      7,
+                      'type="number" inputmode="numeric" min="1" max="30" required',
+                    ) +
                     notice(
                       '邀请不会创建登录账号。请先让对方成功登录 CodePier；无法登录时需实例管理员配置准入。成员/访客接受后仍待分配项目角色，邀请不会自动授权项目、工具或助手。选择空间管理员会授予该空间管理及项目权限。',
                     ) +

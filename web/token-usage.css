@@ -399,3 +399,61 @@
     min-block-size: 3.2em;
   }
 }
+
+/* SITE-06: Compact narrow-screen usage summary strip so #overview reaches projects within 240px. */
+@media (max-width: 760px) {
+  .overview-summary [data-token-dashboard] {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-head {
+    gap: 6px 8px;
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-head h3 {
+    font-size: var(--ui-text-sm);
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-freshness {
+    flex-basis: auto;
+    margin-left: auto;
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin: 6px 0 4px;
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-metric {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    padding: 6px 10px;
+    min-width: 0;
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-metric > span {
+    min-block-size: 0;
+    font-size: var(--ui-text-xs);
+  }
+  .overview-summary [data-token-dashboard] .token-dashboard-metric strong {
+    margin: 0;
+    font-size: var(--ui-text-md);
+  }
+  .overview-summary [data-token-dashboard][data-details-open='false'] > .token-dashboard-note,
+  .overview-summary [data-token-dashboard][data-details-open='false'] > .token-dashboard-limit {
+    display: none;
+  }
+  .overview-summary [data-token-dashboard] > [data-token-filters] {
+    margin-top: 4px;
+  }
+  .overview-summary [data-token-dashboard] > [data-token-filters] > summary {
+    padding-block: 6px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+  }
+  [data-token-dashboard] > .token-dashboard-status:empty {
+    display: none;
+    min-block-size: 0;
+  }
+}

@@ -63,7 +63,47 @@ window.CodePierRoles = (() => {
       allow_tasks: false,
     },
   ) {
-    return `<fieldset data-device-rule class="role-rule"><legend>设备与项目创建委派</legend><div class="actions"><button type="button" class="btn ghost small" data-remove-rule>移除此规则</button></div><div class="check-list">${['devices.read', 'projects.create'].map((a) => `<label class="check"><input type="checkbox" name="action" value="${a}" ${rule.actions.includes(a) ? 'checked' : ''} ${a === 'devices.read' ? 'disabled' : ''}>${labels[a]}</label>`).join('')}</div>${choices(S.devices, rule.devices, 'device')}<label class="field">新项目权限上限<select name="max_project_mode"><option value="read" ${rule.max_project_mode === 'read' ? 'selected' : ''}>只读</option><option value="write" ${rule.max_project_mode === 'write' ? 'selected' : ''}>可写</option></select></label><label class="check"><input type="checkbox" name="allow_tasks" ${rule.allow_tasks ? 'checked' : ''}>允许新项目启用任务（仍需 Agent 允许）</label><label class="field">可映射目录上限（每行一个绝对路径）<textarea name="root_prefixes" rows="2" placeholder="留空表示仍按该设备的 Agent 本机允许目录检查">${esc(rule.root_prefixes.join('\n'))}</textarea></label><p class="form-note">仅创建新映射，不创建磁盘目录、不改已有映射、不改角色、不扩大 Agent 权限。要让新项目可使用，另加「本角色创建的项目」或「全部项目」规则。</p></fieldset>`;
+    return `<fieldset data-device-rule class="role-rule"><legend>设备与项目创建委派</legend><div class="actions"><button type="button" class="btn ghost small" data-remove-rule>移除此规则</button></div><div class="check-list">${['devices.read', 'projects.create'].map((a) => `<label class="check"><input type="checkbox" name="action" value="${a}" ${rule.actions.includes(a) ? 'checked' : ''} ${a === 'devices.read' ? 'disabled' : ''}>${labels[a]}</label>`).join('')}</div>${choices(S.devices, rule.devices, 'device')}<label class="field">新项目权限上限<select name="max_project_mode"><option value="read" ${rule.max_project_mode === 'read' ? 'selected' : ''}>只读</option><option value="write" ${rule.max_project_mode === 'write' ? 'selected' : ''}>可写</option></select></label><label class="check"><input type="checkbox" name="allow_tasks" ${rule.allow_tasks ? 'checked' : ''}>允许新项目启用任务（仍需 Agent 允许）</label><label class="field">可映射目录上限（每行一个绝对路径）<textarea name="root_prefixes" rows="2" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="留空表示仍按该设备的 Agent 本机允许目录检查">${esc(rule.root_prefixes.join('\n'))}</textarea></label><p class="form-note">仅创建新映射，不创建磁盘目录、不改已有映射、不改角色、不扩大 Agent 权限。要让新项目可使用，另加「本角色创建的项目」或「全部项目」规则。</p></fieldset>`;
+  }
+  function syncMobileRuleBar(dialog) {
+    const listNode = dialog.querySelector('.policy-rule-list');
+    if (!listNode) return;
+    let bar = dialog.querySelector('.policy-rule-mobile-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'policy-rule-mobile-bar';
+      listNode.before(bar);
+    }
+    const buttons = $$('button', listNode);
+    if (!buttons.length) {
+      bar.hidden = true;
+      bar.replaceChildren();
+      return;
+    }
+    bar.hidden = false;
+    const activeIdx = Math.max(
+      0,
+      buttons.findIndex((b) => b.getAttribute('aria-pressed') === 'true'),
+    );
+    bar.innerHTML =
+      `<span class="policy-rule-count">共 ${buttons.length} 条规则 · 当前第 ${activeIdx + 1} 条</span>` +
+      (buttons.length > 1
+        ? `<select class="policy-rule-jumper" aria-label="快速切换规则">${buttons.map((b, i) => `<option value="${i}" ${i === activeIdx ? 'selected' : ''}>${i + 1} · ${esc(b.textContent.trim())}</option>`).join('')}</select>`
+        : '');
+    const jumper = bar.querySelector('.policy-rule-jumper');
+    if (jumper) {
+      jumper.onchange = () => {
+        const target = buttons[Number(jumper.value)];
+        target?.click();
+        target?.scrollIntoView?.({ block: 'nearest' });
+      };
+    }
+    if (!listNode.dataset.mobileRuleWired) {
+      listNode.dataset.mobileRuleWired = '1';
+      listNode.addEventListener('click', (ev) => {
+        if (ev.target.closest('button')) syncMobileRuleBar(dialog);
+      });
+    }
   }
   const selected = (box, name) => $$(`input[name="${name}"]:checked`, box).map((x) => x.value);
   async function edit(id = null) {
@@ -95,6 +135,7 @@ window.CodePierRoles = (() => {
           };
         });
         uiPolicyEditor(dialog, preferLast);
+        syncMobileRuleBar(dialog);
       };
       $('#role-add-project-rule', dialog).onclick = () => {
         if ($$('[data-project-rule]', dialog).length >= 32) return;

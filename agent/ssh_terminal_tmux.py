@@ -272,9 +272,12 @@ class TmuxController:
         self.transport, self.config = transport, config
         self.reference = TmuxReference.for_session(session_id)
         self._binary = None
+        self._version = None
 
     async def probe(self):
         capability, self._binary = await _probe_tmux(self.transport)
+        version = capability.get("version")
+        self._version = tuple(map(int, version.split("."))) if version else None
         return capability
 
     def _prefix(self):
@@ -308,11 +311,21 @@ class TmuxController:
     async def create(self, cols, rows):
         if await self.exists():
             raise SSHTransportError("REMOTE_SESSION_EXISTS", "该持久会话已经存在，请恢复原会话")
+        window_sizing = (
+            "set-window-option -g aggressive-resize on"
+            if self._version is not None and self._version < (2, 9)
+            else "set-window-option -g window-size latest"
+        )
         command = (
             self._prefix()
             + " start-server"
+            + " \\; set-option -sg escape-time 10"
             + " \\; set-option -g history-limit "
             + str(self.config.tmux_history_lines)
+            + " \\; set-option -g status off"
+            + " \\; set-option -g mouse on"
+            + " \\; "
+            + window_sizing
             + " \\; new-session -d -s "
             + shlex.quote(self.reference.session)
             + f" -x {int(cols)} -y {int(rows)}"

@@ -7,6 +7,7 @@ const WIDTH_RESET_PX = 24;
 const KEYBOARD_MIN_PX = 80;
 const KEYBOARD_HEIGHT_FRACTION = 0.12;
 const KEYBOARD_EXIT_FRACTION = 0.55;
+const ADDRESS_BAR_DEADBAND_PX = 14;
 
 export function computeTerminalViewport(
   {
@@ -70,11 +71,33 @@ export function computeTerminalViewport(
     dockRect.bottom > dockRect.top
   )
     bottom = Math.min(bottom, dockRect.top);
+  const rawAvailableHeight = Math.max(0, Math.floor(bottom - top - nonNegative(gap)));
+  const heightDelta =
+    stable && Number.isFinite(previous?.availableHeight)
+      ? Math.abs(rawAvailableHeight - previous.availableHeight)
+      : 0;
+  const keyboardTransition =
+    !!keyboardEligible &&
+    stable &&
+    (previous.keyboardOpen !== keyboardOpen || heightDelta >= KEYBOARD_MIN_PX);
+  const suppressJitter =
+    !!keyboardEligible &&
+    stable &&
+    !keyboardTransition &&
+    previous.expanded === expanded &&
+    Math.abs(width - finite(previous.viewportWidth, width)) < 1 &&
+    rawAvailableHeight > 0 &&
+    previous.availableHeight > 0 &&
+    heightDelta > 0 &&
+    heightDelta < ADDRESS_BAR_DEADBAND_PX;
   return {
-    availableHeight: Math.max(0, Math.floor(bottom - top - nonNegative(gap))),
+    availableHeight: suppressJitter ? previous.availableHeight : rawAvailableHeight,
     keyboardOpen,
+    keyboardTransition,
     baselineHeight,
     screenWidth,
+    viewportWidth: width,
+    expanded,
     orientationKey,
     zoomed,
   };
