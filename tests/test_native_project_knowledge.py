@@ -274,7 +274,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from agent import chat_worker, chat_reviews
 # The unchanged review subsystem is independently covered by its own tests.
-chat_reviews.TurnReviews = lambda *_: SimpleNamespace(begin=lambda *_: None, finish=lambda *_: None)
+chat_reviews.TurnReviews = lambda *_, flags=None: SimpleNamespace(begin=lambda *_: None, finish=lambda *_: None)
 def load(engine, project, **args):
     assert project['mode'] == 'read' and not project['allow_tasks']
     with (Path(project['root']) / 'lookups.jsonl').open('a') as out:

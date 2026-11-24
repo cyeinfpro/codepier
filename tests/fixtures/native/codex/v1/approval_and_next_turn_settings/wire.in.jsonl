@@ -1,0 +1,14 @@
+{"op": "start"}
+{"op": "wire", "frame": {"id": "codepier-1", "result": {}}}
+{"op": "wire", "frame": {"id": "codepier-2", "result": {"thread": {"id": "thread-1"}}}}
+{"op": "wire", "frame": {"id": "codepier-3", "result": {"data": [{"id": "codex-default", "model": "codex-default", "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "high"}]}]}}}
+{"op": "wire", "frame": {"id": "codepier-4", "result": {"data": []}}}
+{"op": "wire", "frame": {"id": "codepier-5", "result": {"config": {"model": "codex-default", "model_reasoning_effort": "medium"}}}}
+{"op": "settings", "receipt": "22222222222222222222222222222222", "payload": {"model": "codex-default", "effort": "high"}}
+{"op": "prompt", "receipt": "33333333333333333333333333333333", "payload": {"text": "Run check"}}
+{"op": "wire", "frame": {"id": "codepier-6", "result": {"turn": {"id": "turn-1"}}}}
+{"op": "wire", "frame": {"id": "srv-1", "method": "item/commandExecution/requestApproval", "params": {"command": "pytest", "availableDecisions": ["accept", "decline"]}}}
+{"op": "answer", "request_id": "srv-1", "answer": "accept", "run_receipt": "33333333333333333333333333333333"}
+{"op": "wire", "frame": {"method": "item/agentMessage/delta", "params": {"itemId": "item-1", "delta": "Passed"}}}
+{"op": "wire", "frame": {"method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "item-1", "text": "Passed"}}}}
+{"op": "wire", "frame": {"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}}}

@@ -1,0 +1,14 @@
+{"op": "start"}
+{"op": "wire", "frame": {"type": "response", "id": "codepier-1", "success": true, "data": {"model": {"provider": "pi", "id": "pi-default"}, "thinkingLevel": "medium"}}}
+{"op": "wire", "frame": {"type": "response", "id": "codepier-2", "success": true, "data": {"models": [{"provider": "pi", "id": "pi-default", "name": "Pi Default"}]}}}
+{"op": "wire", "frame": {"type": "response", "id": "codepier-3", "success": true, "data": {"levels": ["off", "low", "medium", "high"]}}}
+{"op": "wire", "frame": {"type": "response", "id": "codepier-4", "success": true, "data": {"commands": []}}}
+{"op": "prompt", "receipt": "11111111111111111111111111111111", "payload": {"text": "Explain helper"}}
+{"op": "wire", "frame": {"type": "response", "id": "codepier-5", "success": true, "data": {}}}
+{"op": "wire", "frame": {"type": "message_start", "message": {"role": "assistant"}}}
+{"op": "wire", "frame": {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "Hello "}}}
+{"op": "wire", "frame": {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "world"}}}
+{"op": "wire", "frame": {"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "read_file", "args": {"path": "app.py"}}}
+{"op": "wire", "frame": {"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "read_file", "isError": false, "result": {"ok": true}}}
+{"op": "wire", "frame": {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello world"}], "stopReason": "stop"}}}
+{"op": "wire", "frame": {"type": "agent_settled"}}

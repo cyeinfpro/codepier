@@ -48,6 +48,7 @@ TEXT_SUFFIXES = {
     ".css",
     ".html",
     ".json",
+    ".jsonl",
     ".md",
     ".txt",
     ".sh",

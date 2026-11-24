@@ -34,7 +34,102 @@ const ChatUI = {
   rows: [],
   connection: 'idle',
   focus: false,
+  v2Cache:
+    typeof CP !== 'undefined' && CP.nativeCache?.NativeSnapshotCache
+      ? new CP.nativeCache.NativeSnapshotCache()
+      : null,
+  v2Capabilities: null,
+  v2CapabilitiesPromise: null,
+  v2ScopeKeys: new Map(),
+  v2ProjectMappings: new Map(),
+  v2ActiveScope: null,
 };
+function chatV2Cache() {
+  if (!ChatUI.v2Cache && typeof CP !== 'undefined' && CP.nativeCache?.NativeSnapshotCache) {
+    ChatUI.v2Cache = new CP.nativeCache.NativeSnapshotCache();
+  }
+  return ChatUI.v2Cache;
+}
+function chatV2Enabled(flag = 'native_snapshot_v2_read') {
+  return (
+    typeof CP !== 'undefined' &&
+    !!CP.nativeState &&
+    !!CP.nativeRuntime &&
+    ChatUI.v2Capabilities?.native_view_v2 === true &&
+    ChatUI.v2Capabilities?.flags?.[flag] === true
+  );
+}
+function chatV2MappingSignature(projectId = ChatUI.project) {
+  const project = (typeof S !== 'undefined' && S.projects ? S.projects : []).find(
+    (p) => p.id === projectId,
+  );
+  const space = typeof S !== 'undefined' ? S.space_id || '' : '';
+  const user = typeof S !== 'undefined' ? S.session?.user_id || S.session?.username || '' : '';
+  return {
+    projectId: projectId || '',
+    root: project?.root || '',
+    deviceId: project?.device_id || '',
+    key: `${space}::${user}::${projectId || ''}::${project?.device_id || ''}::${project?.root || ''}`,
+  };
+}
+function chatInvalidateProjectV2(projectId) {
+  if (!projectId) return;
+  const cache = chatV2Cache();
+  const prefix = `::${projectId}::`;
+  for (const [mKey, scopeKey] of [...ChatUI.v2ScopeKeys.entries()]) {
+    if (mKey.includes(prefix)) {
+      cache?.invalidateScope(scopeKey);
+      ChatUI.v2ScopeKeys.delete(mKey);
+    }
+  }
+  for (const [viewKey, view] of ChatUI.views.entries()) {
+    if (!viewKey.startsWith(projectId + '\n')) continue;
+    view.v2Scope?.stopNative?.();
+    view.v2OutputSubscriptions?.closeAll?.();
+    view.v2Window?.observer?.disconnect?.();
+    view.v2State = null;
+    view.v2Scope = null;
+    view.v2Window = null;
+    view.v2Halted = null;
+    view.v2ProjectionState = '';
+    view.v2DirtyKeys?.clear();
+    view.v2StructureDirty = false;
+  }
+}
+function chatCheckProjectMappings() {
+  if (typeof S === 'undefined' || !Array.isArray(S.projects)) return;
+  for (const p of S.projects) {
+    const prev = ChatUI.v2ProjectMappings.get(p.id);
+    const next = { root: p.root || '', device_id: p.device_id || '' };
+    if (prev && (prev.root !== next.root || prev.device_id !== next.device_id)) {
+      chatInvalidateProjectV2(p.id);
+    }
+    ChatUI.v2ProjectMappings.set(p.id, next);
+  }
+}
+function chatClearV2Scopes(invalidateCache = false) {
+  const activeScope = ChatUI.v2ActiveScope;
+  ChatUI.v2ActiveScope = null;
+  activeScope?.stopNative?.();
+  for (const v of ChatUI.views.values()) {
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    if (invalidateCache) {
+      v.v2State = null;
+      v.v2Scope = null;
+      v.v2Window = null;
+      v.v2Halted = null;
+    }
+  }
+  if (invalidateCache) {
+    chatV2Cache()?.invalidateAll();
+    ChatUI.v2ScopeKeys.clear();
+    ChatUI.v2ProjectMappings.clear();
+    ChatUI.v2Capabilities = null;
+    ChatUI.v2CapabilitiesPromise = null;
+  }
+}
 const chatLabels = {
   off: '关闭',
   none: '不启用',
@@ -103,10 +198,26 @@ function chatView() {
       stats: null,
       commands: null,
       mode: 'followup',
+      selectionMode: 'inherit_at_dispatch',
       search: '',
       match: 0,
       queue: [],
       sessionStatus: ChatUI.selected?.status || 'new',
+      v2State: null,
+      v2Scope: null,
+      v2DirtyKeys: new Set(),
+      v2StructureDirty: false,
+      v2Window: null,
+      v2OutputSubscriptions: null,
+      v2ProjectionState: '',
+      v2Halted: null,
+      v2HistoryBusy: false,
+      v2BodyRequests: new Map(),
+      v2SettingsGeneration: 0,
+      v2Control: null,
+      v2Sync: null,
+      v2ActionAvailability: null,
+      structureDirty: false,
     });
   return ChatUI.views.get(key);
 }
@@ -186,6 +297,7 @@ function chatDetach(clear = false) {
     cancelAnimationFrame(c.frame);
     c.frame = 0;
     c.dirty.clear();
+    chatClearV2Scopes(clear);
     document.body.classList.remove('chat-focus');
     if (clear) {
       chatCatalogAbortAll();
@@ -213,13 +325,20 @@ async function chatOpenProject(project, provider = 'pi') {
   if (S.page === 'native' && $('#chat-root'))
     return chatSwitch(null, project, { provider, cwd: '.' });
   chatDetach();
-  Object.assign(ChatUI, { project, provider, cwd: '.', selected: null, inspector: '' });
+  Object.assign(ChatUI, {
+    project,
+    provider,
+    cwd: '.',
+    selected: null,
+    inspector: '',
+  });
   await navigate('native');
 }
 async function chatSwitch(row, project = row?.project_id || ChatUI.project, options = {}) {
   const c = ChatUI;
   chatDisconnect();
   chatRememberView();
+  chatCheckProjectMappings();
   c.dialogCancel?.();
   chatClosePopover();
   chatOptions(false);
@@ -275,6 +394,524 @@ async function chatSwitch(row, project = row?.project_id || ChatUI.project, opti
   if (v.selection) input.setSelectionRange(...v.selection);
 }
 
+function chatActionAvailabilityEntry(v, actionName) {
+  const list =
+    v?.v2ActionAvailability ||
+    v?.settings?.action_availability ||
+    v?.catalog?.action_availability ||
+    v?.v2State?.projection?.capabilities?.action_availability;
+  if (!list) return null;
+  if (Array.isArray(list)) return list.find((a) => a && a.action === actionName) || null;
+  if (typeof list === 'object') return list[actionName] || null;
+  return null;
+}
+function chatActionAvailabilityText(avail) {
+  if (
+    !avail ||
+    (avail.supported !== false && avail.authorized !== false && avail.ready !== false)
+  ) {
+    return '';
+  }
+  const remedyMap = {
+    select_node: '请重新选择可用项目或电脑',
+    update_agent: '请升级本机代理版本',
+    reconnect: '请等待或检查本机重连',
+    choose_supported_option: '请改选当前支持的选项',
+    resolve_current_run: '请先等待或中断当前回复',
+    review_access: '请检查项目写入与执行权限',
+  };
+  const reasonMap = {
+    unsupported: '当前原生版本不支持此操作',
+    unauthorized: '当前账号无此操作权限',
+    offline: '电脑离线',
+    busy: '当前回复尚未结束',
+    invalid_option: '当前选项不受支持',
+  };
+  const reason =
+    avail.message ||
+    avail.reason ||
+    (avail.reason_code && reasonMap[avail.reason_code]) ||
+    (!avail.supported
+      ? '当前原生版本不支持此操作'
+      : !avail.authorized
+        ? '当前账号无此操作权限'
+        : '当前操作暂不可用');
+  const remedy = remedyMap[avail.remedy] || '';
+  return remedy ? `${reason}；${remedy}` : reason;
+}
+function chatSyncAvailabilityHints() {
+  const v = chatView();
+  const sendHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'send'));
+  if (sendHint && $('#chat-send') && $('#chat-send-blocker')) {
+    $('#chat-send').disabled = true;
+    $('#chat-send-blocker').textContent = sendHint;
+    $('#chat-send-blocker').hidden = false;
+  }
+  const resumeAvail = chatActionAvailabilityEntry(v, 'resume_session');
+  const resumeHint = chatActionAvailabilityText(resumeAvail);
+  const resumeEl = $('#chat-resume-hint');
+  if (resumeEl) {
+    resumeEl.textContent = resumeHint;
+    resumeEl.hidden = !resumeHint || $('#chat-resume')?.hidden;
+    if (resumeHint && $('#chat-resume')) {
+      $('#chat-resume').disabled = true;
+      $('#chat-resume').title = resumeHint;
+    }
+  }
+  const modelHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'change_model'));
+  const effortHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'change_options'));
+  const settingsHintEl = $('#chat-settings-availability');
+  if (settingsHintEl) {
+    const combined = [modelHint, effortHint].filter(Boolean).join('；');
+    settingsHintEl.textContent = combined;
+    settingsHintEl.hidden = !combined;
+  }
+  if (modelHint && $('#chat-model-picker')) {
+    $('#chat-model-picker').disabled = true;
+    $('#chat-model-picker').title = modelHint;
+  } else if ($('#chat-model-picker')) {
+    $('#chat-model-picker').disabled = false;
+  }
+  if (effortHint && $('#chat-effort-select')) {
+    $('#chat-effort-select').disabled = true;
+    $('#chat-effort-select').title = effortHint;
+  }
+}
+function chatCaptureScrollAnchor(v) {
+  const el = $('#chat-scroll');
+  const holder = $('#chat-messages');
+  if (!el || !holder) return null;
+  if (chatViewportActive(v) && v.v2Window) {
+    return CP.nativeWindow.captureAnchor(v.v2Window);
+  }
+  const elTop = el.getBoundingClientRect().top;
+  let firstRow = null;
+  for (const child of holder.children) {
+    const rect = child.getBoundingClientRect();
+    if (rect.bottom > elTop + 1) {
+      firstRow = child;
+      break;
+    }
+  }
+  return {
+    owner: ChatUI.generation,
+    userScrollGeneration: v.v2Window?.userScrollGeneration || 0,
+    key: firstRow?.dataset?.rowKey || firstRow?.dataset?.groupKey || firstRow?.dataset?.key || null,
+    relativeTop: firstRow ? firstRow.getBoundingClientRect().top - elTop : 0,
+    prevHeight: el.scrollHeight,
+    prevTop: el.scrollTop,
+  };
+}
+function chatRestoreScrollAnchor(v, anchor) {
+  const el = $('#chat-scroll');
+  const holder = $('#chat-messages');
+  if (!el || !holder || !anchor) return;
+  if (chatViewportActive(v) && v.v2Window) {
+    if (
+      anchor.owner !== v.v2Window.owner ||
+      anchor.userScrollGeneration !== v.v2Window.userScrollGeneration
+    ) {
+      return;
+    }
+    const targetTop = CP.nativeWindow.resolveSurvivingAnchor(v.v2Window, anchor, el.scrollTop);
+    chatSetScrollTop(v, el, targetTop);
+    return;
+  }
+  if (
+    anchor.owner !== ChatUI.generation ||
+    anchor.userScrollGeneration !== (v.v2Window?.userScrollGeneration || 0)
+  ) {
+    return;
+  }
+  if (anchor.key) {
+    const target = [...holder.children].find(
+      (n) => (n.dataset?.rowKey || n.dataset?.groupKey || n.dataset?.key) === anchor.key,
+    );
+    if (target) {
+      const delta =
+        target.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.relativeTop;
+      chatSetScrollTop(v, el, Math.max(0, el.scrollTop + delta));
+      return;
+    }
+  }
+  chatSetScrollTop(v, el, Math.max(0, anchor.prevTop + el.scrollHeight - anchor.prevHeight));
+}
+async function chatLoadOlderHistoryV2() {
+  const c = ChatUI;
+  const v = chatView();
+  const gen = c.generation;
+  const sid = c.selected?.id;
+  const before = v.v2State?.projection?.history?.nextToken;
+  if (!sid || !v.v2State || !before || v.v2HistoryBusy) return;
+  const olderBtn = $('#chat-older');
+  const anchor = chatCaptureScrollAnchor(v);
+  v.v2HistoryBusy = true;
+  if (olderBtn) {
+    olderBtn.disabled = true;
+    olderBtn.textContent = '正在加载更早消息…';
+  }
+  try {
+    const page = await api(
+      '/api/native/sessions/' +
+        encodeURIComponent(sid) +
+        '/history?' +
+        new URLSearchParams({ before }),
+    );
+    if (!chatCurrent(gen, v) || c.selected?.id !== sid || !v.v2State) return;
+    if (page.stream_epoch && page.stream_epoch !== v.v2State.streamEpoch) {
+      chatStatus('会话视图已更新，请重新打开或等待同步完成', true);
+      return;
+    }
+    v.v2State = CP.nativeState.mergeHistoryPage(v.v2State, chatNormalizeV2HistoryPage(page));
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    if (!chatViewportActive(v)) {
+      v.limit = Math.max(v.limit, v.v2State.projection.order.length);
+    }
+    chatSyncV2ToView(v, null, v.v2State.dirtyKeys, true);
+    chatRenderHistory(false);
+    chatRestoreScrollAnchor(v, anchor);
+    chatV2Cache()?.enqueue(v.v2State, () => chatCurrent(gen, v));
+  } catch (err) {
+    if (chatCurrent(gen, v)) chatStatus(err.message || '加载更早消息失败', true);
+  } finally {
+    v.v2HistoryBusy = false;
+    if (olderBtn && chatCurrent(gen, v)) {
+      olderBtn.disabled = false;
+      olderBtn.textContent = '显示更早消息';
+      olderBtn.hidden = !v.v2State?.projection?.history?.hasMore;
+    }
+  }
+}
+function chatSyncPartialBodyNotice(item) {
+  if (!item?.node) return;
+  const existing = item.node.querySelector('.chat-body-partial');
+  if (!item.data?.partial) {
+    existing?.remove();
+    return;
+  }
+  let bar = existing;
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'chat-body-partial';
+    const note = document.createElement('span');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-text-button';
+    btn.onclick = () => chatLoadItemBody(item.key);
+    bar.append(note, btn);
+    item.node.append(bar);
+  }
+  const v = chatView();
+  const loading = !!v.v2BodyRequests?.get(item.key);
+  const totalBytes = item.data.total_bytes ?? item.data.body?.byte_length;
+  const loadedBytes = item.data.body_loaded_bytes || 0;
+  const sizeHint =
+    typeof totalBytes === 'number' && totalBytes > 0
+      ? `（已载入 ${Math.min(loadedBytes, totalBytes).toLocaleString()} / ${totalBytes.toLocaleString()} 字节）`
+      : '';
+  bar.firstElementChild.textContent = '正文较长，当前仅显示预览' + sizeHint;
+  const btn = bar.lastElementChild;
+  btn.disabled = loading;
+  btn.textContent = loading ? '正在加载…' : '加载完整正文';
+}
+async function chatLoadItemBody(itemKey) {
+  const c = ChatUI;
+  const v = chatView();
+  const gen = c.generation;
+  const sid = c.selected?.id;
+  if (!sid || !v.v2State || v.v2BodyRequests?.get(itemKey)) return;
+  v.v2BodyRequests ??= new Map();
+  v.v2BodyRequests.set(itemKey, true);
+  const itemUi = v.items.get(itemKey);
+  if (itemUi) chatSyncPartialBodyNotice(itemUi);
+  try {
+    let pItem = v.v2State.projection.items.get(itemKey);
+    if (!pItem) return;
+    let contentGen = pItem.content_generation ?? pItem.body?.content_generation ?? 1;
+    let startByte = pItem.body_loaded_bytes ?? 0;
+    for (let step = 0; step < 64; step += 1) {
+      if (!chatCurrent(gen, v) || c.selected?.id !== sid || !v.v2State) return;
+      let chunk;
+      try {
+        chunk = await api(
+          '/api/native/sessions/' +
+            encodeURIComponent(sid) +
+            '/items/' +
+            encodeURIComponent(itemKey) +
+            '/body?' +
+            new URLSearchParams({
+              generation: String(contentGen),
+              start_byte: String(startByte),
+            }),
+        );
+      } catch (err) {
+        if (err?.code === 'BODY_REVISION_EXPIRED' && step === 0) {
+          const detail = await api(
+            '/api/native/sessions/' +
+              encodeURIComponent(sid) +
+              '/items/' +
+              encodeURIComponent(itemKey),
+          );
+          if (!chatCurrent(gen, v) || !detail?.item) return;
+          contentGen =
+            detail.item.content_generation ?? detail.item.body?.content_generation ?? contentGen;
+          startByte = 0;
+          continue;
+        }
+        throw err;
+      }
+      if (!chatCurrent(gen, v) || !v.v2State) return;
+      v.v2State = CP.nativeState.mergeBodyChunk(v.v2State, itemKey, chunk);
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+      pItem = v.v2State.projection.items.get(itemKey);
+      startByte = chunk.end_byte;
+      if (!chunk.has_more) break;
+    }
+    chatSyncV2ToView(v, null, new Set([itemKey]), false);
+    if (!c.frame) c.frame = requestAnimationFrame(chatFlush);
+    chatV2Cache()?.enqueue(v.v2State, () => chatCurrent(gen, v));
+  } catch (err) {
+    if (chatCurrent(gen, v)) chatStatus(err.message || '加载完整正文失败', true);
+  } finally {
+    v.v2BodyRequests?.delete(itemKey);
+    const cur = v.items.get(itemKey);
+    if (cur && chatCurrent(gen, v)) chatSyncPartialBodyNotice(cur);
+  }
+}
+function chatSyncToolTruncatedNotice(item, st) {
+  if (!item?.node) return;
+  const details = item.node.querySelector('details');
+  if (!details) return;
+  let notice = details.querySelector('.chat-tool-truncated');
+  if (!st?.truncatedBefore) {
+    notice?.remove();
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.className = 'chat-tool-truncated';
+    const text = document.createElement('span');
+    text.textContent = '输出较长，仅展示末尾内容';
+    const link = document.createElement('a');
+    link.className = 'chat-text-button';
+    link.textContent = '导出完整记录';
+    link.download = 'conversation.md';
+    notice.append(text, link);
+    details.insertBefore(notice, item.body);
+  }
+  const sid = ChatUI.selected?.id;
+  if (sid) {
+    notice.lastElementChild.href =
+      '/api/native/sessions/' +
+      encodeURIComponent(sid) +
+      '/export?' +
+      new URLSearchParams({ format: 'md', space_id: S.space_id || '' });
+  }
+}
+function chatEnsureOutputManager(v) {
+  if (
+    v.v2OutputSubscriptions ||
+    typeof CP === 'undefined' ||
+    !CP.nativeRuntime?.ToolOutputSubscriptionManager
+  ) {
+    return v.v2OutputSubscriptions;
+  }
+  const controllers = new Map();
+  const mgr = new CP.nativeRuntime.ToolOutputSubscriptionManager({
+    onSubscribe: (toolKey, spec) => {
+      const c = ChatUI;
+      const gen = c.generation;
+      const sid = c.selected?.id;
+      if (!sid) return;
+      const ac = new AbortController();
+      controllers.set(toolKey, ac);
+      void (async () => {
+        let afterOffset = spec.afterOffset ?? null;
+        while (
+          !ac.signal.aborted &&
+          chatCurrent(gen, v) &&
+          c.selected?.id === sid &&
+          mgr.getState(toolKey)
+        ) {
+          try {
+            const qs = new URLSearchParams({ stream: 'true' });
+            if (afterOffset !== null && afterOffset !== undefined) {
+              qs.set('after_offset', String(afterOffset));
+            }
+            if (S.space_id) qs.set('space_id', S.space_id);
+            const res = await fetch(
+              '/api/native/sessions/' +
+                encodeURIComponent(sid) +
+                '/items/' +
+                encodeURIComponent(toolKey) +
+                '/output?' +
+                qs,
+              {
+                credentials: 'same-origin',
+                headers: {
+                  Accept: 'text/event-stream',
+                  ...(S.space_id ? { 'X-CodePier-Space': S.space_id } : {}),
+                  ...(S.session?.csrf ? { 'X-RD-CSRF': S.session.csrf } : {}),
+                },
+                signal: ac.signal,
+              },
+            );
+            if (!res.ok || !res.body || ac.signal.aborted) break;
+            let needsReplace = false;
+            await CP.nativeRuntime.parseSseFrames(
+              res.body,
+              async (frame) => {
+                if (ac.signal.aborted || !chatCurrent(gen, v) || !frame.data) return;
+                if (frame.event === 'error') return;
+                let payload;
+                try {
+                  payload = JSON.parse(frame.data);
+                } catch {
+                  return;
+                }
+                const st = mgr.receiveFrame(toolKey, payload);
+                if (!st) return;
+                if (st.needsReplace) {
+                  needsReplace = true;
+                  afterOffset = null;
+                  return;
+                }
+                afterOffset = st.toOffset;
+                const item = v.items.get(toolKey);
+                if (item && item.body) {
+                  item.text = st.text;
+                  item.body.textContent = st.text;
+                  chatSyncToolTruncatedNotice(item, st);
+                }
+                if (!st.running) ac.abort();
+              },
+              ac.signal,
+            );
+            if (!needsReplace) break;
+          } catch {
+            break;
+          }
+        }
+      })();
+    },
+    onUnsubscribe: (toolKey) => {
+      const ac = controllers.get(toolKey);
+      controllers.delete(toolKey);
+      ac?.abort();
+    },
+  });
+  v.v2OutputSubscriptions = mgr;
+  return mgr;
+}
+function chatToolVisibleInDom(item) {
+  if (!item?.node) return false;
+  const details = item.node.querySelector('details');
+  if (!details?.open) return false;
+  const group = item.node.closest('.chat-process');
+  return !group || group.open;
+}
+function chatOpenToolOutput(item, v = chatView()) {
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State) return;
+  const mgr = chatEnsureOutputManager(v);
+  if (!mgr) return;
+  mgr.open(item.key, {
+    outputEpoch: item.data?.output_ref?.output_epoch || '',
+    running: item.data?.active !== false,
+  });
+}
+function chatCloseToolOutput(itemKey, v = chatView()) {
+  v?.v2OutputSubscriptions?.close(itemKey);
+}
+function chatOnToolDetailsToggle(item, _details) {
+  const v = chatView();
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State) return;
+  if (chatToolVisibleInDom(item)) chatOpenToolOutput(item, v);
+  else chatCloseToolOutput(item.key, v);
+}
+function chatSyncGroupToolOutputs(v, groupNode) {
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State || !groupNode) return;
+  for (const el of groupNode.querySelectorAll('.chat-message-tool')) {
+    const key = el.dataset.key;
+    const item = key ? v.items.get(key) : null;
+    if (!item) continue;
+    if (chatToolVisibleInDom(item)) chatOpenToolOutput(item, v);
+    else chatCloseToolOutput(item.key, v);
+  }
+}
+function chatApplyReviewEvidenceState(item) {
+  if (!item?.node || !item.reviewMeta || !item.reviewNote) return;
+  const v = chatView();
+  const data = item.data || {};
+  const ctrl = v.v2Control || {};
+  const receipt = data.receipt;
+  const matchCtrl = (entry) => entry && (!receipt || !entry.receipt || entry.receipt === receipt);
+  const evidenceState =
+    data.evidence_state ??
+    (matchCtrl(ctrl.evidence_frozen?.body) ? ctrl.evidence_frozen.body.evidence_state : null) ??
+    (matchCtrl(ctrl.provider_completed?.body) ? ctrl.provider_completed.body.evidence_state : null);
+  const reviewState =
+    data.review_state ??
+    (matchCtrl(ctrl.review_ready?.body) ? ctrl.review_ready.body.review_state : null);
+  if (!evidenceState && !reviewState) return;
+
+  let badgeLabel = '';
+  let badgeState = '';
+  if (evidenceState === 'capture_pending') {
+    badgeLabel = '采集中';
+    badgeState = 'pending';
+  } else if (
+    evidenceState === 'unavailable' ||
+    evidenceState === 'not_requested' ||
+    reviewState === 'unavailable'
+  ) {
+    badgeLabel = '暂不可用';
+    badgeState = 'unavailable';
+  } else if (
+    reviewState === 'generating' ||
+    ((evidenceState === 'frozen' || evidenceState === 'partial') &&
+      reviewState !== 'ready' &&
+      data.available !== true &&
+      data.available !== false)
+  ) {
+    badgeLabel = '审阅生成中';
+    badgeState = 'generating';
+  } else if (evidenceState === 'frozen' || evidenceState === 'partial' || reviewState === 'ready') {
+    badgeLabel = '已固定';
+    badgeState = 'frozen';
+  }
+
+  const summary = item.reviewNode?.querySelector('summary');
+  if (summary && badgeLabel) {
+    let badge = summary.querySelector('.chat-evidence-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'chat-evidence-badge';
+      summary.insertBefore(badge, item.reviewMeta);
+    }
+    badge.textContent = badgeLabel;
+    badge.dataset.state = badgeState;
+  }
+
+  if (
+    evidenceState === 'unavailable' ||
+    evidenceState === 'capture_pending' ||
+    evidenceState === 'not_requested' ||
+    reviewState === 'unavailable'
+  ) {
+    item.reviewMeta.textContent = badgeLabel || '未能核实';
+    item.reviewNote.textContent =
+      data.text ||
+      {
+        capture_pending: '正在采集本轮改动快照，完成后更新。',
+        not_requested: '本轮未请求工作区改动快照。',
+        unavailable: '工作区改动快照暂不可用，请在电脑本机核实。',
+      }[evidenceState] ||
+      '改动审阅暂不可用，请在电脑本机核实。';
+  } else if (badgeState === 'generating') {
+    item.reviewMeta.textContent = badgeLabel;
+    item.reviewNote.textContent = '已固定本轮前后快照，正在生成改动审阅…';
+  }
+}
 async function chatPage() {
   if ($('#chat-root')) {
     chatList();
@@ -283,8 +920,9 @@ async function chatPage() {
   chatDetach();
   const c = ChatUI,
     gen = c.generation;
-  await loadBasics();
+  await Promise.all([loadBasics(), chatLoadNativeCapabilities()]);
   if (!chatCurrent(gen)) return;
+  chatCheckProjectMappings();
   c.project = S.projects.some((p) => p.id === c.project)
     ? c.project
     : S.work.project || S.projects[0]?.id || '';
@@ -306,7 +944,7 @@ async function chatPage() {
   <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button></footer></aside>
   <div class="chat-main">
   <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
-  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button></div>
+  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button><span id="chat-resume-hint" class="chat-availability-hint" role="status" hidden></span></div>
   <button id="chat-latest" class="chat-latest" hidden>↓ 回到最新</button>
   <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">等这轮结束再发</option><option value="steer">插入当前回复</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
   <div id="chat-target-notice" class="chat-catalog-notice" role="status" hidden><span></span><button type="button" id="chat-target-refresh" hidden>检查连接</button><button type="button" id="chat-catalog-retry" hidden>重新加载</button></div>
@@ -329,7 +967,9 @@ async function chatPage() {
     )
     .join('')}</div></div><span id="chat-target-info"></span></div>
   <div class="chat-config-bar"><div class="chat-setting-field"><label for="chat-model-picker">模型</label><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button></div><label class="chat-cli-label chat-setting-field"><span>会话 CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label chat-setting-field">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
+  <label class="chat-selection-label chat-setting-field"><span>配置生效</span><select id="chat-selection-mode" aria-label="配置生效方式"><option value="inherit_at_dispatch">发送时跟随当前</option><option value="explicit">本条固定</option></select></label>
   <div class="chat-setting-field"><label for="chat-cwd-button">工作目录</label><button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div></div>
+  <p id="chat-settings-availability" class="chat-availability-hint" role="status" hidden></p>
   <div class="chat-option-tools"><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button></div></section></div>
   <div class="chat-setting-feedback"><span id="chat-setting-state" class="chat-setting-state"></span><button type="button" id="chat-settings-retry" class="chat-text-button" hidden>重试设置</button></div>
   <p id="chat-send-blocker" class="chat-popover-help" role="status" hidden></p><div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试</button></div></div>
@@ -472,16 +1112,41 @@ async function chatPage() {
     if (tab) chatInspector(tab.dataset.chatTab);
     if (!e.target.closest('#chat-popover,#chat-model-picker,#chat-cwd-button')) chatClosePopover();
   });
+  let scrollFrame = 0;
   on('chat-scroll', 'scroll', () => {
     const v = chatView();
+    const el = $('#chat-scroll');
+    if (v.v2Window) {
+      const isProg =
+        v.v2Window.programmaticScroll &&
+        Math.abs(el.scrollTop - (v.v2Window.expectedScrollTop ?? el.scrollTop)) <= 2;
+      if (!isProg) {
+        v.v2Window.userScrollGeneration += 1;
+      }
+      v.v2Window.programmaticScroll = false;
+    }
     v.follow = chatAtBottom();
-    v.scrollTop = $('#chat-scroll').scrollTop;
+    if (v.v2Window) v.v2Window.followBottom = v.follow;
+    v.scrollTop = el.scrollTop;
     $('#chat-latest').hidden = v.follow;
+    if (chatViewportActive(v) && !scrollFrame) {
+      const scrollGen = c.generation;
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = 0;
+        if (chatCurrent(scrollGen, v) && chatViewportActive(v)) {
+          chatRenderViewportWindow(v);
+        }
+      });
+    }
   });
   on('chat-latest', 'click', chatBottom);
   on('chat-older', 'click', () => {
-    const v = chatView(),
-      el = $('#chat-scroll'),
+    const v = chatView();
+    if (v.v2State) {
+      void chatLoadOlderHistoryV2();
+      return;
+    }
+    const el = $('#chat-scroll'),
       h = el.scrollHeight,
       t = el.scrollTop;
     v.limit += 100;
@@ -516,6 +1181,10 @@ async function chatPage() {
   });
   on('chat-send-mode', 'change', (e) => {
     chatView().mode = e.target.value;
+    chatSyncChrome();
+  });
+  on('chat-selection-mode', 'change', (e) => {
+    chatView().selectionMode = e.target.value;
     chatSyncChrome();
   });
   on('chat-interrupt', 'click', chatInterrupt);
@@ -566,8 +1235,39 @@ async function chatPage() {
   on('chat-export-json', 'click', () => chatExport('json'));
   on('chat-stop', 'click', chatStop);
   on('chat-delete', 'click', chatDelete);
+  document.addEventListener(
+    'focusin',
+    (e) => {
+      const v = chatView();
+      if (!chatViewportActive(v) || !v.v2Window) return;
+      const msg = e.target?.closest?.('#chat-messages [data-row-key]');
+      for (const [k, reasons] of [...v.v2Window.pinSet.entries]) {
+        if (reasons.has('focus')) v.v2Window.pinSet.unpin(k, 'focus');
+      }
+      if (msg?.dataset.rowKey) v.v2Window.pinSet.pin(msg.dataset.rowKey, 'focus');
+    },
+    { signal: c.listeners.signal },
+  );
+  document.addEventListener(
+    'selectionchange',
+    () => {
+      const v = chatView();
+      if (!chatViewportActive(v) || !v.v2Window) return;
+      for (const [k, reasons] of [...v.v2Window.pinSet.entries]) {
+        if (reasons.has('selection')) v.v2Window.pinSet.unpin(k, 'selection');
+      }
+      const sel = window.getSelection?.();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+      const node = sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement;
+      const msg = node?.closest?.('#chat-messages [data-row-key]');
+      if (msg?.dataset.rowKey) v.v2Window.pinSet.pin(msg.dataset.rowKey, 'selection');
+    },
+    { signal: c.listeners.signal },
+  );
   for (const target of [window, window.visualViewport].filter(Boolean))
-    target.addEventListener('resize', chatViewport, { signal: c.listeners.signal });
+    target.addEventListener('resize', chatViewport, {
+      signal: c.listeners.signal,
+    });
   chatMountChrome();
   chatMountHistory();
   chatDrawer(false, true);
@@ -669,6 +1369,8 @@ function chatRestore(history = true) {
   $('#chat-retry').hidden = !v.pending;
   $('#chat-interrupt').hidden = !v.active;
   $('#chat-send-mode').value = v.mode;
+  if ($('#chat-selection-mode'))
+    $('#chat-selection-mode').value = v.selectionMode || 'inherit_at_dispatch';
   chatResizeComposer();
   chatFiles();
   chatOutbox();
@@ -678,6 +1380,7 @@ function chatRestore(history = true) {
   $('#chat-find-count').textContent = '';
   chatTargetSync();
   chatSyncChrome();
+  chatSyncAvailabilityHints();
 }
 
 function chatModelKey(model) {
@@ -728,6 +1431,26 @@ function chatLevels(v = chatView()) {
 function chatSettings(settings) {
   const v = chatView();
   if (settings) v.settings = settings;
+  if (v.v2State && v.settingOp) {
+    const overlay = v.v2State.pendingCommands?.get(v.settingOp.receipt);
+    if (overlay) {
+      if (overlay.actual && typeof overlay.actual === 'object') {
+        v.settings = { ...(v.settings || {}), ...overlay.actual };
+      }
+      if (overlay.status === 'applied' && !overlay.partial && overlay.outcome !== 'partial') {
+        v.settingOp = null;
+      } else if (overlay.outcome === 'partial' || overlay.partial) {
+        v.settingOp.outcome = 'partial';
+        v.settingOp.state = 'error';
+      } else if (overlay.status === 'failed') {
+        v.settingOp.state = 'error';
+        v.settingOp.outcome = overlay.outcome || 'rejected';
+      } else if (overlay.status === 'uncertain') {
+        v.settingOp.state = 'uncertain';
+        v.settingOp.outcome = 'unknown';
+      }
+    }
+  }
   const current = chatModelCurrent(v),
     model = chatModels(v).find(
       (m) => chatModelKey(m) === current || m.model === current || m.id === current,
@@ -821,6 +1544,7 @@ function chatSettings(settings) {
       $('#chat-send-mode').value = 'followup';
     }
   }
+  if (typeof chatSyncAvailabilityHints === 'function') chatSyncAvailabilityHints();
   if (ChatUI.inspector === 'overview') chatInspectorRender();
   chatSyncChrome();
 }
@@ -830,7 +1554,9 @@ function chatClosePopover(restore = false) {
   box?.setAttribute('hidden', '');
   $('#chat-model-picker')?.setAttribute('aria-expanded', 'false');
   if (open && restore)
-    $('#' + (ChatUI.popoverAnchor || 'chat-model-picker'))?.focus({ preventScroll: true });
+    $('#' + (ChatUI.popoverAnchor || 'chat-model-picker'))?.focus({
+      preventScroll: true,
+    });
 }
 function chatModelPopover() {
   if (innerWidth <= 1100 && ChatUI.inspector) chatInspector('');
@@ -996,31 +1722,84 @@ async function chatSubmitSettings(patch, retry = false) {
   const visible = () =>
     S.session === identity && S.page === 'native' && !!$('#chat-root') && chatView() === v;
   if (!id) return;
-  if (v.settingOp && !retry && v.settingOp.state !== 'error') {
+  if (v.settingOp && !retry && !['error', 'uncertain'].includes(v.settingOp.state)) {
     chatStatus('上一项设置正在确认，请稍候。');
     return;
   }
+  // Uncertain timeouts/disconnects always preserve the original receipt; only
+  // definitive rejections mint a new receipt when retried.
   const op = retry
     ? v.settingOp?.state === 'error'
-      ? { receipt: uid(), patch: v.settingOp.patch, state: 'sending' }
+      ? {
+          receipt: uid(),
+          patch: v.settingOp.patch,
+          state: 'sending',
+          generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
+        }
       : v.settingOp
-    : { receipt: uid(), patch, state: 'sending' };
+    : {
+        receipt: uid(),
+        patch,
+        state: 'sending',
+        generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
+      };
   if (!op) return;
+  op.generation = op.generation || (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1);
   v.settingOp = op;
   op.state = 'sending';
+  if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.upsertCommandOverlay) {
+    v.v2State = CP.nativeState.upsertCommandOverlay(v.v2State, {
+      receipt: op.receipt,
+      generation: op.generation,
+      action: 'settings',
+      status: 'pending',
+      requested: op.patch,
+    });
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+  }
   chatSettings(v.settings);
   try {
     const result = await chatAPI(
       'chat_settings',
-      { id, receipt: op.receipt, ...op.patch },
+      {
+        id,
+        receipt: op.receipt,
+        settings_generation: op.generation,
+        expected_settings_revision: v.settings?.settings_revision ?? v.settings?.revision ?? 0,
+        ...op.patch,
+      },
       project,
     );
     if (S.session !== identity || v.settingOp !== op) return;
+    if (result.actual && typeof result.actual === 'object') {
+      v.settings = { ...(v.settings || {}), ...result.actual };
+    }
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: op.receipt,
+        generation: op.generation,
+        status:
+          result.state === 'completed' || result.state === 'applied'
+            ? 'applied'
+            : ['queued', 'claimed'].includes(result.state) || !result.state
+              ? 'accepted'
+              : result.state,
+        outcome: result.outcome,
+        actual: result.actual,
+        appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (op.state === 'sending') op.state = result.state || 'queued';
+    if (result.outcome) op.outcome = result.outcome;
     if (visible()) {
       chatSettings(v.settings);
       chatStatus(
-        op.state === 'error' ? '原生设置失败，可重试' : '设置已提交，等待原生确认',
+        op.state === 'error'
+          ? op.outcome === 'partial'
+            ? '部分设置已生效；当前模型与强度已回读，请核对后重试剩余项'
+            : '原生设置失败，可重试'
+          : '设置已提交，等待原生确认',
         op.state === 'error',
       );
       if (!['error', 'uncertain'].includes(op.state))
@@ -1028,10 +1807,21 @@ async function chatSubmitSettings(patch, retry = false) {
     }
   } catch (e) {
     if (S.session !== identity || v.settingOp !== op) return;
-    op.state = ['NETWORK_UNCERTAIN', 'CLI_UNCERTAIN', 'CLI_OFFLINE'].includes(e.code)
-      ? 'uncertain'
-      : 'error';
+    const isUncertain =
+      ['NETWORK_UNCERTAIN', 'CLI_UNCERTAIN', 'CLI_OFFLINE'].includes(e.code) ||
+      e.status === 408 ||
+      !e.status;
+    op.state = isUncertain ? 'uncertain' : 'error';
     op.error = e.message;
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: op.receipt,
+        generation: op.generation,
+        status: isUncertain ? 'uncertain' : 'failed',
+        error: e.message,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (visible()) {
       chatStatus(e.message, true);
       chatSettings(v.settings);
@@ -1059,7 +1849,38 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
         op.state === 'error'
       )
         return;
+      if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+        const mappedStatus =
+          result.state === 'completed' || result.state === 'applied'
+            ? 'applied'
+            : ['queued', 'claimed'].includes(result.state)
+              ? 'accepted'
+              : result.state === 'uncertain'
+                ? 'uncertain'
+                : ['error', 'cancelled', 'interrupted'].includes(result.state)
+                  ? 'failed'
+                  : undefined;
+        v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+          receipt,
+          generation: op.generation,
+          status: mappedStatus,
+          outcome: result.outcome,
+          actual: result.actual,
+          appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+        });
+        if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+      }
+      if (result.actual && typeof result.actual === 'object') {
+        v.settings = { ...(v.settings || {}), ...result.actual };
+      }
       if (['completed', 'applied'].includes(result.state)) {
+        if (result.outcome === 'partial') {
+          op.outcome = 'partial';
+          op.state = 'error';
+          chatSettings(v.settings);
+          chatStatus('部分设置已生效；当前模型与强度已回读，请核对后重试剩余项', true);
+          return;
+        }
         v.settingOp = null;
         chatSettings(v.settings);
         chatStatus(v.pendingSettings ? '设置将在下一条消息生效' : '设置已由原生 CLI 接受');
@@ -1067,7 +1888,13 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
       }
       if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state)) {
         op.state = result.state === 'uncertain' ? 'uncertain' : 'error';
-        chatStatus('设置返回错误，实际配置待核实；可能部分生效', true);
+        op.outcome = result.outcome || (result.state === 'uncertain' ? 'unknown' : op.outcome);
+        chatStatus(
+          op.state === 'uncertain'
+            ? '原生设置仍在核实中，重试会使用同一确认编号'
+            : '设置返回错误，实际配置待核实；可能部分生效',
+          true,
+        );
         chatSettings(v.settings);
         return;
       }
@@ -1075,7 +1902,16 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
   }
   if (chatCurrent(gen, v) && v.settingOp === op) {
     op.state = 'uncertain';
-    chatStatus('原生设置仍在等待处理，重试会使用同一回执', true);
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt,
+        generation: op.generation,
+        status: 'uncertain',
+        outcome: 'unknown',
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
+    chatStatus('原生设置仍在等待处理，重试会使用同一确认编号', true);
     chatSettings(v.settings);
   }
 }
@@ -1142,6 +1978,22 @@ function chatDraftLimit(v = chatView()) {
   }
   return exceeded ? '消息不能超过 64 KiB，请缩短内容或改用附件' : '';
 }
+function chatBuildExplicitSelection(v) {
+  const model = typeof chatModelCurrent === 'function' ? chatModelCurrent(v) : v.selectedModel;
+  if (!model) return null;
+  const source = v.configForResume ? v.catalog : v.settings || v.catalog;
+  const effort =
+    v.selectedEffort ??
+    v.pendingSettings?.effort ??
+    source?.effort ??
+    source?.thinkingLevel ??
+    source?.reasoningEffort ??
+    null;
+  return {
+    model,
+    options: effort ? { effort } : {},
+  };
+}
 async function chatSend(retry = false) {
   const c = ChatUI,
     v = chatView(),
@@ -1190,6 +2042,10 @@ async function chatSend(retry = false) {
     if (!text && !v.files.length) return;
     if (chatBuiltin(text)) return;
     const resume = c.selected && !['running', 'starting'].includes(c.selected.status);
+    const requestedMode = v.selectionMode || 'inherit_at_dispatch';
+    const explicitSelection = requestedMode === 'explicit' ? chatBuildExplicitSelection(v) : null;
+    const selectionMode =
+      requestedMode === 'explicit' && explicitSelection ? 'explicit' : 'inherit_at_dispatch';
     v.pending = {
       id: (!resume && c.selected?.id) || uid(),
       receipt: uid(),
@@ -1199,9 +2055,12 @@ async function chatSend(retry = false) {
       cwd: c.cwd,
       model: v.selectedModel,
       effort: v.selectedEffort,
+      selection_mode: selectionMode,
+      selection: selectionMode === 'explicit' ? explicitSelection : null,
       started: !!c.selected && !resume,
       continue_session: resume ? c.selected.id : null,
       action: v.active && v.mode === 'steer' ? 'chat_steer' : 'chat_prompt',
+      generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
     };
     // A lost explicit-resume response may already have started the process.
     // Continue that exact launch rather than creating a second continuation.
@@ -1211,6 +2070,16 @@ async function chatSend(retry = false) {
     }
   }
   const pending = v.pending;
+  if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.upsertCommandOverlay) {
+    v.v2State = CP.nativeState.upsertCommandOverlay(v.v2State, {
+      receipt: pending.receipt,
+      generation: pending.generation || 1,
+      action: pending.action,
+      status: 'pending',
+      requested: { text: pending.text, selection_mode: pending.selection_mode },
+    });
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+  }
   v.outbox.set(pending.receipt, { ...pending, state: 'sending' });
   v.busy = true;
   chatOutbox();
@@ -1240,16 +2109,17 @@ async function chatSend(retry = false) {
     }
     // A two-stage first send must never continue under a different login.
     if (S.session !== identity) return;
-    const result = await chatAPI(
-      pending.action,
-      {
-        id: pending.id,
-        receipt: pending.receipt,
-        text: pending.text,
-        attachments: pending.attachments,
-      },
-      project,
-    );
+    const promptArgs = {
+      id: pending.id,
+      receipt: pending.receipt,
+      text: pending.text,
+      attachments: pending.attachments,
+      ...(pending.selection_mode ? { selection_mode: pending.selection_mode } : {}),
+      ...(pending.selection_mode === 'explicit' && pending.selection
+        ? { selection: pending.selection }
+        : {}),
+    };
+    const result = await chatAPI(pending.action, promptArgs, project);
     if (S.session !== identity) return;
     if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state))
       throw Object.assign(
@@ -1258,8 +2128,19 @@ async function chatSend(retry = false) {
             chatStateName(result.state) +
             '」，没有重新执行。请核对历史后再决定。',
         ),
-        { code: result.state === 'uncertain' ? 'CLI_UNCERTAIN' : 'CLI_RECEIPT_TERMINAL' },
+        {
+          code: result.state === 'uncertain' ? 'CLI_UNCERTAIN' : 'CLI_RECEIPT_TERMINAL',
+        },
       );
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: pending.receipt,
+        generation: pending.generation || 1,
+        status: result.state === 'completed' ? 'applied' : 'accepted',
+        appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     v.pending = null;
     if (v.outbox.has(pending.receipt))
       v.outbox.get(pending.receipt).state = result.state || 'queued';
@@ -1306,6 +2187,15 @@ async function chatSend(retry = false) {
       'CLI_AGENT_UPDATE_REQUIRED',
       'CLI_NOT_RUNNING',
     ].includes(e.code);
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: pending.receipt,
+        generation: pending.generation || 1,
+        status: rejected ? 'failed' : 'uncertain',
+        error: e.message,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (rejected && !pending.started && v.resumeRequest?.id === pending.id) {
       v.resumeId = null;
       v.resumeRequest = null;
@@ -1353,20 +2243,331 @@ function chatDisconnect() {
   const source = ChatUI.source;
   ChatUI.source = null;
   source?.close();
+  const activeScope = ChatUI.v2ActiveScope;
+  ChatUI.v2ActiveScope = null;
+  activeScope?.stopNative?.();
+  if (ChatUI.views) {
+    for (const view of ChatUI.views.values()) {
+      view.v2Scope?.stopNative?.();
+      view.v2OutputSubscriptions?.closeAll?.();
+    }
+  }
 }
-function chatConnect() {
-  const c = ChatUI,
-    gen = c.generation,
-    id = c.selected?.id,
-    v = chatView();
-  chatDisconnect();
-  if (!id) return;
+async function chatLoadNativeCapabilities(force = false) {
+  const c = ChatUI;
+  if (typeof CP === 'undefined' || !CP.nativeState || !CP.nativeRuntime) {
+    c.v2Capabilities = { native_view_v2: false, flags: {} };
+    return c.v2Capabilities;
+  }
+  if (!force && c.v2Capabilities) return c.v2Capabilities;
+  if (!force && c.v2CapabilitiesPromise) return c.v2CapabilitiesPromise;
+  const identity = typeof S !== 'undefined' ? S.session : null;
+  const promise = (async () => {
+    try {
+      const data = await api('/api/native/capabilities');
+      if (typeof S !== 'undefined' && S.session !== identity) {
+        return { native_view_v2: false, flags: {} };
+      }
+      const caps =
+        data && data.native_view_v2 === true
+          ? {
+              native_view_v2: true,
+              schema_version: data.schema_version ?? 2,
+              flags: data.flags || {},
+              budgets: data.budgets || {},
+            }
+          : { native_view_v2: false, flags: {} };
+      c.v2Capabilities = caps;
+      return caps;
+    } catch {
+      return { native_view_v2: false, flags: {} };
+    } finally {
+      if (c.v2CapabilitiesPromise === promise) c.v2CapabilitiesPromise = null;
+    }
+  })();
+  c.v2CapabilitiesPromise = promise;
+  return promise;
+}
+function chatNormalizeV2Item(rawItem) {
+  if (!rawItem || typeof rawItem !== 'object') return rawItem;
+  const item = { ...rawItem };
+  const body = item.body;
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    if (body.kind === 'inline') {
+      if (item.text === undefined) item.text = body.text ?? '';
+      item._seenBodyText = body.text ?? '';
+    } else if (body.kind === 'ref') {
+      item.body_ref = item.body_ref ?? body.body_ref ?? null;
+      item.content_generation = item.content_generation ?? body.content_generation ?? 1;
+      item.total_bytes = item.total_bytes ?? body.byte_length ?? null;
+      item.partial = Boolean(body.partial ?? true);
+      if (item.tail_text === undefined && typeof body.preview === 'string') {
+        item.tail_text = body.preview;
+      }
+    }
+  }
+  return item;
+}
+function chatNormalizeV2Snapshot(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const pending = Array.isArray(raw.pending)
+    ? raw.pending
+    : Array.isArray(raw.pending?.items)
+      ? raw.pending.items
+      : raw.pending && typeof raw.pending === 'object' && !('count' in raw.pending)
+        ? raw.pending
+        : [];
+  return {
+    ...raw,
+    items: Array.isArray(raw.items) ? raw.items.map(chatNormalizeV2Item) : [],
+    pending,
+    history: raw.history
+      ? {
+          has_more: Boolean(raw.history.has_more ?? raw.history.hasMore),
+          next_token: raw.history.next_token ?? raw.history.nextToken ?? raw.history.before ?? null,
+          page_revision: raw.history.page_revision ?? raw.projection_revision ?? 0,
+          page_applied_cursor: raw.history.page_applied_cursor ?? raw.applied_cursor ?? 0,
+        }
+      : undefined,
+  };
+}
+function chatNormalizeV2HistoryPage(page) {
+  if (!page || typeof page !== 'object') return page;
+  return {
+    ...page,
+    next_token: page.next_token ?? page.nextToken ?? page.before ?? null,
+    items: Array.isArray(page.items) ? page.items.map(chatNormalizeV2Item) : [],
+  };
+}
+function chatV2ItemText(pItem) {
+  if (!pItem) return '';
+  if (pItem.partial) {
+    if (pItem.body_loaded_bytes > 0 && typeof pItem.body === 'string') return pItem.body;
+    if (pItem.body && typeof pItem.body === 'object' && typeof pItem.body.preview === 'string') {
+      return pItem.body.preview + (pItem.tail_text || '');
+    }
+    return pItem.tail_text ?? pItem.text ?? '';
+  }
+  if (typeof pItem.text === 'string') return pItem.text;
+  if (typeof pItem.body === 'string') return pItem.body;
+  if (pItem.body && typeof pItem.body === 'object' && typeof pItem.body.text === 'string') {
+    return pItem.body.text;
+  }
+  return pItem.tail_text || '';
+}
+function chatApplyV2SessionMeta(c, v, sessionMeta) {
+  if (!sessionMeta || typeof sessionMeta !== 'object') return;
+  if (c.selected && c.selected.id === (sessionMeta.id || c.selected.id)) {
+    Object.assign(c.selected, sessionMeta);
+  }
+  v.sessionStatus = sessionMeta.status || v.sessionStatus;
+  if ($('#chat-title') && sessionMeta.title) $('#chat-title').textContent = sessionMeta.title;
+  if (sessionMeta.status && !['running', 'starting'].includes(sessionMeta.status)) {
+    v.active = null;
+    v.phase = '';
+    for (const key of v.approvalKeys || []) {
+      const item = v.items.get(key);
+      if (item && !item.data.resolved) {
+        item.data.resolved = true;
+        item.data.resolution = 'closed';
+        chatApproval(item);
+      }
+    }
+    if ($('#chat-interrupt')) $('#chat-interrupt').hidden = true;
+    chatConnection('stopped', chatStateName(sessionMeta.status));
+    chatStatus(
+      sessionMeta.error ||
+        {
+          stopping: '正在等待会话进程退出，草稿已保留。',
+          orphaned: '会话进程状态待核实，请先检查电脑。草稿已保留。',
+        }[sessionMeta.status] ||
+        '会话已停止，发送消息可恢复原生历史',
+    );
+  }
+}
+function chatApplyV2ExtraMeta(c, v, meta) {
+  if (!meta || typeof meta !== 'object') return;
+  if (meta.sync) v.v2Sync = meta.sync;
+  if (meta.commands !== undefined) v.commands = meta.commands;
+  if (meta.stats && typeof meta.stats === 'object') v.stats = meta.stats;
+  if (meta.queue !== undefined) {
+    v.queue = Array.isArray(meta.queue) ? meta.queue : meta.queue?.commands || v.queue;
+    if (c.inspector === 'queue' && typeof chatQueueRender === 'function') chatQueueRender();
+  }
+  if (meta.control && typeof meta.control === 'object') {
+    v.v2Control = { ...(v.v2Control || {}), ...meta.control };
+    if (meta.control.action_availability) {
+      v.v2ActionAvailability = meta.control.action_availability;
+    }
+  }
+  if (meta.action_availability) v.v2ActionAvailability = meta.action_availability;
+  if (meta.status_text) chatStatus(meta.status_text);
+  if (meta.settings_result) {
+    const res = meta.settings_result;
+    const op = v.settingOp;
+    if (v.v2State && res.receipt && CP?.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: res.receipt,
+        outcome: res.outcome,
+        actual: res.actual,
+        appliedRevision: res.settings_revision ?? null,
+      });
+    }
+    if (op && op.receipt === res.receipt) {
+      if (res.actual) v.settings = { ...(v.settings || {}), ...res.actual };
+      op.outcome = res.outcome;
+      op.state = res.outcome === 'unknown' ? 'uncertain' : 'error';
+      chatSettings(v.settings);
+      chatStatus(
+        {
+          partial: '部分设置已生效；当前模型与强度已回读，请核对后重试剩余项',
+          applied: '实际配置已生效，但原操作回执仍为失败；无需重试',
+          rejected: '原生回读确认设置未变更',
+          unknown: '设置结果待核实；不能确认是否部分生效',
+        }[res.outcome] || '设置结果待核实',
+        res.outcome !== 'applied',
+      );
+    }
+  }
+  if (meta.command_result) {
+    const cr = meta.command_result;
+    if (cr.state && !['queued', 'claimed', 'running', 'accepted', 'uncertain'].includes(cr.state)) {
+      for (const [key, receipt] of v.controlOps || []) {
+        if (receipt === cr.receipt) v.controlOps.delete(key);
+      }
+    }
+    if (cr.text || cr.name) {
+      chatStatus(cr.text || cr.name + ' · ' + chatStateName(cr.state), cr.state === 'error');
+    }
+  }
+}
+function chatSyncV2ToView(v, extraMeta = null, dirtyOverride = null, structureOverride = false) {
+  const c = ChatUI;
+  const state = v.v2State;
+  if (!state) return;
+  const proj = state.projection;
+  for (const pItem of proj.items.values()) {
+    if (pItem.body && typeof pItem.body === 'object') {
+      if (pItem.body.kind === 'inline' && pItem.body.text !== pItem._seenBodyText) {
+        pItem.text = pItem.body.text ?? '';
+        pItem._seenBodyText = pItem.text;
+      } else if (pItem.body.kind === 'ref' && pItem.partial !== false) {
+        pItem.body_ref = pItem.body_ref ?? pItem.body.body_ref ?? null;
+        pItem.content_generation = pItem.content_generation ?? pItem.body.content_generation ?? 1;
+        pItem.total_bytes = pItem.total_bytes ?? pItem.body.byte_length ?? null;
+        pItem.partial = true;
+      }
+    }
+  }
+  let orderChanged = v.order.length !== proj.order.length;
+  if (!orderChanged) {
+    for (let i = 0; i < proj.order.length; i += 1) {
+      if (v.order[i] !== proj.order[i]) {
+        orderChanged = true;
+        break;
+      }
+    }
+  }
+  if (orderChanged) {
+    v.order = [...proj.order];
+    v.v2StructureDirty = true;
+    v.structureDirty = true;
+  }
+  for (const oldKey of [...v.items.keys()]) {
+    if (!proj.items.has(oldKey)) {
+      const removed = v.items.get(oldKey);
+      removed?.node?.remove();
+      v.items.delete(oldKey);
+      v.approvalKeys?.delete(oldKey);
+      v.v2StructureDirty = true;
+      v.structureDirty = true;
+    }
+  }
+  const sourceDirty = dirtyOverride || state.dirtyKeys;
+  const keysToSync =
+    orderChanged || v.items.size !== proj.items.size || !sourceDirty?.size
+      ? proj.order
+      : [...sourceDirty];
+  for (const key of keysToSync) {
+    const pItem = proj.items.get(key);
+    if (!pItem) continue;
+    const nextText = chatV2ItemText(pItem);
+    const nextData = {
+      ...pItem,
+      type: pItem.kind,
+      isError: Boolean(pItem.is_error || pItem.isError),
+    };
+    let uiItem = v.items.get(key);
+    if (!uiItem) {
+      uiItem = {
+        key,
+        kind: pItem.kind,
+        text: nextText,
+        data: nextData,
+        node: null,
+        body: null,
+      };
+      v.items.set(key, uiItem);
+      v.v2StructureDirty = true;
+      v.structureDirty = true;
+    } else {
+      const prevCompact =
+        ['tool', 'reasoning'].includes(uiItem.kind) && !chatProcessFailure(uiItem);
+      const prevKind = uiItem.kind;
+      uiItem.kind = pItem.kind;
+      uiItem.text = nextText;
+      uiItem.data = nextData;
+      const nextCompact =
+        ['tool', 'reasoning'].includes(uiItem.kind) && !chatProcessFailure(uiItem);
+      if (prevKind !== uiItem.kind || prevCompact !== nextCompact) {
+        v.v2StructureDirty = true;
+        v.structureDirty = true;
+      }
+    }
+    if (uiItem.kind === 'approval') {
+      v.approvalKeys ??= new Set();
+      if (uiItem.data.resolved || uiItem.answered) v.approvalKeys.delete(key);
+      else v.approvalKeys.add(key);
+      if (uiItem.data.resolved && uiItem.node) {
+        uiItem.node.querySelector('.chat-approval-actions')?.remove();
+        chatApproval(uiItem);
+      }
+    }
+    if (uiItem.kind === 'review' && c.inspector === 'changes') chatInspectorRender();
+    c.dirty.add(key);
+    v.v2DirtyKeys.add(key);
+  }
+  if (structureOverride || state.structureDirty) {
+    v.v2StructureDirty = true;
+    v.structureDirty = true;
+  }
+  if (proj.session) chatApplyV2SessionMeta(c, v, proj.session);
+  if (proj.run) {
+    v.active = proj.run.receipt || null;
+    v.phase = proj.run.phase || '';
+    if ($('#chat-interrupt')) $('#chat-interrupt').hidden = !v.active;
+  }
+  if (proj.stats) v.stats = proj.stats;
+  if (proj.pendingSettings !== undefined) v.pendingSettings = proj.pendingSettings;
+  if (proj.settings) v.settings = { ...(v.settings || {}), ...proj.settings };
+  if (proj.capabilities?.action_availability) {
+    v.v2ActionAvailability = proj.capabilities.action_availability;
+  }
+  if (extraMeta) chatApplyV2ExtraMeta(c, v, extraMeta);
+  if (proj.settings || proj.pendingSettings !== undefined) chatSettings(v.settings);
+  if (c.inspector === 'overview') chatInspectorRender();
+}
+function chatConnectV1(c, gen, id, v) {
   c.cursor = v.cursor || 0;
   const source = new EventSource(
     '/api/native/sessions/' +
       encodeURIComponent(id) +
       '/events?' +
-      new URLSearchParams({ space_id: S.space_id || '', project: c.project, cursor: c.cursor }),
+      new URLSearchParams({
+        space_id: S.space_id || '',
+        project: c.project,
+        cursor: c.cursor,
+      }),
   );
   c.source = source;
   const receive = (e) => {
@@ -1440,6 +2641,268 @@ function chatConnect() {
       chatStatus('连接暂时中断，正在从已接收的位置恢复…');
     }
   };
+}
+async function chatConnectV2(c, gen, id, v) {
+  const identitySession = S.session;
+  const mapping = chatV2MappingSignature(c.project);
+  const cache = chatV2Cache();
+  let scopeKey = c.v2ScopeKeys.get(mapping.key) || v.v2State?.scopeKey || '';
+  let initialSnap = null;
+  if (scopeKey && cache) {
+    const hit = cache.get({ scopeKey, sessionId: id, schemaVersion: 2 });
+    if (hit?.snapshot) {
+      const pendingCommands = v.v2State?.pendingCommands;
+      v.v2State = CP.nativeState.installNativeSnapshot(hit.snapshot, {
+        scopeKey,
+        sessionId: id,
+      });
+      if (pendingCommands?.size) v.v2State.pendingCommands = new Map(pendingCommands);
+      chatSyncV2ToView(v, hit.snapshot);
+      if (chatCurrent(gen, v)) chatRenderHistory();
+    }
+  }
+  if (!v.v2State) {
+    try {
+      initialSnap = await api('/api/native/sessions/' + encodeURIComponent(id) + '/view');
+    } catch (err) {
+      if (!chatCurrent(gen, v)) return;
+      if (err?.status === 404 || err?.status === 409 || err?.status === 403) {
+        chatConnection('error', '连接受限');
+        chatStatus(err.message || '访问权限已变化', true);
+        return;
+      }
+      chatConnectV1(c, gen, id, v);
+      return;
+    }
+    if (!chatCurrent(gen, v) || S.session !== identitySession) return;
+    const projState = initialSnap?.sync?.projection_state;
+    if (projState === 'projection_building' || projState === 'building') {
+      v.v2ProjectionState = projState;
+      chatConnectV1(c, gen, id, v);
+      return;
+    }
+    scopeKey = initialSnap.scope_key;
+    c.v2ScopeKeys.set(mapping.key, scopeKey);
+    const normalized = chatNormalizeV2Snapshot(initialSnap);
+    const pendingCommands = v.v2State?.pendingCommands;
+    v.v2State = CP.nativeState.installNativeSnapshot(normalized, {
+      scopeKey,
+      sessionId: id,
+    });
+    if (pendingCommands?.size) v.v2State.pendingCommands = new Map(pendingCommands);
+    v.v2ProjectionState = projState || 'ready';
+    v.v2Halted = null;
+    cache?.enqueue(v.v2State, () => chatCurrent(gen, v) && S.session === identitySession);
+    chatSyncV2ToView(v, initialSnap);
+    if (chatCurrent(gen, v)) {
+      chatRenderHistory();
+      chatSyncChrome();
+    }
+  }
+  if (!chatCurrent(gen, v)) return;
+  const scope = {
+    identity: { scopeKey, sessionId: id },
+    authoritative: v.v2State,
+    cache,
+    initiallySynchronized: false,
+    scheduleRender: () => {
+      if (!chatCurrent(gen, v)) return;
+      if (!c.frame) c.frame = requestAnimationFrame(chatFlush);
+    },
+  };
+  v.v2Scope = scope;
+  c.v2ActiveScope = scope;
+  const io = {
+    commitApplied: (sc, next, owner, summaryPatches) => {
+      if (sc.owner !== owner || !chatCurrent(gen, v)) return false;
+      sc.authoritative = next;
+      v.v2State = next;
+      chatSyncV2ToView(v);
+      for (const patch of summaryPatches) chatApplyV2ExtraMeta(c, v, patch);
+      sc.authoritative = v.v2State;
+      sc.cache?.enqueue(sc.authoritative, () => sc.owner === owner && chatCurrent(gen, v));
+      sc.scheduleRender?.();
+      return true;
+    },
+    consumeAttempt: async ({ identity: idObj, after, signal, onFrame }) => {
+      const qs = new URLSearchParams({
+        after: after || '',
+        ...(S.space_id ? { space_id: S.space_id } : {}),
+      });
+      const res = await fetch(
+        '/api/native/sessions/' + encodeURIComponent(idObj.sessionId) + '/view-events?' + qs,
+        {
+          credentials: 'same-origin',
+          headers: {
+            ...(S.space_id ? { 'X-CodePier-Space': S.space_id } : {}),
+            ...(S.session?.csrf ? { 'X-RD-CSRF': S.session.csrf } : {}),
+          },
+          signal,
+        },
+      ).catch((error) => {
+        throw new CP.nativeRuntime.NativeTransportReadError(error);
+      });
+      if (signal.aborted || !chatCurrent(gen, v))
+        return { kind: 'done', stablySynchronized: false };
+      if (!res.ok) {
+        let errBody = null;
+        try {
+          errBody = await res.json();
+        } catch {}
+        if (res.status === 401) {
+          cache?.invalidateScope(idObj.scopeKey);
+          endSession(false);
+          return { kind: 'blocked', reason: 'unauthorized' };
+        }
+        if ([403, 404, 409].includes(res.status)) {
+          return {
+            kind: 'blocked',
+            reason: errBody?.error?.code || 'HTTP_' + res.status,
+            message: errBody?.error?.message,
+          };
+        }
+        return { kind: 'resume', stablySynchronized: false };
+      }
+      if (!res.body) return { kind: 'resume', stablySynchronized: false };
+      let stablySynchronized = false;
+      await CP.nativeRuntime.parseSseFrames(
+        res.body,
+        async (frame) => {
+          if (signal.aborted || !chatCurrent(gen, v)) return;
+          if (!frame.data) return;
+          let payload;
+          try {
+            payload = JSON.parse(frame.data);
+          } catch (error) {
+            throw new CP.nativeRuntime.NativeTransportReadError(error);
+          }
+          if (frame.event === 'synchronized') {
+            await onFrame({ ...payload, kind: 'synchronized' });
+            stablySynchronized = true;
+            chatConnection('online', '实时连接');
+            chatStatus('已连接 · Enter 发送');
+            const op = v.settingOp;
+            if (op && ['sending', 'queued', 'claimed', 'uncertain'].includes(op.state)) {
+              chatWatchReceipt(id, op.receipt, gen, v, op);
+            }
+            return;
+          }
+          if (frame.event === 'reset_required') {
+            await onFrame({ kind: 'reset_required', ...payload });
+            return;
+          }
+          if (frame.event === 'blocked') {
+            await onFrame({ kind: 'blocked', ...payload });
+            return;
+          }
+          if (frame.event === 'error') {
+            await onFrame({
+              kind: 'blocked',
+              reason: payload.code || 'stream_error',
+              message: payload.message,
+            });
+            return;
+          }
+          if (frame.event === 'batch' || payload.kind === 'batch') {
+            await onFrame({
+              ...payload,
+              _rawBytes: new TextEncoder().encode(frame.data).length,
+            });
+          }
+        },
+        signal,
+      );
+      return { kind: 'resume', stablySynchronized };
+    },
+    replaceSnapshotBounded: async (sc, owner, signal) => {
+      try {
+        const snap = await api('/api/native/sessions/' + encodeURIComponent(id) + '/view', {
+          signal,
+        });
+        if (signal.aborted || sc.owner !== owner || !chatCurrent(gen, v)) return false;
+        const projState = snap?.sync?.projection_state;
+        if (projState === 'projection_building' || projState === 'building') {
+          v.v2ProjectionState = projState;
+          sc.stopNative?.();
+          chatConnectV1(c, gen, id, v);
+          return false;
+        }
+        const normalized = chatNormalizeV2Snapshot(snap);
+        const applied = CP.nativeRuntime.applyBoundedSnapshotReplacement(sc, normalized, owner);
+        if (applied) {
+          v.v2State = sc.authoritative;
+          v.v2Halted = null;
+          chatSyncV2ToView(v, snap);
+          chatRenderHistory(false);
+        }
+        return applied;
+      } catch {
+        return false;
+      }
+    },
+    publishResetHalted: (sc, outcome) => {
+      if (!chatCurrent(gen, v)) return;
+      if (outcome.reason === 'PROJECTION_BUILDING') {
+        v.v2ProjectionState = 'projection_building';
+        sc.stopNative?.();
+        chatConnectV1(c, gen, id, v);
+        return;
+      }
+      v.v2Halted = outcome;
+      chatConnection('error', '同步受阻');
+      chatStatus(
+        outcome.reason === 'SOURCE_GAP'
+          ? '本机记录存在缺口，草稿与待确认操作已保留；请检查电脑连接'
+          : outcome.reason === 'SOURCE_CORRUPT'
+            ? '本机记录校验异常，草稿已保留；请检查电脑记录'
+            : '视图重置次数过多，草稿已保留；请刷新后重试',
+        true,
+      );
+      chatSyncChrome();
+    },
+    publishBlocked: (sc, outcome) => {
+      if (!chatCurrent(gen, v)) return;
+      cache?.invalidateScope(sc.identity.scopeKey);
+      chatConnection('error', '连接受限');
+      chatStatus(outcome.message || '访问权限或项目目录配置已变化', true);
+      chatSyncChrome();
+    },
+    publishFatal: (_sc, error) => {
+      if (!chatCurrent(gen, v)) return;
+      chatConnection('reconnecting', '重连中');
+      chatStatus(error?.message || '连接暂时中断，正在恢复…', true);
+    },
+  };
+  CP.nativeRuntime.startNativeTransport(scope, io);
+}
+function chatConnect() {
+  const c = ChatUI,
+    gen = c.generation,
+    id = c.selected?.id,
+    v = chatView();
+  chatDisconnect();
+  if (!id) return;
+  if (typeof CP === 'undefined' || !CP.nativeState || !CP.nativeRuntime) {
+    chatConnectV1(c, gen, id, v);
+    return;
+  }
+  if (c.v2Capabilities) {
+    if (chatV2Enabled('native_snapshot_v2_read') && v.v2ProjectionState !== 'projection_building') {
+      void chatConnectV2(c, gen, id, v);
+    } else {
+      chatConnectV1(c, gen, id, v);
+    }
+    return;
+  }
+  void (async () => {
+    await chatLoadNativeCapabilities();
+    if (!chatCurrent(gen, v) || c.selected?.id !== id) return;
+    if (chatV2Enabled('native_snapshot_v2_read') && v.v2ProjectionState !== 'projection_building') {
+      await chatConnectV2(c, gen, id, v);
+    } else {
+      chatConnectV1(c, gen, id, v);
+    }
+  })();
 }
 function chatEvent(e) {
   const c = ChatUI,
@@ -1599,8 +3062,12 @@ function chatEvent(e) {
     item = { key, kind, text: '', data: e, node: null, body: null };
     v.items.set(key, item);
     v.order.push(key);
+    v.structureDirty = true;
   }
+  const prevCompact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
   item.data = { ...item.data, ...e };
+  const nextCompact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+  if (prevCompact !== nextCompact) v.structureDirty = true;
   if (kind === 'approval') {
     if (!v.approvalKeys) chatHasPendingApproval(v);
     v.approvalKeys.add(key);
@@ -1626,9 +3093,23 @@ function chatAtBottom() {
   const el = $('#chat-scroll');
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 110;
 }
+function chatSetScrollTop(v, el, top) {
+  if (!el) return;
+  if (v?.v2Window) {
+    v.v2Window.programmaticScroll = true;
+    v.v2Window.expectedScrollTop = top;
+  }
+  el.scrollTop = top;
+  if (v?.v2Window) {
+    Promise.resolve().then(() => {
+      if (v.v2Window) v.v2Window.programmaticScroll = false;
+    });
+  }
+}
 function chatBottom() {
   const el = $('#chat-scroll');
-  if (el) el.scrollTop = el.scrollHeight;
+  const v = chatView();
+  if (el) chatSetScrollTop(v, el, el.scrollHeight);
   if ($('#chat-latest')) $('#chat-latest').hidden = true;
 }
 function chatProcessFailure(item) {
@@ -1663,6 +3144,58 @@ function chatReconcileNodes(holder, nodes) {
   const keep = new Set(nodes);
   for (const node of [...holder.childNodes]) if (!keep.has(node)) node.remove();
 }
+function chatViewportActive(v = chatView()) {
+  return (
+    typeof CP !== 'undefined' &&
+    !!CP.nativeWindow &&
+    typeof chatV2Enabled === 'function' &&
+    chatV2Enabled('native_viewport_v2') &&
+    !!v?.v2State
+  );
+}
+function chatUpdateProcessGroupMeta(v, node, items, receipt) {
+  const tools = items.filter((i) => i.kind === 'tool').length,
+    thoughts = items.length - tools;
+  const live =
+    !!v.active &&
+    v.active === receipt &&
+    items.some((i) => !['completed', 'end', 'succeeded', 'ok'].includes(i.data.status));
+  const counts = [tools ? tools + ' 项工具' : '', thoughts ? thoughts + ' 段思考' : '']
+    .filter(Boolean)
+    .join(' · ');
+  const last = items.at(-1),
+    status = live
+      ? ' · ' + (last.kind === 'tool' ? (last.data.name || '工具') + ' 执行中' : '思考中')
+      : '';
+  const meta = node.querySelector('.chat-process-meta');
+  if (meta && meta.textContent !== counts + status) meta.textContent = counts + status;
+  node.dataset.active = String(live);
+}
+function chatEnsureProcessGroupNode(v, key) {
+  v.processGroups ??= new Map();
+  let node = v.processGroups.get(key);
+  if (!node) {
+    node = document.createElement('details');
+    node.className = 'chat-process';
+    node.dataset.groupKey = key;
+    node.dataset.rowKey = key;
+    const summary = document.createElement('summary'),
+      label = document.createElement('span'),
+      meta = document.createElement('span'),
+      body = document.createElement('div');
+    label.className = 'chat-process-label';
+    label.textContent = '执行过程';
+    meta.className = 'chat-process-meta';
+    body.className = 'chat-process-body';
+    summary.append(label, meta);
+    node.append(summary, body);
+    if (typeof chatSyncGroupToolOutputs === 'function') {
+      node.addEventListener('toggle', () => chatSyncGroupToolOutputs(v, node));
+    }
+    v.processGroups.set(key, node);
+  }
+  return node;
+}
 // Group consecutive tool/thinking entries without replacing their disclosure nodes.
 function chatRenderProcessGroups() {
   const v = chatView(),
@@ -1673,6 +3206,7 @@ function chatRenderProcessGroups() {
     nodes = [],
     groups = [];
   v.processGroups ??= new Map();
+  v.processGroupEntries = new Map();
   let group = null;
   for (const key of keys) {
     const item = v.items.get(key);
@@ -1683,54 +3217,25 @@ function chatRenderProcessGroups() {
     const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
     if (!compact) {
       group = null;
+      item.groupKey = null;
       nodes.push(item.node);
       continue;
     }
     if (!group || group.receipt !== item.data.receipt) {
-      let node = v.processGroups.get(key);
-      if (!node) {
-        node = document.createElement('details');
-        node.className = 'chat-process';
-        node.dataset.groupKey = key;
-        const summary = document.createElement('summary'),
-          label = document.createElement('span'),
-          meta = document.createElement('span'),
-          body = document.createElement('div');
-        label.className = 'chat-process-label';
-        label.textContent = '执行过程';
-        meta.className = 'chat-process-meta';
-        body.className = 'chat-process-body';
-        summary.append(label, meta);
-        node.append(summary, body);
-        v.processGroups.set(key, node);
-      }
-      group = { node, receipt: item.data.receipt, items: [] };
+      const node = chatEnsureProcessGroupNode(v, key);
+      group = { groupKey: key, node, receipt: item.data.receipt, items: [] };
       groups.push(group);
+      v.processGroupEntries.set(key, group);
       nodes.push(node);
     }
+    item.groupKey = group.groupKey;
     group.items.push(item);
   }
   for (const entry of groups) {
-    const { node, items, receipt } = entry,
-      tools = items.filter((i) => i.kind === 'tool').length,
-      thoughts = items.length - tools;
-    const live =
-      !!v.active &&
-      v.active === receipt &&
-      items.some((i) => !['completed', 'end', 'succeeded', 'ok'].includes(i.data.status));
-    const counts = [tools ? tools + ' 项工具' : '', thoughts ? thoughts + ' 段思考' : '']
-      .filter(Boolean)
-      .join(' · ');
-    const last = items.at(-1),
-      status = live
-        ? ' · ' + (last.kind === 'tool' ? (last.data.name || '工具') + ' 执行中' : '思考中')
-        : '';
-    const meta = node.querySelector('.chat-process-meta');
-    if (meta.textContent !== counts + status) meta.textContent = counts + status;
-    node.dataset.active = String(live);
+    chatUpdateProcessGroupMeta(v, entry.node, entry.items, entry.receipt);
     chatReconcileNodes(
-      node.lastElementChild,
-      items.map((i) => i.node),
+      entry.node.lastElementChild,
+      entry.items.map((i) => i.node),
     );
   }
   chatReconcileNodes(holder, nodes);
@@ -1738,11 +3243,251 @@ function chatRenderProcessGroups() {
   for (const key of v.processGroups.keys()) if (!retained.has(key)) v.processGroups.delete(key);
   for (const [key, item] of v.renderedItems || [])
     if (renderedItems.get(key) !== item) {
+      if (item.kind === 'tool' && typeof chatCloseToolOutput === 'function') {
+        chatCloseToolOutput(item.key, v);
+      }
       item.node?.remove();
       item.node = null;
       item.body = null;
     }
   v.renderedItems = renderedItems;
+}
+function chatBuildViewportRows(v, keys) {
+  const rows = [];
+  const itemToRowKey = new Map();
+  v.processGroups ??= new Map();
+  v.processGroupEntries = new Map();
+  let group = null;
+  for (const key of keys) {
+    const item = v.items.get(key);
+    if (!item) continue;
+    const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+    if (!compact) {
+      group = null;
+      item.groupKey = null;
+      itemToRowKey.set(key, key);
+      rows.push({
+        rowKey: key,
+        isGroup: false,
+        itemKeys: [key],
+        receipt: item.data?.receipt,
+      });
+      continue;
+    }
+    if (!group || group.receipt !== item.data.receipt) {
+      group = {
+        rowKey: key,
+        isGroup: true,
+        itemKeys: [],
+        receipt: item.data.receipt,
+      };
+      rows.push(group);
+    }
+    item.groupKey = group.rowKey;
+    itemToRowKey.set(key, group.rowKey);
+    group.itemKeys.push(key);
+  }
+  return { rows, itemToRowKey };
+}
+function chatEnsureViewportWindow(v) {
+  const el = $('#chat-scroll');
+  const holder = $('#chat-messages');
+  if (!el || !holder || typeof CP === 'undefined' || !CP.nativeWindow) return null;
+  el.style.overflowAnchor = 'none';
+  if (v.v2Window && v.v2Window.el === el && v.v2Window.holder === holder) return v.v2Window;
+  v.v2Window?.observer?.disconnect?.();
+  const topSpacer = document.createElement('div');
+  topSpacer.className = 'chat-spacer-top';
+  topSpacer.setAttribute('aria-hidden', 'true');
+  const bottomSpacer = document.createElement('div');
+  bottomSpacer.className = 'chat-spacer-bottom';
+  bottomSpacer.setAttribute('aria-hidden', 'true');
+  const win = {
+    owner: Symbol('v2-window'),
+    userScrollGeneration: 0,
+    followBottom: v.follow !== false,
+    programmaticScroll: false,
+    expectedScrollTop: 0,
+    heights: new CP.nativeWindow.HeightIndex([], { defaultHeight: 72 }),
+    knownHeights: new Map(),
+    pinSet: new CP.nativeWindow.PinSet(16),
+    mountedKeys: new Set(),
+    rows: [],
+    rowByKey: new Map(),
+    itemToRowKey: new Map(),
+    groupKeyFor: (key) => win.itemToRowKey.get(key) || key,
+    el,
+    holder,
+    topSpacer,
+    bottomSpacer,
+    overscanPx: 240,
+    pendingMeasurements: new Map(),
+    measureFrame: 0,
+    flushRuntime: {
+      frame: 0,
+      generation: ChatUI.generation,
+      structureDirty: false,
+      dirtyKeys: new Set(),
+      budget: { renderSliceMs: 8 },
+      viewport: {
+        isMounted: (itemKey) => win.mountedKeys.has(win.groupKeyFor(itemKey)),
+      },
+      reconcileVisibleStructure: () => chatRenderViewportWindow(v),
+      updateItem: (item) => {
+        if (!item.node) return;
+        chatUpdateItem(item);
+        if (item.groupKey && v.processGroups?.has(item.groupKey)) {
+          const row = win.rowByKey.get(item.groupKey);
+          if (row) {
+            const gItems = row.itemKeys.map((k) => v.items.get(k)).filter(Boolean);
+            chatUpdateProcessGroupMeta(v, v.processGroups.get(item.groupKey), gItems, row.receipt);
+          }
+        }
+      },
+    },
+    renderWindow: (range) => chatMountViewportRange(v, win, range),
+  };
+  if (typeof ResizeObserver === 'function') {
+    win.observer = new ResizeObserver((entries) => {
+      if (win !== v.v2Window || !win.holder.isConnected) return;
+      for (const entry of entries) {
+        const target = entry.target;
+        const rowKey = target.dataset.rowKey || target.dataset.groupKey || target.dataset.key;
+        if (!rowKey || !win.mountedKeys.has(rowKey)) continue;
+        const h =
+          entry.borderBoxSize?.[0]?.blockSize ||
+          entry.contentRect?.height ||
+          target.offsetHeight ||
+          0;
+        if (h > 0 && Math.abs((win.knownHeights.get(rowKey) || 0) - h) > 0.5) {
+          win.pendingMeasurements.set(rowKey, h);
+          win.knownHeights.set(rowKey, h);
+        }
+      }
+      if (!win.pendingMeasurements.size || win.measureFrame) return;
+      win.measureFrame = requestAnimationFrame(() => {
+        win.measureFrame = 0;
+        if (win !== v.v2Window || !win.holder.isConnected) return;
+        const anchor = CP.nativeWindow.captureAnchor(win);
+        const batch = [...win.pendingMeasurements.entries()].map(([key, height]) => ({
+          key,
+          height,
+        }));
+        win.pendingMeasurements.clear();
+        win.programmaticScroll = true;
+        try {
+          CP.nativeWindow.commitHeightBatch(win, batch, anchor);
+        } finally {
+          Promise.resolve().then(() => {
+            win.programmaticScroll = false;
+          });
+        }
+      });
+    });
+  }
+  v.v2Window = win;
+  return win;
+}
+function chatMountViewportRange(v, win, range) {
+  const holder = win.holder;
+  if (!holder) return;
+  const totalRows = win.rows.length;
+  const indices = new Set();
+  for (let i = range.start; i < range.end && i < totalRows; i += 1) indices.add(i);
+  const pinnedRanges = win.pinSet.discreteRanges(win.heights, range.start, range.end);
+  for (const pr of pinnedRanges) {
+    for (let i = pr.start; i < pr.end && i < totalRows; i += 1) indices.add(i);
+  }
+  const sortedIndices = [...indices].sort((a, b) => a - b);
+  const nextMounted = new Set();
+  const nextRenderedItems = new Map();
+  const nodes = [win.topSpacer];
+  win.topSpacer.style.height = Math.max(0, range.top) + 'px';
+  win.bottomSpacer.style.height = Math.max(0, range.bottom) + 'px';
+  for (const idx of sortedIndices) {
+    const row = win.rows[idx];
+    if (!row) continue;
+    nextMounted.add(row.rowKey);
+    if (row.isGroup) {
+      const gNode = chatEnsureProcessGroupNode(v, row.rowKey);
+      const gItems = [];
+      for (const itemKey of row.itemKeys) {
+        const item = v.items.get(itemKey);
+        if (!item) continue;
+        if (!item.node) chatCreateItem(item);
+        chatUpdateItem(item);
+        nextRenderedItems.set(itemKey, item);
+        gItems.push(item);
+      }
+      chatUpdateProcessGroupMeta(v, gNode, gItems, row.receipt);
+      chatReconcileNodes(
+        gNode.lastElementChild,
+        gItems.map((i) => i.node),
+      );
+      nodes.push(gNode);
+      win.observer?.observe(gNode);
+    } else {
+      const item = v.items.get(row.itemKeys[0]);
+      if (!item) continue;
+      if (!item.node) chatCreateItem(item);
+      item.node.dataset.rowKey = row.rowKey;
+      chatUpdateItem(item);
+      nextRenderedItems.set(item.key, item);
+      nodes.push(item.node);
+      win.observer?.observe(item.node);
+    }
+  }
+  nodes.push(win.bottomSpacer);
+  chatReconcileNodes(holder, nodes);
+  for (const prevKey of win.mountedKeys) {
+    if (!nextMounted.has(prevKey)) {
+      const oldRow = win.rowByKey.get(prevKey);
+      if (oldRow?.isGroup) {
+        const gNode = v.processGroups?.get(prevKey);
+        if (gNode) win.observer?.unobserve(gNode);
+      }
+    }
+  }
+  for (const [key, item] of v.renderedItems || []) {
+    if (nextRenderedItems.get(key) !== item) {
+      if (item.kind === 'tool' && typeof chatCloseToolOutput === 'function') {
+        chatCloseToolOutput(item.key, v);
+      }
+      win.observer?.unobserve(item.node);
+      item.node?.remove();
+      item.node = null;
+      item.body = null;
+    }
+  }
+  win.mountedKeys = nextMounted;
+  v.renderedItems = nextRenderedItems;
+}
+function chatRenderViewportWindow(v = chatView()) {
+  const win = chatEnsureViewportWindow(v);
+  if (!win) {
+    chatRenderProcessGroups();
+    return;
+  }
+  const { rows, itemToRowKey } = chatBuildViewportRows(v, v.order);
+  win.rows = rows;
+  win.itemToRowKey = itemToRowKey;
+  win.rowByKey = new Map(rows.map((r) => [r.rowKey, r]));
+  for (const key of v.approvalKeys || []) {
+    const item = v.items.get(key);
+    const rk = itemToRowKey.get(key);
+    if (item && !item.data.resolved && !item.answered && rk) win.pinSet.pin(rk, 'approval');
+    else if (rk) win.pinSet.unpin(rk, 'approval');
+  }
+  win.heights.rebuild(
+    rows.map((r) => r.rowKey),
+    win.knownHeights,
+    72,
+  );
+  const total = win.heights.offset(win.heights.count);
+  const clientH = win.el.clientHeight || 600;
+  const targetTop = win.followBottom ? Math.max(0, total - clientH) : win.el.scrollTop;
+  const range = CP.nativeWindow.visibleRange(win.heights, targetTop, clientH, win.overscanPx);
+  chatMountViewportRange(v, win, range);
 }
 function chatFlush() {
   const c = ChatUI;
@@ -1750,24 +3495,101 @@ function chatFlush() {
   if (!$('#chat-messages')) return;
   const v = chatView(),
     bottom = chatAtBottom();
-  chatRenderProcessGroups();
-  c.dirty.clear();
+  const dirtyKeys = new Set([...c.dirty, ...(v.v2DirtyKeys || [])]);
+  let structureDirty = Boolean(v.structureDirty || v.v2StructureDirty || !v.renderedItems?.size);
+  if (chatViewportActive(v)) {
+    const win = chatEnsureViewportWindow(v);
+    if (win) {
+      win.followBottom = bottom;
+      win.flushRuntime.generation = c.generation;
+      win.flushRuntime.structureDirty = structureDirty;
+      win.flushRuntime.dirtyKeys = new Set(dirtyKeys);
+      CP.nativeWindow.flushVisibleDirty(v, win.flushRuntime);
+      if (win.flushRuntime.dirtyKeys.size) {
+        for (const k of win.flushRuntime.dirtyKeys) c.dirty.add(k);
+      } else {
+        c.dirty.clear();
+      }
+      v.v2DirtyKeys?.clear();
+      v.structureDirty = false;
+      v.v2StructureDirty = false;
+      v.v2State?.dirtyKeys?.clear();
+      v.v2State?.changeReasons?.clear();
+      if (v.v2State) v.v2State.structureDirty = false;
+    }
+  } else {
+    if (!structureDirty && dirtyKeys.size > 0 && v.renderedItems?.size) {
+      const updatedGroups = new Map();
+      for (const key of dirtyKeys) {
+        const item = v.items.get(key);
+        if (!item) {
+          structureDirty = true;
+          break;
+        }
+        if (!item.node || v.renderedItems.get(key) !== item) {
+          const windowKeys = v.order.slice(-v.limit);
+          if (windowKeys.includes(key)) {
+            structureDirty = true;
+            break;
+          }
+          continue;
+        }
+        const compact = ['tool', 'reasoning'].includes(item.kind) && !chatProcessFailure(item);
+        const insideGroup = Boolean(item.groupKey);
+        if (compact !== insideGroup) {
+          structureDirty = true;
+          break;
+        }
+        chatUpdateItem(item);
+        if (item.groupKey && v.processGroupEntries?.has(item.groupKey)) {
+          updatedGroups.set(item.groupKey, v.processGroupEntries.get(item.groupKey));
+        }
+      }
+      for (const entry of updatedGroups.values()) {
+        chatUpdateProcessGroupMeta(v, entry.node, entry.items, entry.receipt);
+      }
+    } else {
+      structureDirty = true;
+    }
+    if (structureDirty) chatRenderProcessGroups();
+    c.dirty.clear();
+    v.v2DirtyKeys?.clear();
+    v.structureDirty = false;
+    v.v2StructureDirty = false;
+    v.v2State?.dirtyKeys?.clear();
+    v.v2State?.changeReasons?.clear();
+    if (v.v2State) v.v2State.structureDirty = false;
+  }
   $('#chat-empty').hidden = !!v.order.length;
-  $('#chat-older').hidden = v.order.length <= v.limit;
+  $('#chat-older').hidden = v.v2State
+    ? !v.v2State.projection?.history?.hasMore
+    : v.order.length <= v.limit;
   if (bottom) chatBottom();
   else $('#chat-latest').hidden = false;
   chatSyncChrome();
 }
 function chatRenderHistory(scroll = true) {
   const v = chatView();
-  chatRenderProcessGroups();
+  if (chatViewportActive(v)) {
+    chatRenderViewportWindow(v);
+  } else {
+    chatRenderProcessGroups();
+  }
   ChatUI.dirty.clear();
+  v.v2DirtyKeys?.clear();
+  v.structureDirty = false;
+  v.v2StructureDirty = false;
+  v.v2State?.dirtyKeys?.clear();
+  v.v2State?.changeReasons?.clear();
+  if (v.v2State) v.v2State.structureDirty = false;
   $('#chat-empty').hidden = !!v.order.length;
-  $('#chat-older').hidden = v.order.length <= v.limit;
+  $('#chat-older').hidden = v.v2State
+    ? !v.v2State.projection?.history?.hasMore
+    : v.order.length <= v.limit;
   if (scroll) {
-    if (!v.order.length) $('#chat-scroll').scrollTop = 0;
+    if (!v.order.length) chatSetScrollTop(v, $('#chat-scroll'), 0);
     else if (v.follow !== false) chatBottom();
-    else $('#chat-scroll').scrollTop = v.scrollTop || 0;
+    else chatSetScrollTop(v, $('#chat-scroll'), v.scrollTop || 0);
   }
   $('#chat-latest').hidden = !v.order.length || chatAtBottom();
 }
@@ -1818,6 +3640,9 @@ function chatCreateItem(item) {
       summary = document.createElement('summary');
     body = document.createElement('pre');
     details.append(summary, body);
+    if (item.kind === 'tool' && typeof chatOnToolDetailsToggle === 'function') {
+      details.addEventListener('toggle', () => chatOnToolDetailsToggle(item, details));
+    }
     article.append(details);
   } else {
     body = document.createElement('div');
@@ -1864,6 +3689,7 @@ function chatCreateItem(item) {
 function chatUpdateItem(item) {
   if (item.kind === 'review') {
     chatUpdateReview(item);
+    if (typeof chatApplyReviewEvidenceState === 'function') chatApplyReviewEvidenceState(item);
     return;
   }
   const signature =
@@ -1873,7 +3699,11 @@ function chatUpdateItem(item) {
     '\0' +
     (item.data.name || '') +
     '\0' +
-    !!(item.data.isError || item.data.is_error);
+    !!(item.data.isError || item.data.is_error) +
+    '\0' +
+    !!item.data.partial +
+    '\0' +
+    (item.data.body_loaded_bytes || 0);
   if (item.renderedSignature === signature && item.body?.hasChildNodes()) return;
   item.renderedSignature = signature;
   if (item.kind === 'assistant') {
@@ -1898,6 +3728,7 @@ function chatUpdateItem(item) {
       item.node.querySelector('summary').textContent =
         '查看思考过程 · ' + item.text.length + ' 字符';
   }
+  if (typeof chatSyncPartialBodyNotice === 'function') chatSyncPartialBodyNotice(item);
 }
 async function chatCopyText(text) {
   if (typeof copy === 'function') {
@@ -2259,6 +4090,14 @@ async function chatResume() {
     v.configForResume = false;
     v.selectedModel = null;
     v.selectedEffort = null;
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    v.v2State = null;
+    v.v2Scope = null;
+    v.v2Window = null;
+    v.v2Halted = null;
+    v.v2ProjectionState = '';
     c.views.set(chatKey(project, next.id), v);
     if (current) await chatSwitch(next, project);
     c.views.delete(chatKey(project, row.id));
@@ -2342,6 +4181,13 @@ async function chatDelete() {
       }
     }
     await chatAPI('delete', { id: row.id, confirm: row.id }, project);
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    const scopeKey = v.v2State?.scopeKey;
+    if (scopeKey && typeof chatV2Cache === 'function') {
+      chatV2Cache()?.invalidateScope(scopeKey);
+    }
     if (chatCurrent(gen, v)) await chatSwitch(null, project);
     c.views.delete(chatKey(project, row.id));
     for (const file of v.files) {
@@ -2401,9 +4247,20 @@ function chatFind() {
   v.match = ((v.match % keys.length) + keys.length) % keys.length;
   const item = v.items.get(keys[v.match]);
   if (!item.node) {
-    v.limit = Math.max(v.limit, v.order.length - v.order.indexOf(item.key));
-    chatRenderHistory(false);
+    if (typeof chatViewportActive === 'function' && chatViewportActive(v) && v.v2Window) {
+      const rowKey = v.v2Window.groupKeyFor(item.key);
+      const rowIdx = v.v2Window.heights.indexOfKey(rowKey);
+      if (rowIdx >= 0) {
+        v.v2Window.followBottom = false;
+        chatSetScrollTop(v, v.v2Window.el, v.v2Window.heights.offset(rowIdx));
+        chatRenderViewportWindow(v);
+      }
+    } else {
+      v.limit = Math.max(v.limit, v.order.length - v.order.indexOf(item.key));
+      chatRenderHistory(false);
+    }
   }
+  if (!item.node) return;
   item.node.classList.add('search-match');
   const group = item.node.closest('.chat-process');
   if (group) group.open = true;

@@ -1,0 +1,6 @@
+{"type": "user", "receipt": "44444444444444444444444444444444", "text": "Stream and repair"}
+{"type": "delta", "receipt": "44444444444444444444444444444444", "text": "Part 1"}
+{"type": "tool", "receipt": "44444444444444444444444444444444", "tool_id": "tool-c1", "status": "start"}
+{"type": "message", "receipt": "44444444444444444444444444444444", "text": "Part 1 + repaired"}
+{"type": "tool", "receipt": "44444444444444444444444444444444", "tool_id": "tool-c1", "status": "end"}
+{"type": "done", "receipt": "44444444444444444444444444444444", "status": "completed"}

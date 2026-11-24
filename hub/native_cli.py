@@ -9,11 +9,20 @@ from collections import OrderedDict
 import json
 import time
 import uuid
-from fastapi import APIRouter, Request
+from fastapi import Request
 from starlette.responses import StreamingResponse
 from shared.native_cli import database, public, identifier, LIVE, TOTAL_QUOTA
+from shared.native_flags import resolve_native_flags
 from shared.util import DevError
 from hub import iam
+from hub.native_projection import (
+    clear_or_delete_projection_tx,
+    commit_projection_step,
+    ensure_projection_schema,
+    prepare_projection_step,
+    read_tombstone,
+)
+from hub.native_view_api import build_native_router
 
 SEARCH_BYTES = 8 * 1024 * 1024
 MAX_SEARCHES = 4
@@ -81,10 +90,13 @@ class NativeService:
         self.event_cache = OrderedDict()
         self.searching = set()
         self._lane_tasks = set()
+        self._projector_tasks = {}
+        self._projector_dirty = set()
+        self.native_flags = resolve_native_flags()
         self._closing = False
         self.sync_errors = 0
-        with closing(database(self.directory)):
-            pass
+        with closing(database(self.directory)) as db, db:
+            ensure_projection_schema(db)
 
     def project(self, value, principal):
         p = self.runtime.project(value, principal)
@@ -332,13 +344,61 @@ class NativeService:
 
     async def close(self):
         self._closing = True
-        tasks = list(self._lane_tasks)
+        tasks = list(self._lane_tasks) + list(self._projector_tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
             # Store.run drains any already executing transaction on cancellation.
             # Finish that drain before Runtime.stop lets the store close.
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _schedule_projections(self):
+        for sid in list(self._projector_dirty):
+            self._projector_dirty.discard(sid)
+            task = self._projector_tasks.get(sid)
+            if task is None or task.done():
+                t = asyncio.create_task(self._run_session_projector(sid))
+                self._projector_tasks[sid] = t
+                t.add_done_callback(lambda done, s=sid: self._on_projector_done(s, done))
+            else:
+                self._projector_dirty.add(sid)
+
+    def _on_projector_done(self, sid, task):
+        if self._projector_tasks.get(sid) is task:
+            self._projector_tasks.pop(sid, None)
+        if not self._closing and sid in self._projector_dirty:
+            self._schedule_projections()
+
+    async def _run_session_projector(self, sid):
+        while not self._closing:
+            self._projector_dirty.discard(sid)
+            staged = await asyncio.to_thread(self._prepare_projection, sid)
+            if staged is None:
+                if sid in self._projector_dirty:
+                    continue
+                return
+            committed = await run_db(self.runtime.store, self._commit_projection, sid, staged)
+            if committed:
+                self.revision += 1
+                async with self.changed:
+                    self.changed.notify_all()
+            if not staged.has_more and sid not in self._projector_dirty:
+                return
+            await asyncio.sleep(0)
+
+    def _prepare_projection(self, sid):
+        with closing(database(self.directory)) as db:
+            return prepare_projection_step(db, sid)
+
+    def _commit_projection(self, sid, staged):
+        with closing(database(self.directory)) as db:
+            return commit_projection_step(db, sid, staged)
+
+    async def drain_projections(self, sid=None):
+        """Advance pending session projections deterministically (tests/lifecycle)."""
+        targets = [sid] if sid else list(self._projector_dirty)
+        for target in targets:
+            await self._run_session_projector(target)
 
     async def _drain_lane(self, device, connection, lane):
         try:
@@ -364,6 +424,7 @@ class NativeService:
                 return  # Legacy Agents: an unprocessed packet gets no ACK.
             persisted = {"offsets": {}, "changed": False, "rejected": {}, "deferred": {}}
         if persisted["changed"]:
+            self._schedule_projections()
             async with self.changed:
                 self.changed.notify_all()
         ack = {"type": "native_ack", "offsets": persisted["offsets"]}
@@ -378,6 +439,36 @@ class NativeService:
         if persisted["deferred"]:
             ack["deferred"] = persisted["deferred"]
         await connection.send(ack)
+
+    def _sync_clear_or_delete(self, db, sid, row):
+        db.execute("DELETE FROM output WHERE session=?", (sid,))
+        tid = str(row.get("transition_id") or row.get("receipt") or f"sync:{row['status']}:{row.get('updated', 0)}")
+        clear_or_delete_projection_tx(db, sid, transition_id=tid, deleted=row["status"] == "deleted")
+
+    def _chunk_blocked_state(self, db, sid, chunk):
+        state = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()[0]
+        if state in {"cleared", "deleted"}:
+            return state
+        tomb = read_tombstone(db, sid)
+        if tomb and tomb["deleted"]:
+            return "deleted"
+        chunk_epoch = chunk.get("stream_epoch") or chunk.get("epoch")
+        if chunk_epoch and tomb and (chunk_epoch != tomb["epoch"] or chunk_epoch in tomb["source_epochs"]):
+            return "cleared"
+        return state
+
+    def _after_sync_persisted(self, rows, offsets):
+        self.event_cache.clear()
+        for sid in offsets:
+            self._projector_dirty.add(sid)
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("mode", "terminal") == "chat":
+                self._projector_dirty.add(row["id"])
+
+    def _clear_session_db(self, db, sid, *, deleted, transition_id):
+        db.execute("DELETE FROM output WHERE session=?", (sid,))
+        tid = transition_id or f"action:{'delete' if deleted else 'clear'}:{uuid.uuid4().hex[:12]}"
+        clear_or_delete_projection_tx(db, sid, transition_id=tid, deleted=deleted)
 
     def _persist_sync(self, device, data):
         """Legacy result shape: ``(offsets, changed)`` or ``None``."""
@@ -529,7 +620,7 @@ class NativeService:
                             [normalized[k] for k in keys],
                         )
                     if row["status"] in {"cleared", "deleted"}:
-                        db.execute("DELETE FROM output WHERE session=?", (sid,))
+                        self._sync_clear_or_delete(db, sid, row)
                     offsets[sid] = db.execute(
                         "SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?",
                         (sid,),
@@ -543,7 +634,7 @@ class NativeService:
                 sid = chunk.get("id") if isinstance(chunk, dict) else None
                 if sid not in offsets:
                     continue
-                state = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()[0]
+                state = self._chunk_blocked_state(db, sid, chunk)
                 if state in {"cleared", "deleted"}:
                     continue
                 try:
@@ -576,7 +667,7 @@ class NativeService:
                     continue
         if changed:
             self.revision += 1
-            self.event_cache.clear()
+            self._after_sync_persisted(rows, offsets)
         return {"offsets": offsets, "changed": changed, "rejected": rejected, "deferred": deferred}
 
     @staticmethod
@@ -699,7 +790,7 @@ class NativeService:
 
 
 def make_native_router(auth, runtime):
-    router = APIRouter(prefix="/api/native")
+    router = build_native_router(auth, runtime)
     service = runtime.native
 
     @router.get("/access")
@@ -1225,7 +1316,7 @@ def make_native_router(auth, runtime):
                 )
             if action in {"clear", "delete"}:
                 with closing(database(service.directory)) as db, db:
-                    db.execute("DELETE FROM output WHERE session=?", (args["id"],))
+                    service._clear_session_db(db, args["id"], deleted=action == "delete", transition_id=args.get("receipt") or "")
                     db.execute(
                         "UPDATE sessions SET size=0,status=?,updated=? WHERE id=?",
                         ("deleted" if action == "delete" else "cleared", time.time(), args["id"]),

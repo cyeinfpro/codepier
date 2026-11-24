@@ -1,0 +1,7 @@
+{"type": "user", "receipt": "11111111111111111111111111111111", "text": "Explain helper"}
+{"type": "delta", "receipt": "11111111111111111111111111111111", "text": "Hello "}
+{"type": "delta", "receipt": "11111111111111111111111111111111", "text": "world"}
+{"type": "tool", "receipt": "11111111111111111111111111111111", "tool_id": "call-1", "status": "start"}
+{"type": "tool", "receipt": "11111111111111111111111111111111", "tool_id": "call-1", "status": "end"}
+{"type": "message", "receipt": "11111111111111111111111111111111", "text": "Hello world"}
+{"type": "done", "receipt": "11111111111111111111111111111111", "status": "completed"}

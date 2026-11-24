@@ -7,6 +7,7 @@ import hashlib
 import json
 import copy
 from collections import deque
+from dataclasses import dataclass
 import jsonschema
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -26,14 +28,29 @@ from shared.native_cli import (
     TOTAL_QUOTA,
     retained_bytes,
     ATTACHMENT_CAP,
+    append_spool_bytes_tx,
+    immediate,
 )
+from shared.native_contracts import NativeCommand
+from shared.native_flags import resolve_native_flags
 
 MAX_LINE = 64 * 1024 * 1024  # Native Pi events may echo one bounded 20 MiB image as base64.
 MAX_EVENT = 256 * 1024
 
 
 from agent.chat_catalog import public_model, commands, CAPABILITIES, COMMANDS, validate_settings
+from agent.native_adapters import (
+    AdapterProtocolError,
+    NativeAdapterRegistry,
+    ProviderInstanceRegistry,
+    SessionFence,
+)
+from agent.native_process import structured_chat_platform_support
 from agent.native_project_knowledge import NativeProjectKnowledge, reference_text
+from agent.native_review_worker import NativeReviewWorker
+from agent.native_turn_store import NativeTurnStore, TurnKey, TurnRecord
+from agent.resource_queue import Claim, canonical_path
+from agent.workspace_ownership import WorkspaceOwnershipStore
 
 
 def bounded_event(event):
@@ -114,9 +131,24 @@ def image_inputs(attachments, provider):
 class Protocol:
     """Allowlisted native protocol translator. Only replies to observed requests."""
 
-    def __init__(self, provider, row, send, emit, finish, persist):
+    def __init__(
+        self,
+        provider,
+        row,
+        send,
+        emit,
+        finish,
+        persist,
+        *,
+        on_accept=None,
+        on_terminal=None,
+        on_capture_wake=None,
+    ):
         self.provider, self.row = provider, row
         self.send, self.emit, self.finish, self.persist = send, emit, finish, persist
+        self._on_accept = on_accept
+        self._on_terminal = on_terminal
+        self._on_capture_wake = on_capture_wake
         self.active = None
         self.turn = None
         self.turn_start_call = None
@@ -154,6 +186,23 @@ class Protocol:
         self.message_id = ""
         self.command_prompt = False
         self.knowledge_context = None
+
+    def _notify_accept(self, receipt, *, native_thread_id=None, native_turn_id=None):
+        if self._on_accept and receipt:
+            self._on_accept(
+                receipt,
+                native_thread_id=native_thread_id,
+                native_turn_id=native_turn_id,
+            )
+
+    def _notify_terminal(self, receipt, status, text):
+        if self._on_terminal and receipt:
+            return self._on_terminal(receipt, status, text)
+        return None
+
+    def _notify_capture_wake(self, receipt):
+        if self._on_capture_wake and receipt:
+            self._on_capture_wake(receipt)
 
     def call(self, method, params=None, tag=None):
         self.serial += 1
@@ -630,8 +679,13 @@ class Protocol:
                 self.turn = None
             return
         status = "interrupted" if self.interrupted else ("error" if self.failure else status)
-        self.finish(self.active, status)
-        self.emit("done", status=status, text=error or self.failure or "")
+        text = error or self.failure or ""
+        receipt = self.active
+        done_extra = self._notify_terminal(receipt, status, text)
+        if done_extra is None:
+            self.finish(receipt, status)
+        self.emit("done", status=status, text=text, **(done_extra or {}))
+        self._notify_capture_wake(receipt)
         for key in list(self.pending):
             self.emit("approval", request_id=key, resolved=True, resolution="closed")
         if self.provider == "codex" and self.turn:
@@ -665,6 +719,38 @@ class Protocol:
                 self.refresh_errors.discard(receipt)
                 self.finish(receipt, state)
                 self.emit("command_result", receipt=receipt, name="refresh", state=state)
+
+    def _pi_prompt_ack(self):
+        self._notify_accept(self.active, native_thread_id=self.thread or None)
+        if self.command_prompt and self.active:
+            self.call("get_state", tag="prompt_idle_check")
+
+    def _codex_turn_start(self, data):
+        self.turn = data["turn"]["id"]
+        self._notify_accept(self.active, native_thread_id=self.thread or None, native_turn_id=self.turn)
+        # A matching start reply is authoritative even if a native
+        # implementation reuses a turn identifier.
+        with contextlib.suppress(ValueError):
+            self.closed_turns.remove(self.turn)
+        if self.turn_settings:
+            self.settings.update(self.turn_settings)
+            if "effort" in self.turn_settings:
+                self.settings["reasoningEffort"] = self.turn_settings["effort"]
+            self.publish_settings()
+            if self.turn_settings_receipt:
+                self.emit("settings", receipt=self.turn_settings_receipt, **self.settings)
+                self.emit(
+                    "settings_pending", receipt=self.turn_settings_receipt, cleared=True
+                )
+                self.next_settings_receipt = None
+                self.save_settings()
+            self.emit("settings_pending", cleared=True)
+        if self.interrupted:
+            self.interrupt()
+
+    def _codex_turn_started(self, params):
+        self.turn = params["turn"]["id"]
+        self._notify_accept(self.active, native_thread_id=self.thread or None, native_turn_id=self.turn)
 
     def pi(self, m):
         if self.operation_response(m):
@@ -743,8 +829,8 @@ class Protocol:
                         raise RuntimeError("Native Pi state initialization failed")
                 return
             data = m.get("data") or {}
-            if tag == "prompt" and self.command_prompt and self.active:
-                self.call("get_state", tag="prompt_idle_check")
+            if tag == "prompt":
+                self._pi_prompt_ack()
             elif tag == "prompt_idle_check":
                 if (
                     self.active
@@ -959,26 +1045,7 @@ class Protocol:
                 if data.get("nextCursor"):
                     self.call("model/list", {"cursor": data["nextCursor"]})
             elif tag == "turn/start":
-                self.turn = data["turn"]["id"]
-                # A matching start reply is authoritative even if a native
-                # implementation reuses a turn identifier.
-                with contextlib.suppress(ValueError):
-                    self.closed_turns.remove(self.turn)
-                if self.turn_settings:
-                    self.settings.update(self.turn_settings)
-                    if "effort" in self.turn_settings:
-                        self.settings["reasoningEffort"] = self.turn_settings["effort"]
-                    self.publish_settings()
-                    if self.turn_settings_receipt:
-                        self.emit("settings", receipt=self.turn_settings_receipt, **self.settings)
-                        self.emit(
-                            "settings_pending", receipt=self.turn_settings_receipt, cleared=True
-                        )
-                        self.next_settings_receipt = None
-                        self.save_settings()
-                    self.emit("settings_pending", cleared=True)
-                if self.interrupted:
-                    self.interrupt()
+                self._codex_turn_start(data)
             return
         if method == "thread/tokenUsage/updated":
             self.settings["stats"] = params.get("tokenUsage", {})
@@ -1037,7 +1104,7 @@ class Protocol:
                 del self.pending[key]
                 self.emit("approval", request_id=key, resolved=True)
         elif method == "turn/started":
-            self.turn = params["turn"]["id"]
+            self._codex_turn_started(params)
         elif method == "turn/completed":
             turn = params.get("turn", {})
             if not self.turn:
@@ -1061,7 +1128,622 @@ class Protocol:
             self.emit("error", text=(params.get("error") or {}).get("message", "Native error"))
 
 
-def run(directory, sid, config_path=None):
+@dataclass
+class _V2TurnState:
+    turn: TurnRecord
+    armed: bool = False
+    bytes_before: int = 0
+    accepted: bool = False
+
+
+def _run_capture_and_review(worker: NativeReviewWorker, job_id: str) -> None:
+    res = worker.run_capture_job(job_id)
+    if isinstance(res, dict) and res.get("review_job_id"):
+        worker.run_review_job(res["review_job_id"])
+
+
+class _CaptureV2Manager:
+    """Coordinates v2 baseline, write-started fencing, terminal barrier, and async capture."""
+
+    def __init__(self, directory, sid, row, owner_epoch, reviews, *, enabled):
+        self.directory = directory
+        self.sid = sid
+        self.row = row
+        self.owner_epoch = owner_epoch
+        self.enabled = enabled
+        self.turns: dict[str, _V2TurnState] = {}
+        self.pending_capture_jobs: dict[str, str] = {}
+        self.turn_store = NativeTurnStore()
+        self.claims = WorkspaceOwnershipStore()
+        self.review_worker = (
+            NativeReviewWorker(
+                directory,
+                lambda _s: reviews.engine(),
+                owner=f"chat-worker:{sid}",
+                owner_epoch=owner_epoch,
+            )
+            if (enabled and reviews is not None)
+            else None
+        )
+
+    def is_v2_turn(self, receipt):
+        return receipt in self.turns
+
+    def prepare_prompt(self, db, receipt, reviews):
+        if not self.enabled:
+            if reviews:
+                reviews.begin(receipt)
+            return
+        sess = db.execute(
+            "SELECT workspace_version, provider_instance_id FROM sessions WHERE id=?",
+            (self.sid,),
+        ).fetchone()
+        ws_ver = int(sess["workspace_version"]) if sess else int(self.row.get("workspace_version", 0))
+        pid = (
+            (sess["provider_instance_id"] if sess else self.row.get("provider_instance_id"))
+            or ("0" * 32)
+        )
+        attempt_id = uuid.uuid4().hex
+        now_ts = time.time()
+        claim = Claim("agent", "path", str(self.row["root"]), True, "process")
+        with immediate(db):
+            self.claims.acquire_claim_tx(
+                db,
+                claims=[claim],
+                phase="execute",
+                receipt=receipt,
+                attempt_id=attempt_id,
+                owner_epoch=self.owner_epoch,
+                workspace_version=ws_ver,
+                process_identity={"session_id": self.sid, "pid": os.getpid()},
+                now=now_ts,
+            )
+            turn = self.turn_store.begin_turn_tx(
+                db,
+                receipt=receipt,
+                attempt_id=attempt_id,
+                session_id=self.sid,
+                provider_instance_id=pid,
+                workspace_key=canonical_path(self.row["root"]),
+                workspace_version=ws_ver,
+                owner_epoch=self.owner_epoch,
+                evidence_requested=bool(reviews),
+                now=now_ts,
+            )
+        if reviews:
+            prep = reviews.prepare_turn_baseline(receipt, attempt_id, before_ref=turn.before_ref)
+            with immediate(db):
+                turn = self.turn_store.record_baseline_tx(
+                    db,
+                    TurnKey(receipt, attempt_id),
+                    owner_epoch=self.owner_epoch,
+                    expected_state_version=turn.state_version,
+                    status=prep["status"],
+                    before_ref=prep.get("before_ref"),
+                    error_code=prep.get("error_code"),
+                    now=time.time(),
+                )
+        self.turns[receipt] = _V2TurnState(turn=turn)
+
+    def arm_prompt_bytes(self, receipt, bytes_before):
+        state = self.turns.get(receipt)
+        if state is not None:
+            state.armed = True
+            state.bytes_before = max(0, int(bytes_before))
+
+    def before_os_write(self, db):
+        for state in self.turns.values():
+            if state.armed and state.bytes_before == 0 and state.turn.send_phase == "not_sent":
+                with immediate(db):
+                    state.turn = self.turn_store.mark_write_started_tx(
+                        db,
+                        TurnKey(state.turn.receipt, state.turn.attempt_id),
+                        owner_epoch=self.owner_epoch,
+                        expected_state_version=state.turn.state_version,
+                        now=time.time(),
+                    )
+
+    def on_outgoing_written(self, count):
+        for state in self.turns.values():
+            if state.armed and state.bytes_before > 0:
+                state.bytes_before = max(0, state.bytes_before - count)
+
+    def on_accept(self, db, receipt, *, native_thread_id=None, native_turn_id=None):
+        state = self.turns.get(receipt)
+        if state is None or state.turn.terminal_event_id is not None:
+            return
+        if state.accepted and (
+            native_turn_id is None or state.turn.native_turn_id == native_turn_id
+        ):
+            return
+        key = TurnKey(state.turn.receipt, state.turn.attempt_id)
+        with immediate(db):
+            if state.turn.send_phase == "not_sent":
+                state.turn = self.turn_store.mark_write_started_tx(
+                    db,
+                    key,
+                    owner_epoch=self.owner_epoch,
+                    expected_state_version=state.turn.state_version,
+                    now=time.time(),
+                )
+            state.turn = self.turn_store.mark_accepted_tx(
+                db,
+                key,
+                owner_epoch=self.owner_epoch,
+                expected_state_version=state.turn.state_version,
+                native_thread_id=native_thread_id,
+                native_turn_id=native_turn_id,
+                now=time.time(),
+            )
+        state.accepted = True
+
+    def on_terminal(self, db, flush_fn, receipt, status, text, size_cb):
+        state = self.turns.get(receipt)
+        if state is None:
+            return None
+        flush_fn()
+        outcome = {
+            "error": "failed",
+            "failed": "failed",
+            "interrupted": "interrupted",
+            "uncertain": "uncertain",
+        }.get(status, "completed")
+        err_code = {
+            "interrupted": "INTERRUPTED",
+            "failed": "PROVIDER_ERROR",
+            "uncertain": "UNCERTAIN",
+        }.get(outcome)
+        res = self.turn_store.persist_provider_terminal(
+            db,
+            TurnKey(receipt, state.turn.attempt_id),
+            outcome,
+            owner_epoch=self.owner_epoch,
+            claims=self.claims,
+            now=time.time(),
+            error_code=err_code,
+        )
+        if res.get("spool_range"):
+            size_cb(res["spool_range"][1])
+        evidence = res["evidence_state"]
+        review_state = (
+            "pending"
+            if evidence == "capture_pending"
+            else ("not_requested" if evidence == "not_requested" else "unavailable")
+        )
+        if evidence == "capture_pending":
+            self.pending_capture_jobs[receipt] = f"capture:{receipt}:{state.turn.attempt_id}"
+        self.turns.pop(receipt, None)
+        return {"evidence_state": evidence, "review_state": review_state}
+
+    def wake_capture(self, receipt):
+        job_id = self.pending_capture_jobs.pop(receipt, None)
+        if job_id and self.review_worker is not None:
+            self.review_worker._executor.submit(_run_capture_and_review, self.review_worker, job_id)
+
+    def on_interrupt(self, db, receipt):
+        state = self.turns.get(receipt)
+        if state is not None and state.turn.send_phase != "not_sent":
+            with immediate(db):
+                self.turn_store.mark_interrupt_requested_tx(
+                    db,
+                    TurnKey(state.turn.receipt, state.turn.attempt_id),
+                    owner_epoch=self.owner_epoch,
+                    expected_native_turn_id=state.turn.native_turn_id,
+                    now=time.time(),
+                )
+
+    def settle_remaining(self, db, flush_fn, size_cb, *, stop):
+        for receipt in list(self.turns):
+            state = self.turns[receipt]
+            status = (
+                "uncertain"
+                if state.turn.send_phase == "write_started"
+                else ("interrupted" if stop else "error")
+            )
+            self.on_terminal(db, flush_fn, receipt, status, "", size_cb)
+            self.wake_capture(receipt)
+
+    def shutdown(self):
+        if self.review_worker is not None:
+            self.review_worker.__exit__(None, None, None)
+
+
+class _AdapterProtocolBridge:
+    """Optional NativeAdapterRegistry driver enabled by native_provider_adapter_v2."""
+
+    def __init__(
+        self,
+        adapter,
+        row,
+        sid,
+        owner_epoch,
+        send,
+        emit,
+        finish,
+        persist,
+        *,
+        on_accept=None,
+        on_terminal=None,
+        on_capture_wake=None,
+    ):
+        self.adapter = adapter
+        self.provider = adapter.provider_kind
+        self.row = row
+        self.sid = sid
+        self.owner_epoch = owner_epoch
+        self.send = send
+        self.emit = emit
+        self.finish = finish
+        self.persist = persist
+        self._on_accept = on_accept
+        self._on_terminal = on_terminal
+        self._on_capture_wake = on_capture_wake
+        self.fence = SessionFence(
+            session_id=sid,
+            provider_instance_id=adapter.provider_instance_id,
+            worker_epoch=owner_epoch,
+        )
+        self.ready = False
+        self.active = None
+        self.turn = None
+        self.settings_busy = False
+        self.settings_deadline = 0.0
+        self.compaction_receipt = None
+        self.compaction_deadline = 0.0
+        self.operation_deadlines = {}
+        self.knowledge_context = None
+
+    def _cmd(self, receipt, payload):
+        return NativeCommand.model_validate(
+            {
+                "receipt": receipt,
+                "session_id": self.sid,
+                "provider_instance_id": self.adapter.provider_instance_id,
+                "payload": payload,
+            }
+        )
+
+    def _apply(self, transition):
+        for req in transition.wire_requests:
+            self.send(req)
+        updates = transition.state_updates
+        if "native_thread" in updates:
+            self.persist(updates["native_thread"])
+        self.ready = bool(self.adapter._ready)
+        self.active = self.adapter._active_run_id
+        self.turn = self.adapter._active_turn_id
+        self.settings_busy = bool(self.adapter._settings_busy)
+        self.settings_deadline = float(getattr(self.adapter, "_settings_deadline", 0.0))
+        if self.active and self._on_accept:
+            prompt_pending = any(tag in ("prompt", "turn/start") for tag in self.adapter._calls.values())
+            if not prompt_pending or self.turn or any(
+                ev["kind"] in ("delta", "message", "reasoning.delta", "done")
+                for ev in transition.events
+            ):
+                self._on_accept(
+                    self.active,
+                    native_thread_id=getattr(self.adapter, "thread_id", None) or None,
+                    native_turn_id=self.turn,
+                )
+        for ev in transition.events:
+            self._emit_adapter_event(ev)
+
+    def _emit_adapter_event(self, ev):
+        kind = ev["kind"]
+        body = ev["body"]
+        ev_receipt = ev.get("receipt")
+        if kind == "done":
+            done_extra = (
+                self._on_terminal(ev_receipt, body["status"], body.get("text", ""))
+                if self._on_terminal and ev_receipt
+                else None
+            )
+            if done_extra is None and ev_receipt:
+                self.finish(ev_receipt, body["status"])
+            self.emit(
+                "done",
+                receipt=ev_receipt,
+                status=body["status"],
+                text=body.get("text", ""),
+                **(done_extra or {}),
+            )
+            if self._on_capture_wake and ev_receipt:
+                self._on_capture_wake(ev_receipt)
+            return
+        if kind == "settings.applied" and ev_receipt:
+            self.finish(ev_receipt, "completed" if body.get("status") == "applied" else "error")
+            self.emit("settings", **{**body, "receipt": ev_receipt})
+            return
+        mapped = "reasoning" if kind == "reasoning.delta" else kind
+        if kind == "approval.resolved":
+            self.emit(
+                "approval",
+                receipt=ev_receipt,
+                request_id=body.get("request_id"),
+                resolved=True,
+                resolution=body.get("decision", "resolved"),
+            )
+            return
+        # Some normalized events retain a receipt in the legacy body as
+        # well. Prefer the envelope identity and emit a single field.
+        fields = {**body, "receipt": ev_receipt} if ev_receipt else body
+        self.emit(mapped, **fields)
+
+    def start(self):
+        saved = json.loads(self.row.get("chat_settings", "{}"))
+        next_sel = saved.get("next") or {}
+        settings = {"model": next_sel["model"], "options": {k: v for k, v in next_sel.items() if k != "model"}} if next_sel.get("model") else None
+        self._apply(self.adapter.initialize(self.fence, settings=settings))
+
+    def prompt(self, receipt, payload):
+        if payload.get("attachments") or payload.get("attachment_ids"):
+            raise AdapterProtocolError(
+                "CLI_ADAPTER_ATTACHMENTS_UNSUPPORTED",
+                "当前新版原生对话不支持附件，消息未发送。请使用兼容模式发送附件。",
+            )
+        self._apply(
+            self.adapter.command(
+                self._cmd(
+                    receipt,
+                    {
+                        "action": "send",
+                        "text": payload.get("text", ""),
+                        "attachment_ids": payload.get("attachment_ids", []),
+                        "selection_mode": "inherit_at_dispatch",
+                    },
+                )
+            )
+        )
+
+    def steer(self, receipt, payload):
+        self._apply(
+            self.adapter.command(
+                self._cmd(
+                    receipt,
+                    {
+                        "action": "steer",
+                        "target_run_id": self.active,
+                        "provider_turn_id": self.turn or self.active,
+                        "worker_epoch": self.owner_epoch,
+                        "text": payload["text"],
+                    },
+                )
+            )
+        )
+
+    def interrupt(self, receipt=None):
+        self._apply(
+            self.adapter.command(
+                self._cmd(
+                    receipt or uuid.uuid4().hex,
+                    {
+                        "action": "interrupt",
+                        "target_run_id": self.active,
+                        "provider_turn_id": self.turn or self.active,
+                        "worker_epoch": self.owner_epoch,
+                    },
+                )
+            )
+        )
+
+    def answer(self, request_id, answer, guard=None):
+        pending = self.adapter._pending_approvals.get(str(request_id))
+        if not pending:
+            raise ValueError("Native request is not pending")
+        self._apply(
+            self.adapter.command(
+                self._cmd(
+                    uuid.uuid4().hex,
+                    {
+                        "action": "answer_approval",
+                        "observed_request_id": str(request_id),
+                        "target_run_id": pending["run_id"],
+                        "worker_epoch": self.owner_epoch,
+                        "request_digest": pending["digest"],
+                        "answer": answer,
+                    },
+                )
+            )
+        )
+
+    def change_settings(self, receipt, payload):
+        rev = self.adapter._settings_revision
+        if "model" in payload:
+            cmd_payload = {
+                "action": "change_model",
+                "model": payload["model"],
+                "options": {k: v for k, v in payload.items() if k != "model"},
+                "expected_settings_revision": rev,
+            }
+        else:
+            cmd_payload = {
+                "action": "change_options",
+                "options": dict(payload),
+                "expected_settings_revision": rev,
+            }
+        self._apply(self.adapter.command(self._cmd(receipt, cmd_payload)))
+
+    def command(self, receipt, payload):
+        raise ValueError("Adapter v2 command dispatch is unsupported for " + str(payload.get("name")))
+
+    def receive(self, message):
+        self._apply(self.adapter.receive(message, self.fence))
+
+    def expire_settings_readbacks(self):
+        self._apply(self.adapter.expire(time.monotonic()))
+
+    def settings_response(self, tag, success, data=None, error="Native setting rejected"):
+        self.expire_settings_readbacks()
+
+    def settled(self, status="completed", error=""):
+        if self.adapter._active_run_id:
+            self.adapter._begin_transition()
+            self.adapter._settle_run(status, error)
+            self._apply(self.adapter._finish_transition())
+
+
+def _resolve_worker_instance_id(directory, row, argv):
+    existing = row.get("provider_instance_id", "")
+    if isinstance(existing, str) and len(existing) == 32:
+        return existing
+    reg = ProviderInstanceRegistry(Path(directory))
+    digest = reg.compute_config_digest(argv[0] if argv else row["provider"], "")
+    return reg.resolve(
+        execution_account="local",
+        provider_kind=row["provider"],
+        executable_and_config_digest=digest,
+    ).provider_instance_id
+
+
+def _create_protocol(
+    flags,
+    directory,
+    sid,
+    row,
+    argv,
+    owner_epoch,
+    platform,
+    send,
+    emit,
+    finish,
+    persist,
+    v2,
+    db,
+    flush,
+    set_size,
+):
+    on_accept = (
+        (lambda rec, **kw: v2.on_accept(db, rec, **kw))
+        if flags.native_capture_v2
+        else None
+    )
+    on_terminal = (
+        (lambda rec, st, txt: v2.on_terminal(db, flush, rec, st, txt, set_size))
+        if flags.native_capture_v2
+        else None
+    )
+    on_wake = v2.wake_capture if flags.native_capture_v2 else None
+    if flags.native_provider_adapter_v2:
+        pid = _resolve_worker_instance_id(directory, row, argv)
+        extra = (
+            {"cwd": row["cwd"], "thread_id": row.get("native_thread", "")}
+            if row["provider"] in ("codex", "claude")
+            else {}
+        )
+        adapter = NativeAdapterRegistry.create(
+            row["provider"],
+            provider_instance_id=pid,
+            platform_supported=platform.available,
+            platform_reason=platform.reason_code,
+            **extra,
+        )
+        return _AdapterProtocolBridge(
+            adapter,
+            row,
+            sid,
+            owner_epoch,
+            send,
+            emit,
+            finish,
+            persist,
+            on_accept=on_accept,
+            on_terminal=on_terminal,
+            on_capture_wake=on_wake,
+        )
+    cls = None
+    if row["provider"] == "claude":
+        from agent.claude_protocol import ClaudeProtocol
+
+        cls = ClaudeProtocol
+    else:
+        cls = Protocol
+    return cls(
+        row["provider"],
+        row,
+        send,
+        emit,
+        finish,
+        persist,
+        on_accept=on_accept,
+        on_terminal=on_terminal,
+        on_capture_wake=on_wake,
+    )
+
+
+def _dispatch_interrupt(row, protocol, v2, db, receipt, finish):
+    v2.on_interrupt(db, protocol.active)
+    if row["provider"] == "claude":
+        protocol.interrupt(receipt)
+    else:
+        protocol.interrupt()
+        finish(receipt, "completed")
+
+
+def _dispatch_worker_command(
+    command,
+    row,
+    protocol,
+    reviews,
+    v2,
+    db,
+    outgoing,
+    finish,
+    emit,
+    flush,
+    set_size,
+):
+    try:
+        payload = json.loads(command["payload"])
+        kind = command["kind"]
+        if kind == "stop":
+            return True
+        if kind == "chat_prompt":
+            v2.prepare_prompt(db, command["id"], reviews)
+            before_len = len(outgoing)
+            protocol.prompt(command["id"], payload)
+            v2.arm_prompt_bytes(command["id"], before_len)
+        elif kind == "chat_interrupt":
+            _dispatch_interrupt(row, protocol, v2, db, command["id"], finish)
+        elif kind == "chat_answer":
+            protocol.answer(
+                payload["request_id"],
+                payload["answer"],
+                payload if "request_guard" in payload else None,
+            )
+            finish(command["id"], "completed")
+        else:
+            handlers = {
+                "chat_steer": protocol.steer,
+                "chat_command": protocol.command,
+                "chat_settings": protocol.change_settings,
+            }
+            handlers[kind](command["id"], payload)
+    except (ValueError, KeyError, OSError, AdapterProtocolError) as exc:
+        if command["kind"] == "chat_prompt" and v2.is_v2_turn(command["id"]):
+            v2.on_terminal(db, flush, command["id"], "error", str(exc), set_size)
+        else:
+            finish(command["id"], "error")
+        details = {"code": exc.code} if isinstance(exc, AdapterProtocolError) else {}
+        emit("error", receipt=command["id"], text=str(exc), **details)
+    return False
+
+
+def _flush_outgoing_stdin(child, outgoing, v2, db, child_exited):
+    if not outgoing:
+        return
+    v2.before_os_write(db)
+    try:
+        n = os.write(child.stdin.fileno(), outgoing[:65536])
+        del outgoing[:n]
+        v2.on_outgoing_written(n)
+    except BlockingIOError:
+        pass
+    except BrokenPipeError:
+        if not child_exited(child.pid):
+            raise
+
+
+def run(directory, sid, config_path=None, *, flags=None, windows_runtime_validated=False):
     sid = identifier(sid)
     ownership = WorkerLock(directory, sid)
     try:
@@ -1069,8 +1751,10 @@ def run(directory, sid, config_path=None):
     except BaseException:
         ownership.close()
         raise
+    resolved_flags = resolve_native_flags(flags)
     child = None
     protocol = None
+    v2 = None
     stop = False
     status, error = "exited", ""
     selector = selectors.DefaultSelector()
@@ -1093,8 +1777,22 @@ def run(directory, sid, config_path=None):
         if config_path:
             from agent.chat_reviews import TurnReviews
 
-            reviews = TurnReviews(directory, row, config_path)
+            reviews = TurnReviews(directory, row, config_path, flags=resolved_flags)
+        owner_epoch = int(row.get("worker_epoch") or 1)
+        v2 = _CaptureV2Manager(
+            directory,
+            sid,
+            row,
+            owner_epoch,
+            reviews,
+            enabled=resolved_flags.native_capture_v2,
+        )
         size = row["size"]
+
+        def set_size(new_size):
+            nonlocal size
+            if new_size > size:
+                size = new_size
 
         pending = bytearray()
         flush_at = None
@@ -1103,17 +1801,8 @@ def run(directory, sid, config_path=None):
             nonlocal size, flush_at
             if not pending:
                 return
-            with db:
-                for start in range(0, len(pending), 65536):
-                    db.execute(
-                        "INSERT INTO output VALUES (?,?,?)",
-                        (sid, size + start, pending[start : start + 65536]),
-                    )
-                db.execute(
-                    "UPDATE sessions SET size=?,updated=? WHERE id=?",
-                    (size + len(pending), time.time(), sid),
-                )
-            size += len(pending)
+            with immediate(db):
+                _, size = append_spool_bytes_tx(db, sid, bytes(pending), now=time.time())
             pending.clear()
             flush_at = None
 
@@ -1137,20 +1826,20 @@ def run(directory, sid, config_path=None):
 
         def finish(receipt, state):
             flush()
-            db.execute("UPDATE commands SET state=? WHERE id=?", (state, receipt))
-            db.commit()
-            if reviews:
+            with immediate(db):
+                db.execute("UPDATE commands SET state=? WHERE id=?", (state, receipt))
+            if reviews and not v2.is_v2_turn(receipt):
                 review = reviews.finish(receipt)
                 if review:
                     emit("review", receipt=receipt, **review)
 
         def persist(thread):
             flush()
-            db.execute(
-                "UPDATE sessions SET native_thread=?,chat_settings=?,updated=? WHERE id=?",
-                (thread, protocol.row.get("chat_settings", "{}"), time.time(), sid),
-            )
-            db.commit()
+            with immediate(db):
+                db.execute(
+                    "UPDATE sessions SET native_thread=?,chat_settings=?,updated=? WHERE id=?",
+                    (thread, protocol.row.get("chat_settings", "{}"), time.time(), sid),
+                )
 
         def send(value):
             data = (json.dumps(value, separators=(",", ":")) + "\n").encode()
@@ -1164,9 +1853,14 @@ def run(directory, sid, config_path=None):
 
         for number in (signal.SIGTERM, signal.SIGINT):
             signal.signal(number, stop_signal)
-        if os.name == "nt":
+        platform = structured_chat_platform_support(
+            resolved_flags,
+            os_name=os.name,
+            windows_runtime_validated=windows_runtime_validated,
+        )
+        if not platform.available:
             raise RuntimeError(
-                "Structured chat pipe worker is not supported on Windows; use node-local CLI"
+                f"{platform.reason_code or 'CLI_CHAT_PLATFORM'}: Structured chat pipe worker is not supported on Windows; use node-local CLI"
             )
         argv = json.loads(row["argv"])
         if row["provider"] == "pi":
@@ -1189,17 +1883,28 @@ def run(directory, sid, config_path=None):
             selector.register(pipe, selectors.EVENT_READ)
             buffers[pipe] = bytearray()
         os.set_blocking(child.stdin.fileno(), False)
-        db.execute(
-            "UPDATE sessions SET status='running',worker_pid=?,child_pid=?,heartbeat=?,updated=? WHERE id=?",
-            (os.getpid(), child.pid, time.time(), time.time(), sid),
+        with immediate(db):
+            db.execute(
+                "UPDATE sessions SET status='running',worker_pid=?,child_pid=?,heartbeat=?,updated=? WHERE id=?",
+                (os.getpid(), child.pid, time.time(), time.time(), sid),
+            )
+        protocol = _create_protocol(
+            resolved_flags,
+            directory,
+            sid,
+            row,
+            argv,
+            owner_epoch,
+            platform,
+            send,
+            emit,
+            finish,
+            persist,
+            v2,
+            db,
+            flush,
+            set_size,
         )
-        db.commit()
-        if row["provider"] == "claude":
-            from agent.claude_protocol import ClaudeProtocol
-
-            protocol = ClaudeProtocol(row["provider"], row, send, emit, finish, persist)
-        else:
-            protocol = Protocol(row["provider"], row, send, emit, finish, persist)
         if config_path:
             protocol.knowledge_context = NativeProjectKnowledge(directory, row, config_path)
 
@@ -1240,8 +1945,8 @@ def run(directory, sid, config_path=None):
                 ):
                     raise RuntimeError("NATIVE_HISTORY_QUOTA")
             if now - heartbeat >= 1:
-                db.execute("UPDATE sessions SET heartbeat=? WHERE id=?", (now, sid))
-                db.commit()
+                with immediate(db):
+                    db.execute("UPDATE sessions SET heartbeat=? WHERE id=?", (now, sid))
                 heartbeat = now
                 if retained_bytes(db) > TOTAL_QUOTA:
                     raise RuntimeError("TOTAL_QUOTA")
@@ -1269,43 +1974,27 @@ def run(directory, sid, config_path=None):
             ).fetchone()
             if command:
                 flush()
-                claimed = db.execute(
-                    "UPDATE commands SET state='claimed' WHERE id=? AND session=? AND state='queued'",
-                    (command["id"], sid),
-                ).rowcount
-                db.commit()  # durable before native write; crash cannot duplicate prompt
+                with immediate(db):
+                    claimed = db.execute(
+                        "UPDATE commands SET state='claimed' WHERE id=? AND session=? AND state='queued'",
+                        (command["id"], sid),
+                    ).rowcount
                 if not claimed:
                     continue
-                try:
-                    payload = json.loads(command["payload"])
-                    if command["kind"] == "stop":
-                        stop = True
-                    elif command["kind"] == "chat_prompt":
-                        if reviews:
-                            reviews.begin(command["id"])
-                        protocol.prompt(command["id"], payload)
-                    elif command["kind"] == "chat_steer":
-                        protocol.steer(command["id"], payload)
-                    elif command["kind"] == "chat_command":
-                        protocol.command(command["id"], payload)
-                    elif command["kind"] == "chat_settings":
-                        protocol.change_settings(command["id"], payload)
-                    elif command["kind"] == "chat_interrupt":
-                        if row["provider"] == "claude":
-                            protocol.interrupt(command["id"])
-                        else:
-                            protocol.interrupt()
-                            finish(command["id"], "completed")
-                    elif command["kind"] == "chat_answer":
-                        protocol.answer(
-                            payload["request_id"],
-                            payload["answer"],
-                            payload if "request_guard" in payload else None,
-                        )
-                        finish(command["id"], "completed")
-                except (ValueError, KeyError, OSError) as exc:
-                    finish(command["id"], "error")
-                    emit("error", receipt=command["id"], text=str(exc))
+                if _dispatch_worker_command(
+                    command,
+                    row,
+                    protocol,
+                    reviews,
+                    v2,
+                    db,
+                    outgoing,
+                    finish,
+                    emit,
+                    flush,
+                    set_size,
+                ):
+                    stop = True
             for key, deadline in list(protocol.operation_deadlines.items()):
                 if time.monotonic() > deadline:
                     protocol.receive(
@@ -1329,15 +2018,7 @@ def run(directory, sid, config_path=None):
                 protocol.settings_response(
                     "settings_timeout", False, error="Native settings acknowledgement timed out"
                 )
-            if outgoing:
-                try:
-                    n = os.write(child.stdin.fileno(), outgoing[:65536])
-                    del outgoing[:n]
-                except BlockingIOError:
-                    pass
-                except BrokenPipeError:
-                    if not child_exited(child.pid):
-                        raise
+            _flush_outgoing_stdin(child, outgoing, v2, db, child_exited)
             for key, _ in selector.select(0.025):
                 data = os.read(key.fileobj.fileno(), 65536)
                 if not data:
@@ -1393,31 +2074,39 @@ def run(directory, sid, config_path=None):
                             pipe.close()
             selector.close()
             if admitted:
-                db.execute(
-                    "UPDATE commands SET state='uncertain' WHERE session=? AND state='claimed' AND kind!='stop'",
-                    (sid,),
-                )
-                db.execute(
-                    "UPDATE commands SET state=? WHERE session=? AND state='claimed' AND kind='stop'",
-                    ("uncertain" if status == "orphaned" else "completed", sid),
-                )
-                db.execute(
-                    "UPDATE commands SET state='interrupted' WHERE session=? AND state='queued'",
-                    (sid,),
-                )
-                db.execute(
-                    "UPDATE sessions SET status=?,error=?,exit_code=?,updated=?,heartbeat=? WHERE id=?",
-                    (
-                        status,
-                        error,
-                        child.returncode if child else None,
-                        time.time(),
-                        time.time(),
-                        sid,
-                    ),
-                )
-                db.commit()
+                if db.in_transaction:
+                    db.rollback()
+                if v2 is not None:
+                    with contextlib.suppress(Exception):
+                        v2.settle_remaining(db, flush, set_size, stop=stop)
+                with immediate(db):
+                    db.execute(
+                        "UPDATE commands SET state='uncertain' WHERE session=? AND state='claimed' AND kind!='stop'",
+                        (sid,),
+                    )
+                    db.execute(
+                        "UPDATE commands SET state=? WHERE session=? AND state='claimed' AND kind='stop'",
+                        ("uncertain" if status == "orphaned" else "completed", sid),
+                    )
+                    db.execute(
+                        "UPDATE commands SET state='interrupted' WHERE session=? AND state='queued'",
+                        (sid,),
+                    )
+                    db.execute(
+                        "UPDATE sessions SET status=?,error=?,exit_code=?,updated=?,heartbeat=? WHERE id=?",
+                        (
+                            status,
+                            error,
+                            child.returncode if child else None,
+                            time.time(),
+                            time.time(),
+                            sid,
+                        ),
+                    )
         finally:
+            if v2 is not None:
+                with contextlib.suppress(Exception):
+                    v2.shutdown()
             try:
                 db.close()
             finally:

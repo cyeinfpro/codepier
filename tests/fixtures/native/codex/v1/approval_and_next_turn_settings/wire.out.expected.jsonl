@@ -1,0 +1,8 @@
+{"id": "codepier-1", "method": "initialize"}
+{"method": "initialized", "params": {}}
+{"id": "codepier-2", "method": "thread/start"}
+{"id": "codepier-3", "method": "model/list"}
+{"id": "codepier-4", "method": "skills/list"}
+{"id": "codepier-5", "method": "config/read"}
+{"id": "codepier-6", "method": "turn/start"}
+{"id": "srv-1", "result": {"decision": "accept"}}

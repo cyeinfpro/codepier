@@ -1,5 +1,6 @@
 """Bounded, inference-free native discovery. Never return native connection config."""
 
+from collections.abc import Callable, Mapping, Sequence, Set
 import copy
 import contextlib
 import hashlib
@@ -10,6 +11,9 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Any
+
+from shared.native_contracts import ActionAvailability, FeatureState, ProviderCapabilities
 
 CAPABILITIES = dict(
     steer=True, compact=True, commands=True, stats=True, auto_compaction=False, auto_retry=False
@@ -329,7 +333,69 @@ class CatalogCache:
             except (OSError, ValueError, TypeError, AttributeError):
                 self.entries.clear()
 
-    def get(self, key, loader, refresh=False, allow_stale=False):
+    @staticmethod
+    def make_key(
+        *,
+        project_id: str,
+        device_id: str,
+        root: Any,
+        cli: str,
+        cwd: Any,
+        model: str = "",
+        include_commands: bool = True,
+        executable: str = "",
+        environment_key: str = "",
+        provider_instance_id: str = "",
+        instance_revision: int = 1,
+    ) -> tuple[Any, ...]:
+        """Build an instance- and directory-isolated catalog cache key."""
+        return (
+            project_id,
+            device_id,
+            str(root),
+            cli,
+            str(cwd),
+            model,
+            include_commands,
+            executable,
+            environment_key,
+            provider_instance_id,
+            instance_revision,
+        )
+
+    @staticmethod
+    def _check_auth(authorize: Callable[[], None] | None) -> None:
+        if authorize is not None:
+            authorize()
+
+    def _scope_key(
+        self,
+        key: Any,
+        provider_instance_id: str | None,
+        instance_revision: int | None,
+    ) -> Any:
+        if provider_instance_id is None and instance_revision is None:
+            return key
+        normalized = (
+            json.dumps(key, sort_keys=True)
+            if self.path is None and isinstance(key, Mapping)
+            else key
+        )
+        return ("scoped", normalized, provider_instance_id, instance_revision)
+
+    def get(
+        self,
+        key,
+        loader,
+        refresh=False,
+        allow_stale=False,
+        *,
+        provider_instance_id: str | None = None,
+        instance_revision: int | None = None,
+        authorize: Callable[[], None] | None = None,
+    ):
+        self._check_auth(authorize)
+        key = self._scope_key(key, provider_instance_id, instance_revision)
         if self.path is not None:
             key = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
         with self.lock:
@@ -387,3 +453,336 @@ class CatalogCache:
                 if self.pending.get(key) is event:
                     self.pending.pop(key)
                 event.set()
+
+
+_PROVIDER_OPTIONS_SCHEMAS: dict[str, dict[str, Any]] = {
+    "pi": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "model": {"type": "string", "maxLength": 200},
+            "effort": {
+                "type": "string",
+                "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            },
+        },
+    },
+    "codex": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "model": {"type": "string", "maxLength": 200},
+            "effort": {
+                "type": "string",
+                "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+            },
+        },
+    },
+    "claude": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "model": {"type": "string", "maxLength": 200},
+            "effort": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "xhigh", "max"],
+            },
+        },
+    },
+}
+
+_PROVIDER_CHANGE_MODES: dict[str, tuple[str, str, bool]] = {
+    "pi": ("in_place", "in_place", True),
+    "codex": ("next_turn", "next_turn", True),
+    "claude": ("in_place", "unsupported", False),
+}
+
+_AVAILABILITY_ACTIONS: tuple[str, ...] = (
+    "start_session",
+    "resume_session",
+    "send",
+    "steer",
+    "interrupt",
+    "answer_approval",
+    "change_model",
+    "change_options",
+    "fork_session",
+    "rollback_session",
+    "stop_session",
+)
+
+_EXECUTION_ACTIONS = frozenset(
+    {
+        "start_session",
+        "resume_session",
+        "send",
+        "steer",
+        "change_model",
+        "change_options",
+        "fork_session",
+        "rollback_session",
+    }
+)
+
+
+def describe_provider_capabilities(
+    provider_kind: str,
+    *,
+    provider_instance_id: str,
+    instance_revision: int = 1,
+    provider_version: str = "unknown",
+    platform_supported: bool = True,
+    platform_reason: str | None = None,
+) -> ProviderCapabilities:
+    """Build normalized ProviderCapabilities for a verified provider instance."""
+    if provider_kind not in _PROVIDER_CHANGE_MODES:
+        raise ValueError(f"Unsupported provider_kind: {provider_kind}")
+    model_change, effort_change, steer_supported = _PROVIDER_CHANGE_MODES[provider_kind]
+    unavailable_reason = None if platform_supported else (platform_reason or "CLI_CHAT_PLATFORM")
+    chat_feature = FeatureState(
+        supported=True, available=platform_supported, reason_code=unavailable_reason
+    )
+    steer_feature = (
+        FeatureState(
+            supported=True, available=platform_supported, reason_code=unavailable_reason
+        )
+        if steer_supported
+        else FeatureState(supported=False, available=False, reason_code="UNSUPPORTED_BY_PROVIDER")
+    )
+    unsupported = FeatureState(
+        supported=False, available=False, reason_code="UNSUPPORTED_BY_PROVIDER"
+    )
+    return ProviderCapabilities(
+        provider_instance_id=provider_instance_id,
+        revision=instance_revision,
+        provider_kind=provider_kind,
+        provider_version=provider_version or "unknown",
+        structured_chat=chat_feature,
+        resume=chat_feature,
+        steer=steer_feature,
+        conversation_rollback=unsupported,
+        conversation_fork=unsupported,
+        context_import=chat_feature,
+        model_change=model_change,
+        effort_change=effort_change,
+        options_schema=copy.deepcopy(_PROVIDER_OPTIONS_SCHEMAS[provider_kind]),
+    )
+
+
+def _action_supported(
+    action: str, capabilities: ProviderCapabilities
+) -> tuple[bool, str | None, bool, str | None]:
+    """Return (supported, unsupported_reason, platform_available, platform_reason)."""
+    feature_map = {
+        "start_session": capabilities.structured_chat,
+        "resume_session": capabilities.resume,
+        "send": capabilities.structured_chat,
+        "steer": capabilities.steer,
+        "interrupt": capabilities.structured_chat,
+        "answer_approval": capabilities.structured_chat,
+        "fork_session": capabilities.conversation_fork,
+        "rollback_session": capabilities.conversation_rollback,
+    }
+    feature = feature_map.get(action)
+    if feature is not None:
+        plat_ok = (
+            feature.available if feature.supported else capabilities.structured_chat.available
+        )
+        plat_reason = (
+            feature.reason_code
+            if feature.supported
+            else capabilities.structured_chat.reason_code
+        )
+        return (
+            feature.supported,
+            None if feature.supported else (feature.reason_code or "UNSUPPORTED_BY_PROVIDER"),
+            plat_ok,
+            None if plat_ok else (plat_reason or "CLI_CHAT_PLATFORM"),
+        )
+    if action == "change_model":
+        ok = capabilities.model_change != "unsupported"
+        return (
+            ok,
+            None if ok else "UNSUPPORTED_BY_PROVIDER",
+            capabilities.structured_chat.available,
+            capabilities.structured_chat.reason_code,
+        )
+    if action == "change_options":
+        ok = capabilities.effort_change != "unsupported"
+        return (
+            ok,
+            None if ok else "UNSUPPORTED_BY_PROVIDER",
+            capabilities.structured_chat.available,
+            capabilities.structured_chat.reason_code,
+        )
+    return True, None, True, None
+
+
+def _scope_grants_action(
+    authorized_scopes: Sequence[str] | Set[str] | Mapping[str, bool], action: str
+) -> bool:
+    if isinstance(authorized_scopes, Mapping):
+        return bool(authorized_scopes.get(action, authorized_scopes.get("*", False)))
+    scopes = set(authorized_scopes)
+    if action in scopes or "*" in scopes:
+        return True
+    general = {"chat", "native_chat", "execute", "command_exec", "tasks"}
+    if action in {"stop_session", "interrupt", "answer_approval"}:
+        general = general | {"control", "session_control"}
+    return bool(scopes & general)
+
+
+def _action_authorized(
+    action: str,
+    authorized_scopes: Sequence[str] | Set[str] | Mapping[str, bool],
+    allow_tasks: bool,
+    shell_enabled: bool,
+) -> tuple[bool, str | None]:
+    if not _scope_grants_action(authorized_scopes, action):
+        return False, "INSUFFICIENT_SCOPE"
+    if action in _EXECUTION_ACTIONS:
+        if not allow_tasks:
+            return False, "TASKS_DISABLED"
+        if not shell_enabled:
+            return False, "SHELL_DISABLED"
+    return True, None
+
+
+def _action_ready(
+    action: str,
+    *,
+    platform_available: bool,
+    platform_reason: str | None,
+    device_enabled: bool,
+    mode: str,
+    session_status: str | None,
+    has_active_run: bool,
+    pending_approvals: int,
+) -> tuple[bool, str | None, str]:
+    if not device_enabled:
+        return False, "DEVICE_DISABLED", "select_node"
+    if not platform_available:
+        reason = platform_reason or "CLI_CHAT_PLATFORM"
+        return False, reason, "select_node" if reason == "CLI_CHAT_PLATFORM" else "update_agent"
+    if mode != "chat":
+        return False, "INVALID_SESSION_MODE", "choose_supported_option"
+    return _session_state_ready(action, session_status, has_active_run, pending_approvals)
+
+
+def _session_state_ready(
+    action: str,
+    session_status: str | None,
+    has_active_run: bool,
+    pending_approvals: int,
+) -> tuple[bool, str | None, str]:
+    live_statuses = {"starting", "running", "stopping", "orphaned"}
+    if action == "start_session":
+        if session_status in live_statuses:
+            return False, "SESSION_ACTIVE", "resolve_current_run"
+        return True, None, "none"
+    if action == "resume_session":
+        if session_status in live_statuses:
+            return False, "SESSION_ACTIVE", "resolve_current_run"
+        if session_status is None:
+            return False, "SESSION_NOT_FOUND", "choose_supported_option"
+        return True, None, "none"
+    if action == "stop_session":
+        return (
+            (True, None, "none")
+            if session_status in live_statuses
+            else (False, "SESSION_NOT_RUNNING", "none")
+        )
+    if session_status not in {None, "starting", "running"}:
+        return False, "SESSION_NOT_RUNNING", "reconnect"
+    return _run_state_ready(action, has_active_run, pending_approvals)
+
+
+def _run_state_ready(
+    action: str, has_active_run: bool, pending_approvals: int
+) -> tuple[bool, str | None, str]:
+    if action in {"steer", "interrupt"}:
+        return (True, None, "none") if has_active_run else (False, "NO_ACTIVE_RUN", "none")
+    if action == "answer_approval":
+        return (
+            (True, None, "none")
+            if pending_approvals > 0
+            else (False, "NO_PENDING_APPROVAL", "none")
+        )
+    if pending_approvals > 0:
+        return False, "PENDING_APPROVAL", "resolve_current_run"
+    if action in {"change_model", "change_options"} and has_active_run:
+        return False, "ACTIVE_RUN_IN_PROGRESS", "resolve_current_run"
+    return True, None, "none"
+
+
+def compute_action_availabilities(
+    *,
+    capabilities: ProviderCapabilities,
+    authorized_scopes: Sequence[str] | Set[str] | Mapping[str, bool],
+    device_enabled: bool,
+    mode: str,
+    allow_tasks: bool,
+    shell_enabled: bool,
+    session_status: str | None = None,
+    has_active_run: bool = False,
+    pending_approvals: int = 0,
+    observed_revision: str = "1",
+) -> list[ActionAvailability]:
+    """Compute independent supported, authorized, and ready states for native actions."""
+    results: list[ActionAvailability] = []
+    for action in _AVAILABILITY_ACTIONS:
+        supported, unsupported_reason, plat_ok, plat_reason = _action_supported(
+            action, capabilities
+        )
+        authorized, auth_reason = _action_authorized(
+            action, authorized_scopes, allow_tasks, shell_enabled
+        )
+        ready, ready_reason, ready_remedy = _action_ready(
+            action,
+            platform_available=plat_ok,
+            platform_reason=plat_reason,
+            device_enabled=device_enabled,
+            mode=mode,
+            session_status=session_status,
+            has_active_run=has_active_run,
+            pending_approvals=pending_approvals,
+        )
+        reason_code, remedy = _pick_reason(
+            supported,
+            unsupported_reason,
+            authorized,
+            auth_reason,
+            ready,
+            ready_reason,
+            ready_remedy,
+        )
+        results.append(
+            ActionAvailability(
+                action=action,
+                supported=supported,
+                authorized=authorized,
+                ready=ready,
+                reason_code=reason_code,
+                remedy=remedy,
+                observed_revision=observed_revision,
+            )
+        )
+    return results
+
+
+def _pick_reason(
+    supported: bool,
+    unsupported_reason: str | None,
+    authorized: bool,
+    auth_reason: str | None,
+    ready: bool,
+    ready_reason: str | None,
+    ready_remedy: str,
+) -> tuple[str | None, str]:
+    if not supported:
+        return unsupported_reason or "UNSUPPORTED_BY_PROVIDER", "choose_supported_option"
+    if not authorized:
+        return auth_reason or "INSUFFICIENT_SCOPE", "review_access"
+    if not ready:
+        return ready_reason or "NOT_READY", ready_remedy
+    return None, "none"

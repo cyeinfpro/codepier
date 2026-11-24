@@ -46,6 +46,26 @@ function chatLevels(v = chatView()) {
 function chatSettings(settings) {
   const v = chatView();
   if (settings) v.settings = settings;
+  if (v.v2State && v.settingOp) {
+    const overlay = v.v2State.pendingCommands?.get(v.settingOp.receipt);
+    if (overlay) {
+      if (overlay.actual && typeof overlay.actual === 'object') {
+        v.settings = { ...(v.settings || {}), ...overlay.actual };
+      }
+      if (overlay.status === 'applied' && !overlay.partial && overlay.outcome !== 'partial') {
+        v.settingOp = null;
+      } else if (overlay.outcome === 'partial' || overlay.partial) {
+        v.settingOp.outcome = 'partial';
+        v.settingOp.state = 'error';
+      } else if (overlay.status === 'failed') {
+        v.settingOp.state = 'error';
+        v.settingOp.outcome = overlay.outcome || 'rejected';
+      } else if (overlay.status === 'uncertain') {
+        v.settingOp.state = 'uncertain';
+        v.settingOp.outcome = 'unknown';
+      }
+    }
+  }
   const current = chatModelCurrent(v),
     model = chatModels(v).find(
       (m) => chatModelKey(m) === current || m.model === current || m.id === current,
@@ -139,6 +159,7 @@ function chatSettings(settings) {
       $('#chat-send-mode').value = 'followup';
     }
   }
+  if (typeof chatSyncAvailabilityHints === 'function') chatSyncAvailabilityHints();
   if (ChatUI.inspector === 'overview') chatInspectorRender();
   chatSyncChrome();
 }
@@ -148,7 +169,9 @@ function chatClosePopover(restore = false) {
   box?.setAttribute('hidden', '');
   $('#chat-model-picker')?.setAttribute('aria-expanded', 'false');
   if (open && restore)
-    $('#' + (ChatUI.popoverAnchor || 'chat-model-picker'))?.focus({ preventScroll: true });
+    $('#' + (ChatUI.popoverAnchor || 'chat-model-picker'))?.focus({
+      preventScroll: true,
+    });
 }
 function chatModelPopover() {
   if (innerWidth <= 1100 && ChatUI.inspector) chatInspector('');
@@ -314,31 +337,84 @@ async function chatSubmitSettings(patch, retry = false) {
   const visible = () =>
     S.session === identity && S.page === 'native' && !!$('#chat-root') && chatView() === v;
   if (!id) return;
-  if (v.settingOp && !retry && v.settingOp.state !== 'error') {
+  if (v.settingOp && !retry && !['error', 'uncertain'].includes(v.settingOp.state)) {
     chatStatus('上一项设置正在确认，请稍候。');
     return;
   }
+  // Uncertain timeouts/disconnects always preserve the original receipt; only
+  // definitive rejections mint a new receipt when retried.
   const op = retry
     ? v.settingOp?.state === 'error'
-      ? { receipt: uid(), patch: v.settingOp.patch, state: 'sending' }
+      ? {
+          receipt: uid(),
+          patch: v.settingOp.patch,
+          state: 'sending',
+          generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
+        }
       : v.settingOp
-    : { receipt: uid(), patch, state: 'sending' };
+    : {
+        receipt: uid(),
+        patch,
+        state: 'sending',
+        generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
+      };
   if (!op) return;
+  op.generation = op.generation || (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1);
   v.settingOp = op;
   op.state = 'sending';
+  if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.upsertCommandOverlay) {
+    v.v2State = CP.nativeState.upsertCommandOverlay(v.v2State, {
+      receipt: op.receipt,
+      generation: op.generation,
+      action: 'settings',
+      status: 'pending',
+      requested: op.patch,
+    });
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+  }
   chatSettings(v.settings);
   try {
     const result = await chatAPI(
       'chat_settings',
-      { id, receipt: op.receipt, ...op.patch },
+      {
+        id,
+        receipt: op.receipt,
+        settings_generation: op.generation,
+        expected_settings_revision: v.settings?.settings_revision ?? v.settings?.revision ?? 0,
+        ...op.patch,
+      },
       project,
     );
     if (S.session !== identity || v.settingOp !== op) return;
+    if (result.actual && typeof result.actual === 'object') {
+      v.settings = { ...(v.settings || {}), ...result.actual };
+    }
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: op.receipt,
+        generation: op.generation,
+        status:
+          result.state === 'completed' || result.state === 'applied'
+            ? 'applied'
+            : ['queued', 'claimed'].includes(result.state) || !result.state
+              ? 'accepted'
+              : result.state,
+        outcome: result.outcome,
+        actual: result.actual,
+        appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (op.state === 'sending') op.state = result.state || 'queued';
+    if (result.outcome) op.outcome = result.outcome;
     if (visible()) {
       chatSettings(v.settings);
       chatStatus(
-        op.state === 'error' ? '原生设置失败，可重试' : '设置已提交，等待原生确认',
+        op.state === 'error'
+          ? op.outcome === 'partial'
+            ? '部分设置已生效；当前模型与强度已回读，请核对后重试剩余项'
+            : '原生设置失败，可重试'
+          : '设置已提交，等待原生确认',
         op.state === 'error',
       );
       if (!['error', 'uncertain'].includes(op.state))
@@ -346,10 +422,21 @@ async function chatSubmitSettings(patch, retry = false) {
     }
   } catch (e) {
     if (S.session !== identity || v.settingOp !== op) return;
-    op.state = ['NETWORK_UNCERTAIN', 'CLI_UNCERTAIN', 'CLI_OFFLINE'].includes(e.code)
-      ? 'uncertain'
-      : 'error';
+    const isUncertain =
+      ['NETWORK_UNCERTAIN', 'CLI_UNCERTAIN', 'CLI_OFFLINE'].includes(e.code) ||
+      e.status === 408 ||
+      !e.status;
+    op.state = isUncertain ? 'uncertain' : 'error';
     op.error = e.message;
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: op.receipt,
+        generation: op.generation,
+        status: isUncertain ? 'uncertain' : 'failed',
+        error: e.message,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (visible()) {
       chatStatus(e.message, true);
       chatSettings(v.settings);

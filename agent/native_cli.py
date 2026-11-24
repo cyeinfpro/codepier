@@ -27,10 +27,25 @@ from shared.native_cli import (
     process_exists,
     retained_bytes,
 )
+from shared.native_flags import resolve_native_flags
 from shared.util import DevError
-from agent.chat_catalog import CatalogCache, probe, validate_settings, COMMANDS
+from agent.chat_catalog import (
+    CatalogCache,
+    probe,
+    validate_settings,
+    COMMANDS,
+    compute_action_availabilities,
+    describe_provider_capabilities,
+)
+from agent.native_adapters import ProviderInstanceRegistry
+from agent.native_process import structured_chat_platform_support
+from agent.native_review_worker import NativeReviewWorker
+from agent.native_turn_store import NativeTurnStore
+from agent.resource_queue import Claim
 from agent.shell import shell_denial
 from agent.native_pi_bridge import prepare_extension, sync_manifest
+from agent.turn_restore import TurnRestoreCoordinator
+from agent.workspace_ownership import WorkspaceOwnershipStore
 
 
 class NativeCLI:
@@ -48,10 +63,17 @@ class NativeCLI:
 
         # Persisted per-session refusal state + in-memory window/backoff.
         self.sync_flow = SyncFlow(self.directory / "sync-paused.json")
+        self.flags = resolve_native_flags(getattr(agent, "native_flags", None))
+        self.instance_registry = ProviderInstanceRegistry(self.directory)
+        self.ownership_store = WorkspaceOwnershipStore()
+        self.turn_store = NativeTurnStore()
+        self.restore_coordinator = TurnRestoreCoordinator()
+        self.review_worker = NativeReviewWorker(self.directory, self._review_engine_factory)
         with self.connect_db() as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS session_files (session TEXT, file TEXT, PRIMARY KEY(session,file))"
             )
+        self.reconcile_runtime()
 
     @contextmanager
     def connect_db(self):
@@ -242,6 +264,279 @@ class NativeCLI:
             with self.launch_gate:
                 self.pending_starts.pop(ticket, None)
 
+    def _current_flags(self):
+        return resolve_native_flags(getattr(self.agent, "native_flags", None))
+
+    def _windows_chat_validated(self):
+        return bool(getattr(self.agent, "windows_structured_chat_validated", False))
+
+    def _check_chat_platform(self):
+        support = structured_chat_platform_support(
+            self._current_flags(),
+            os_name=os.name,
+            windows_runtime_validated=self._windows_chat_validated(),
+        )
+        if not support.available:
+            raise DevError(
+                support.reason_code or "CLI_CHAT_PLATFORM",
+                "面板聊天目前支持 macOS/Linux；请选择受支持节点，或在 Windows 电脑本地使用 CLI",
+                409,
+            )
+        return support
+
+    def _review_engine_factory(self, sid):
+        with self.connect_db() as db:
+            row = db.execute("SELECT * FROM sessions WHERE id=?", (identifier(sid),)).fetchone()
+        if row is None:
+            raise DevError("CLI_NOT_FOUND", "会话不存在", 404)
+        project = {
+            "id": row["project_id"],
+            "alias": row["project_id"],
+            "root": row["root"],
+            "device_id": row["device_id"],
+            "mode": "write",
+            "allow_tasks": True,
+            "_coding_owner": "native:" + row["id"],
+        }
+        return self.agent.engine, project
+
+    def _recover_one_session(self, db, row, *, now=None):
+        sid = row["id"]
+        store = None
+        project = None
+        engine = getattr(self.agent, "engine", None)
+        if engine is not None and hasattr(engine, "journal"):
+            from agent.coding_reviews import ReviewStore
+
+            store = ReviewStore(engine)
+            project = {
+                "id": row["project_id"],
+                "alias": row["project_id"],
+                "root": row["root"],
+                "device_id": row["device_id"],
+                "mode": "write",
+                "allow_tasks": True,
+                "_coding_owner": "native:" + sid,
+            }
+        return self.turn_store.recover_session_turns(
+            db,
+            sid,
+            store=store,
+            project=project,
+            claims=self.ownership_store,
+            current_workspace_version=int(row["workspace_version"]),
+            now=now,
+        )
+
+    def reconcile_runtime(self, *, now=None):
+        """Reconcile durable claims and dead session turns without bumping live worker_epoch."""
+        with self.connect_db() as db:
+            claims_report = self.ownership_store.reconcile_claims(self.directory, db, now=now)
+            recovered = {}
+            rows = db.execute(
+                "SELECT id, project_id, device_id, root, workspace_version FROM sessions WHERE status != 'deleted'"
+            ).fetchall()
+            for row in rows:
+                if worker_present(self.directory, row["id"]):
+                    continue
+                actions = self._recover_one_session(db, row, now=now)
+                if actions:
+                    recovered[row["id"]] = actions
+        self.review_worker.pump_due(now=now)
+        return {"claims": claims_report, "recovered": recovered}
+
+    def _resolve_provider_instance_id(self, project, provider, executable):
+        cfg_digest = self.instance_registry.compute_config_digest(executable or provider, "")
+        account = str(project.get("_native_owner") or project.get("owner_user_id") or "local")
+        return self.instance_registry.resolve(
+            execution_account=account,
+            provider_kind=provider,
+            executable_and_config_digest=cfg_digest,
+        ).provider_instance_id
+
+    def _persist_start_metadata(
+        self, db, sid, project, provider, executable, signature, mode, native_thread, settings
+    ):
+        instance_id = self._resolve_provider_instance_id(project, provider, executable)
+        db.execute(
+            "UPDATE sessions SET launch_signature=?,mode=?,native_thread=?,chat_settings=?,provider_instance_id=? WHERE id=?",
+            (signature, mode, native_thread, json.dumps(settings), instance_id, sid),
+        )
+
+    def _handle_catalog_action(self, project, root, args):
+        cli = args.get("cli")
+        if cli not in ("pi", "codex", "claude"):
+            raise ValueError("CLI must be pi, codex or claude")
+        cwd = self.agent.engine.path(root, args.get("cwd", "."))
+        if not cwd.is_dir():
+            raise ValueError("Invalid catalog cwd")
+        model = validate_settings({"model": args.get("model", "")}, cli)["model"]
+        env = self.environment()
+        executable = shutil.which(cli, path=env["PATH"])
+        if not executable:
+            raise DevError(
+                "CLI_MISSING", cli + " unavailable; install/configure native CLI locally", 409
+            )
+        include_commands = args.get("include_commands", True)
+        if type(include_commands) is not bool:
+            raise ValueError("include_commands must be boolean")
+        environment_key = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
+        key = (
+            project["id"],
+            project["device_id"],
+            str(root),
+            cli,
+            str(cwd),
+            model,
+            include_commands,
+            executable,
+            environment_key,
+        )
+        result = self.catalog_cache.get(
+            key,
+            lambda: probe(cli, executable, cwd, env, model, include_commands=include_commands),
+            bool(args.get("refresh")),
+            allow_stale=not include_commands,
+        )
+        if str(self.authorize(project)) != str(root):
+            raise DevError("CLI_MAPPING_CHANGED", "Mapping changed during catalog probe", 403)
+        return result
+
+    def query_action_availability(self, project, root, args):
+        """Compute supported, authorized, and ready states for native actions."""
+        sid = args.get("id")
+        session_status = None
+        has_active_run = False
+        mode = args.get("mode", "chat")
+        if sid:
+            sid = identifier(sid)
+            with self.connect_db() as db:
+                self.security(db, "session", sid, project)
+                row = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+                if not row:
+                    raise DevError("CLI_NOT_FOUND", "会话不存在", 404)
+                self.check_row(row, project, root)
+                provider = row["provider"]
+                mode = row["mode"]
+                session_status = row["status"]
+                has_active_run = bool(
+                    db.execute(
+                        "SELECT 1 FROM commands WHERE session=? AND state='claimed' AND kind='chat_prompt'",
+                        (sid,),
+                    ).fetchone()
+                )
+                resolved_pid = self.instance_registry.resolve_legacy_session(dict(row))
+                pid = ("0" * 32) if resolved_pid == "legacy_unresolved" else resolved_pid
+        else:
+            provider = args.get("cli", "pi")
+            if provider not in ("pi", "codex", "claude"):
+                raise ValueError("CLI must be pi, codex or claude")
+            executable = shutil.which(provider, path=self.environment()["PATH"]) or provider
+            pid = self._resolve_provider_instance_id(project, provider, executable)
+            resolved_pid = pid
+        support = structured_chat_platform_support(
+            self._current_flags(),
+            os_name=os.name,
+            windows_runtime_validated=self._windows_chat_validated(),
+        )
+        caps = describe_provider_capabilities(
+            provider,
+            provider_instance_id=pid,
+            platform_supported=support.available,
+            platform_reason=support.reason_code,
+        )
+        shell_enabled = bool((self.agent.config.get("shell") or {}).get("enabled", True))
+        avail = compute_action_availabilities(
+            capabilities=caps,
+            authorized_scopes=args.get("authorized_scopes")
+            or project.get("_native_scopes")
+            or ("chat", "execute", "control"),
+            device_enabled=bool(project.get("device_enabled", True)),
+            mode=mode,
+            allow_tasks=bool(project.get("allow_tasks", True)),
+            shell_enabled=shell_enabled,
+            session_status=session_status,
+            has_active_run=has_active_run,
+            pending_approvals=int(args.get("pending_approvals", 0)),
+        )
+        return {
+            "provider": provider,
+            "provider_instance_id": resolved_pid,
+            "capabilities": caps.model_dump(),
+            "actions": [item.model_dump() for item in avail],
+        }
+
+    def _handle_restore_action(self, project, root, args):
+        if not self._current_flags().native_workspace_restore_v2:
+            raise DevError("RESTORE_DISABLED", "工作区回退功能未启用", 409)
+        sid = identifier(args.get("id"))
+        receipt = identifier(args.get("receipt"))
+        with self.connect_db() as db:
+            self.security(db, "session", sid, project)
+            row = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            if not row:
+                raise DevError("CLI_NOT_FOUND", "会话不存在", 404)
+            self.check_row(row, project, root)
+            if row["status"] in LIVE or worker_present(self.directory, sid):
+                raise DevError("CLI_BUSY", "先停止运行中的会话再执行回退", 409)
+            expected_ws = int(args.get("expected_workspace_version", row["workspace_version"]))
+            if expected_ws != int(row["workspace_version"]):
+                raise DevError("WORKSPACE_VERSION_CONFLICT", "工作区版本已变化", 409)
+        mode = args.get("mode") or "files_only"
+        # No provider-owned rewind invocation is wired to this entry point yet.
+        # Reject before creating a journal or holding a durable restore claim.
+        if mode == "native_rewind":
+            raise DevError("RESTORE_UNSUPPORTED", "暂未接入 Provider 原生回退", 409)
+        resolved_pid = self.instance_registry.resolve_legacy_session(dict(row))
+        pid = ("0" * 32) if resolved_pid == "legacy_unresolved" else resolved_pid
+        caps = describe_provider_capabilities(row["provider"], provider_instance_id=pid).model_dump()
+        claims = [Claim("agent", "path", str(root), True, "process")]
+        with closing(database(self.directory)) as conn:
+            prep = self.restore_coordinator.prepare_restore(
+                conn,
+                restore_id=args.get("restore_id"),
+                session_id=sid,
+                receipt=receipt,
+                attempt_id=str(args.get("attempt_id") or "rst-1"),
+                checkpoint_ref=str(args.get("checkpoint_ref") or ""),
+                mode=mode,
+                target_files=args.get("target_files") or [],
+                expected_workspace_version=expected_ws,
+                owner_epoch=int(row["worker_epoch"]),
+                claims=self.ownership_store,
+                workspace_claims=claims,
+                provider_capabilities=caps,
+                target_provider_instance_id=str(args.get("target_provider_instance_id") or ""),
+            )
+            rid = prep["restore_id"]
+            self.restore_coordinator.apply_provider_step(
+                conn,
+                rid,
+                replacement_session_id=args.get("replacement_session_id"),
+                target_native_thread_id=args.get("target_native_thread_id"),
+            )
+            files_res = self.restore_coordinator.restore_files_checked(conn, rid, root=root)
+            if files_res["barrier_held"]:
+                return files_res
+            committed = self.restore_coordinator.commit_runtime_binding(
+                conn,
+                rid,
+                claims=self.ownership_store,
+                owner_epoch=int(row["worker_epoch"]),
+            )
+            return {**committed, "files": files_res["files"]}
+
+    def _dispatch_top_action(self, action, project, root, args):
+        if action == "chat_catalog":
+            return True, self._handle_catalog_action(project, root, args)
+        if action == "discover":
+            return True, self.discover()
+        if action in {"availability", "chat_availability"}:
+            return True, self.query_action_availability(project, root, args)
+        if action in {"restore", "chat_restore"}:
+            return True, self._handle_restore_action(project, root, args)
+        return False, None
+
     def _action(self, action, project, args):
         # Erasing this caller's stopped replay does not launch a shell or
         # modify the project. Keep current mapping and session ownership checks.
@@ -250,50 +545,11 @@ class NativeCLI:
             if action in {"clear", "delete"}
             else self.authorize(project)
         )
-        if action == "chat_catalog":
-            cli = args.get("cli")
-            if cli not in ("pi", "codex", "claude"):
-                raise ValueError("CLI must be pi, codex or claude")
-            cwd = self.agent.engine.path(root, args.get("cwd", "."))
-            if not cwd.is_dir():
-                raise ValueError("Invalid catalog cwd")
-            model = validate_settings({"model": args.get("model", "")}, cli)["model"]
-            env = self.environment()
-            executable = shutil.which(cli, path=env["PATH"])
-            if not executable:
-                raise DevError(
-                    "CLI_MISSING", cli + " unavailable; install/configure native CLI locally", 409
-                )
-            include_commands = args.get("include_commands", True)
-            if type(include_commands) is not bool:
-                raise ValueError("include_commands must be boolean")
-            # Defaults and skills can vary by directory. Cache their complete
-            # response locally; the browser shares only model capabilities.
-            environment_key = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
-            key = (
-                project["id"],
-                project["device_id"],
-                str(root),
-                cli,
-                str(cwd),
-                model,
-                include_commands,
-                executable,
-                environment_key,
-            )
-            result = self.catalog_cache.get(
-                key,
-                lambda: probe(cli, executable, cwd, env, model, include_commands=include_commands),
-                bool(args.get("refresh")),
-                allow_stale=not include_commands,
-            )
-            if str(self.authorize(project)) != str(root):
-                raise DevError("CLI_MAPPING_CHANGED", "Mapping changed during catalog probe", 403)
-            return result
+        handled, top_result = self._dispatch_top_action(action, project, root, args)
+        if handled:
+            return top_result
         live_sessions = self.live() if action == "start" else []
         with self.connect_db() as db:
-            if action == "discover":
-                return self.discover()
             if action.startswith("upload_"):
                 db.execute("BEGIN IMMEDIATE")
                 return self.upload(db, action, project, root, args)
@@ -330,12 +586,8 @@ class NativeCLI:
                     raise ValueError(
                         "Chat uses native defaults; advanced launch options belong in terminal"
                     )
-                if os.name == "nt" and mode == "chat":
-                    raise DevError(
-                        "CLI_CHAT_PLATFORM",
-                        "面板聊天目前支持 macOS/Linux；请选择受支持节点，或在 Windows 电脑本地使用 CLI",
-                        409,
-                    )
+                if mode == "chat":
+                    self._check_chat_platform()
                 if os.name == "nt" and mode == "terminal":
                     from agent.native_windows import capabilities
 
@@ -477,9 +729,16 @@ class NativeCLI:
                         json.dumps(argv),
                     ),
                 )
-                db.execute(
-                    "UPDATE sessions SET launch_signature=?,mode=?,native_thread=?,chat_settings=? WHERE id=?",
-                    (signature, mode, native_thread, json.dumps(settings), sid),
+                self._persist_start_metadata(
+                    db,
+                    sid,
+                    project,
+                    provider,
+                    executable,
+                    signature,
+                    mode,
+                    native_thread,
+                    settings,
                 )
                 for fid in files:
                     db.execute("INSERT INTO session_files VALUES (?,?)", (sid, fid))
@@ -1285,6 +1544,12 @@ class NativeCLI:
                     break
         return {"type": "native_sync", "sessions": sessions, "chunks": chunks}
 
+    async def _reconcile_on_connect(self):
+        try:
+            await asyncio.to_thread(self.reconcile_runtime)
+        except Exception:
+            pass
+
     async def sync(self):
         # Offsets are re-learned from the Hub on every connection. Rejected or
         # non-progressing sessions are skipped by SyncFlow, so a reset no longer
@@ -1292,10 +1557,16 @@ class NativeCLI:
         self.offsets = {}
         flow = self.sync_flow
         flow.reset_connection()
+        await self._reconcile_on_connect()
         sent_metadata = {}
         idle = 0.1
+        next_review_pump = time.monotonic() + 2.0
         while not self.agent.stop_event.is_set():
             try:
+                current = time.monotonic()
+                if current >= next_review_pump:
+                    next_review_pump = current + 2.0
+                    await asyncio.to_thread(self.review_worker.pump_due)
                 window_open = flow.window_open()
                 for sid in flow.due_probes():
                     sent_metadata.pop(sid, None)

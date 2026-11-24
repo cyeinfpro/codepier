@@ -1,3 +1,521 @@
+function chatActionAvailabilityEntry(v, actionName) {
+  const list =
+    v?.v2ActionAvailability ||
+    v?.settings?.action_availability ||
+    v?.catalog?.action_availability ||
+    v?.v2State?.projection?.capabilities?.action_availability;
+  if (!list) return null;
+  if (Array.isArray(list)) return list.find((a) => a && a.action === actionName) || null;
+  if (typeof list === 'object') return list[actionName] || null;
+  return null;
+}
+function chatActionAvailabilityText(avail) {
+  if (
+    !avail ||
+    (avail.supported !== false && avail.authorized !== false && avail.ready !== false)
+  ) {
+    return '';
+  }
+  const remedyMap = {
+    select_node: '请重新选择可用项目或电脑',
+    update_agent: '请升级本机代理版本',
+    reconnect: '请等待或检查本机重连',
+    choose_supported_option: '请改选当前支持的选项',
+    resolve_current_run: '请先等待或中断当前回复',
+    review_access: '请检查项目写入与执行权限',
+  };
+  const reasonMap = {
+    unsupported: '当前原生版本不支持此操作',
+    unauthorized: '当前账号无此操作权限',
+    offline: '电脑离线',
+    busy: '当前回复尚未结束',
+    invalid_option: '当前选项不受支持',
+  };
+  const reason =
+    avail.message ||
+    avail.reason ||
+    (avail.reason_code && reasonMap[avail.reason_code]) ||
+    (!avail.supported
+      ? '当前原生版本不支持此操作'
+      : !avail.authorized
+        ? '当前账号无此操作权限'
+        : '当前操作暂不可用');
+  const remedy = remedyMap[avail.remedy] || '';
+  return remedy ? `${reason}；${remedy}` : reason;
+}
+function chatSyncAvailabilityHints() {
+  const v = chatView();
+  const sendHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'send'));
+  if (sendHint && $('#chat-send') && $('#chat-send-blocker')) {
+    $('#chat-send').disabled = true;
+    $('#chat-send-blocker').textContent = sendHint;
+    $('#chat-send-blocker').hidden = false;
+  }
+  const resumeAvail = chatActionAvailabilityEntry(v, 'resume_session');
+  const resumeHint = chatActionAvailabilityText(resumeAvail);
+  const resumeEl = $('#chat-resume-hint');
+  if (resumeEl) {
+    resumeEl.textContent = resumeHint;
+    resumeEl.hidden = !resumeHint || $('#chat-resume')?.hidden;
+    if (resumeHint && $('#chat-resume')) {
+      $('#chat-resume').disabled = true;
+      $('#chat-resume').title = resumeHint;
+    }
+  }
+  const modelHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'change_model'));
+  const effortHint = chatActionAvailabilityText(chatActionAvailabilityEntry(v, 'change_options'));
+  const settingsHintEl = $('#chat-settings-availability');
+  if (settingsHintEl) {
+    const combined = [modelHint, effortHint].filter(Boolean).join('；');
+    settingsHintEl.textContent = combined;
+    settingsHintEl.hidden = !combined;
+  }
+  if (modelHint && $('#chat-model-picker')) {
+    $('#chat-model-picker').disabled = true;
+    $('#chat-model-picker').title = modelHint;
+  } else if ($('#chat-model-picker')) {
+    $('#chat-model-picker').disabled = false;
+  }
+  if (effortHint && $('#chat-effort-select')) {
+    $('#chat-effort-select').disabled = true;
+    $('#chat-effort-select').title = effortHint;
+  }
+}
+function chatCaptureScrollAnchor(v) {
+  const el = $('#chat-scroll');
+  const holder = $('#chat-messages');
+  if (!el || !holder) return null;
+  if (chatViewportActive(v) && v.v2Window) {
+    return CP.nativeWindow.captureAnchor(v.v2Window);
+  }
+  const elTop = el.getBoundingClientRect().top;
+  let firstRow = null;
+  for (const child of holder.children) {
+    const rect = child.getBoundingClientRect();
+    if (rect.bottom > elTop + 1) {
+      firstRow = child;
+      break;
+    }
+  }
+  return {
+    owner: ChatUI.generation,
+    userScrollGeneration: v.v2Window?.userScrollGeneration || 0,
+    key: firstRow?.dataset?.rowKey || firstRow?.dataset?.groupKey || firstRow?.dataset?.key || null,
+    relativeTop: firstRow ? firstRow.getBoundingClientRect().top - elTop : 0,
+    prevHeight: el.scrollHeight,
+    prevTop: el.scrollTop,
+  };
+}
+function chatRestoreScrollAnchor(v, anchor) {
+  const el = $('#chat-scroll');
+  const holder = $('#chat-messages');
+  if (!el || !holder || !anchor) return;
+  if (chatViewportActive(v) && v.v2Window) {
+    if (
+      anchor.owner !== v.v2Window.owner ||
+      anchor.userScrollGeneration !== v.v2Window.userScrollGeneration
+    ) {
+      return;
+    }
+    const targetTop = CP.nativeWindow.resolveSurvivingAnchor(v.v2Window, anchor, el.scrollTop);
+    chatSetScrollTop(v, el, targetTop);
+    return;
+  }
+  if (
+    anchor.owner !== ChatUI.generation ||
+    anchor.userScrollGeneration !== (v.v2Window?.userScrollGeneration || 0)
+  ) {
+    return;
+  }
+  if (anchor.key) {
+    const target = [...holder.children].find(
+      (n) => (n.dataset?.rowKey || n.dataset?.groupKey || n.dataset?.key) === anchor.key,
+    );
+    if (target) {
+      const delta =
+        target.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.relativeTop;
+      chatSetScrollTop(v, el, Math.max(0, el.scrollTop + delta));
+      return;
+    }
+  }
+  chatSetScrollTop(v, el, Math.max(0, anchor.prevTop + el.scrollHeight - anchor.prevHeight));
+}
+async function chatLoadOlderHistoryV2() {
+  const c = ChatUI;
+  const v = chatView();
+  const gen = c.generation;
+  const sid = c.selected?.id;
+  const before = v.v2State?.projection?.history?.nextToken;
+  if (!sid || !v.v2State || !before || v.v2HistoryBusy) return;
+  const olderBtn = $('#chat-older');
+  const anchor = chatCaptureScrollAnchor(v);
+  v.v2HistoryBusy = true;
+  if (olderBtn) {
+    olderBtn.disabled = true;
+    olderBtn.textContent = '正在加载更早消息…';
+  }
+  try {
+    const page = await api(
+      '/api/native/sessions/' +
+        encodeURIComponent(sid) +
+        '/history?' +
+        new URLSearchParams({ before }),
+    );
+    if (!chatCurrent(gen, v) || c.selected?.id !== sid || !v.v2State) return;
+    if (page.stream_epoch && page.stream_epoch !== v.v2State.streamEpoch) {
+      chatStatus('会话视图已更新，请重新打开或等待同步完成', true);
+      return;
+    }
+    v.v2State = CP.nativeState.mergeHistoryPage(v.v2State, chatNormalizeV2HistoryPage(page));
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    if (!chatViewportActive(v)) {
+      v.limit = Math.max(v.limit, v.v2State.projection.order.length);
+    }
+    chatSyncV2ToView(v, null, v.v2State.dirtyKeys, true);
+    chatRenderHistory(false);
+    chatRestoreScrollAnchor(v, anchor);
+    chatV2Cache()?.enqueue(v.v2State, () => chatCurrent(gen, v));
+  } catch (err) {
+    if (chatCurrent(gen, v)) chatStatus(err.message || '加载更早消息失败', true);
+  } finally {
+    v.v2HistoryBusy = false;
+    if (olderBtn && chatCurrent(gen, v)) {
+      olderBtn.disabled = false;
+      olderBtn.textContent = '显示更早消息';
+      olderBtn.hidden = !v.v2State?.projection?.history?.hasMore;
+    }
+  }
+}
+function chatSyncPartialBodyNotice(item) {
+  if (!item?.node) return;
+  const existing = item.node.querySelector('.chat-body-partial');
+  if (!item.data?.partial) {
+    existing?.remove();
+    return;
+  }
+  let bar = existing;
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'chat-body-partial';
+    const note = document.createElement('span');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-text-button';
+    btn.onclick = () => chatLoadItemBody(item.key);
+    bar.append(note, btn);
+    item.node.append(bar);
+  }
+  const v = chatView();
+  const loading = !!v.v2BodyRequests?.get(item.key);
+  const totalBytes = item.data.total_bytes ?? item.data.body?.byte_length;
+  const loadedBytes = item.data.body_loaded_bytes || 0;
+  const sizeHint =
+    typeof totalBytes === 'number' && totalBytes > 0
+      ? `（已载入 ${Math.min(loadedBytes, totalBytes).toLocaleString()} / ${totalBytes.toLocaleString()} 字节）`
+      : '';
+  bar.firstElementChild.textContent = '正文较长，当前仅显示预览' + sizeHint;
+  const btn = bar.lastElementChild;
+  btn.disabled = loading;
+  btn.textContent = loading ? '正在加载…' : '加载完整正文';
+}
+async function chatLoadItemBody(itemKey) {
+  const c = ChatUI;
+  const v = chatView();
+  const gen = c.generation;
+  const sid = c.selected?.id;
+  if (!sid || !v.v2State || v.v2BodyRequests?.get(itemKey)) return;
+  v.v2BodyRequests ??= new Map();
+  v.v2BodyRequests.set(itemKey, true);
+  const itemUi = v.items.get(itemKey);
+  if (itemUi) chatSyncPartialBodyNotice(itemUi);
+  try {
+    let pItem = v.v2State.projection.items.get(itemKey);
+    if (!pItem) return;
+    let contentGen = pItem.content_generation ?? pItem.body?.content_generation ?? 1;
+    let startByte = pItem.body_loaded_bytes ?? 0;
+    for (let step = 0; step < 64; step += 1) {
+      if (!chatCurrent(gen, v) || c.selected?.id !== sid || !v.v2State) return;
+      let chunk;
+      try {
+        chunk = await api(
+          '/api/native/sessions/' +
+            encodeURIComponent(sid) +
+            '/items/' +
+            encodeURIComponent(itemKey) +
+            '/body?' +
+            new URLSearchParams({
+              generation: String(contentGen),
+              start_byte: String(startByte),
+            }),
+        );
+      } catch (err) {
+        if (err?.code === 'BODY_REVISION_EXPIRED' && step === 0) {
+          const detail = await api(
+            '/api/native/sessions/' +
+              encodeURIComponent(sid) +
+              '/items/' +
+              encodeURIComponent(itemKey),
+          );
+          if (!chatCurrent(gen, v) || !detail?.item) return;
+          contentGen =
+            detail.item.content_generation ?? detail.item.body?.content_generation ?? contentGen;
+          startByte = 0;
+          continue;
+        }
+        throw err;
+      }
+      if (!chatCurrent(gen, v) || !v.v2State) return;
+      v.v2State = CP.nativeState.mergeBodyChunk(v.v2State, itemKey, chunk);
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+      pItem = v.v2State.projection.items.get(itemKey);
+      startByte = chunk.end_byte;
+      if (!chunk.has_more) break;
+    }
+    chatSyncV2ToView(v, null, new Set([itemKey]), false);
+    if (!c.frame) c.frame = requestAnimationFrame(chatFlush);
+    chatV2Cache()?.enqueue(v.v2State, () => chatCurrent(gen, v));
+  } catch (err) {
+    if (chatCurrent(gen, v)) chatStatus(err.message || '加载完整正文失败', true);
+  } finally {
+    v.v2BodyRequests?.delete(itemKey);
+    const cur = v.items.get(itemKey);
+    if (cur && chatCurrent(gen, v)) chatSyncPartialBodyNotice(cur);
+  }
+}
+function chatSyncToolTruncatedNotice(item, st) {
+  if (!item?.node) return;
+  const details = item.node.querySelector('details');
+  if (!details) return;
+  let notice = details.querySelector('.chat-tool-truncated');
+  if (!st?.truncatedBefore) {
+    notice?.remove();
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.className = 'chat-tool-truncated';
+    const text = document.createElement('span');
+    text.textContent = '输出较长，仅展示末尾内容';
+    const link = document.createElement('a');
+    link.className = 'chat-text-button';
+    link.textContent = '导出完整记录';
+    link.download = 'conversation.md';
+    notice.append(text, link);
+    details.insertBefore(notice, item.body);
+  }
+  const sid = ChatUI.selected?.id;
+  if (sid) {
+    notice.lastElementChild.href =
+      '/api/native/sessions/' +
+      encodeURIComponent(sid) +
+      '/export?' +
+      new URLSearchParams({ format: 'md', space_id: S.space_id || '' });
+  }
+}
+function chatEnsureOutputManager(v) {
+  if (
+    v.v2OutputSubscriptions ||
+    typeof CP === 'undefined' ||
+    !CP.nativeRuntime?.ToolOutputSubscriptionManager
+  ) {
+    return v.v2OutputSubscriptions;
+  }
+  const controllers = new Map();
+  const mgr = new CP.nativeRuntime.ToolOutputSubscriptionManager({
+    onSubscribe: (toolKey, spec) => {
+      const c = ChatUI;
+      const gen = c.generation;
+      const sid = c.selected?.id;
+      if (!sid) return;
+      const ac = new AbortController();
+      controllers.set(toolKey, ac);
+      void (async () => {
+        let afterOffset = spec.afterOffset ?? null;
+        while (
+          !ac.signal.aborted &&
+          chatCurrent(gen, v) &&
+          c.selected?.id === sid &&
+          mgr.getState(toolKey)
+        ) {
+          try {
+            const qs = new URLSearchParams({ stream: 'true' });
+            if (afterOffset !== null && afterOffset !== undefined) {
+              qs.set('after_offset', String(afterOffset));
+            }
+            if (S.space_id) qs.set('space_id', S.space_id);
+            const res = await fetch(
+              '/api/native/sessions/' +
+                encodeURIComponent(sid) +
+                '/items/' +
+                encodeURIComponent(toolKey) +
+                '/output?' +
+                qs,
+              {
+                credentials: 'same-origin',
+                headers: {
+                  Accept: 'text/event-stream',
+                  ...(S.space_id ? { 'X-CodePier-Space': S.space_id } : {}),
+                  ...(S.session?.csrf ? { 'X-RD-CSRF': S.session.csrf } : {}),
+                },
+                signal: ac.signal,
+              },
+            );
+            if (!res.ok || !res.body || ac.signal.aborted) break;
+            let needsReplace = false;
+            await CP.nativeRuntime.parseSseFrames(
+              res.body,
+              async (frame) => {
+                if (ac.signal.aborted || !chatCurrent(gen, v) || !frame.data) return;
+                if (frame.event === 'error') return;
+                let payload;
+                try {
+                  payload = JSON.parse(frame.data);
+                } catch {
+                  return;
+                }
+                const st = mgr.receiveFrame(toolKey, payload);
+                if (!st) return;
+                if (st.needsReplace) {
+                  needsReplace = true;
+                  afterOffset = null;
+                  return;
+                }
+                afterOffset = st.toOffset;
+                const item = v.items.get(toolKey);
+                if (item && item.body) {
+                  item.text = st.text;
+                  item.body.textContent = st.text;
+                  chatSyncToolTruncatedNotice(item, st);
+                }
+                if (!st.running) ac.abort();
+              },
+              ac.signal,
+            );
+            if (!needsReplace) break;
+          } catch {
+            break;
+          }
+        }
+      })();
+    },
+    onUnsubscribe: (toolKey) => {
+      const ac = controllers.get(toolKey);
+      controllers.delete(toolKey);
+      ac?.abort();
+    },
+  });
+  v.v2OutputSubscriptions = mgr;
+  return mgr;
+}
+function chatToolVisibleInDom(item) {
+  if (!item?.node) return false;
+  const details = item.node.querySelector('details');
+  if (!details?.open) return false;
+  const group = item.node.closest('.chat-process');
+  return !group || group.open;
+}
+function chatOpenToolOutput(item, v = chatView()) {
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State) return;
+  const mgr = chatEnsureOutputManager(v);
+  if (!mgr) return;
+  mgr.open(item.key, {
+    outputEpoch: item.data?.output_ref?.output_epoch || '',
+    running: item.data?.active !== false,
+  });
+}
+function chatCloseToolOutput(itemKey, v = chatView()) {
+  v?.v2OutputSubscriptions?.close(itemKey);
+}
+function chatOnToolDetailsToggle(item, _details) {
+  const v = chatView();
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State) return;
+  if (chatToolVisibleInDom(item)) chatOpenToolOutput(item, v);
+  else chatCloseToolOutput(item.key, v);
+}
+function chatSyncGroupToolOutputs(v, groupNode) {
+  if (!chatV2Enabled('native_log_on_demand') || !v?.v2State || !groupNode) return;
+  for (const el of groupNode.querySelectorAll('.chat-message-tool')) {
+    const key = el.dataset.key;
+    const item = key ? v.items.get(key) : null;
+    if (!item) continue;
+    if (chatToolVisibleInDom(item)) chatOpenToolOutput(item, v);
+    else chatCloseToolOutput(item.key, v);
+  }
+}
+function chatApplyReviewEvidenceState(item) {
+  if (!item?.node || !item.reviewMeta || !item.reviewNote) return;
+  const v = chatView();
+  const data = item.data || {};
+  const ctrl = v.v2Control || {};
+  const receipt = data.receipt;
+  const matchCtrl = (entry) => entry && (!receipt || !entry.receipt || entry.receipt === receipt);
+  const evidenceState =
+    data.evidence_state ??
+    (matchCtrl(ctrl.evidence_frozen?.body) ? ctrl.evidence_frozen.body.evidence_state : null) ??
+    (matchCtrl(ctrl.provider_completed?.body) ? ctrl.provider_completed.body.evidence_state : null);
+  const reviewState =
+    data.review_state ??
+    (matchCtrl(ctrl.review_ready?.body) ? ctrl.review_ready.body.review_state : null);
+  if (!evidenceState && !reviewState) return;
+
+  let badgeLabel = '';
+  let badgeState = '';
+  if (evidenceState === 'capture_pending') {
+    badgeLabel = '采集中';
+    badgeState = 'pending';
+  } else if (
+    evidenceState === 'unavailable' ||
+    evidenceState === 'not_requested' ||
+    reviewState === 'unavailable'
+  ) {
+    badgeLabel = '暂不可用';
+    badgeState = 'unavailable';
+  } else if (
+    reviewState === 'generating' ||
+    ((evidenceState === 'frozen' || evidenceState === 'partial') &&
+      reviewState !== 'ready' &&
+      data.available !== true &&
+      data.available !== false)
+  ) {
+    badgeLabel = '审阅生成中';
+    badgeState = 'generating';
+  } else if (evidenceState === 'frozen' || evidenceState === 'partial' || reviewState === 'ready') {
+    badgeLabel = '已固定';
+    badgeState = 'frozen';
+  }
+
+  const summary = item.reviewNode?.querySelector('summary');
+  if (summary && badgeLabel) {
+    let badge = summary.querySelector('.chat-evidence-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'chat-evidence-badge';
+      summary.insertBefore(badge, item.reviewMeta);
+    }
+    badge.textContent = badgeLabel;
+    badge.dataset.state = badgeState;
+  }
+
+  if (
+    evidenceState === 'unavailable' ||
+    evidenceState === 'capture_pending' ||
+    evidenceState === 'not_requested' ||
+    reviewState === 'unavailable'
+  ) {
+    item.reviewMeta.textContent = badgeLabel || '未能核实';
+    item.reviewNote.textContent =
+      data.text ||
+      {
+        capture_pending: '正在采集本轮改动快照，完成后更新。',
+        not_requested: '本轮未请求工作区改动快照。',
+        unavailable: '工作区改动快照暂不可用，请在电脑本机核实。',
+      }[evidenceState] ||
+      '改动审阅暂不可用，请在电脑本机核实。';
+  } else if (badgeState === 'generating') {
+    item.reviewMeta.textContent = badgeLabel;
+    item.reviewNote.textContent = '已固定本轮前后快照，正在生成改动审阅…';
+  }
+}
 async function chatPage() {
   if ($('#chat-root')) {
     chatList();
@@ -6,8 +524,9 @@ async function chatPage() {
   chatDetach();
   const c = ChatUI,
     gen = c.generation;
-  await loadBasics();
+  await Promise.all([loadBasics(), chatLoadNativeCapabilities()]);
   if (!chatCurrent(gen)) return;
+  chatCheckProjectMappings();
   c.project = S.projects.some((p) => p.id === c.project)
     ? c.project
     : S.work.project || S.projects[0]?.id || '';
@@ -29,7 +548,7 @@ async function chatPage() {
   <footer class="chat-sidebar-footer"><button type="button" id="chat-command-menu" class="chat-sidebar-action" aria-label="快捷操作" title="快捷操作">${chatIcon('command')}<span>快捷操作</span><kbd data-chat-shortcut="command">⌘ K</kbd></button></footer></aside>
   <div class="chat-main">
   <div id="chat-find-bar" class="chat-find-bar" hidden><input id="chat-find-input" type="search" placeholder="在已载入消息中查找" aria-label="消息关键词"><span id="chat-find-count"></span><button id="chat-find-prev" aria-label="上一个匹配">↑</button><button id="chat-find-next" aria-label="下一个匹配">↓</button><button id="chat-find-close" aria-label="关闭查找">×</button></div>
-  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button></div>
+  <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="对话消息"><button id="chat-older" class="chat-text-button" hidden>显示更早消息</button><div id="chat-empty" class="chat-empty"><div class="chat-empty-mark">${chatIcon('command')}</div><h2 id="chat-empty-title"></h2><div class="chat-starters"><button data-chat-starter="梳理这个项目的结构，指出值得优先处理的问题。">${chatIcon('folder')}<span><strong>了解项目</strong><small>梳理结构与关键入口</small></span></button><button data-chat-starter="检查当前改动，找出可复现的问题并给出修复建议。">${chatIcon('check')}<span><strong>检查改动</strong><small>找出问题与潜在风险</small></span></button><button data-chat-starter="先阅读项目说明和已有实现，再制定实施计划。">${chatIcon('command')}<span><strong>制定计划</strong><small>把想法拆成具体步骤</small></span></button></div></div><div id="chat-messages" class="chat-messages"></div><button type="button" class="chat-text-button" id="chat-resume" hidden>恢复会话</button><span id="chat-resume-hint" class="chat-availability-hint" role="status" hidden></span></div>
   <button id="chat-latest" class="chat-latest" hidden>↓ 回到最新</button>
   <div class="chat-composer-wrap"><div id="chat-activity" class="chat-activity" hidden role="status"><i aria-hidden="true"></i><span id="chat-activity-text"></span><button type="button" id="chat-activity-queue"></button><div class="chat-run-controls"><select id="chat-send-mode" aria-label="发送方式" title="正在执行时如何发送新消息"><option value="followup">等这轮结束再发</option><option value="steer">插入当前回复</option></select><button type="button" id="chat-interrupt" class="chat-stop-turn" aria-label="中断当前" title="中断当前回复" hidden>${chatIcon('stop')}<span>中断当前</span></button></div></div><div id="chat-outbox" class="chat-outbox" aria-live="polite"></div><div id="chat-files" class="chat-files" aria-live="polite"></div>
   <div id="chat-target-notice" class="chat-catalog-notice" role="status" hidden><span></span><button type="button" id="chat-target-refresh" hidden>检查连接</button><button type="button" id="chat-catalog-retry" hidden>重新加载</button></div>
@@ -52,7 +571,9 @@ async function chatPage() {
     )
     .join('')}</div></div><span id="chat-target-info"></span></div>
   <div class="chat-config-bar"><div class="chat-setting-field"><label for="chat-model-picker">模型</label><button type="button" id="chat-model-picker" class="chat-model-picker" aria-label="选择模型" aria-haspopup="dialog" aria-expanded="false">${chatIcon('model')}<span id="chat-model-name">选择模型</span>${chatIcon('chevron')}</button></div><label class="chat-cli-label chat-setting-field"><span>会话 CLI</span><select id="chat-provider" aria-label="原生 CLI"><option value="pi">Pi</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>  <label class="chat-effort-label chat-setting-field">${chatIcon('brain')}<span>思考</span><select id="chat-effort-select" aria-label="思考强度"><option value="">本机默认</option></select></label>
+  <label class="chat-selection-label chat-setting-field"><span>配置生效</span><select id="chat-selection-mode" aria-label="配置生效方式"><option value="inherit_at_dispatch">发送时跟随当前</option><option value="explicit">本条固定</option></select></label>
   <div class="chat-setting-field"><label for="chat-cwd-button">工作目录</label><button type="button" id="chat-cwd-button" class="chat-cwd-button" title="工作目录">${chatIcon('folder')}<span>.</span></button></div></div>
+  <p id="chat-settings-availability" class="chat-availability-hint" role="status" hidden></p>
   <div class="chat-option-tools"><button type="button" id="chat-file-library" aria-label="附件库">${chatIcon('file')}<span>附件库</span></button></div></section></div>
   <div class="chat-setting-feedback"><span id="chat-setting-state" class="chat-setting-state"></span><button type="button" id="chat-settings-retry" class="chat-text-button" hidden>重试设置</button></div>
   <p id="chat-send-blocker" class="chat-popover-help" role="status" hidden></p><div class="chat-composer-note"><span id="chat-status" role="status" data-quiet="true">Enter 发送 · Shift+Enter 换行</span><span id="chat-text-limit" role="status" hidden></span><button id="chat-retry" hidden>重试</button></div></div>
@@ -195,16 +716,41 @@ async function chatPage() {
     if (tab) chatInspector(tab.dataset.chatTab);
     if (!e.target.closest('#chat-popover,#chat-model-picker,#chat-cwd-button')) chatClosePopover();
   });
+  let scrollFrame = 0;
   on('chat-scroll', 'scroll', () => {
     const v = chatView();
+    const el = $('#chat-scroll');
+    if (v.v2Window) {
+      const isProg =
+        v.v2Window.programmaticScroll &&
+        Math.abs(el.scrollTop - (v.v2Window.expectedScrollTop ?? el.scrollTop)) <= 2;
+      if (!isProg) {
+        v.v2Window.userScrollGeneration += 1;
+      }
+      v.v2Window.programmaticScroll = false;
+    }
     v.follow = chatAtBottom();
-    v.scrollTop = $('#chat-scroll').scrollTop;
+    if (v.v2Window) v.v2Window.followBottom = v.follow;
+    v.scrollTop = el.scrollTop;
     $('#chat-latest').hidden = v.follow;
+    if (chatViewportActive(v) && !scrollFrame) {
+      const scrollGen = c.generation;
+      scrollFrame = requestAnimationFrame(() => {
+        scrollFrame = 0;
+        if (chatCurrent(scrollGen, v) && chatViewportActive(v)) {
+          chatRenderViewportWindow(v);
+        }
+      });
+    }
   });
   on('chat-latest', 'click', chatBottom);
   on('chat-older', 'click', () => {
-    const v = chatView(),
-      el = $('#chat-scroll'),
+    const v = chatView();
+    if (v.v2State) {
+      void chatLoadOlderHistoryV2();
+      return;
+    }
+    const el = $('#chat-scroll'),
       h = el.scrollHeight,
       t = el.scrollTop;
     v.limit += 100;
@@ -239,6 +785,10 @@ async function chatPage() {
   });
   on('chat-send-mode', 'change', (e) => {
     chatView().mode = e.target.value;
+    chatSyncChrome();
+  });
+  on('chat-selection-mode', 'change', (e) => {
+    chatView().selectionMode = e.target.value;
     chatSyncChrome();
   });
   on('chat-interrupt', 'click', chatInterrupt);
@@ -289,8 +839,39 @@ async function chatPage() {
   on('chat-export-json', 'click', () => chatExport('json'));
   on('chat-stop', 'click', chatStop);
   on('chat-delete', 'click', chatDelete);
+  document.addEventListener(
+    'focusin',
+    (e) => {
+      const v = chatView();
+      if (!chatViewportActive(v) || !v.v2Window) return;
+      const msg = e.target?.closest?.('#chat-messages [data-row-key]');
+      for (const [k, reasons] of [...v.v2Window.pinSet.entries]) {
+        if (reasons.has('focus')) v.v2Window.pinSet.unpin(k, 'focus');
+      }
+      if (msg?.dataset.rowKey) v.v2Window.pinSet.pin(msg.dataset.rowKey, 'focus');
+    },
+    { signal: c.listeners.signal },
+  );
+  document.addEventListener(
+    'selectionchange',
+    () => {
+      const v = chatView();
+      if (!chatViewportActive(v) || !v.v2Window) return;
+      for (const [k, reasons] of [...v.v2Window.pinSet.entries]) {
+        if (reasons.has('selection')) v.v2Window.pinSet.unpin(k, 'selection');
+      }
+      const sel = window.getSelection?.();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+      const node = sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement;
+      const msg = node?.closest?.('#chat-messages [data-row-key]');
+      if (msg?.dataset.rowKey) v.v2Window.pinSet.pin(msg.dataset.rowKey, 'selection');
+    },
+    { signal: c.listeners.signal },
+  );
   for (const target of [window, window.visualViewport].filter(Boolean))
-    target.addEventListener('resize', chatViewport, { signal: c.listeners.signal });
+    target.addEventListener('resize', chatViewport, {
+      signal: c.listeners.signal,
+    });
   chatMountChrome();
   chatMountHistory();
   chatDrawer(false, true);
@@ -392,6 +973,8 @@ function chatRestore(history = true) {
   $('#chat-retry').hidden = !v.pending;
   $('#chat-interrupt').hidden = !v.active;
   $('#chat-send-mode').value = v.mode;
+  if ($('#chat-selection-mode'))
+    $('#chat-selection-mode').value = v.selectionMode || 'inherit_at_dispatch';
   chatResizeComposer();
   chatFiles();
   chatOutbox();
@@ -401,4 +984,5 @@ function chatRestore(history = true) {
   $('#chat-find-count').textContent = '';
   chatTargetSync();
   chatSyncChrome();
+  chatSyncAvailabilityHints();
 }

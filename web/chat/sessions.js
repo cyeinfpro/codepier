@@ -69,6 +69,14 @@ async function chatResume() {
     v.configForResume = false;
     v.selectedModel = null;
     v.selectedEffort = null;
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    v.v2State = null;
+    v.v2Scope = null;
+    v.v2Window = null;
+    v.v2Halted = null;
+    v.v2ProjectionState = '';
     c.views.set(chatKey(project, next.id), v);
     if (current) await chatSwitch(next, project);
     c.views.delete(chatKey(project, row.id));
@@ -152,6 +160,13 @@ async function chatDelete() {
       }
     }
     await chatAPI('delete', { id: row.id, confirm: row.id }, project);
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    const scopeKey = v.v2State?.scopeKey;
+    if (scopeKey && typeof chatV2Cache === 'function') {
+      chatV2Cache()?.invalidateScope(scopeKey);
+    }
     if (chatCurrent(gen, v)) await chatSwitch(null, project);
     c.views.delete(chatKey(project, row.id));
     for (const file of v.files) {
@@ -211,9 +226,20 @@ function chatFind() {
   v.match = ((v.match % keys.length) + keys.length) % keys.length;
   const item = v.items.get(keys[v.match]);
   if (!item.node) {
-    v.limit = Math.max(v.limit, v.order.length - v.order.indexOf(item.key));
-    chatRenderHistory(false);
+    if (typeof chatViewportActive === 'function' && chatViewportActive(v) && v.v2Window) {
+      const rowKey = v.v2Window.groupKeyFor(item.key);
+      const rowIdx = v.v2Window.heights.indexOfKey(rowKey);
+      if (rowIdx >= 0) {
+        v.v2Window.followBottom = false;
+        chatSetScrollTop(v, v.v2Window.el, v.v2Window.heights.offset(rowIdx));
+        chatRenderViewportWindow(v);
+      }
+    } else {
+      v.limit = Math.max(v.limit, v.order.length - v.order.indexOf(item.key));
+      chatRenderHistory(false);
+    }
   }
+  if (!item.node) return;
   item.node.classList.add('search-match');
   const group = item.node.closest('.chat-process');
   if (group) group.open = true;

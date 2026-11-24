@@ -33,7 +33,102 @@ const ChatUI = {
   rows: [],
   connection: 'idle',
   focus: false,
+  v2Cache:
+    typeof CP !== 'undefined' && CP.nativeCache?.NativeSnapshotCache
+      ? new CP.nativeCache.NativeSnapshotCache()
+      : null,
+  v2Capabilities: null,
+  v2CapabilitiesPromise: null,
+  v2ScopeKeys: new Map(),
+  v2ProjectMappings: new Map(),
+  v2ActiveScope: null,
 };
+function chatV2Cache() {
+  if (!ChatUI.v2Cache && typeof CP !== 'undefined' && CP.nativeCache?.NativeSnapshotCache) {
+    ChatUI.v2Cache = new CP.nativeCache.NativeSnapshotCache();
+  }
+  return ChatUI.v2Cache;
+}
+function chatV2Enabled(flag = 'native_snapshot_v2_read') {
+  return (
+    typeof CP !== 'undefined' &&
+    !!CP.nativeState &&
+    !!CP.nativeRuntime &&
+    ChatUI.v2Capabilities?.native_view_v2 === true &&
+    ChatUI.v2Capabilities?.flags?.[flag] === true
+  );
+}
+function chatV2MappingSignature(projectId = ChatUI.project) {
+  const project = (typeof S !== 'undefined' && S.projects ? S.projects : []).find(
+    (p) => p.id === projectId,
+  );
+  const space = typeof S !== 'undefined' ? S.space_id || '' : '';
+  const user = typeof S !== 'undefined' ? S.session?.user_id || S.session?.username || '' : '';
+  return {
+    projectId: projectId || '',
+    root: project?.root || '',
+    deviceId: project?.device_id || '',
+    key: `${space}::${user}::${projectId || ''}::${project?.device_id || ''}::${project?.root || ''}`,
+  };
+}
+function chatInvalidateProjectV2(projectId) {
+  if (!projectId) return;
+  const cache = chatV2Cache();
+  const prefix = `::${projectId}::`;
+  for (const [mKey, scopeKey] of [...ChatUI.v2ScopeKeys.entries()]) {
+    if (mKey.includes(prefix)) {
+      cache?.invalidateScope(scopeKey);
+      ChatUI.v2ScopeKeys.delete(mKey);
+    }
+  }
+  for (const [viewKey, view] of ChatUI.views.entries()) {
+    if (!viewKey.startsWith(projectId + '\n')) continue;
+    view.v2Scope?.stopNative?.();
+    view.v2OutputSubscriptions?.closeAll?.();
+    view.v2Window?.observer?.disconnect?.();
+    view.v2State = null;
+    view.v2Scope = null;
+    view.v2Window = null;
+    view.v2Halted = null;
+    view.v2ProjectionState = '';
+    view.v2DirtyKeys?.clear();
+    view.v2StructureDirty = false;
+  }
+}
+function chatCheckProjectMappings() {
+  if (typeof S === 'undefined' || !Array.isArray(S.projects)) return;
+  for (const p of S.projects) {
+    const prev = ChatUI.v2ProjectMappings.get(p.id);
+    const next = { root: p.root || '', device_id: p.device_id || '' };
+    if (prev && (prev.root !== next.root || prev.device_id !== next.device_id)) {
+      chatInvalidateProjectV2(p.id);
+    }
+    ChatUI.v2ProjectMappings.set(p.id, next);
+  }
+}
+function chatClearV2Scopes(invalidateCache = false) {
+  const activeScope = ChatUI.v2ActiveScope;
+  ChatUI.v2ActiveScope = null;
+  activeScope?.stopNative?.();
+  for (const v of ChatUI.views.values()) {
+    v.v2Scope?.stopNative?.();
+    v.v2OutputSubscriptions?.closeAll?.();
+    v.v2Window?.observer?.disconnect?.();
+    if (invalidateCache) {
+      v.v2State = null;
+      v.v2Scope = null;
+      v.v2Window = null;
+      v.v2Halted = null;
+    }
+  }
+  if (invalidateCache) {
+    chatV2Cache()?.invalidateAll();
+    ChatUI.v2ScopeKeys.clear();
+    ChatUI.v2ProjectMappings.clear();
+    ChatUI.v2Capabilities = null;
+    ChatUI.v2CapabilitiesPromise = null;
+  }
+}
 const chatLabels = {
   off: '关闭',
   none: '不启用',
@@ -102,10 +197,26 @@ function chatView() {
       stats: null,
       commands: null,
       mode: 'followup',
+      selectionMode: 'inherit_at_dispatch',
       search: '',
       match: 0,
       queue: [],
       sessionStatus: ChatUI.selected?.status || 'new',
+      v2State: null,
+      v2Scope: null,
+      v2DirtyKeys: new Set(),
+      v2StructureDirty: false,
+      v2Window: null,
+      v2OutputSubscriptions: null,
+      v2ProjectionState: '',
+      v2Halted: null,
+      v2HistoryBusy: false,
+      v2BodyRequests: new Map(),
+      v2SettingsGeneration: 0,
+      v2Control: null,
+      v2Sync: null,
+      v2ActionAvailability: null,
+      structureDirty: false,
     });
   return ChatUI.views.get(key);
 }
@@ -185,6 +296,7 @@ function chatDetach(clear = false) {
     cancelAnimationFrame(c.frame);
     c.frame = 0;
     c.dirty.clear();
+    chatClearV2Scopes(clear);
     document.body.classList.remove('chat-focus');
     if (clear) {
       chatCatalogAbortAll();
@@ -212,13 +324,20 @@ async function chatOpenProject(project, provider = 'pi') {
   if (S.page === 'native' && $('#chat-root'))
     return chatSwitch(null, project, { provider, cwd: '.' });
   chatDetach();
-  Object.assign(ChatUI, { project, provider, cwd: '.', selected: null, inspector: '' });
+  Object.assign(ChatUI, {
+    project,
+    provider,
+    cwd: '.',
+    selected: null,
+    inspector: '',
+  });
   await navigate('native');
 }
 async function chatSwitch(row, project = row?.project_id || ChatUI.project, options = {}) {
   const c = ChatUI;
   chatDisconnect();
   chatRememberView();
+  chatCheckProjectMappings();
   c.dialogCancel?.();
   chatClosePopover();
   chatOptions(false);

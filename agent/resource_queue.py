@@ -22,6 +22,13 @@ def _path_scope(name):
     return path.anchor, path.parts
 
 
+def _relaxed_non_conflicting(left: Claim, right: Claim) -> bool:
+    if left.strict_barrier or right.strict_barrier or left.holder == right.holder:
+        return False
+    file_claim, process_claim = (left, right) if left.holder == "file" else (right, left)
+    return not file_claim.write or (not process_claim.write and not process_claim.stable)
+
+
 @dataclass(frozen=True)
 class Claim:
     namespace: str
@@ -30,6 +37,7 @@ class Claim:
     write: bool
     holder: str = "file"
     stable: bool = False
+    strict_barrier: bool = False
 
     def conflicts(self, other, *, relaxed=True):
         if (
@@ -40,10 +48,8 @@ class Claim:
             return False
         if self.kind == "service":
             return self.name == other.name
-        if relaxed and self.holder != other.holder:
-            file_claim, process_claim = (self, other) if self.holder == "file" else (other, self)
-            if not file_claim.write or (not process_claim.write and not process_claim.stable):
-                return False
+        if relaxed and _relaxed_non_conflicting(self, other):
+            return False
         left_anchor, left = _path_scope(self.name)
         right_anchor, right = _path_scope(other.name)
         return left_anchor == right_anchor and (
@@ -186,6 +192,19 @@ class ResourceQueue:
                     return False
         return True
 
+    def _has_strict_barrier_blocker(self, dependencies):
+        for blocker in dependencies:
+            if blocker in self.active:
+                return True
+            blocker_claims = self._entries.get(blocker, (None, ()))[1]
+            if any(claim.strict_barrier for claim in blocker_claims):
+                return True
+            for root in self._active_roots(blocker):
+                root_claims = self._entries.get(root, (None, ()))[1]
+                if any(claim.strict_barrier for claim in root_claims):
+                    return True
+        return False
+
     def _bypassable(self, token):
         if not self._bounded.get(token):
             return False
@@ -194,10 +213,10 @@ class ResourceQueue:
             return False
         if not self.relaxed and not self._strict_bypass_allowed(token, dependencies):
             return False
+        if self._has_strict_barrier_blocker(dependencies):
+            return False
         now = self.clock()
         for blocker in dependencies:
-            if blocker in self.active:
-                return False
             roots = self._active_roots(blocker)
             gate = self._bypass_roots.get(blocker)
             if gate is not None:
@@ -205,6 +224,15 @@ class ResourceQueue:
             if not any(now - self._started.get(root, now) >= self.bypass_seconds for root in roots):
                 return False
         return True
+
+    def update_active_claims(self, token, claims):
+        """Atomically update claims for an active holder without releasing queue position."""
+        if token not in self.active:
+            raise KeyError("Cannot update claims for non-active resource token")
+        identifier = self.active[token][0]
+        updated = tuple(claims)
+        self.active[token] = (identifier, updated)
+        self._entries[token] = (identifier, updated)
 
     def blocked(self, token):
         claims = self._entries.get(token, (None, ()))[1]

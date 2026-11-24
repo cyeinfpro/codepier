@@ -6,18 +6,20 @@ workspace changes cannot be attributed exclusively to a particular agent.
 
 from __future__ import annotations
 import asyncio
+from contextlib import closing, contextmanager
 import errno
+from functools import lru_cache
 import hashlib
 import json
 import logging
 import math
 import os
-from contextlib import contextmanager
-from functools import lru_cache
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
+import sqlite3
 import stat
 import time
+from typing import Any, Callable, Literal
 import uuid
 from agent.context import project_context
 from agent import review_content
@@ -31,7 +33,9 @@ MAX_STORAGE_BYTES = 256 * 1024 * 1024
 MAX_RECORDS = 256
 TTL = 7 * 24 * 3600
 BASELINE_TTL = 24 * 3600
+MAX_PIN_LEASE_SECONDS = 7 * 24 * 3600
 CLEANUP_INTERVAL = 3600
+ALLOWED_KINDS = ("baseline", "turn_after", "review")
 EXCLUSIONS = "Protected paths, links, dependencies, .venv-* / venv-* environments, dist/build, caches, .work, .codepier-test-runs and docs/evidence are excluded. Direct files precede subdirectories within each directory."
 SCOPE = (
     "共享目录在两个采样时点之间的变化；不证明本会话独占修改。快照按文件读取，不是原子文件系统快照。"
@@ -76,14 +80,96 @@ def review_excluded(path):
     return excluded(path) or scan_ignored(path)
 
 
+def native_active_pins(
+    native_dir: str | Path,
+    *,
+    now: float | None = None,
+    max_lease_seconds: float = MAX_PIN_LEASE_SECONDS,
+) -> set[str]:
+    """Return before_ref/after_ref pinned by active native turns or review jobs."""
+    db_path = Path(native_dir) / "native.sqlite3"
+    if not db_path.exists() or db_path.is_symlink():
+        return set()
+    now_ts = time.time() if now is None else now
+    cutoff = now_ts - max_lease_seconds
+    pins: set[str] = set()
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return set()
+    with closing(conn):
+        if not _has_table(conn, "native_turns"):
+            return set()
+        _collect_turn_pins(conn, pins, cutoff)
+        if _has_table(conn, "native_review_jobs"):
+            _collect_job_pins(conn, pins, now_ts, cutoff)
+    return pins
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _collect_turn_pins(conn: sqlite3.Connection, pins: set[str], cutoff: float) -> None:
+    rows = conn.execute(
+        """SELECT before_ref, after_ref FROM native_turns
+           WHERE created_at >= ?
+             AND (
+               execution_state IN ('preparing','running','uncertain')
+               OR evidence_state IN ('baseline_pending','baseline_ready','capture_pending','capturing')
+               OR review_state IN ('pending','building')
+             )""",
+        (cutoff,),
+    ).fetchall()
+    for row in rows:
+        for col in ("before_ref", "after_ref"):
+            if row[col]:
+                pins.add(row[col])
+
+
+def _collect_job_pins(
+    conn: sqlite3.Connection, pins: set[str], now_ts: float, cutoff: float
+) -> None:
+    rows = conn.execute(
+        """SELECT t.before_ref, t.after_ref
+           FROM native_review_jobs j
+           JOIN native_turns t ON t.receipt = j.receipt AND t.attempt_id = j.attempt_id
+           WHERE j.status IN ('pending','running','blocked')
+             AND j.created_at >= ?
+             AND (j.recovery_deadline IS NULL OR j.recovery_deadline > ?)""",
+        (cutoff, now_ts),
+    ).fetchall()
+    for row in rows:
+        for col in ("before_ref", "after_ref"):
+            if row[col]:
+                pins.add(row[col])
+
+
 class ReviewStore:
-    def __init__(self, engine):
+    def __init__(
+        self,
+        engine,
+        *,
+        active_pins: set[str] | Callable[[], set[str]] | None = None,
+    ):
         self.engine = engine
+        self._active_pins = active_pins
         self.directory = engine.journal.directory / "coding-reviews"
         if self.directory.is_symlink():
             raise DevError("REVIEW_STORAGE_INVALID", "快照存储路径不安全", 403)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
+
+    def _pinned_refs(self, *, now: float | None = None) -> set[str]:
+        if self._active_pins is None:
+            return native_active_pins(self.engine.journal.directory / "native-cli", now=now)
+        if callable(self._active_pins):
+            return set(self._active_pins())
+        return set(self._active_pins)
 
     @contextmanager
     def lock(self, *, blocking=True):
@@ -140,6 +226,7 @@ class ReviewStore:
             if (
                 checksum != fingerprint(document)
                 or document["id"] != path.stem
+                or document.get("kind") not in ALLOWED_KINDS
                 or type(expires) not in (int, float)
                 or not math.isfinite(expires)
             ):
@@ -174,6 +261,7 @@ class ReviewStore:
         # Caller holds the cross-process lock. Never infer expiry from mtime:
         # copying/restoring a file must not extend or shorten its published lease.
         now = time.time() if now is None else now
+        pinned = self._pinned_refs(now=now)
         removed = False
         try:
             for path in self.directory.glob("*.json"):
@@ -193,7 +281,7 @@ class ReviewStore:
                 # indicator. Revalidate there instead of trusting this cache.
                 metadata = self._metadata.__wrapped__ if os.name == "nt" else self._metadata
                 document, size = metadata(path, signature)
-                if document["expires_at"] <= now:
+                if document["expires_at"] <= now and path.stem not in pinned:
                     path.unlink()
                     removed = True
                 else:
@@ -463,10 +551,164 @@ class ReviewStore:
         with self.lock():
             return self._load(ref, project, kind)
 
-    def _load(self, ref, project, kind):
-        expected_binding = binding(self.engine, project)  # Reauthorize on EVERY read.
+    def _validate_ref_string(self, ref: str) -> None:
         if not isinstance(ref, str) or not re.fullmatch("[a-f0-9]{32}", ref):
             raise DevError("REVIEW_INVALID_REF", "快照编号无效")
+
+    def _existing_turn_snapshot(
+        self,
+        path: Path,
+        *,
+        expected_meta: dict[str, str],
+        expected_binding: dict[str, Any],
+        content_digest: str,
+        role: Literal["before", "after"],
+    ) -> dict[str, Any]:
+        existing, _ = self._read(path)
+        if existing.get("binding") != expected_binding:
+            raise DevError("REVIEW_CONFLICT", "固定快照绑定冲突，禁止覆盖", 409)
+        if role == "before" and existing.get("kind") == "review":
+            if existing.get("baseline_ref") == path.stem and existing.get("turn_meta") == expected_meta:
+                return existing
+            raise DevError("REVIEW_CONFLICT", "固定快照类型冲突，禁止覆盖", 409)
+        if existing.get("turn_meta") != expected_meta:
+            raise DevError("REVIEW_CONFLICT", "固定快照归属冲突，禁止覆盖", 409)
+        existing_digest = fingerprint(
+            {"files": existing.get("files"), "coverage": existing.get("coverage")}
+        )
+        if existing_digest != content_digest:
+            raise DevError("REVIEW_CONFLICT", "固定快照内容冲突，禁止覆盖", 409)
+        return existing
+
+    def _ensure_turn_quota(
+        self,
+        records: list[tuple[Any, dict[str, Any], int]],
+        candidate: tuple[Path, dict[str, Any], int],
+        blobs: dict[str, bytes],
+        *,
+        reserve_bytes: int,
+        reserve_records: int,
+    ) -> list[tuple[Any, dict[str, Any], int]]:
+        future = list(records) + [candidate]
+        if self._usage(future, blobs) > self.storage_limit - reserve_bytes:
+            self._compact(records)
+            records = list(self._records())
+            review_content.collect(self.directory, self._refs(records))
+            future = list(records) + [candidate]
+        used = self._usage(records)
+        required = self._usage(future, blobs)
+        if len(future) + reserve_records > self.record_limit or required > self.storage_limit - reserve_bytes:
+            raise DevError(
+                "REVIEW_QUOTA",
+                "审阅快照配额不足；不会提前删除有效快照",
+                409,
+                used_bytes=used,
+                limit_bytes=self.storage_limit,
+                records=len(records),
+                limit_records=self.record_limit,
+                completion_reserve_bytes=reserve_bytes,
+                required_bytes=required,
+                effective_limit_bytes=max(0, self.storage_limit - reserve_bytes),
+                quota_scope="agent",
+                retryable=False,
+            )
+        return future
+
+    def save_turn_snapshot(
+        self,
+        document: dict[str, Any],
+        *,
+        ref: str,
+        receipt: str,
+        attempt_id: str,
+        role: Literal["before", "after"],
+        expected_binding: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish an immutable before/after snapshot under a pre-allocated ref."""
+        self._validate_ref_string(ref)
+        if role not in ("before", "after"):
+            raise ValueError(f"Unsupported snapshot role: {role}")
+        if document.get("binding") != expected_binding:
+            raise DevError("REVIEW_NOT_FOUND", "快照不属于当前项目映射和授权", 404)
+        kind = "baseline" if role == "before" else "turn_after"
+        now = time.time()
+        ttl = min(TTL, BASELINE_TTL) if role == "before" else TTL
+        meta = {"receipt": receipt, "attempt_id": attempt_id, "role": role}
+        enriched = {
+            **document,
+            "kind": kind,
+            "id": ref,
+            "created": document.get("created", now),
+            "expires_at": document.get("expires_at", now + ttl),
+            "turn_meta": meta,
+        }
+        content_digest = fingerprint(
+            {"files": enriched.get("files"), "coverage": enriched.get("coverage")}
+        )
+        wrapped, blobs, size = self._prepare_turn_payload(enriched)
+        reserve_bytes = 2 * MAX_DOCUMENT_BYTES if role == "before" else MAX_DOCUMENT_BYTES
+        reserve_records = 1 if role == "before" else 0
+        target = self.directory / (ref + ".json")
+        with self.lock():
+            if target.exists() or target.is_symlink():
+                return self._existing_turn_snapshot(
+                    target,
+                    expected_meta=meta,
+                    expected_binding=expected_binding,
+                    content_digest=content_digest,
+                    role=role,
+                )
+            records = list(self._records(now=now))
+            review_content.collect(self.directory, self._refs(records))
+            candidate = (target, {"refs": set(blobs), "expires_at": enriched["expires_at"]}, size)
+            future = self._ensure_turn_quota(
+                records,
+                candidate,
+                blobs,
+                reserve_bytes=reserve_bytes,
+                reserve_records=reserve_records,
+            )
+            review_content.publish(self.directory, blobs)
+            atomic_json(target, wrapped)
+            review_content.collect(self.directory, self._refs(future))
+        return enriched
+
+    @staticmethod
+    def _prepare_turn_payload(document: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bytes], int]:
+        raw_size = len(
+            json.dumps(
+                {"sha256": fingerprint(document), "payload": document},
+                ensure_ascii=False,
+                indent=2,
+            ).encode()
+        )
+        if raw_size > MAX_DOCUMENT_BYTES:
+            raise DevError("REVIEW_TOO_LARGE", "快照序列化超过 32 MiB；没有发布不完整快照", 413)
+        wrapped, blobs, size = ReviewStore._pack(document)
+        if size > MAX_DOCUMENT_BYTES:
+            raise DevError("REVIEW_TOO_LARGE", "快照序列化超过 32 MiB", 413)
+        return wrapped, blobs, size
+
+    def load_turn_snapshot(
+        self,
+        ref: str,
+        project: dict[str, Any],
+        *,
+        kind: str | tuple[str, ...] = ("baseline", "turn_after", "review"),
+    ) -> dict[str, Any]:
+        """Load fixed snapshot evidence or raise explicit REVIEW_UNAVAILABLE."""
+        try:
+            return self.load(ref, project, kind)
+        except DevError as exc:
+            if exc.code == "REVIEW_OWNER_REQUIRED":
+                raise
+            raise DevError(
+                "REVIEW_UNAVAILABLE", exc.message, exc.status, cause=exc.code
+            ) from exc
+
+    def _load(self, ref, project, kind):
+        expected_binding = binding(self.engine, project)  # Reauthorize on EVERY read.
+        self._validate_ref_string(ref)
         try:
             path = self.directory / (ref + ".json")
             document, _ = self._read(path)
@@ -605,6 +847,134 @@ def public_summary(review):
     }
 
 
+def _diff_entry(engine, path: str, before_snap: dict, after_snap: dict) -> dict[str, Any] | None:
+    before, current = before_snap["files"].get(path), after_snap["files"].get(path)
+    if (
+        before
+        and current
+        and (before["sha256"], before["mode"]) == (current["sha256"], current["mode"])
+    ):
+        return None
+    unknown = (
+        before is None
+        and not before_snap["coverage"]["complete"]
+        or current is None
+        and not after_snap["coverage"]["complete"]
+    )
+    binary = any(v is not None and v["text"] is None for v in (before, current))
+    kind = (
+        "unverified"
+        if unknown
+        else "added"
+        if before is None
+        else "deleted"
+        if current is None
+        else "modified"
+    )
+    item: dict[str, Any] = {
+        "path": path,
+        "status": kind,
+        "before_sha256": before["sha256"] if before else "new",
+        "sha256": current["sha256"] if current else "new",
+        "before": before,
+        "after": current,
+        "text_diff_available": not binary and not unknown,
+        "added_lines": 0,
+        "removed_lines": 0,
+    }
+    if item["text_diff_available"]:
+        diff = engine.diff(
+            path,
+            before["text"].encode() if before else None,
+            current["text"].encode() if current else None,
+        )
+        item.update(
+            {
+                k: diff.get(k, False)
+                for k in (
+                    "added_lines",
+                    "removed_lines",
+                    "diff_truncated",
+                    "line_counts_approximate",
+                )
+            }
+        )
+    return item
+
+
+def build_review_document(
+    engine,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    baseline_id: str | None = None,
+    created: float | None = None,
+) -> dict[str, Any]:
+    """Pure interval diff comparing two immutable snapshot dicts without touching the live workspace."""
+    if before.get("binding") != after.get("binding"):
+        raise DevError("REVIEW_NOT_FOUND", "快照不属于当前项目映射和授权", 404)
+    ref = baseline_id if baseline_id is not None else before.get("id", "")
+    files, added, removed, approximate = [], 0, 0, False
+    for path in sorted(before["files"].keys() | after["files"].keys()):
+        if review_excluded(path):
+            # Legacy baselines can contain newly excluded scratch files. A
+            # capture-policy change is not evidence that those files were deleted.
+            continue
+        item = _diff_entry(engine, path, before, after)
+        if item is None:
+            continue
+        added += item["added_lines"]
+        removed += item["removed_lines"]
+        approximate |= bool(item.get("line_counts_approximate"))
+        files.append(item)
+    paths = before["coverage"].get("paths")
+    document: dict[str, Any] = {
+        "kind": "review",
+        "binding": before["binding"],
+        "baseline_ref": ref,
+        "started": before["started"],
+        "finished": after["finished"],
+        "files": files,
+        "summary": {
+            "files": len(files),
+            "added_lines": added,
+            "removed_lines": removed,
+            "line_counts_approximate": approximate,
+            "unverified_files": sum(x["status"] == "unverified" for x in files),
+        },
+        "coverage": {
+            "before": before["coverage"],
+            "after": after["coverage"],
+            "complete": before["coverage"]["complete"] and after["coverage"]["complete"],
+        },
+        "scope": SCOPE + (" 仅覆盖指定文件，不代表全项目。" if paths else ""),
+    }
+    if created is not None:
+        document["created"] = created
+    return document
+
+
+def freeze_review_from_snapshots(
+    engine,
+    project: dict[str, Any],
+    *,
+    before_ref: str,
+    after_ref: str,
+    finalize: bool = True,
+) -> dict[str, Any]:
+    """Build and optionally finalize a review strictly from immutable before/after snapshots."""
+    store = ReviewStore(engine)
+    before = store.load(before_ref, project, ("baseline", "review") if finalize else "baseline")
+    if before["kind"] == "review":
+        if before.get("baseline_released") and before.get("baseline_ref") == before_ref:
+            return public_summary(before)
+        raise DevError("REVIEW_NOT_FOUND", "此编号不是可完成的基线", 404)
+    after = store.load_turn_snapshot(after_ref, project, kind=("turn_after", "baseline"))
+    doc = build_review_document(engine, before, after, baseline_id=before_ref)
+    saved = store.save(doc, finalize_project=project if finalize else None)
+    return public_summary(saved)
+
+
 def freeze_review(engine, project, baseline_ref, *, finalize=False):
     store = ReviewStore(engine)
     baseline = store.load(baseline_ref, project, ("baseline", "review") if finalize else "baseline")
@@ -614,91 +984,8 @@ def freeze_review(engine, project, baseline_ref, *, finalize=False):
         raise DevError("REVIEW_NOT_FOUND", "此编号不是可完成的基线", 404)
     paths = baseline["coverage"].get("paths")
     after = capture(engine, project, paths=paths) if paths else capture(engine, project)
-    files, added, removed, approximate = [], 0, 0, False
-    for path in sorted(baseline["files"].keys() | after["files"].keys()):
-        if review_excluded(path):
-            # Legacy baselines can contain newly excluded scratch files. A
-            # capture-policy change is not evidence that those files were deleted.
-            continue
-        before, current = baseline["files"].get(path), after["files"].get(path)
-        if (
-            before
-            and current
-            and (before["sha256"], before["mode"]) == (current["sha256"], current["mode"])
-        ):
-            continue
-        unknown = (
-            before is None
-            and not baseline["coverage"]["complete"]
-            or current is None
-            and not after["coverage"]["complete"]
-        )
-        binary = any(v is not None and v["text"] is None for v in (before, current))
-        kind = (
-            "unverified"
-            if unknown
-            else "added"
-            if before is None
-            else "deleted"
-            if current is None
-            else "modified"
-        )
-        item = {
-            "path": path,
-            "status": kind,
-            "before_sha256": before["sha256"] if before else "new",
-            "sha256": current["sha256"] if current else "new",
-            "before": before,
-            "after": current,
-            "text_diff_available": not binary and not unknown,
-            "added_lines": 0,
-            "removed_lines": 0,
-        }
-        if item["text_diff_available"]:
-            diff = engine.diff(
-                path,
-                before["text"].encode() if before else None,
-                current["text"].encode() if current else None,
-            )
-            item.update(
-                {
-                    k: diff.get(k, False)
-                    for k in (
-                        "added_lines",
-                        "removed_lines",
-                        "diff_truncated",
-                        "line_counts_approximate",
-                    )
-                }
-            )
-            added += item["added_lines"]
-            removed += item["removed_lines"]
-            approximate |= item["line_counts_approximate"]
-        files.append(item)
-    document = store.save(
-        {
-            "kind": "review",
-            "binding": baseline["binding"],
-            "baseline_ref": baseline_ref,
-            "started": baseline["started"],
-            "finished": after["finished"],
-            "files": files,
-            "summary": {
-                "files": len(files),
-                "added_lines": added,
-                "removed_lines": removed,
-                "line_counts_approximate": approximate,
-                "unverified_files": sum(x["status"] == "unverified" for x in files),
-            },
-            "coverage": {
-                "before": baseline["coverage"],
-                "after": after["coverage"],
-                "complete": baseline["coverage"]["complete"] and after["coverage"]["complete"],
-            },
-            "scope": SCOPE + (" 仅覆盖指定文件，不代表全项目。" if paths else ""),
-        },
-        finalize_project=project if finalize else None,
-    )
+    doc = build_review_document(engine, baseline, after, baseline_id=baseline_ref)
+    document = store.save(doc, finalize_project=project if finalize else None)
     return public_summary(document)
 
 

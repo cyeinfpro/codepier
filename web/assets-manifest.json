@@ -1,5 +1,5 @@
 {
-  "version": "1.34.9",
+  "version": "1.34.10",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -75,8 +75,8 @@
       "bytes": 88702
     },
     "chat.js": {
-      "sha256": "f74956957d7a63df21c128f6509782a660fe84bd5ff37891cf1f0562cd687f49",
-      "bytes": 98990
+      "sha256": "1c4be542c6dd6108c33e00407042850e0d0f36f02f2b9be145bac0390aee4229",
+      "bytes": 167517
     },
     "collaboration-room-store.js": {
       "sha256": "3331a07e34b571f4527d686b7d34f958997c65f8484847c6aeb41da56fb7e454",
@@ -103,8 +103,8 @@
       "bytes": 9148
     },
     "core/bundle.js": {
-      "sha256": "711c94ec7032ba89558af87ad53a85c10880a1fd322e67948ce097816ce31d2d",
-      "bytes": 25251
+      "sha256": "a28ca46e2a65d4495d32481e4ce16daea5d11ae8f71b35844b5d9599c32be472",
+      "bytes": 91437
     },
     "favicon.svg": {
       "sha256": "f99761d39d805b7f995e20bb44df1b1adfe17fc9cef8caf47c965e1af713032f",

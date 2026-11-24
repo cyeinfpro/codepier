@@ -1,0 +1,8 @@
+{
+  "max_prompts_per_receipt": 1,
+  "no_post_terminal_resurrection": true,
+  "no_cross_run_approval": true,
+  "expected_terminal_states": {
+    "44444444444444444444444444444444": "completed"
+  }
+}

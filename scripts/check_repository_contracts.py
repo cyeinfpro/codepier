@@ -177,6 +177,19 @@ def check_core_schemas(*, write=False):
     return sha256(data.encode()).hexdigest()
 
 
+def check_native_contracts(*, write=False):
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.build_native_contracts import check as check_contracts
+
+    changed, digest = check_contracts(write=write)
+    if changed:
+        raise ValueError(
+            "Native contracts drifted. Run scripts/build_native_contracts.py"
+        )
+    return digest
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write-core-schemas", action="store_true")
@@ -185,12 +198,14 @@ def main():
         count = check()
         anchors = check_doc_symbols()
         core_hash = check_core_schemas(write=args.write_core_schemas)
+        native_hash = check_native_contracts(write=False)
     except (ValueError, StopIteration, AttributeError) as error:
         print(str(error), file=sys.stderr)
         return 1
     print(f"Deployment contracts: {count} settings and timezone/CPU defaults agree")
     print(f"Documentation: {anchors} source symbols verified")
     print(f"Core output schema SHA256: {core_hash}")
+    print(f"Native contracts SHA256: {native_hash}")
     return 0
 
 

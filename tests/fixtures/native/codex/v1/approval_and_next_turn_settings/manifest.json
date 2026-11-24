@@ -1,0 +1,10 @@
+{
+  "provider": "codex",
+  "protocol_version": "v1",
+  "schema_version": 2,
+  "source": "synthetic",
+  "sanitization_version": "1.0",
+  "cli_hash": "synthetic-codex-cli-v1",
+  "harness_hash": "native-fixture-replayer-v1",
+  "case": "approval_and_next_turn_settings"
+}

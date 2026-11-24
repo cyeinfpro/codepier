@@ -1,0 +1,6 @@
+{"id": "codepier-1", "type": "get_state"}
+{"id": "codepier-2", "type": "get_available_models"}
+{"id": "codepier-3", "type": "get_available_thinking_levels"}
+{"id": "codepier-4", "type": "get_commands"}
+{"id": "codepier-5", "type": "prompt", "message": "Explain helper"}
+{"id": "codepier-6", "type": "get_session_stats"}

@@ -32,8 +32,30 @@ def text_content(value):
 
 
 class ClaudeProtocol(Protocol):
-    def __init__(self, provider, row, send, emit, finish, persist):
-        super().__init__(provider, row, send, emit, finish, persist)
+    def __init__(
+        self,
+        provider,
+        row,
+        send,
+        emit,
+        finish,
+        persist,
+        *,
+        on_accept=None,
+        on_terminal=None,
+        on_capture_wake=None,
+    ):
+        super().__init__(
+            provider,
+            row,
+            send,
+            emit,
+            finish,
+            persist,
+            on_accept=on_accept,
+            on_terminal=on_terminal,
+            on_capture_wake=on_capture_wake,
+        )
         self.settings["capabilities"] = dict(CAPS)
         self.defaults = {"model": "", "effort": ""}
         self.streams = {}
@@ -325,7 +347,9 @@ class ClaudeProtocol(Protocol):
         elif self.failure:
             status = "error"
         receipt = self.active
-        self.finish(receipt, status)
+        done_extra = self._notify_terminal(receipt, status, text)
+        if done_extra is None:
+            self.finish(receipt, status)
         for key, request in self.pending.items():
             self.emit(
                 "approval",
@@ -340,7 +364,8 @@ class ClaudeProtocol(Protocol):
             self.emit(
                 "command_result", receipt=receipt, name=self.active_command, state=status, text=text
             )
-        self.emit("done", receipt=receipt, status=status, text=text)
+        self.emit("done", receipt=receipt, status=status, text=text, **(done_extra or {}))
+        self._notify_capture_wake(receipt)
         self.active = self.turn = self.active_command = None
 
     def tool(self, block, status="start"):
@@ -366,6 +391,7 @@ class ClaudeProtocol(Protocol):
         kind = event.get("type")
         parent = frame.get("parent_tool_use_id") or "main"
         if kind == "message_start":
+            self._notify_accept(self.active, native_thread_id=self.thread or None)
             mid = (event.get("message") or {}).get("id") or str(uuid.uuid4())
             stream = {"id": str(mid), "blocks": {}, "finalized": set(), "finals": {}}
             self.streams[parent] = stream
@@ -410,6 +436,7 @@ class ClaudeProtocol(Protocol):
         return (parent + ":" if parent != "main" else "") + str(mid) + ":" + str(index)
 
     def assistant(self, frame):
+        self._notify_accept(self.active, native_thread_id=self.thread or None)
         message = frame.get("message") or {}
         parent = frame.get("parent_tool_use_id") or "main"
         mid = (
@@ -473,6 +500,7 @@ class ClaudeProtocol(Protocol):
         if identity:
             self.closed_results.append(identity)
         self.observe_session(frame)
+        self._notify_accept(self.active, native_thread_id=self.thread or None)
         usage = frame.get("usage") or {}
         tokens = {
             name: usage.get(key, 0)

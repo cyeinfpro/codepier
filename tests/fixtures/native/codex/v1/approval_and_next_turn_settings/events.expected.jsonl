@@ -1,0 +1,8 @@
+{"type": "settings_pending", "receipt": "22222222222222222222222222222222", "model": "codex-default", "effort": "high"}
+{"type": "user", "receipt": "33333333333333333333333333333333", "text": "Run check"}
+{"type": "settings", "receipt": "22222222222222222222222222222222", "effort": "high"}
+{"type": "approval", "receipt": "33333333333333333333333333333333", "request_id": "srv-1"}
+{"type": "approval", "receipt": "33333333333333333333333333333333", "request_id": "srv-1", "resolved": true}
+{"type": "delta", "receipt": "33333333333333333333333333333333", "text": "Passed"}
+{"type": "message", "receipt": "33333333333333333333333333333333", "text": "Passed"}
+{"type": "done", "receipt": "33333333333333333333333333333333", "status": "completed"}

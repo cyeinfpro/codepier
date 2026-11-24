@@ -18,7 +18,38 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
         op.state === 'error'
       )
         return;
+      if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+        const mappedStatus =
+          result.state === 'completed' || result.state === 'applied'
+            ? 'applied'
+            : ['queued', 'claimed'].includes(result.state)
+              ? 'accepted'
+              : result.state === 'uncertain'
+                ? 'uncertain'
+                : ['error', 'cancelled', 'interrupted'].includes(result.state)
+                  ? 'failed'
+                  : undefined;
+        v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+          receipt,
+          generation: op.generation,
+          status: mappedStatus,
+          outcome: result.outcome,
+          actual: result.actual,
+          appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+        });
+        if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+      }
+      if (result.actual && typeof result.actual === 'object') {
+        v.settings = { ...(v.settings || {}), ...result.actual };
+      }
       if (['completed', 'applied'].includes(result.state)) {
+        if (result.outcome === 'partial') {
+          op.outcome = 'partial';
+          op.state = 'error';
+          chatSettings(v.settings);
+          chatStatus('部分设置已生效；当前模型与强度已回读，请核对后重试剩余项', true);
+          return;
+        }
         v.settingOp = null;
         chatSettings(v.settings);
         chatStatus(v.pendingSettings ? '设置将在下一条消息生效' : '设置已由原生 CLI 接受');
@@ -26,7 +57,13 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
       }
       if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state)) {
         op.state = result.state === 'uncertain' ? 'uncertain' : 'error';
-        chatStatus('设置返回错误，实际配置待核实；可能部分生效', true);
+        op.outcome = result.outcome || (result.state === 'uncertain' ? 'unknown' : op.outcome);
+        chatStatus(
+          op.state === 'uncertain'
+            ? '原生设置仍在核实中，重试会使用同一确认编号'
+            : '设置返回错误，实际配置待核实；可能部分生效',
+          true,
+        );
         chatSettings(v.settings);
         return;
       }
@@ -34,7 +71,16 @@ async function chatWatchReceipt(id, receipt, gen, v, op) {
   }
   if (chatCurrent(gen, v) && v.settingOp === op) {
     op.state = 'uncertain';
-    chatStatus('原生设置仍在等待处理，重试会使用同一回执', true);
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt,
+        generation: op.generation,
+        status: 'uncertain',
+        outcome: 'unknown',
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
+    chatStatus('原生设置仍在等待处理，重试会使用同一确认编号', true);
     chatSettings(v.settings);
   }
 }
@@ -101,6 +147,22 @@ function chatDraftLimit(v = chatView()) {
   }
   return exceeded ? '消息不能超过 64 KiB，请缩短内容或改用附件' : '';
 }
+function chatBuildExplicitSelection(v) {
+  const model = typeof chatModelCurrent === 'function' ? chatModelCurrent(v) : v.selectedModel;
+  if (!model) return null;
+  const source = v.configForResume ? v.catalog : v.settings || v.catalog;
+  const effort =
+    v.selectedEffort ??
+    v.pendingSettings?.effort ??
+    source?.effort ??
+    source?.thinkingLevel ??
+    source?.reasoningEffort ??
+    null;
+  return {
+    model,
+    options: effort ? { effort } : {},
+  };
+}
 async function chatSend(retry = false) {
   const c = ChatUI,
     v = chatView(),
@@ -149,6 +211,10 @@ async function chatSend(retry = false) {
     if (!text && !v.files.length) return;
     if (chatBuiltin(text)) return;
     const resume = c.selected && !['running', 'starting'].includes(c.selected.status);
+    const requestedMode = v.selectionMode || 'inherit_at_dispatch';
+    const explicitSelection = requestedMode === 'explicit' ? chatBuildExplicitSelection(v) : null;
+    const selectionMode =
+      requestedMode === 'explicit' && explicitSelection ? 'explicit' : 'inherit_at_dispatch';
     v.pending = {
       id: (!resume && c.selected?.id) || uid(),
       receipt: uid(),
@@ -158,9 +224,12 @@ async function chatSend(retry = false) {
       cwd: c.cwd,
       model: v.selectedModel,
       effort: v.selectedEffort,
+      selection_mode: selectionMode,
+      selection: selectionMode === 'explicit' ? explicitSelection : null,
       started: !!c.selected && !resume,
       continue_session: resume ? c.selected.id : null,
       action: v.active && v.mode === 'steer' ? 'chat_steer' : 'chat_prompt',
+      generation: (v.v2SettingsGeneration = (v.v2SettingsGeneration || 0) + 1),
     };
     // A lost explicit-resume response may already have started the process.
     // Continue that exact launch rather than creating a second continuation.
@@ -170,6 +239,16 @@ async function chatSend(retry = false) {
     }
   }
   const pending = v.pending;
+  if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.upsertCommandOverlay) {
+    v.v2State = CP.nativeState.upsertCommandOverlay(v.v2State, {
+      receipt: pending.receipt,
+      generation: pending.generation || 1,
+      action: pending.action,
+      status: 'pending',
+      requested: { text: pending.text, selection_mode: pending.selection_mode },
+    });
+    if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+  }
   v.outbox.set(pending.receipt, { ...pending, state: 'sending' });
   v.busy = true;
   chatOutbox();
@@ -199,16 +278,17 @@ async function chatSend(retry = false) {
     }
     // A two-stage first send must never continue under a different login.
     if (S.session !== identity) return;
-    const result = await chatAPI(
-      pending.action,
-      {
-        id: pending.id,
-        receipt: pending.receipt,
-        text: pending.text,
-        attachments: pending.attachments,
-      },
-      project,
-    );
+    const promptArgs = {
+      id: pending.id,
+      receipt: pending.receipt,
+      text: pending.text,
+      attachments: pending.attachments,
+      ...(pending.selection_mode ? { selection_mode: pending.selection_mode } : {}),
+      ...(pending.selection_mode === 'explicit' && pending.selection
+        ? { selection: pending.selection }
+        : {}),
+    };
+    const result = await chatAPI(pending.action, promptArgs, project);
     if (S.session !== identity) return;
     if (['error', 'cancelled', 'uncertain', 'interrupted'].includes(result.state))
       throw Object.assign(
@@ -217,8 +297,19 @@ async function chatSend(retry = false) {
             chatStateName(result.state) +
             '」，没有重新执行。请核对历史后再决定。',
         ),
-        { code: result.state === 'uncertain' ? 'CLI_UNCERTAIN' : 'CLI_RECEIPT_TERMINAL' },
+        {
+          code: result.state === 'uncertain' ? 'CLI_UNCERTAIN' : 'CLI_RECEIPT_TERMINAL',
+        },
       );
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: pending.receipt,
+        generation: pending.generation || 1,
+        status: result.state === 'completed' ? 'applied' : 'accepted',
+        appliedRevision: result.applied_revision ?? result.projection_revision ?? null,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     v.pending = null;
     if (v.outbox.has(pending.receipt))
       v.outbox.get(pending.receipt).state = result.state || 'queued';
@@ -265,6 +356,15 @@ async function chatSend(retry = false) {
       'CLI_AGENT_UPDATE_REQUIRED',
       'CLI_NOT_RUNNING',
     ].includes(e.code);
+    if (v.v2State && typeof CP !== 'undefined' && CP.nativeState?.reconcileCommandOverlay) {
+      v.v2State = CP.nativeState.reconcileCommandOverlay(v.v2State, {
+        receipt: pending.receipt,
+        generation: pending.generation || 1,
+        status: rejected ? 'failed' : 'uncertain',
+        error: e.message,
+      });
+      if (v.v2Scope) v.v2Scope.authoritative = v.v2State;
+    }
     if (rejected && !pending.started && v.resumeRequest?.id === pending.id) {
       v.resumeId = null;
       v.resumeRequest = null;
