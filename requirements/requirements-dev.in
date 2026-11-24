@@ -8,7 +8,7 @@ httpx2==2.13.1
 playwright==1.65.1
 -r requirements-tools.in
 pytest-cov==7.1.0
-mypy==2.4.0
+mypy==2.4.1
 
 # Retain reviewed transitive versions while integrating the 2026-10-19 updates.
 ast-serialize==0.12.1
