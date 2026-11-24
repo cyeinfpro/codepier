@@ -1769,12 +1769,7 @@ class Agent:
                             ):
                                 raise DevError("CANCELLED", "操作开始前已取消")
                             self.phase(id, "executing")
-                            if tool == "ssh_exec" or (
-                                tool == "exec" and args.get("target", "agent") != "agent"
-                            ):
-                                result = await self.execute(id, tool, project, args, not_after=not_after)
-                            else:
-                                result = await self.execute(id, tool, project, args)
+                            result = await self._execute_started(id, tool, project, args, not_after)
                             concurrency = self.resources.concurrency_for(id)
                             if concurrency and isinstance(result, dict):
                                 result["concurrency"] = concurrency
@@ -2155,6 +2150,133 @@ class Agent:
                 "根目录写声明会阻塞项目写入及其他进程；strict 模式也会阻塞文件读取。请按实际修改范围声明资源。"
             )
 
+    def _prepare_ssh_command(self, project, args, saved_vps_target):
+        root, spec = self.engine.root(project, True)
+        # Preserve the original local denial before runtime compatibility
+        # diagnostics; a disabled permission must not look like a request
+        # to select a broader execution mode.
+        from agent.shell import shell_denial
+
+        denial = shell_denial(self.config, project, spec)
+        if denial:
+            raise DevError(*denial, 403)
+        from agent.project_runtime import selected
+
+        mode = selected(self.config, project)["mode"]
+        # A saved VPS is an explicit, separately authorized remote target,
+        # never a fallback for a failed local runtime. Only this internal
+        # call path receives the transport prepared from the bound VPS.
+        saved_transport = (
+            isinstance(saved_vps_target, str)
+            and saved_vps_target.startswith("vps:")
+            and isinstance(project.get("_core_ssh"), dict)
+            and TOOLS["ssh_exec"].model.model_validate(project["_core_ssh"]).model_dump() == args
+        )
+        if (
+            project.get("_runtime_requirement")
+            or mode == "container_v1"
+            or (mode != "native_compat" and not saved_transport)
+        ):
+            raise DevError(
+                "RUNTIME_REMOTE_TARGET_UNSUPPORTED",
+                "This project runtime does not support native SSH transport; choose a separately authorized compatible target",
+                403,
+            )
+        return root, saved_transport
+
+    def _ssh_command_output_callbacks(self, id):
+        seq = 0
+        last_snapshot = 0.0
+        last_snapshot_output = None
+
+        async def on_chunk_text(text):
+            log = getattr(self, "_execution_logs", {}).get(id)
+            if log is not None:
+                await self._snapshot_io(log.append, text)
+
+        async def on_output(decoded_output, final):
+            nonlocal seq, last_snapshot, last_snapshot_output
+            now = time.monotonic()
+            if not final and now - last_snapshot < 0.25:
+                return
+            if last_snapshot_output != decoded_output:
+                seq += 1
+                last_snapshot = now
+                last_snapshot_output = decoded_output
+                self.pending_output[id] = {
+                    "type": "output",
+                    "id": id,
+                    "snapshot": True,
+                    "seq": seq,
+                    "text": decoded_output,
+                }
+                self.output_wake.set()
+
+        return on_chunk_text, on_output
+
+    async def _execute_ssh_command(self, id, project, args, saved_vps_target, not_after):
+        root, saved_transport = self._prepare_ssh_command(project, args, saved_vps_target)
+        from agent.vps_exec import execute_vps_command
+
+        shell = self.config["shell"]
+        if args["timeout_seconds"] > shell["max_timeout_seconds"]:
+            raise DevError("SHELL_TIMEOUT_LIMIT", "请求超时超过本机 Shell 执行上限")
+        timeout = self.bounded_timeout(project, args["timeout_seconds"])
+        if saved_transport:
+            await self._allocate_output_log(id, project, root)
+
+        on_chunk_text, on_output = self._ssh_command_output_callbacks(id)
+
+        # This is the existing authenticated Hub start deadline, not the
+        # SSH transport timeout. A connection can span the deadline without
+        # having sent the command. Once dispatched, its runtime budget owns it.
+        def require_vps_start_deadline():
+            if not_after is not None and time.time() > not_after:
+                raise DevError(
+                    "QUEUE_EXPIRED", "超过首次执行期限，尚未发送远程命令；请查询原操作回执"
+                )
+
+        require_vps_start_deadline()
+        result = await execute_vps_command(
+            operation_id=id,
+            host=args["host"],
+            port=args["port"],
+            username=args["username"],
+            password=args["password"],
+            command=args["command"],
+            timeout_seconds=timeout,
+            credential_source="saved_vps" if saved_transport else "inline_compat",
+            cancelled=lambda: id in self.cancelled or self.journal.is_cancelled(id),
+            stopping=self.stop_event.is_set,
+            record=lambda stage, **detail: self.phase(id, stage, **detail),
+            on_chunk_text=on_chunk_text,
+            on_output=on_output,
+            require_authority=require_vps_start_deadline if not_after is not None else None,
+        )
+        result["transport_runtime"] = {
+            "mode": "native_ssh_transport",
+            "engine": result["transport_runtime"],
+            "isolation": "none",
+            "grants_authority": False,
+            **({"target": saved_vps_target} if saved_transport else {}),
+        }
+        if saved_transport:
+            log = self._execution_logs[id]
+            log.finish()
+            await self._snapshot_io(log.close)
+            result["output_log"] = log.receipt(id)
+        return {
+            **result,
+            "host": args["host"],
+            "port": args["port"],
+            "username": args["username"],
+        }
+
+    async def _execute_started(self, id, tool, project, args, not_after):
+        if tool == "ssh_exec" or (tool == "exec" and args.get("target", "agent") != "agent"):
+            return await self.execute(id, tool, project, args, not_after=not_after)
+        return await self.execute(id, tool, project, args)
+
     async def execute(self, id, tool, project, args, *, saved_vps_target=None, not_after=None):
         if workspace_probe.eligible(tool, args):
             entry = self._read_workers.get(id)
@@ -2275,117 +2397,7 @@ class Agent:
         if tool == "artifacts_register":
             return await self._committed_io(self.artifacts.register, id, project, args)
         if tool == "ssh_exec":
-            root, spec = self.engine.root(project, True)
-            # Preserve the original local denial before runtime compatibility
-            # diagnostics; a disabled permission must not look like a request
-            # to select a broader execution mode.
-            from agent.shell import shell_denial
-
-            denial = shell_denial(self.config, project, spec)
-            if denial:
-                raise DevError(*denial, 403)
-            from agent.project_runtime import selected
-
-            mode = selected(self.config, project)["mode"]
-            # A saved VPS is an explicit, separately authorized remote target,
-            # never a fallback for a failed local runtime. Only this internal
-            # call path receives the transport prepared from the bound VPS.
-            saved_transport = (
-                isinstance(saved_vps_target, str)
-                and saved_vps_target.startswith("vps:")
-                and isinstance(project.get("_core_ssh"), dict)
-                and TOOLS["ssh_exec"].model.model_validate(project["_core_ssh"]).model_dump()
-                == args
-            )
-            if (
-                project.get("_runtime_requirement")
-                or mode == "container_v1"
-                or (mode != "native_compat" and not saved_transport)
-            ):
-                raise DevError(
-                    "RUNTIME_REMOTE_TARGET_UNSUPPORTED",
-                    "This project runtime does not support native SSH transport; choose a separately authorized compatible target",
-                    403,
-                )
-            from agent.vps_exec import execute_vps_command
-
-            shell = self.config["shell"]
-            if args["timeout_seconds"] > shell["max_timeout_seconds"]:
-                raise DevError("SHELL_TIMEOUT_LIMIT", "请求超时超过本机 Shell 执行上限")
-            timeout = self.bounded_timeout(project, args["timeout_seconds"])
-
-            if saved_transport:
-                await self._allocate_output_log(id, project, root)
-
-            seq = 0
-            last_snapshot = 0.0
-            last_snapshot_output = None
-
-            async def on_chunk_text(text):
-                log = getattr(self, "_execution_logs", {}).get(id)
-                if log is not None:
-                    await self._snapshot_io(log.append, text)
-
-            async def on_output(decoded_output, final):
-                nonlocal seq, last_snapshot, last_snapshot_output
-                now = time.monotonic()
-                if not final and now - last_snapshot < 0.25:
-                    return
-                if last_snapshot_output != decoded_output:
-                    seq += 1
-                    last_snapshot = now
-                    last_snapshot_output = decoded_output
-                    self.pending_output[id] = {
-                        "type": "output",
-                        "id": id,
-                        "snapshot": True,
-                        "seq": seq,
-                        "text": decoded_output,
-                    }
-                    self.output_wake.set()
-
-            # This is the existing authenticated Hub start deadline, not the
-            # SSH transport timeout. A connection can span the deadline without
-            # having sent the command. Once dispatched, its runtime budget owns it.
-            def require_vps_start_deadline():
-                if not_after is not None and time.time() > not_after:
-                    raise DevError("QUEUE_EXPIRED", "超过首次执行期限，尚未发送远程命令；请查询原操作回执")
-
-            require_vps_start_deadline()
-            result = await execute_vps_command(
-                operation_id=id,
-                host=args["host"],
-                port=args["port"],
-                username=args["username"],
-                password=args["password"],
-                command=args["command"],
-                timeout_seconds=timeout,
-                credential_source="saved_vps" if saved_transport else "inline_compat",
-                cancelled=lambda: id in self.cancelled or self.journal.is_cancelled(id),
-                stopping=self.stop_event.is_set,
-                record=lambda stage, **detail: self.phase(id, stage, **detail),
-                on_chunk_text=on_chunk_text,
-                on_output=on_output,
-                require_authority=require_vps_start_deadline if not_after is not None else None,
-            )
-            result["transport_runtime"] = {
-                "mode": "native_ssh_transport",
-                "engine": result["transport_runtime"],
-                "isolation": "none",
-                "grants_authority": False,
-                **({"target": saved_vps_target} if saved_transport else {}),
-            }
-            if saved_transport:
-                log = self._execution_logs[id]
-                log.finish()
-                await self._snapshot_io(log.close)
-                result["output_log"] = log.receipt(id)
-            return {
-                **result,
-                "host": args["host"],
-                "port": args["port"],
-                "username": args["username"],
-            }
+            return await self._execute_ssh_command(id, project, args, saved_vps_target, not_after)
         if tool == "shell_exec":
             root, spec = self.engine.root(project, True)
             command, cwd, env = prepare_shell(self.config, project, spec, root, args)

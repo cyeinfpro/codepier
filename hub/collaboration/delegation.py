@@ -42,13 +42,9 @@ def effective_target_projection(snapshot):
     return {
         "target": snapshot.get("target"),
         "reference": {
-            key: reference.get(key)
-            for key in ("id", "binding_id", "connection_revision")
+            key: reference.get(key) for key in ("id", "binding_id", "connection_revision")
         },
-        "endpoint": {
-            key: endpoint.get(key)
-            for key in ("host", "port", "username")
-        },
+        "endpoint": {key: endpoint.get(key) for key in ("host", "port", "username")},
     }
 
 

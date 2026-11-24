@@ -3298,6 +3298,28 @@ class Runtime:
             raise ValueError("Invalid durable request")
         return request
 
+    def _validate_delivery_connection(self, op, request, con, project, delivery_principal, denied):
+        """Check the negotiated connection and attach any first-send runtime requirement."""
+        validate_call_epoch(op["tool"], request.get("tool_contract_version"))
+        require_compatible(getattr(con, "tool_protocol", None), op["tool"])
+        self.require_resource_semantics(con, request["args"])
+        self.require_file_options(con, op["tool"], request["args"])
+        if not op["accepted_at"] and project and not denied:
+            from hub.project_runtimes import attach_requirement
+
+            request["integration_context"]["runtime_requirement"] = attach_requirement(
+                self, request, delivery_principal, project, con
+            )
+        if (
+            request.get("bounded_execution") is not None
+            and getattr(con, "bounded_execution_protocol", 0) != 1
+        ):
+            raise DevError(
+                "AGENT_BOUNDED_EXECUTION_REQUIRED",
+                "当前连接不能确认原有界命令预算，禁止重投执行",
+                409,
+            )
+
     def _prepare_delivery(self, id, *, retain_source=False, scheduled_device=None, timing=None):
         # Reuse existing authorization memoization only within this synchronous
         # phase. Every write invalidates it; no decision survives the next await.
@@ -3431,25 +3453,9 @@ class Runtime:
                     timing.kind = "offline_backoff"
                 return
             try:
-                validate_call_epoch(op["tool"], request.get("tool_contract_version"))
-                require_compatible(getattr(con, "tool_protocol", None), op["tool"])
-                self.require_resource_semantics(con, request["args"])
-                self.require_file_options(con, op["tool"], request["args"])
-                if not op["accepted_at"] and project and not denied:
-                    from hub.project_runtimes import attach_requirement
-
-                    request["integration_context"]["runtime_requirement"] = attach_requirement(
-                        self, request, delivery_principal, project, con
-                    )
-                if (
-                    request.get("bounded_execution") is not None
-                    and getattr(con, "bounded_execution_protocol", 0) != 1
-                ):
-                    raise DevError(
-                        "AGENT_BOUNDED_EXECUTION_REQUIRED",
-                        "当前连接不能确认原有界命令预算，禁止重投执行",
-                        409,
-                    )
+                self._validate_delivery_connection(
+                    op, request, con, project, delivery_principal, denied
+                )
             except DevError as exc:
                 if not op["attempts"]:
                     self.complete(

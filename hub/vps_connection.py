@@ -66,11 +66,7 @@ def supports_vps_ssh_v2(
     operation: Literal["exec", "terminal", "probe"],
 ) -> bool:
     """Return True iff the live agent connection explicitly advertises vps_ssh_v2 for operation."""
-    if (
-        agent is None
-        or getattr(agent, "closed", False)
-        or getattr(agent, "unusable", False)
-    ):
+    if agent is None or getattr(agent, "closed", False) or getattr(agent, "unusable", False):
         return False
     caps = getattr(agent, "agent_vps_ssh", None)
     if (
@@ -99,9 +95,7 @@ def require_vps_capability(
     if supports_vps_ssh_v2(agent, operation):
         return
     if (
-        agent is None
-        or getattr(agent, "closed", False)
-        or getattr(agent, "unusable", False)
+        agent is None or getattr(agent, "closed", False) or getattr(agent, "unusable", False)
     ) and not device_online:
         raise DevError("AGENT_OFFLINE", "关联节点当前离线，无法执行 VPS SSH 操作", 409)
     raise DevError(

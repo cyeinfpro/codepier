@@ -304,7 +304,11 @@ class SSHExec(Project):
             raise ValueError("SSH password cannot contain NUL or line breaks")
         if not self.command.strip() or "\x00" in self.command:
             raise ValueError("SSH command must be nonempty text without NUL")
-        if "\x00" in self.known_hosts_file or "\x00" in self.host_key_policy or "\x00" in self.host_key_fingerprint:
+        if (
+            "\x00" in self.known_hosts_file
+            or "\x00" in self.host_key_policy
+            or "\x00" in self.host_key_fingerprint
+        ):
             raise ValueError("legacy SSH trust fields cannot contain NUL")
         # Normalize retired legacy trust fields so downstream execution never branches on them.
         self.host_key_policy = "disabled"

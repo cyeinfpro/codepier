@@ -72,10 +72,7 @@ def missing_shell_command(output):
     return None
 
 
-def failure_context(*, data=None, error=None, operation_id=None, source="agent_operation"):
-    data, error = data or {}, error or {}
-    cleanup = data.get("runtime_cleanup") if isinstance(data.get("runtime_cleanup"), dict) else {}
-    outcome = data.get("runtime_outcome") if isinstance(data.get("runtime_outcome"), dict) else {}
+def _receipt_failure_code(data, error):
     code = error.get("code")
     if not isinstance(code, str):
         code = None
@@ -103,6 +100,14 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
         code = data.get("ssh_error") if isinstance(data.get("ssh_error"), str) else None
     elif code is None and isinstance(data.get("ssh_error"), str) and data.get("exit_code") is None:
         code = data["ssh_error"]
+    return code
+
+
+def failure_context(*, data=None, error=None, operation_id=None, source="agent_operation"):
+    data, error = data or {}, error or {}
+    cleanup = data.get("runtime_cleanup") if isinstance(data.get("runtime_cleanup"), dict) else {}
+    outcome = data.get("runtime_outcome") if isinstance(data.get("runtime_outcome"), dict) else {}
+    code = _receipt_failure_code(data, error)
     if code in DENIALS or (
         code and code.startswith(("ROOM_SCOPE_", "DELEGATION_", "LEASE_", "FENCING_"))
     ):
@@ -133,7 +138,12 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
         category = "ssh_authentication_failed"
     elif code == "VPS_TRANSPORT_UPGRADE_REQUIRED":
         category = "execution_unavailable"
-    elif code in {"SSH_PROTOCOL_NEGOTIATION_FAILED", "SSH_CONNECT_TIMEOUT", "SSH_CONNECTION_FAILED", "SSH_CHANNEL_CLOSED"}:
+    elif code in {
+        "SSH_PROTOCOL_NEGOTIATION_FAILED",
+        "SSH_CONNECT_TIMEOUT",
+        "SSH_CONNECTION_FAILED",
+        "SSH_CHANNEL_CLOSED",
+    }:
         category = "ssh_command_or_connection_failed"
     elif code in {"SSH_HOST_KEY_CHANGED", "SSH_HOST_KEY_UNTRUSTED"}:
         category = "ssh_host_verification_failed"

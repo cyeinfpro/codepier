@@ -602,7 +602,9 @@ class RoomInputAuthority:
             if target.startswith("vps:"):
                 target_id = target[4:]
                 original_endpoint = (original or {}).get("endpoint") or {}
-                original_revision = ((original or {}).get("reference") or {}).get("connection_revision")
+                original_revision = ((original or {}).get("reference") or {}).get(
+                    "connection_revision"
+                )
                 if any(
                     not state
                     or not state["enabled"]

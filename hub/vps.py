@@ -762,7 +762,9 @@ class VPSService:
         self, identifier, agent, project, target, password, timeout_seconds, principal
     ):
         timeout = min(60, max(5, int(timeout_seconds)))
-        source = "direct" if str(target.get("binding_id", "")).startswith("direct:") else "project_bound"
+        source = (
+            "direct" if str(target.get("binding_id", "")).startswith("direct:") else "project_bound"
+        )
         resolved = build_resolved_target(
             target,
             source=source,

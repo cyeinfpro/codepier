@@ -49,7 +49,9 @@ def classify_error(exc, trust=None):
     if kind == "HostKeyNotVerifiable":
         return _classify_host_key_error(exc)
     if kind == "KeyExchangeFailed":
-        return SSHTransportError("SSH_PROTOCOL_NEGOTIATION_FAILED", "SSH 协议或密钥交换算法协商失败")
+        return SSHTransportError(
+            "SSH_PROTOCOL_NEGOTIATION_FAILED", "SSH 协议或密钥交换算法协商失败"
+        )
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return SSHTransportError("SSH_CONNECT_TIMEOUT", "SSH 连接或认证超时")
     if kind in {"ConnectionLost", "ConnectionResetError", "BrokenPipeError"}:

@@ -214,7 +214,9 @@ async def _agent_socket(socket, device_id, runtime, store, service):
             hello_info.get("direct_vps_allowed", connection.direct_vps)
         )
         connection.host_pin_supported = hello_info.get("host_pin") is True
-        connection.saved_vps_password_only_supported = hello_info.get("saved_vps_password_only") is True
+        connection.saved_vps_password_only_supported = (
+            hello_info.get("saved_vps_password_only") is True
+        )
         connection.agent_vps_ssh = parse_agent_vps_ssh(hello_info)
         connection.vps_ssh_v2_supported = supports_vps_ssh_v2(connection, "terminal")
         connection.probe_supported = bool(hello_info.get("probe")) or supports_vps_ssh_v2(
