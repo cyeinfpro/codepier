@@ -542,8 +542,17 @@ def scan_complete_jsonl_lines(
     strict_safe_int(max_lines, minimum=1)
     ingested = _ingested_cursor(db, sid)
     if start_cursor > ingested:
-        return ScanResult([], start_cursor, start_cursor, ingested, "SOURCE_GAP", {"expected": start_cursor, "ingested": ingested})
-    buffer, scanned_to, gap_err, gap_detail = _collect_raw_buffer(db, sid, start_cursor, max_bytes=max_bytes)
+        return ScanResult(
+            [],
+            start_cursor,
+            start_cursor,
+            ingested,
+            "SOURCE_GAP",
+            {"expected": start_cursor, "ingested": ingested},
+        )
+    buffer, scanned_to, gap_err, gap_detail = _collect_raw_buffer(
+        db, sid, start_cursor, max_bytes=max_bytes
+    )
     if gap_err and not buffer:
         return ScanResult([], start_cursor, start_cursor, ingested, gap_err, gap_detail)
     return _decode_scanned_buffer(
@@ -603,10 +612,19 @@ def _decode_scanned_buffer(
             more = pos < len(buffer) or scanned_to < ingested
             return ScanResult(lines, start_cursor, start_cursor + pos, ingested, has_more=more)
     if not lines and len(buffer) > MAX_SINGLE_LINE_BYTES:
-        return ScanResult([], start_cursor, start_cursor, ingested, "SOURCE_CORRUPT", {"cursor": start_cursor, "reason": "line_too_large"})
+        return ScanResult(
+            [],
+            start_cursor,
+            start_cursor,
+            ingested,
+            "SOURCE_CORRUPT",
+            {"cursor": start_cursor, "reason": "line_too_large"},
+        )
     if gap_err:
         return ScanResult(lines, start_cursor, start_cursor + pos, ingested, gap_err, gap_detail)
-    return ScanResult(lines, start_cursor, start_cursor + pos, ingested, has_more=scanned_to < ingested)
+    return ScanResult(
+        lines, start_cursor, start_cursor + pos, ingested, has_more=scanned_to < ingested
+    )
 
 
 def _normalize_kind(kind: str) -> str:
@@ -664,14 +682,10 @@ def _compute_item_key(
 ) -> tuple[str, str]:
     kind = _normalize_kind(event.kind)
     item_id = _resolve_claude_item_id(state, event, body)
-    ident = (
-        item_id
-        or body.get("request_id")
-        or body.get("tool_id")
-        or body.get("review_id")
-        or ""
+    ident = item_id or body.get("request_id") or body.get("tool_id") or body.get("review_id") or ""
+    receipt = event.receipt or (
+        body.get("receipt") if isinstance(body.get("receipt"), str) else None
     )
-    receipt = event.receipt or (body.get("receipt") if isinstance(body.get("receipt"), str) else None)
     if not receipt and not ident:
         return kind, f"session:{kind}:@{event.source_start_cursor}"
     return kind, f"{receipt or 'session'}:{kind}:{ident}"
@@ -703,7 +717,9 @@ def _build_item_body_payload(
     }
 
 
-def _public_item(item: dict[str, Any], *, body_inline_bytes: int = DEFAULT_BODY_INLINE_BYTES) -> dict[str, Any]:
+def _public_item(
+    item: dict[str, Any], *, body_inline_bytes: int = DEFAULT_BODY_INLINE_BYTES
+) -> dict[str, Any]:
     summary = item["summary"]
     out = {
         "key": item["item_key"],
@@ -780,7 +796,9 @@ def _extract_exit_code(body: Mapping[str, Any], text: str) -> int | None:
     return None
 
 
-def _handle_settings_meta(state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]) -> None:
+def _handle_settings_meta(
+    state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]
+) -> None:
     summary = state["summary"]
     patch = state["summary_patch"]
     if event.kind == "settings":
@@ -853,7 +871,9 @@ def _close_turn_items(state: dict[str, Any], receipt: str | None, resolution: st
             state["touched"][item["item_key"]] = ("upsert", None, item.get("item_revision"))
 
 
-def _handle_control_event(state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]) -> None:
+def _handle_control_event(
+    state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]
+) -> None:
     summary = state["summary"]
     patch = state["summary_patch"]
     if event.kind in {"done", "run.completed"}:
@@ -917,7 +937,9 @@ def _apply_text_change(
         state["touched"][item["item_key"]] = (op, base_rev, None)
 
 
-def _update_phase(state: dict[str, Any], kind: str, event: NormalizedEvent, body: Mapping[str, Any]) -> None:
+def _update_phase(
+    state: dict[str, Any], kind: str, event: NormalizedEvent, body: Mapping[str, Any]
+) -> None:
     run = state["summary"].setdefault("run", {})
     phase_map = {"tool": "tool", "reasoning": "reasoning", "assistant": "reply", "user": "working"}
     if kind in phase_map:
@@ -962,7 +984,9 @@ def _apply_tool_output(
     return ("append" if is_delta else "replace"), chunk_str
 
 
-def _apply_approval_fields(item: dict[str, Any], event: NormalizedEvent, body: Mapping[str, Any]) -> None:
+def _apply_approval_fields(
+    item: dict[str, Any], event: NormalizedEvent, body: Mapping[str, Any]
+) -> None:
     resolved = bool(body.get("resolved")) or event.kind == "approval.resolved"
     item["summary"]["resolved"] = resolved
     if resolved:
@@ -977,21 +1001,40 @@ def _apply_approval_fields(item: dict[str, Any], event: NormalizedEvent, body: M
             item["summary"][field_name] = body[field_name]
 
 
-def _handle_content_event(state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]) -> None:
+def _handle_content_event(
+    state: dict[str, Any], event: NormalizedEvent, body: dict[str, Any]
+) -> None:
     kind, key = _compute_item_key(state, event, body)
     item, is_new = _get_or_create_item(state, key, kind, event)
     item["summary"]["last_type"] = event.kind
-    for field_name in ("receipt", "parent_receipt", "item_id", "tool_id", "name", "attachments", "steering"):
+    for field_name in (
+        "receipt",
+        "parent_receipt",
+        "item_id",
+        "tool_id",
+        "name",
+        "attachments",
+        "steering",
+    ):
         if field_name in body and body[field_name] is not None:
             item["summary"][field_name] = body[field_name]
     if event.receipt and not item["summary"].get("receipt"):
         item["summary"]["receipt"] = event.receipt
     if "status" in body and isinstance(body["status"], str):
         item["summary"]["status"] = body["status"]
-    item["summary"]["is_error"] = bool(body.get("isError") or body.get("is_error") or kind == "error")
+    item["summary"]["is_error"] = bool(
+        body.get("isError") or body.get("is_error") or kind == "error"
+    )
     _update_phase(state, kind, event, body)
     mode, text = _resolve_content_mode_and_text(state, item, kind, event, body)
-    _apply_text_change(state, item, is_new=is_new, mode=mode, text=text, body_inline_bytes=state["body_inline_bytes"])
+    _apply_text_change(
+        state,
+        item,
+        is_new=is_new,
+        mode=mode,
+        text=text,
+        body_inline_bytes=state["body_inline_bytes"],
+    )
     if kind == "review":
         state["summary"]["review"] = dict(body)
         state["summary_patch"]["review"] = dict(body)
@@ -1006,11 +1049,22 @@ def _resolve_content_mode_and_text(
 ) -> tuple[str, str]:
     if kind == "approval":
         _apply_approval_fields(item, event, body)
-        fallback = body.get("text") or body.get("message") or body.get("method") or item["full_text"]
+        fallback = (
+            body.get("text") or body.get("message") or body.get("method") or item["full_text"]
+        )
         return "replace", str(fallback or "")
     if kind == "tool":
-        return _apply_tool_output(state, item, event, body, tool_inline_bytes=state["tool_inline_bytes"])
-    if event.kind in {"delta", "text_delta", "message.delta", "reasoning", "reasoning.delta", "thinking"}:
+        return _apply_tool_output(
+            state, item, event, body, tool_inline_bytes=state["tool_inline_bytes"]
+        )
+    if event.kind in {
+        "delta",
+        "text_delta",
+        "message.delta",
+        "reasoning",
+        "reasoning.delta",
+        "thinking",
+    }:
         delta = body.get("text") if body.get("text") is not None else body.get("delta", "")
         if kind == "reasoning":
             item["active"] = 0 if body.get("status") == "end" else 1
@@ -1067,7 +1121,9 @@ def _hydrate_existing_item(row, body_bytes: bytes, output_bytes: bytes) -> dict[
         "pending": int(row["pending"]),
         "body_ref": row["body_ref"],
         "content_generation": strict_safe_int(summary.get("content_generation", 1), minimum=1),
-        "full_text": body_bytes.decode("utf-8", errors="replace") if row["body_ref"] else str(summary.get("inline_text", "")),
+        "full_text": body_bytes.decode("utf-8", errors="replace")
+        if row["body_ref"]
+        else str(summary.get("inline_text", "")),
         "output_bytes": output_bytes,
         "output_epoch": (summary.get("output_ref") or {}).get("output_epoch"),
         "summary": summary,
@@ -1085,7 +1141,9 @@ def _load_item_body_bytes(db, sid: str, epoch: str, item_key: str, generation: i
     return b"".join(parts)
 
 
-def _load_item_output_bytes(db, sid: str, epoch: str, item_key: str, output_epoch: str | None) -> bytes:
+def _load_item_output_bytes(
+    db, sid: str, epoch: str, item_key: str, output_epoch: str | None
+) -> bytes:
     if not output_epoch:
         return b""
     parts = [
@@ -1107,9 +1165,13 @@ def _load_relevant_items(db, sid: str, epoch: str) -> dict[str, dict[str, Any]]:
     for row in rows:
         summary = json.loads(row["summary_json"])
         gen = strict_safe_int(summary.get("content_generation", 1), minimum=1)
-        body_bytes = _load_item_body_bytes(db, sid, epoch, row["item_key"], gen) if row["body_ref"] else b""
+        body_bytes = (
+            _load_item_body_bytes(db, sid, epoch, row["item_key"], gen) if row["body_ref"] else b""
+        )
         out_ep = (summary.get("output_ref") or {}).get("output_epoch")
-        out_bytes = _load_item_output_bytes(db, sid, epoch, row["item_key"], out_ep) if out_ep else b""
+        out_bytes = (
+            _load_item_output_bytes(db, sid, epoch, row["item_key"], out_ep) if out_ep else b""
+        )
         items[row["item_key"]] = _hydrate_existing_item(row, body_bytes, out_bytes)
     return items
 
@@ -1167,11 +1229,30 @@ def _build_staged_changes(
         item = state["items"][key]
         pub = _public_item(item, body_inline_bytes=body_inline_bytes)
         if op == "append_text":
-            changes.append({"op": "append_text", "key": key, "base_item_revision": base_rev, "item_revision": item["item_revision"], "text": text_arg})
+            changes.append(
+                {
+                    "op": "append_text",
+                    "key": key,
+                    "base_item_revision": base_rev,
+                    "item_revision": item["item_revision"],
+                    "text": text_arg,
+                }
+            )
         elif op == "replace_body":
-            changes.append({"op": "replace_body", "key": key, "base_item_revision": base_rev, "item_revision": item["item_revision"], "body": pub["body"], "item": pub})
+            changes.append(
+                {
+                    "op": "replace_body",
+                    "key": key,
+                    "base_item_revision": base_rev,
+                    "item_revision": item["item_revision"],
+                    "body": pub["body"],
+                    "item": pub,
+                }
+            )
         else:
-            changes.append({"op": "upsert", "key": key, "item_revision": item["item_revision"], "item": pub})
+            changes.append(
+                {"op": "upsert", "key": key, "item_revision": item["item_revision"], "item": pub}
+            )
         stored_summary = dict(item["summary"])
         stored_summary["content_generation"] = item["content_generation"]
         stored_summary["inline_text"] = "" if item["body_ref"] else item["full_text"]
@@ -1231,10 +1312,21 @@ def prepare_projection_step(
         epoch = _active_epoch_for_session(db, sid, head)
         base = head.watermark if head else Watermark(epoch=epoch, revision=0, applied_cursor=0)
         scan = scan_complete_jsonl_lines(
-            db, sid, base.applied_cursor, max_bytes=max_bytes, max_lines=max_lines, stream_epoch=epoch
+            db,
+            sid,
+            base.applied_cursor,
+            max_bytes=max_bytes,
+            max_lines=max_lines,
+            stream_epoch=epoch,
         )
         staged = _stage_from_scan(
-            db, srow, head, base, scan, body_inline_bytes=body_inline_bytes, tool_inline_bytes=tool_inline_bytes
+            db,
+            srow,
+            head,
+            base,
+            scan,
+            body_inline_bytes=body_inline_bytes,
+            tool_inline_bytes=tool_inline_bytes,
         )
         db.commit()
         return staged
@@ -1291,7 +1383,9 @@ def _stage_from_scan(
             return None
         if head is None and scan.ingested_cursor == 0 and source_state == "ready":
             pass
-    changes, db_items, body_writes, output_writes = _build_staged_changes(state, body_inline_bytes=body_inline_bytes)
+    changes, db_items, body_writes, output_writes = _build_staged_changes(
+        state, body_inline_bytes=body_inline_bytes
+    )
     return StagedProjection(
         session_id=sid,
         base=base,
@@ -1345,7 +1439,17 @@ def write_items(db, session_id: str, staged: StagedProjection, revision: int) ->
                 total_bytes=excluded.total_bytes,
                 content_revision=excluded.content_revision,
                 data=excluded.data""",
-            (session_id, epoch, b["item_key"], b["content_generation"], b["start_byte"], b["end_byte"], b["total_bytes"], revision, b["data"]),
+            (
+                session_id,
+                epoch,
+                b["item_key"],
+                b["content_generation"],
+                b["start_byte"],
+                b["end_byte"],
+                b["total_bytes"],
+                revision,
+                b["data"],
+            ),
         )
     for o in staged.output_writes:
         db.execute(
@@ -1356,7 +1460,16 @@ def write_items(db, session_id: str, staged: StagedProjection, revision: int) ->
                 end_offset=excluded.end_offset,
                 data=excluded.data,
                 running=excluded.running""",
-            (session_id, epoch, o["item_key"], o["output_epoch"], o["start_offset"], o["end_offset"], o["data"], o["running"]),
+            (
+                session_id,
+                epoch,
+                o["item_key"],
+                o["output_epoch"],
+                o["start_offset"],
+                o["end_offset"],
+                o["data"],
+                o["running"],
+            ),
         )
 
 
@@ -1381,7 +1494,18 @@ def insert_batch(db, session_id: str, staged: StagedProjection, revision: int) -
         """INSERT INTO native_projection_batches(
             session_id,epoch,from_revision,to_revision,from_cursor,to_cursor,payload_json,payload_digest,payload_bytes,created
         ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        (session_id, staged.base.epoch, staged.base.revision, revision, staged.base.applied_cursor, staged.end_cursor, payload_json, payload_digest, payload_bytes, time.time()),
+        (
+            session_id,
+            staged.base.epoch,
+            staged.base.revision,
+            revision,
+            staged.base.applied_cursor,
+            staged.end_cursor,
+            payload_json,
+            payload_digest,
+            payload_bytes,
+            time.time(),
+        ),
     )
     return payload_digest
 
@@ -1483,7 +1607,9 @@ def commit_projection_step(
         revision = staged.base.revision + 1
         write_items(db, sid, staged, revision)
         insert_batch(db, sid, staged, revision)
-        pruned_from = _prune_journal(db, sid, staged.base.epoch, max_batches=max_journal_batches, max_bytes=max_journal_bytes)
+        pruned_from = _prune_journal(
+            db, sid, staged.base.epoch, max_batches=max_journal_batches, max_bytes=max_journal_bytes
+        )
         retained = max(current.retained_from_revision if current else 0, pruned_from)
         update_head(db, sid, staged, revision, retained_from_revision=retained)
         db.commit()
@@ -1540,8 +1666,12 @@ def record_session_metadata_step(
         )
         revision = base.revision + 1
         insert_batch(db, sid, staged, revision)
-        pruned_from = _prune_journal(db, sid, base.epoch, max_batches=max_journal_batches, max_bytes=max_journal_bytes)
-        update_head(db, sid, staged, revision, retained_from_revision=max(retained_base, pruned_from))
+        pruned_from = _prune_journal(
+            db, sid, base.epoch, max_batches=max_journal_batches, max_bytes=max_journal_bytes
+        )
+        update_head(
+            db, sid, staged, revision, retained_from_revision=max(retained_base, pruned_from)
+        )
         db.commit()
         return True
     except BaseException:
@@ -1564,14 +1694,19 @@ def clear_or_delete_projection_tx(
     if tomb and transition_id and transition_id in tomb["transition_ids"]:
         if deleted and not tomb["deleted"]:
             _purge_session_projection_data(db, sid, keep_tombstone=True)
-            db.execute("UPDATE native_projection_tombstones SET deleted=1, updated=? WHERE session_id=?", (now, sid))
+            db.execute(
+                "UPDATE native_projection_tombstones SET deleted=1, updated=? WHERE session_id=?",
+                (now, sid),
+            )
         return tomb["epoch"]
     old_epochs = list(tomb["source_epochs"]) if tomb else []
     for candidate in (tomb["epoch"] if tomb else None, head.watermark.epoch if head else None):
         if candidate and candidate not in old_epochs:
             old_epochs.append(candidate)
     new_epoch = f"ep_{uuid.uuid4().hex[:16]}"
-    transitions = (list(tomb["transition_ids"]) if tomb else []) + ([transition_id] if transition_id else [])
+    transitions = (list(tomb["transition_ids"]) if tomb else []) + (
+        [transition_id] if transition_id else []
+    )
     _purge_session_projection_data(db, sid, keep_tombstone=True)
     db.execute(
         """INSERT INTO native_projection_tombstones(
@@ -1584,7 +1719,15 @@ def clear_or_delete_projection_tx(
             transition_ids_json=excluded.transition_ids_json,
             source_epochs_json=excluded.source_epochs_json,
             updated=excluded.updated""",
-        (sid, new_epoch, 1 if deleted else 0, transition_id, json.dumps(transitions[-64:]), json.dumps(old_epochs[-64:]), now),
+        (
+            sid,
+            new_epoch,
+            1 if deleted else 0,
+            transition_id,
+            json.dumps(transitions[-64:]),
+            json.dumps(old_epochs[-64:]),
+            now,
+        ),
     )
     if not deleted:
         srow = db.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -1593,7 +1736,18 @@ def clear_or_delete_projection_tx(
             """INSERT INTO native_projection_heads(
                 session_id,epoch,schema_version,projection_revision,applied_cursor,retained_from_revision,summary_json,source_state,blocked_cursor,updated
             ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (sid, new_epoch, PROJECTION_SCHEMA_VERSION, 0, 0, 0, json.dumps(summary, ensure_ascii=False), "ready", None, now),
+            (
+                sid,
+                new_epoch,
+                PROJECTION_SCHEMA_VERSION,
+                0,
+                0,
+                0,
+                json.dumps(summary, ensure_ascii=False),
+                "ready",
+                None,
+                now,
+            ),
         )
     return new_epoch
 
@@ -1632,7 +1786,9 @@ def _decode_db_item(row, *, body_inline_bytes: int) -> dict[str, Any]:
             body = {
                 "kind": "ref",
                 "body_ref": f"body:{row['epoch']}:{row['item_key']}:{summary.get('content_generation', 1)}",
-                "content_generation": strict_safe_int(summary.get("content_generation", 1), minimum=1),
+                "content_generation": strict_safe_int(
+                    summary.get("content_generation", 1), minimum=1
+                ),
                 "content_revision": strict_safe_int(row["item_revision"]),
                 "byte_length": len(raw),
                 "preview": _utf8_safe_prefix(raw, 1024),
@@ -1704,15 +1860,31 @@ def read_snapshot(
         if not srow or srow["status"] == "deleted":
             raise DevError("CLI_NOT_FOUND", "未找到会话", 404)
         if srow["mode"] != "chat":
-            raise DevError("CLI_TERMINAL_SESSION", "此记录属于旧终端历史，不能作为聊天对话回放；原记录仍保留", 409)
+            raise DevError(
+                "CLI_TERMINAL_SESSION",
+                "此记录属于旧终端历史，不能作为聊天对话回放；原记录仍保留",
+                409,
+            )
         head = read_head(db, sid)
         ingested = _ingested_cursor(db, sid)
         if head is None:
             epoch = _active_epoch_for_session(db, sid, None)
-            snap = _empty_building_snapshot(db, sid, scope_key, epoch, srow, ingested, secret=secret)
+            snap = _empty_building_snapshot(
+                db, sid, scope_key, epoch, srow, ingested, secret=secret
+            )
             db.commit()
             return snap
-        result = _assemble_snapshot(db, sid, srow, head, ingested, scope_key=scope_key, window_limit=window_limit, body_inline_bytes=body_inline_bytes, secret=secret)
+        result = _assemble_snapshot(
+            db,
+            sid,
+            srow,
+            head,
+            ingested,
+            scope_key=scope_key,
+            window_limit=window_limit,
+            body_inline_bytes=body_inline_bytes,
+            secret=secret,
+        )
         db.commit()
         return result
     except BaseException:
@@ -1732,7 +1904,15 @@ def _empty_building_snapshot(
         "projection_revision": 0,
         "applied_cursor": 0,
         "retained_from_revision": 0,
-        "resume_token": make_resume_token(db, session_id=sid, scope_key=scope_key, epoch=epoch, revision=0, applied_cursor=0, secret=secret),
+        "resume_token": make_resume_token(
+            db,
+            session_id=sid,
+            scope_key=scope_key,
+            epoch=epoch,
+            revision=0,
+            applied_cursor=0,
+            secret=secret,
+        ),
         "sync": {
             "projection_state": "building",
             "source_status": session_meta.get("status", ""),
@@ -1789,9 +1969,26 @@ def _assemble_snapshot(
         if earlier:
             has_more = True
             before_tok = make_history_token(
-                db, session_id=sid, scope_key=scope_key, epoch=epoch, before_cursor=int(oldest["first_cursor"]), before_key=oldest["item_key"], secret=secret
+                db,
+                session_id=sid,
+                scope_key=scope_key,
+                epoch=epoch,
+                before_cursor=int(oldest["first_cursor"]),
+                before_key=oldest["item_key"],
+                secret=secret,
             )
-    return _format_snapshot_dict(db, sid, srow, head, ingested, items, has_more, before_tok, scope_key=scope_key, secret=secret)
+    return _format_snapshot_dict(
+        db,
+        sid,
+        srow,
+        head,
+        ingested,
+        items,
+        has_more,
+        before_tok,
+        scope_key=scope_key,
+        secret=secret,
+    )
 
 
 def _format_snapshot_dict(
@@ -1825,7 +2022,13 @@ def _format_snapshot_dict(
         "retained_from_revision": head.retained_from_revision,
         "blocked_cursor": head.blocked_cursor,
         "resume_token": make_resume_token(
-            db, session_id=sid, scope_key=scope_key, epoch=head.watermark.epoch, revision=head.watermark.revision, applied_cursor=head.watermark.applied_cursor, secret=secret
+            db,
+            session_id=sid,
+            scope_key=scope_key,
+            epoch=head.watermark.epoch,
+            revision=head.watermark.revision,
+            applied_cursor=head.watermark.applied_cursor,
+            secret=secret,
         ),
         "sync": {
             "projection_state": proj_state,
@@ -1882,12 +2085,26 @@ def read_history_page(
             ORDER BY first_cursor DESC, item_key DESC LIMIT ?""",
             (sid, epoch, before_cursor, before_cursor, before_key, row_budget + 1),
         ).fetchall()
-        page_desc, has_more = _bound_history_page(db, sid, epoch, rows, row_budget=row_budget, byte_budget=byte_budget, body_inline_bytes=body_inline_bytes)
+        page_desc, has_more = _bound_history_page(
+            db,
+            sid,
+            epoch,
+            rows,
+            row_budget=row_budget,
+            byte_budget=byte_budget,
+            body_inline_bytes=body_inline_bytes,
+        )
         ordered = list(reversed(page_desc))
         next_before = None
         if has_more and ordered:
             next_before = make_history_token(
-                db, session_id=sid, scope_key=scope_key, epoch=epoch, before_cursor=ordered[0]["first_cursor"], before_key=ordered[0]["key"], secret=secret
+                db,
+                session_id=sid,
+                scope_key=scope_key,
+                epoch=epoch,
+                before_cursor=ordered[0]["first_cursor"],
+                before_key=ordered[0]["key"],
+                secret=secret,
             )
         db.commit()
         return {
@@ -1920,7 +2137,9 @@ def _bound_history_page(
     for row in rows[:row_budget]:
         item = _decode_db_item(row, body_inline_bytes=body_inline_bytes)
         _enrich_body_ref_meta(db, sid, epoch, item)
-        encoded_len = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        encoded_len = len(
+            json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
         if selected and used_bytes + encoded_len > byte_budget:
             has_more = True
             break
@@ -2034,11 +2253,23 @@ def read_tool_output_view(
             if out_epoch
             else []
         )
-        raw = b"".join(bytes(r["data"]) for r in rows) if rows else str(summary.get("inline_text", "")).encode("utf-8")
+        raw = (
+            b"".join(bytes(r["data"]) for r in rows)
+            if rows
+            else str(summary.get("inline_text", "")).encode("utf-8")
+        )
         min_offset = int(rows[0]["start_offset"]) if rows else 0
         total = min_offset + len(raw)
         running = bool(item_row["active"])
-        res = _slice_tool_output(raw, min_offset=min_offset, total=total, after_offset=after_offset, tail_bytes=tail_bytes, output_epoch=out_epoch or f"{epoch}:{item_key}", running=running)
+        res = _slice_tool_output(
+            raw,
+            min_offset=min_offset,
+            total=total,
+            after_offset=after_offset,
+            tail_bytes=tail_bytes,
+            output_epoch=out_epoch or f"{epoch}:{item_key}",
+            running=running,
+        )
         db.commit()
         return res
     except BaseException:
@@ -2084,7 +2315,9 @@ def _slice_tool_output(
     }
 
 
-def read_item_detail(db, session_id: str, item_key: str, *, body_inline_bytes: int = DEFAULT_BODY_INLINE_BYTES) -> dict[str, Any]:
+def read_item_detail(
+    db, session_id: str, item_key: str, *, body_inline_bytes: int = DEFAULT_BODY_INLINE_BYTES
+) -> dict[str, Any]:
     """Read a single versioned semantic item in one BEGIN read transaction."""
     sid = identifier(session_id)
     db.execute("BEGIN")
@@ -2101,13 +2334,19 @@ def read_item_detail(db, session_id: str, item_key: str, *, body_inline_bytes: i
         item = _decode_db_item(row, body_inline_bytes=body_inline_bytes)
         _enrich_body_ref_meta(db, sid, head.watermark.epoch, item)
         db.commit()
-        return {"stream_epoch": head.watermark.epoch, "projection_revision": head.watermark.revision, "item": item}
+        return {
+            "stream_epoch": head.watermark.epoch,
+            "projection_revision": head.watermark.revision,
+            "item": item,
+        }
     except BaseException:
         db.rollback()
         raise
 
 
-def verify_shadow_parity(v1_events: list[Mapping[str, Any]], snapshot: Mapping[str, Any], *, provider: str = "codex") -> dict[str, Any]:
+def verify_shadow_parity(
+    v1_events: list[Mapping[str, Any]], snapshot: Mapping[str, Any], *, provider: str = "codex"
+) -> dict[str, Any]:
     """Compare v1 chatEvent semantics against a v2 projection snapshot without transcript logging."""
     state = {
         "provider": provider,
@@ -2124,7 +2363,9 @@ def verify_shadow_parity(v1_events: list[Mapping[str, Any]], snapshot: Mapping[s
     }
     for idx, raw_event in enumerate(v1_events):
         line = json.dumps(raw_event, ensure_ascii=False).encode("utf-8")
-        ev = decode_raw_source_line(line, stream_epoch=state["epoch"], start_cursor=idx * 100, end_cursor=(idx + 1) * 100)
+        ev = decode_raw_source_line(
+            line, stream_epoch=state["epoch"], start_cursor=idx * 100, end_cursor=(idx + 1) * 100
+        )
         if not _is_unknown_control(ev):
             _reduce_one_event(state, ev)
     expected = sorted(state["items"].values(), key=lambda it: (it["first_cursor"], it["item_key"]))
@@ -2149,6 +2390,8 @@ def _diff_shadow_items(expected: list[dict[str, Any]], actual: list[dict[str, An
         act_body = act.get("body", {})
         if act_body.get("kind") == "inline" and act_body.get("text") != exp["full_text"]:
             diffs.append(f"text:{exp['item_key']}")
-        elif act_body.get("kind") == "ref" and act_body.get("byte_length") != len(exp["full_text"].encode("utf-8")):
+        elif act_body.get("kind") == "ref" and act_body.get("byte_length") != len(
+            exp["full_text"].encode("utf-8")
+        ):
             diffs.append(f"byte_length:{exp['item_key']}")
     return diffs

@@ -184,9 +184,7 @@ def check_native_contracts(*, write=False):
 
     changed, digest = check_contracts(write=write)
     if changed:
-        raise ValueError(
-            "Native contracts drifted. Run scripts/build_native_contracts.py"
-        )
+        raise ValueError("Native contracts drifted. Run scripts/build_native_contracts.py")
     return digest
 
 

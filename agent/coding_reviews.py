@@ -568,7 +568,10 @@ class ReviewStore:
         if existing.get("binding") != expected_binding:
             raise DevError("REVIEW_CONFLICT", "固定快照绑定冲突，禁止覆盖", 409)
         if role == "before" and existing.get("kind") == "review":
-            if existing.get("baseline_ref") == path.stem and existing.get("turn_meta") == expected_meta:
+            if (
+                existing.get("baseline_ref") == path.stem
+                and existing.get("turn_meta") == expected_meta
+            ):
                 return existing
             raise DevError("REVIEW_CONFLICT", "固定快照类型冲突，禁止覆盖", 409)
         if existing.get("turn_meta") != expected_meta:
@@ -597,7 +600,10 @@ class ReviewStore:
             future = list(records) + [candidate]
         used = self._usage(records)
         required = self._usage(future, blobs)
-        if len(future) + reserve_records > self.record_limit or required > self.storage_limit - reserve_bytes:
+        if (
+            len(future) + reserve_records > self.record_limit
+            or required > self.storage_limit - reserve_bytes
+        ):
             raise DevError(
                 "REVIEW_QUOTA",
                 "审阅快照配额不足；不会提前删除有效快照",
@@ -674,7 +680,9 @@ class ReviewStore:
         return enriched
 
     @staticmethod
-    def _prepare_turn_payload(document: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bytes], int]:
+    def _prepare_turn_payload(
+        document: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, bytes], int]:
         raw_size = len(
             json.dumps(
                 {"sha256": fingerprint(document), "payload": document},
@@ -702,9 +710,7 @@ class ReviewStore:
         except DevError as exc:
             if exc.code == "REVIEW_OWNER_REQUIRED":
                 raise
-            raise DevError(
-                "REVIEW_UNAVAILABLE", exc.message, exc.status, cause=exc.code
-            ) from exc
+            raise DevError("REVIEW_UNAVAILABLE", exc.message, exc.status, cause=exc.code) from exc
 
     def _load(self, ref, project, kind):
         expected_binding = binding(self.engine, project)  # Reauthorize on EVERY read.

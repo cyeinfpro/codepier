@@ -40,7 +40,9 @@ class PiAdapter(BaseProviderAdapter):
         self._calls[key] = tag
         return key
 
-    def _call(self, method: str, params: dict[str, Any] | None = None, tag: str | None = None) -> str:
+    def _call(
+        self, method: str, params: dict[str, Any] | None = None, tag: str | None = None
+    ) -> str:
         key = self._next_id(tag or method)
         self._emit_wire({"id": key, "type": method, **(params or {})})
         return key
@@ -68,7 +70,11 @@ class PiAdapter(BaseProviderAdapter):
         payload = cmd.payload
         action = payload.action
         if action in {"start_session", "resume_session"}:
-            self._emit_event("session", {"status": "ready" if self._ready else "initializing"}, receipt=cmd.receipt)
+            self._emit_event(
+                "session",
+                {"status": "ready" if self._ready else "initializing"},
+                receipt=cmd.receipt,
+            )
         elif action == "send":
             self._cmd_send(cmd.receipt, payload)
         elif action == "steer":
@@ -78,9 +84,15 @@ class PiAdapter(BaseProviderAdapter):
         elif action == "answer_approval":
             self._cmd_approval(cmd.receipt, payload)
         elif action == "change_model":
-            self._cmd_settings(cmd.receipt, {"model": payload.model, **payload.options}, payload.expected_settings_revision)
+            self._cmd_settings(
+                cmd.receipt,
+                {"model": payload.model, **payload.options},
+                payload.expected_settings_revision,
+            )
         elif action == "change_options":
-            self._cmd_settings(cmd.receipt, dict(payload.options), payload.expected_settings_revision)
+            self._cmd_settings(
+                cmd.receipt, dict(payload.options), payload.expected_settings_revision
+            )
         elif action == "stop_session":
             self._cmd_stop(cmd.receipt, payload.worker_epoch)
         else:
@@ -109,7 +121,12 @@ class PiAdapter(BaseProviderAdapter):
             receipt=receipt,
             run_id=receipt,
         )
-        self._emit_event("user", {"text": payload.text, "effective_selection": effective}, receipt=receipt, run_id=receipt)
+        self._emit_event(
+            "user",
+            {"text": payload.text, "effective_selection": effective},
+            receipt=receipt,
+            run_id=receipt,
+        )
         self._call("prompt", {"message": payload.text}, tag="prompt")
 
     def _emit_explicit_selection(self, effective: dict[str, Any]) -> None:
@@ -123,13 +140,23 @@ class PiAdapter(BaseProviderAdapter):
 
     def _cmd_steer(self, receipt: str, payload: SteerPayload) -> None:
         self._check_epoch_and_run(payload.worker_epoch, payload.target_run_id)
-        self._emit_event("user", {"text": payload.text, "steering": True}, receipt=receipt, run_id=payload.target_run_id)
+        self._emit_event(
+            "user",
+            {"text": payload.text, "steering": True},
+            receipt=receipt,
+            run_id=payload.target_run_id,
+        )
         self._call("steer", {"message": payload.text}, tag="steer")
 
     def _cmd_interrupt(self, receipt: str, payload: InterruptPayload) -> None:
         self._check_epoch_and_run(payload.worker_epoch, payload.target_run_id)
         self._interrupted_run_id = payload.target_run_id
-        self._pending_interrupt = (receipt, payload.target_run_id, payload.provider_turn_id, payload.worker_epoch)
+        self._pending_interrupt = (
+            receipt,
+            payload.target_run_id,
+            payload.provider_turn_id,
+            payload.worker_epoch,
+        )
         self._call("abort", tag="abort")
 
     def _cmd_approval(self, receipt: str, payload: ApprovalPayload) -> None:
@@ -158,7 +185,9 @@ class PiAdapter(BaseProviderAdapter):
 
     def _cmd_settings(self, receipt: str, raw: dict[str, Any], expected_rev: int) -> None:
         if expected_rev != self._settings_revision:
-            raise AdapterProtocolError("STALE_SETTINGS_REVISION", "Settings revision does not match")
+            raise AdapterProtocolError(
+                "STALE_SETTINGS_REVISION", "Settings revision does not match"
+            )
         if not self._ready or self._active_run_id or self._settings_busy:
             raise AdapterProtocolError("SESSION_NOT_READY", "Pi settings require an idle session")
         selected = validate_settings(raw, "pi")
@@ -238,9 +267,13 @@ class PiAdapter(BaseProviderAdapter):
         elif tag == "get_commands":
             self._emit_event("commands", {"commands": format_commands(data, "pi")})
         elif tag == "get_available_models":
-            self._pending_updates["models"] = data.get("models", []) if isinstance(data, dict) else data
+            self._pending_updates["models"] = (
+                data.get("models", []) if isinstance(data, dict) else data
+            )
         elif tag == "get_available_thinking_levels":
-            self._pending_updates["thinking_levels"] = data.get("levels", []) if isinstance(data, dict) else data
+            self._pending_updates["thinking_levels"] = (
+                data.get("levels", []) if isinstance(data, dict) else data
+            )
 
     def _apply_pi_state(self, data: dict[str, Any]) -> None:
         self._ready = True
@@ -252,14 +285,19 @@ class PiAdapter(BaseProviderAdapter):
         if isinstance(data.get("thinkingLevel"), str):
             self._defaults.setdefault("effort", data["thinkingLevel"])
             self._confirmed_settings["effort"] = data["thinkingLevel"]
-        self._emit_event("settings", {"actual": dict(self._confirmed_settings), "revision": self._settings_revision})
+        self._emit_event(
+            "settings",
+            {"actual": dict(self._confirmed_settings), "revision": self._settings_revision},
+        )
 
     def _handle_settings_step(self, tag: str, frame: Mapping[str, Any]) -> None:
         if not self._settings_busy:
             return
         receipt = self._settings_receipt
         if not frame.get("success", False):
-            self._abort_settings_with_readback(receipt, str(frame.get("error", "Native setting rejected")))
+            self._abort_settings_with_readback(
+                receipt, str(frame.get("error", "Native setting rejected"))
+            )
             return
         data = frame.get("data") or {}
         if tag == "settings_model":
@@ -268,7 +306,9 @@ class PiAdapter(BaseProviderAdapter):
             levels = data.get("levels", []) if isinstance(data, dict) else data
             effort = self._settings_requested.get("effort")
             if effort and effort not in levels:
-                self._abort_settings_with_readback(receipt, "Unsupported thinking level for Pi model")
+                self._abort_settings_with_readback(
+                    receipt, "Unsupported thinking level for Pi model"
+                )
             elif effort:
                 self._call("set_thinking_level", {"level": effort}, "settings_effort")
             else:
@@ -336,7 +376,15 @@ class PiAdapter(BaseProviderAdapter):
         complete = all(k in actual for k in requested)
         matches = complete and all(actual.get(k) == v for k, v in requested.items())
         changed = any(actual.get(k) != before.get(k) for k in actual)
-        status = "applied" if matches else "partial" if complete and changed else "rejected" if complete else "unknown"
+        status = (
+            "applied"
+            if matches
+            else "partial"
+            if complete and changed
+            else "rejected"
+            if complete
+            else "unknown"
+        )
         if actual and status != "unknown":
             self._confirmed_settings.update(actual)
             self._settings_revision += 1
@@ -353,22 +401,42 @@ class PiAdapter(BaseProviderAdapter):
             },
             receipt=receipt,
         )
-        self._emit_event("settings_result", {"receipt": receipt, "outcome": status, "actual": actual}, receipt=receipt)
+        self._emit_event(
+            "settings_result",
+            {"receipt": receipt, "outcome": status, "actual": actual},
+            receipt=receipt,
+        )
 
     def _handle_message_update(self, frame: Mapping[str, Any]) -> None:
         event = frame.get("assistantMessageEvent") or {}
         etype = event.get("type")
         if etype == "text_delta":
-            self._emit_event("delta", {"text": event.get("delta", ""), "item_id": self._message_id}, receipt=self._active_run_id)
+            self._emit_event(
+                "delta",
+                {"text": event.get("delta", ""), "item_id": self._message_id},
+                receipt=self._active_run_id,
+            )
         elif etype == "thinking_delta":
-            self._emit_event("reasoning.delta", {"text": event.get("delta", ""), "item_id": self._message_id}, receipt=self._active_run_id)
+            self._emit_event(
+                "reasoning.delta",
+                {"text": event.get("delta", ""), "item_id": self._message_id},
+                receipt=self._active_run_id,
+            )
 
     def _handle_message_end(self, frame: Mapping[str, Any]) -> None:
         message = frame.get("message") or {}
         if message.get("role") == "assistant":
-            text = "".join(c.get("text", "") for c in message.get("content", []) if isinstance(c, dict) and c.get("type") == "text")
+            text = "".join(
+                c.get("text", "")
+                for c in message.get("content", [])
+                if isinstance(c, dict) and c.get("type") == "text"
+            )
             if text:
-                self._emit_event("message", {"text": text, "item_id": self._message_id}, receipt=self._active_run_id)
+                self._emit_event(
+                    "message",
+                    {"text": text, "item_id": self._message_id},
+                    receipt=self._active_run_id,
+                )
         if message.get("stopReason") in {"error", "aborted"}:
             self._failure = str(message.get("errorMessage", "Native response failed"))
             self._emit_event("error", {"text": self._failure}, receipt=self._active_run_id)
@@ -378,11 +446,24 @@ class PiAdapter(BaseProviderAdapter):
         req_id = str(frame.get("id", ""))
         if method in {"select", "confirm", "input", "editor"} and req_id:
             details = {k: v for k, v in frame.items() if k != "_deadline"}
-            timeout = frame["timeout"] / 1000.0 if isinstance(frame.get("timeout"), (int, float)) else None
-            self._register_approval(req_id, method, details, frame, timeout_seconds=timeout, options=frame.get("options", []))
+            timeout = (
+                frame["timeout"] / 1000.0
+                if isinstance(frame.get("timeout"), (int, float))
+                else None
+            )
+            self._register_approval(
+                req_id,
+                method,
+                details,
+                frame,
+                timeout_seconds=timeout,
+                options=frame.get("options", []),
+            )
             return
         if method == "notify":
-            self._emit_event("notice", {"text": str(frame.get("message", ""))}, receipt=self._active_run_id)
+            self._emit_event(
+                "notice", {"text": str(frame.get("message", ""))}, receipt=self._active_run_id
+            )
             return
         if req_id:
             self._emit_wire({"type": "extension_ui_response", "id": req_id, "cancelled": True})
@@ -394,7 +475,11 @@ class PiAdapter(BaseProviderAdapter):
         run_id = frame.get("run_id")
         if run_id and run_id != self._active_run_id:
             return
-        status = "interrupted" if self._interrupted_run_id == self._active_run_id else ("error" if self._failure else "completed")
+        status = (
+            "interrupted"
+            if self._interrupted_run_id == self._active_run_id
+            else ("error" if self._failure else "completed")
+        )
         self._settle_run(status, self._failure or "")
 
     def expire(self, now_monotonic: float) -> AdapterTransition:
@@ -419,7 +504,11 @@ class PiAdapter(BaseProviderAdapter):
 def _parse_pi_actual(data: Mapping[str, Any]) -> dict[str, Any]:
     actual: dict[str, Any] = {}
     native_model = data.get("model")
-    if isinstance(native_model, dict) and isinstance(native_model.get("provider"), str) and isinstance(native_model.get("id"), str):
+    if (
+        isinstance(native_model, dict)
+        and isinstance(native_model.get("provider"), str)
+        and isinstance(native_model.get("id"), str)
+    ):
         if native_model["provider"] and native_model["id"]:
             actual["model"] = f"{native_model['provider']}/{native_model['id']}"
     if isinstance(data.get("thinkingLevel"), str):

@@ -36,7 +36,9 @@ class NativeFeatureFlags:
             native_viewport_v2=env_bool("CODEPIER_NATIVE_VIEWPORT_V2", False),
             native_provider_adapter_v2=env_bool("CODEPIER_NATIVE_PROVIDER_ADAPTER_V2", False),
             native_workspace_restore_v2=env_bool("CODEPIER_NATIVE_WORKSPACE_RESTORE_V2", False),
-            native_windows_structured_chat=env_bool("CODEPIER_NATIVE_WINDOWS_STRUCTURED_CHAT", False),
+            native_windows_structured_chat=env_bool(
+                "CODEPIER_NATIVE_WINDOWS_STRUCTURED_CHAT", False
+            ),
         )
 
     def with_overrides(self, overrides: Mapping[str, Any] | None = None) -> NativeFeatureFlags:

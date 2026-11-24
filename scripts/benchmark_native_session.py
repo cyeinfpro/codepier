@@ -112,7 +112,9 @@ def _make_raw_event(idx: int) -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def benchmark_cold_open(sizes: tuple[int, ...] = (1000, 10000, 50000), page_size: int = 100) -> dict[str, Any]:
+def benchmark_cold_open(
+    sizes: tuple[int, ...] = (1000, 10000, 50000), page_size: int = 100
+) -> dict[str, Any]:
     """Compare v1 full-history replay against v2 bounded snapshot + recent page."""
     results: dict[str, Any] = {}
     for total in sizes:
@@ -179,7 +181,9 @@ def benchmark_dirty_fenwick_deltas(history_size: int = 50000, deltas: int = 60) 
     }
 
 
-def benchmark_slow_review_gate(iterations: int = 10, review_gate_ms: float = 25.0) -> dict[str, Any]:
+def benchmark_slow_review_gate(
+    iterations: int = 10, review_gate_ms: float = 25.0
+) -> dict[str, Any]:
     """Verify slow review I/O gate never delays provider_completed or projection_committed."""
     provider_to_proj_ms: list[float] = []
     provider_to_review_ms: list[float] = []
@@ -221,7 +225,9 @@ def benchmark_slow_review_gate(iterations: int = 10, review_gate_ms: float = 25.
     }
 
 
-def benchmark_reconnect_catchup(rounds: int = 12, batch_events: int = 50, dup_events: int = 10) -> dict[str, Any]:
+def benchmark_reconnect_catchup(
+    rounds: int = 12, batch_events: int = 50, dup_events: int = 10
+) -> dict[str, Any]:
     """Measure reconnect catch-up bytes and duplicate-ledger drop efficiency."""
     catchup_ms: list[float] = []
     total_catchup_bytes = 0

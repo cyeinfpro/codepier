@@ -142,9 +142,7 @@ class WorkspaceOwnershipStore:
                 (r["namespace"], r["resource_kind"], r["canonical_name"], r["write_mode"])
                 for r in same_turn
             }
-            incoming_set = {
-                (c.namespace, c.kind, c.name, int(c.write)) for c in incoming
-            }
+            incoming_set = {(c.namespace, c.kind, c.name, int(c.write)) for c in incoming}
             if existing_set == incoming_set:
                 return [r["claim_id"] for r in same_turn], conflicts
         return None, conflicts
@@ -410,7 +408,9 @@ class WorkspaceOwnershipStore:
                         pids.append(session[col])
         return sid, pids
 
-    def _has_incomplete_restore(self, conn: sqlite3.Connection, receipt: str, attempt_id: str) -> bool:
+    def _has_incomplete_restore(
+        self, conn: sqlite3.Connection, receipt: str, attempt_id: str
+    ) -> bool:
         row = conn.execute(
             """SELECT 1 FROM native_restore_journals
                WHERE receipt=? AND attempt_id=? AND stage != 'completed' LIMIT 1""",
@@ -485,9 +485,7 @@ class WorkspaceOwnershipStore:
         with immediate(conn):
             return self._reconcile_tx(directory, conn, now_ts)
 
-    def sync_to_resource_queue(
-        self, conn: sqlite3.Connection, queue: ResourceQueue
-    ) -> list[Any]:
+    def sync_to_resource_queue(self, conn: sqlite3.Connection, queue: ResourceQueue) -> list[Any]:
         """Hydrate live and unknown durable claims into an in-memory ResourceQueue."""
         rows = conn.execute(
             """SELECT * FROM native_workspace_claims

@@ -543,9 +543,7 @@ def describe_provider_capabilities(
         supported=True, available=platform_supported, reason_code=unavailable_reason
     )
     steer_feature = (
-        FeatureState(
-            supported=True, available=platform_supported, reason_code=unavailable_reason
-        )
+        FeatureState(supported=True, available=platform_supported, reason_code=unavailable_reason)
         if steer_supported
         else FeatureState(supported=False, available=False, reason_code="UNSUPPORTED_BY_PROVIDER")
     )
@@ -585,13 +583,9 @@ def _action_supported(
     }
     feature = feature_map.get(action)
     if feature is not None:
-        plat_ok = (
-            feature.available if feature.supported else capabilities.structured_chat.available
-        )
+        plat_ok = feature.available if feature.supported else capabilities.structured_chat.available
         plat_reason = (
-            feature.reason_code
-            if feature.supported
-            else capabilities.structured_chat.reason_code
+            feature.reason_code if feature.supported else capabilities.structured_chat.reason_code
         )
         return (
             feature.supported,

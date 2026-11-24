@@ -124,9 +124,7 @@ def _require_tx(conn: sqlite3.Connection, name: str) -> None:
 class NativeTurnStore:
     """Transactional state store for native turns, review jobs, and recovery."""
 
-    def get_current_tx(
-        self, conn: sqlite3.Connection, key: TurnKey | str
-    ) -> TurnRecord:
+    def get_current_tx(self, conn: sqlite3.Connection, key: TurnKey | str) -> TurnRecord:
         if isinstance(key, TurnKey):
             row = conn.execute(
                 "SELECT * FROM native_turns WHERE receipt=? AND attempt_id=?",
@@ -534,9 +532,7 @@ class NativeTurnStore:
         """Atomically claim a claimable job and increment its fence."""
         now_ts = time.time() if now is None else now
         with immediate(conn):
-            row = conn.execute(
-                "SELECT * FROM native_review_jobs WHERE id=?", (job_id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM native_review_jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 return None
             if row["status"] == "pending" and float(row["available_at"]) <= now_ts:
@@ -990,10 +986,18 @@ class NativeTurnStore:
                        WHERE receipt=? AND attempt_id=? AND state_version=?""",
                     (now_ts, turn.receipt, turn.attempt_id, turn.state_version),
                 )
-                return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "reconciled_before_ref"}
+                return {
+                    "receipt": turn.receipt,
+                    "attempt_id": turn.attempt_id,
+                    "action": "reconciled_before_ref",
+                }
             except DevError:
                 pass
-        return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "keep_baseline_pending"}
+        return {
+            "receipt": turn.receipt,
+            "attempt_id": turn.attempt_id,
+            "action": "keep_baseline_pending",
+        }
 
     def _recover_write_started(
         self, conn: sqlite3.Connection, turn: TurnRecord, now_ts: float
@@ -1006,7 +1010,11 @@ class NativeTurnStore:
             (now_ts, turn.receipt, turn.attempt_id, turn.state_version),
         )
         self.update_legacy_command_tx(conn, turn.receipt, "uncertain")
-        return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "marked_uncertain"}
+        return {
+            "receipt": turn.receipt,
+            "attempt_id": turn.attempt_id,
+            "action": "marked_uncertain",
+        }
 
     def _recover_pending_capture(
         self,
@@ -1034,7 +1042,11 @@ class NativeTurnStore:
         # the Agent process may own this job. Never replace a running fence
         # without independent holder verification.
         if job is not None and job["status"] == "running":
-            return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "capture_holder_unverified"}
+            return {
+                "receipt": turn.receipt,
+                "attempt_id": turn.attempt_id,
+                "action": "capture_holder_unverified",
+            }
         if claims is not None:
             phases = {
                 row["phase"]
@@ -1044,11 +1056,19 @@ class NativeTurnStore:
                 )
             }
             if "capture" not in phases or phases & {"unknown", "released"}:
-                return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "capture_barrier_unverified"}
+                return {
+                    "receipt": turn.receipt,
+                    "attempt_id": turn.attempt_id,
+                    "action": "capture_barrier_unverified",
+                }
         if store is not None and project is not None and turn.after_ref:
             try:
                 after = store.load_turn_snapshot(turn.after_ref, project, kind="turn_after")
-                if job is not None and job["status"] in ("pending", "blocked") and claims is not None:
+                if (
+                    job is not None
+                    and job["status"] in ("pending", "blocked")
+                    and claims is not None
+                ):
                     new_fence = int(job["fence"]) + 1
                     conn.execute(
                         "UPDATE native_review_jobs SET status='running', fence=? WHERE id=?",
@@ -1066,7 +1086,11 @@ class NativeTurnStore:
                         claims=claims,
                         now=now_ts,
                     )
-                    return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "committed_published_after"}
+                    return {
+                        "receipt": turn.receipt,
+                        "attempt_id": turn.attempt_id,
+                        "action": "committed_published_after",
+                    }
             except DevError:
                 pass
 
@@ -1087,9 +1111,17 @@ class NativeTurnStore:
             )
             if claims is not None:
                 claims.release_or_drain_tx(conn, turn, now=now_ts)
-            return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "expired_capture_window"}
+            return {
+                "receipt": turn.receipt,
+                "attempt_id": turn.attempt_id,
+                "action": "expired_capture_window",
+            }
 
-        return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "resume_capture_job"}
+        return {
+            "receipt": turn.receipt,
+            "attempt_id": turn.attempt_id,
+            "action": "resume_capture_job",
+        }
 
     def _recover_one_turn(
         self,
@@ -1103,8 +1135,14 @@ class NativeTurnStore:
         now_ts: float,
         max_pin_lease_seconds: float,
     ) -> dict[str, Any] | None:
-        if turn.execution_state == "preparing" and turn.send_phase == "not_sent" and turn.evidence_state == "baseline_pending":
-            return self._recover_before_publish(conn, turn, store=store, project=project, now_ts=now_ts)
+        if (
+            turn.execution_state == "preparing"
+            and turn.send_phase == "not_sent"
+            and turn.evidence_state == "baseline_pending"
+        ):
+            return self._recover_before_publish(
+                conn, turn, store=store, project=project, now_ts=now_ts
+            )
         if turn.send_phase == "write_started" and turn.terminal_event_id is None:
             return self._recover_write_started(conn, turn, now_ts)
         if turn.evidence_state in ("capture_pending", "capturing"):
@@ -1118,7 +1156,10 @@ class NativeTurnStore:
                 now_ts=now_ts,
                 max_pin_lease_seconds=max_pin_lease_seconds,
             )
-        if turn.evidence_state == "baseline_ready" and (now_ts - turn.created_at) > max_pin_lease_seconds:
+        if (
+            turn.evidence_state == "baseline_ready"
+            and (now_ts - turn.created_at) > max_pin_lease_seconds
+        ):
             conn.execute(
                 """UPDATE native_turns
                    SET evidence_state='unavailable', review_state='unavailable',
@@ -1128,7 +1169,11 @@ class NativeTurnStore:
             )
             if claims is not None:
                 claims.release_or_drain_tx(conn, turn, now=now_ts)
-            return {"receipt": turn.receipt, "attempt_id": turn.attempt_id, "action": "expired_baseline_pin"}
+            return {
+                "receipt": turn.receipt,
+                "attempt_id": turn.attempt_id,
+                "action": "expired_baseline_pin",
+            }
         return None
 
     def recover_session_turns(

@@ -442,8 +442,14 @@ class NativeService:
 
     def _sync_clear_or_delete(self, db, sid, row):
         db.execute("DELETE FROM output WHERE session=?", (sid,))
-        tid = str(row.get("transition_id") or row.get("receipt") or f"sync:{row['status']}:{row.get('updated', 0)}")
-        clear_or_delete_projection_tx(db, sid, transition_id=tid, deleted=row["status"] == "deleted")
+        tid = str(
+            row.get("transition_id")
+            or row.get("receipt")
+            or f"sync:{row['status']}:{row.get('updated', 0)}"
+        )
+        clear_or_delete_projection_tx(
+            db, sid, transition_id=tid, deleted=row["status"] == "deleted"
+        )
 
     def _chunk_blocked_state(self, db, sid, chunk):
         state = db.execute("SELECT status FROM sessions WHERE id=?", (sid,)).fetchone()[0]
@@ -453,7 +459,11 @@ class NativeService:
         if tomb and tomb["deleted"]:
             return "deleted"
         chunk_epoch = chunk.get("stream_epoch") or chunk.get("epoch")
-        if chunk_epoch and tomb and (chunk_epoch != tomb["epoch"] or chunk_epoch in tomb["source_epochs"]):
+        if (
+            chunk_epoch
+            and tomb
+            and (chunk_epoch != tomb["epoch"] or chunk_epoch in tomb["source_epochs"])
+        ):
             return "cleared"
         return state
 
@@ -462,7 +472,11 @@ class NativeService:
         for sid in offsets:
             self._projector_dirty.add(sid)
         for row in rows:
-            if isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("mode", "terminal") == "chat":
+            if (
+                isinstance(row, dict)
+                and isinstance(row.get("id"), str)
+                and row.get("mode", "terminal") == "chat"
+            ):
                 self._projector_dirty.add(row["id"])
 
     def _clear_session_db(self, db, sid, *, deleted, transition_id):
@@ -1316,7 +1330,12 @@ def make_native_router(auth, runtime):
                 )
             if action in {"clear", "delete"}:
                 with closing(database(service.directory)) as db, db:
-                    service._clear_session_db(db, args["id"], deleted=action == "delete", transition_id=args.get("receipt") or "")
+                    service._clear_session_db(
+                        db,
+                        args["id"],
+                        deleted=action == "delete",
+                        transition_id=args.get("receipt") or "",
+                    )
                     db.execute(
                         "UPDATE sessions SET size=0,status=?,updated=? WHERE id=?",
                         ("deleted" if action == "delete" else "cleared", time.time(), args["id"]),

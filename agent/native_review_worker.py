@@ -41,7 +41,9 @@ class NativeReviewWorker:
         self.owner_epoch = owner_epoch
         self.turn_store = turn_store or NativeTurnStore()
         self.claims = claims or WorkspaceOwnershipStore()
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="native-review")
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="native-review"
+        )
         self._pump_lock = threading.Lock()
         self._pump_capacity = max_workers
         self._pumped: dict[str, Future] = {}
@@ -73,7 +75,9 @@ class NativeReviewWorker:
                 job_id = str(row["id"])
                 if job_id in self._pumped:
                     continue
-                execute = self.run_capture_job if row["kind"] == "capture_after" else self.run_review_job
+                execute = (
+                    self.run_capture_job if row["kind"] == "capture_after" else self.run_review_job
+                )
                 self._pumped[job_id] = self._executor.submit(execute, job_id, now=now_ts)
                 dispatched.append(job_id)
             return tuple(dispatched)
@@ -143,8 +147,12 @@ class NativeReviewWorker:
             )
         if not owned:
             self.turn_store.block_job(
-                conn, claim.id, fence=claim.fence, reason="CAPTURE_BARRIER_UNVERIFIED",
-                retry_after=5.0, now=now_ts,
+                conn,
+                claim.id,
+                fence=claim.fence,
+                reason="CAPTURE_BARRIER_UNVERIFIED",
+                retry_after=5.0,
+                now=now_ts,
             )
             return "CAPTURE_BARRIER_UNVERIFIED"
         if not drained:

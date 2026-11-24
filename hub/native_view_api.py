@@ -51,7 +51,9 @@ DEFAULT_CATCHUP_MAX_SECONDS = 5.0
 
 def session_scope_key(principal, project: Mapping[str, Any]) -> str:
     """Derive a non-secret scope key for token binding and cache isolation."""
-    raw = f"{principal.space_id}:{principal.user_id}:{project['id']}:{project['device_id']}".encode("utf-8")
+    raw = f"{principal.space_id}:{principal.user_id}:{project['id']}:{project['device_id']}".encode(
+        "utf-8"
+    )
     return "sc_" + hashlib.sha256(raw).hexdigest()[:24]
 
 
@@ -64,7 +66,11 @@ def _authorize_chat_session(auth, service, request: Request, sid: str):
         if not srow or srow["status"] == "deleted":
             raise DevError("CLI_NOT_FOUND", "未找到会话", 404)
         if srow["mode"] != "chat":
-            raise DevError("CLI_TERMINAL_SESSION", "此记录属于旧终端历史，不能作为聊天对话回放；原记录仍保留", 409)
+            raise DevError(
+                "CLI_TERMINAL_SESSION",
+                "此记录属于旧终端历史，不能作为聊天对话回放；原记录仍保留",
+                409,
+            )
     return principal, project, scope_key
 
 
@@ -194,6 +200,12 @@ def _sse_frame(event: str, data: Mapping[str, Any], *, event_id: str | None = No
     return f"{prefix}event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _renew_live_burst_budget(budget: dict[str, Any], start_live_burst: bool) -> None:
+    """Count only an active live burst, not time spent synchronized and idle."""
+    if start_live_burst:
+        budget.update(batches=0, bytes=0, started=time.monotonic())
+
+
 def _view_events_stream(
     auth,
     runtime,
@@ -208,12 +220,15 @@ def _view_events_stream(
     def read_step(seen_rev: int, start_live_burst: bool):
         _, _, scope_key = _authorize_chat_session(auth, service, request, sid)
         svc_rev = service.revision
-        # A synchronized idle stream is not an actively replaying backlog.
-        if start_live_burst:
-            budget.update(batches=0, bytes=0, started=time.monotonic())
+        _renew_live_burst_budget(budget, start_live_burst)
         with closing(database(service.directory)) as db:
             kind, payload = _load_catchup_step(
-                db, sid, scope_key=scope_key, expected_epoch=expected_epoch, seen_rev=seen_rev, budget=budget
+                db,
+                sid,
+                scope_key=scope_key,
+                expected_epoch=expected_epoch,
+                seen_rev=seen_rev,
+                budget=budget,
             )
         return svc_rev, kind, payload
 
@@ -230,7 +245,9 @@ def _view_events_stream(
                     return
                 if kind == "batches":
                     for batch in payload:
-                        await run_db(runtime.store, _authorize_chat_session, auth, service, request, sid)
+                        await run_db(
+                            runtime.store, _authorize_chat_session, auth, service, request, sid
+                        )
                         yield _sse_frame("batch", batch, event_id=str(batch["to_revision"]))
                         seen_rev = int(batch["to_revision"])
                     await asyncio.sleep(0)
@@ -324,7 +341,13 @@ def _register_core_view_routes(router: APIRouter, auth, runtime, service) -> Non
         def load():
             _, _, scope_key = _authorize_chat_session(auth, service, request, sid)
             with closing(database(service.directory)) as db:
-                return read_snapshot(db, sid, scope_key=scope_key, window_limit=window_limit, body_inline_bytes=body_inline_bytes)
+                return read_snapshot(
+                    db,
+                    sid,
+                    scope_key=scope_key,
+                    window_limit=window_limit,
+                    body_inline_bytes=body_inline_bytes,
+                )
 
         return await run_db(runtime.store, load)
 
@@ -355,7 +378,16 @@ def _register_core_view_routes(router: APIRouter, auth, runtime, service) -> Non
             "max_seconds": max(0.05, min(max_seconds, 30.0)),
         }
         return StreamingResponse(
-            _view_events_stream(auth, runtime, service, request, sid, expected_epoch=wm.epoch, start_rev=wm.revision, budget=budget),
+            _view_events_stream(
+                auth,
+                runtime,
+                service,
+                request,
+                sid,
+                expected_epoch=wm.epoch,
+                start_rev=wm.revision,
+                budget=budget,
+            ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )
@@ -373,8 +405,19 @@ def _register_history_and_item_routes(router: APIRouter, auth, runtime, service)
         def load():
             _, _, scope_key = _authorize_chat_session(auth, service, request, sid)
             with closing(database(service.directory)) as db:
-                epoch, before_cursor, before_key = parse_history_token(db, before, session_id=sid, scope_key=scope_key)
-                return read_history_page(db, sid, epoch=epoch, before_cursor=before_cursor, before_key=before_key, row_budget=row_budget, byte_budget=byte_budget, scope_key=scope_key)
+                epoch, before_cursor, before_key = parse_history_token(
+                    db, before, session_id=sid, scope_key=scope_key
+                )
+                return read_history_page(
+                    db,
+                    sid,
+                    epoch=epoch,
+                    before_cursor=before_cursor,
+                    before_key=before_key,
+                    row_budget=row_budget,
+                    byte_budget=byte_budget,
+                    scope_key=scope_key,
+                )
 
         return await run_db(runtime.store, load)
 
@@ -408,7 +451,9 @@ def _register_item_stream_routes(router: APIRouter, auth, runtime, service) -> N
         def load():
             _authorize_chat_session(auth, service, request, sid)
             with closing(database(service.directory)) as db:
-                return read_item_body_chunk(db, sid, key, generation=generation, start_byte=start_byte, max_bytes=max_bytes)
+                return read_item_body_chunk(
+                    db, sid, key, generation=generation, start_byte=start_byte, max_bytes=max_bytes
+                )
 
         return await run_db(runtime.store, load)
 
@@ -428,15 +473,27 @@ def _register_item_stream_routes(router: APIRouter, auth, runtime, service) -> N
                 raise DevError("CLI_OFFSET", "工具输出偏移无效", 400) from exc
         wants_sse = stream or "text/event-stream" in request.headers.get("accept", "").lower()
         if not wants_sse:
+
             def load():
                 _authorize_chat_session(auth, service, request, sid)
                 with closing(database(service.directory)) as db:
-                    return read_tool_output_view(db, sid, key, after_offset=after_offset, tail_bytes=tail_bytes)
+                    return read_tool_output_view(
+                        db, sid, key, after_offset=after_offset, tail_bytes=tail_bytes
+                    )
 
             return await run_db(runtime.store, load)
         await run_db(runtime.store, _authorize_chat_session, auth, service, request, sid)
         return StreamingResponse(
-            _tool_output_stream(auth, runtime, service, request, sid, key, after_offset=after_offset, tail_bytes=tail_bytes),
+            _tool_output_stream(
+                auth,
+                runtime,
+                service,
+                request,
+                sid,
+                key,
+                after_offset=after_offset,
+                tail_bytes=tail_bytes,
+            ),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
         )

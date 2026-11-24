@@ -142,7 +142,9 @@ class LegacyProtocolFacade:
             self.protocol.emit = self._orig_emit
             self.protocol.finish = self._orig_finish
             self.protocol.persist = self._orig_persist
-        return AdapterTransition(wire_requests=tuple(wire), events=tuple(events), state_updates=updates)
+        return AdapterTransition(
+            wire_requests=tuple(wire), events=tuple(events), state_updates=updates
+        )
 
     def initialize(
         self, fence: SessionFence, settings: NativeSelection | Mapping[str, Any] | None = None
@@ -167,13 +169,19 @@ class LegacyProtocolFacade:
             return
         handlers: dict[str, Callable[[], None]] = {
             "send": lambda: self._legacy_send(cmd.receipt, payload),
-            "steer": lambda: self.protocol.steer(cmd.receipt, {"text": payload.text, "attachments": []}),
+            "steer": lambda: self.protocol.steer(
+                cmd.receipt, {"text": payload.text, "attachments": []}
+            ),
             "interrupt": self.protocol.interrupt,
-            "answer_approval": lambda: self.protocol.answer(payload.observed_request_id, payload.answer),
+            "answer_approval": lambda: self.protocol.answer(
+                payload.observed_request_id, payload.answer
+            ),
             "change_model": lambda: self.protocol.change_settings(
                 cmd.receipt, {"model": payload.model, **payload.options}
             ),
-            "change_options": lambda: self.protocol.change_settings(cmd.receipt, dict(payload.options)),
+            "change_options": lambda: self.protocol.change_settings(
+                cmd.receipt, dict(payload.options)
+            ),
             "stop_session": self._legacy_stop,
         }
         handler = handlers.get(action)
@@ -336,7 +344,9 @@ class BaseProviderAdapter:
             assert payload.selection is not None
             raw = {"model": payload.selection.model, **dict(payload.selection.options)}
             return validate_settings(raw, self.provider_kind), self._settings_revision
-        resolved = {k: v for k, v in self._confirmed_settings.items() if k in {"model", "effort"} and v}
+        resolved = {
+            k: v for k, v in self._confirmed_settings.items() if k in {"model", "effort"} and v
+        }
         return resolved, self._settings_revision
 
     def _check_epoch_and_run(self, worker_epoch: int, target_run_id: str) -> None:
@@ -398,7 +408,9 @@ class BaseProviderAdapter:
         if req["run_id"] != payload.target_run_id or req["worker_epoch"] != payload.worker_epoch:
             raise AdapterProtocolError("APPROVAL_SCOPE_MISMATCH", "Approval belongs to another run")
         if req["digest"] != payload.request_digest:
-            raise AdapterProtocolError("APPROVAL_DIGEST_MISMATCH", "Approval request digest changed")
+            raise AdapterProtocolError(
+                "APPROVAL_DIGEST_MISMATCH", "Approval request digest changed"
+            )
         return req
 
     def _settle_run(self, status: str, text: str = "") -> None:

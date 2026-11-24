@@ -235,14 +235,21 @@ class PosixPipeTransport:
             len(self._outgoing) + len(frame_bytes) > MAX_OUTGOING_BYTES
             or len(self._outgoing_frames) >= MAX_OUTGOING_FRAMES
         ):
-            raise PipeTransportError("PIPE_INPUT_BACKPRESSURE", "Native input buffer quota exceeded")
+            raise PipeTransportError(
+                "PIPE_INPUT_BACKPRESSURE", "Native input buffer quota exceeded"
+            )
         self._outgoing.extend(frame_bytes)
         self._outgoing_frames.append((len(frame_bytes), receipt))
         self._flush_stdin()
         self._update_stdin_interest()
 
     def _flush_stdin(self) -> None:
-        if not self._outgoing or self._child is None or self._child.stdin is None or self._stdin_closed:
+        if (
+            not self._outgoing
+            or self._child is None
+            or self._child.stdin is None
+            or self._stdin_closed
+        ):
             return
         try:
             written = os.write(self._child.stdin.fileno(), self._outgoing[:65536])
@@ -557,7 +564,12 @@ class WindowsPipeTransport:
             except Exception as exc:
                 self._error = str(exc)
                 self._record_write_event(
-                    {"kind": "transport_error", "code": "WRITE_FAILED", "message": str(exc), "receipt": receipt}
+                    {
+                        "kind": "transport_error",
+                        "code": "WRITE_FAILED",
+                        "message": str(exc),
+                        "receipt": receipt,
+                    }
                 )
                 return
 

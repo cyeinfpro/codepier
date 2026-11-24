@@ -46,7 +46,9 @@ class CodexAdapter(BaseProviderAdapter):
         self._turn_settings: dict[str, Any] = {}
         self._turn_settings_receipt: str | None = None
 
-    def _call(self, method: str, params: dict[str, Any] | None = None, tag: str | None = None) -> str:
+    def _call(
+        self, method: str, params: dict[str, Any] | None = None, tag: str | None = None
+    ) -> str:
         self._call_serial += 1
         key = f"codex-{self._call_serial}"
         self._calls[key] = tag or method
@@ -63,7 +65,10 @@ class CodexAdapter(BaseProviderAdapter):
             self._next_settings = {k: v for k, v in parsed.items() if v}
         self._call(
             "initialize",
-            {"clientInfo": {"name": "codepier", "version": "1.0.0"}, "capabilities": {"experimentalApi": True}},
+            {
+                "clientInfo": {"name": "codepier", "version": "1.0.0"},
+                "capabilities": {"experimentalApi": True},
+            },
         )
         return self._finish_transition()
 
@@ -73,7 +78,11 @@ class CodexAdapter(BaseProviderAdapter):
         payload = cmd.payload
         action = payload.action
         if action in {"start_session", "resume_session"}:
-            self._emit_event("session", {"status": "ready" if self._ready else "initializing"}, receipt=cmd.receipt)
+            self._emit_event(
+                "session",
+                {"status": "ready" if self._ready else "initializing"},
+                receipt=cmd.receipt,
+            )
         elif action == "send":
             self._cmd_send(cmd.receipt, payload)
         elif action == "steer":
@@ -83,9 +92,15 @@ class CodexAdapter(BaseProviderAdapter):
         elif action == "answer_approval":
             self._cmd_approval(cmd.receipt, payload)
         elif action == "change_model":
-            self._cmd_next_turn_settings(cmd.receipt, {"model": payload.model, **payload.options}, payload.expected_settings_revision)
+            self._cmd_next_turn_settings(
+                cmd.receipt,
+                {"model": payload.model, **payload.options},
+                payload.expected_settings_revision,
+            )
         elif action == "change_options":
-            self._cmd_next_turn_settings(cmd.receipt, dict(payload.options), payload.expected_settings_revision)
+            self._cmd_next_turn_settings(
+                cmd.receipt, dict(payload.options), payload.expected_settings_revision
+            )
         elif action == "stop_session":
             self._cmd_stop(payload.worker_epoch)
         else:
@@ -97,10 +112,16 @@ class CodexAdapter(BaseProviderAdapter):
             raise AdapterProtocolError("SESSION_NOT_READY", "Codex session is not ready for send")
         if payload.selection_mode == "explicit":
             assert payload.selection is not None
-            effective = validate_settings({"model": payload.selection.model, **payload.selection.options}, "codex")
+            effective = validate_settings(
+                {"model": payload.selection.model, **payload.selection.options}, "codex"
+            )
             turn_receipt = None
         else:
-            effective = {k: v for k, v in (self._next_settings or self._confirmed_settings).items() if k in {"model", "effort"} and v}
+            effective = {
+                k: v
+                for k, v in (self._next_settings or self._confirmed_settings).items()
+                if k in {"model", "effort"} and v
+            }
             turn_receipt = self._next_settings_receipt
         self._active_run_id = receipt
         self._active_turn_id = None
@@ -111,29 +132,65 @@ class CodexAdapter(BaseProviderAdapter):
         self._pending_updates["selection_mode"] = payload.selection_mode
         self._emit_event(
             "command.claimed",
-            {"receipt": receipt, "attempt_id": receipt, "provider_instance_id": self.provider_instance_id},
+            {
+                "receipt": receipt,
+                "attempt_id": receipt,
+                "provider_instance_id": self.provider_instance_id,
+            },
             receipt=receipt,
             run_id=receipt,
         )
-        self._emit_event("user", {"text": payload.text, "effective_selection": effective}, receipt=receipt, run_id=receipt)
-        params = {"threadId": self.thread_id, "input": [{"type": "text", "text": payload.text}], **effective}
+        self._emit_event(
+            "user",
+            {"text": payload.text, "effective_selection": effective},
+            receipt=receipt,
+            run_id=receipt,
+        )
+        params = {
+            "threadId": self.thread_id,
+            "input": [{"type": "text", "text": payload.text}],
+            **effective,
+        }
         self._turn_start_call_id = self._call("turn/start", params)
 
     def _cmd_steer(self, receipt: str, payload: SteerPayload) -> None:
         self._check_epoch_and_run(payload.worker_epoch, payload.target_run_id)
         if not self._active_turn_id or payload.provider_turn_id != self._active_turn_id:
-            raise AdapterProtocolError("STALE_TURN_TARGET", "Codex steer requires observed active turn")
-        self._emit_event("user", {"text": payload.text, "steering": True}, receipt=receipt, run_id=payload.target_run_id)
-        self._call("turn/steer", {"threadId": self.thread_id, "expectedTurnId": self._active_turn_id, "input": [{"type": "text", "text": payload.text}]})
+            raise AdapterProtocolError(
+                "STALE_TURN_TARGET", "Codex steer requires observed active turn"
+            )
+        self._emit_event(
+            "user",
+            {"text": payload.text, "steering": True},
+            receipt=receipt,
+            run_id=payload.target_run_id,
+        )
+        self._call(
+            "turn/steer",
+            {
+                "threadId": self.thread_id,
+                "expectedTurnId": self._active_turn_id,
+                "input": [{"type": "text", "text": payload.text}],
+            },
+        )
 
     def _cmd_interrupt(self, receipt: str, payload: InterruptPayload) -> None:
         self._check_epoch_and_run(payload.worker_epoch, payload.target_run_id)
         if self._active_turn_id and payload.provider_turn_id != self._active_turn_id:
-            raise AdapterProtocolError("STALE_TURN_TARGET", "Interrupt turn_id does not match active turn")
+            raise AdapterProtocolError(
+                "STALE_TURN_TARGET", "Interrupt turn_id does not match active turn"
+            )
         self._interrupted_run_id = payload.target_run_id
-        self._pending_interrupt = (receipt, payload.target_run_id, payload.provider_turn_id, payload.worker_epoch)
+        self._pending_interrupt = (
+            receipt,
+            payload.target_run_id,
+            payload.provider_turn_id,
+            payload.worker_epoch,
+        )
         if self._active_turn_id:
-            self._call("turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id})
+            self._call(
+                "turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id}
+            )
 
     def _cmd_approval(self, receipt: str, payload: ApprovalPayload) -> None:
         req = self._validate_approval_claim(payload)
@@ -149,9 +206,13 @@ class CodexAdapter(BaseProviderAdapter):
 
     def _cmd_next_turn_settings(self, receipt: str, raw: dict[str, Any], expected_rev: int) -> None:
         if expected_rev != self._settings_revision:
-            raise AdapterProtocolError("STALE_SETTINGS_REVISION", "Settings revision does not match")
+            raise AdapterProtocolError(
+                "STALE_SETTINGS_REVISION", "Settings revision does not match"
+            )
         if not self._ready or self._active_run_id:
-            raise AdapterProtocolError("SESSION_NOT_READY", "Codex settings require an idle session")
+            raise AdapterProtocolError(
+                "SESSION_NOT_READY", "Codex settings require an idle session"
+            )
         selected = validate_settings(raw, "codex")
         if not selected:
             raise AdapterProtocolError("INVALID_SETTINGS", "No settings supplied")
@@ -168,7 +229,11 @@ class CodexAdapter(BaseProviderAdapter):
         self._pending_updates["next_settings_receipt"] = receipt
         self._emit_event(
             "notice",
-            {"status": "pending_next_turn", "next_settings": dict(self._next_settings), "receipt": receipt},
+            {
+                "status": "pending_next_turn",
+                "next_settings": dict(self._next_settings),
+                "receipt": receipt,
+            },
             receipt=receipt,
         )
 
@@ -178,7 +243,9 @@ class CodexAdapter(BaseProviderAdapter):
             raise AdapterProtocolError("STALE_WORKER_EPOCH", "Stop worker_epoch is stale")
         if self._active_run_id and self._active_turn_id:
             self._interrupted_run_id = self._active_run_id
-            self._call("turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id})
+            self._call(
+                "turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id}
+            )
         self._pending_updates["stop_requested"] = True
 
     def receive(self, frame: Mapping[str, Any], fence: SessionFence) -> AdapterTransition:
@@ -190,8 +257,13 @@ class CodexAdapter(BaseProviderAdapter):
             self._emit_unknown_notification("foreign_thread_event")
             return self._finish_transition()
         turn_id = params.get("turnId") or (params.get("turn") or {}).get("id")
-        if turn_id and (turn_id in self._closed_turns or (self._active_turn_id and turn_id != self._active_turn_id)):
-            self._emit_event("notice", {"diagnostic": "late_turn_event", "turn_id": turn_id, "method": method})
+        if turn_id and (
+            turn_id in self._closed_turns
+            or (self._active_turn_id and turn_id != self._active_turn_id)
+        ):
+            self._emit_event(
+                "notice", {"diagnostic": "late_turn_event", "turn_id": turn_id, "method": method}
+            )
             return self._finish_transition()
         if "id" in frame and method:
             self._handle_server_request(frame, method, params)
@@ -201,14 +273,22 @@ class CodexAdapter(BaseProviderAdapter):
             self._handle_notification(method, params)
         return self._finish_transition()
 
-    def _handle_server_request(self, frame: Mapping[str, Any], method: str, params: dict[str, Any]) -> None:
+    def _handle_server_request(
+        self, frame: Mapping[str, Any], method: str, params: dict[str, Any]
+    ) -> None:
         req_id = str(frame["id"])
         if method not in _CODEX_APPROVAL_METHODS or not self._active_run_id:
-            self._emit_wire({"id": frame["id"], "error": {"code": -32601, "message": "Unsupported request"}})
+            self._emit_wire(
+                {"id": frame["id"], "error": {"code": -32601, "message": "Unsupported request"}}
+            )
             self._emit_unknown_request(method or "unknown", req_id)
             return
-        options = params.get("availableDecisions", ["accept", "acceptForSession", "decline", "cancel"])
-        self._register_approval(req_id, method, params, frame, options=options if isinstance(options, list) else [])
+        options = params.get(
+            "availableDecisions", ["accept", "acceptForSession", "decline", "cancel"]
+        )
+        self._register_approval(
+            req_id, method, params, frame, options=options if isinstance(options, list) else []
+        )
 
     def _handle_rpc_response(self, frame: Mapping[str, Any]) -> None:
         tag = self._calls.pop(frame.get("id"), "")
@@ -216,10 +296,14 @@ class CodexAdapter(BaseProviderAdapter):
             return
         if tag == "turn/interrupt":
             return
-        if tag == "turn/start" and (not self._active_run_id or frame.get("id") != self._turn_start_call_id):
+        if tag == "turn/start" and (
+            not self._active_run_id or frame.get("id") != self._turn_start_call_id
+        ):
             return
         if "error" in frame:
-            self._handle_rpc_error(tag, str((frame.get("error") or {}).get("message", "Native RPC failed")))
+            self._handle_rpc_error(
+                tag, str((frame.get("error") or {}).get("message", "Native RPC failed"))
+            )
             return
         self._handle_rpc_success(tag, frame.get("result") or {})
 
@@ -255,8 +339,13 @@ class CodexAdapter(BaseProviderAdapter):
             self._pending_updates["native_thread"] = self.thread_id
             for key in ("model", "reasoningEffort"):
                 if key in data:
-                    self._confirmed_settings["effort" if key == "reasoningEffort" else key] = data[key]
-            self._emit_event("settings", {"actual": dict(self._confirmed_settings), "revision": self._settings_revision})
+                    self._confirmed_settings["effort" if key == "reasoningEffort" else key] = data[
+                        key
+                    ]
+            self._emit_event(
+                "settings",
+                {"actual": dict(self._confirmed_settings), "revision": self._settings_revision},
+            )
         elif tag == "config/read":
             cfg = data.get("config", {})
             if isinstance(cfg.get("model"), str):
@@ -293,13 +382,21 @@ class CodexAdapter(BaseProviderAdapter):
                     receipt=self._turn_settings_receipt,
                 )
         if self._interrupted_run_id == self._active_run_id and self._active_turn_id:
-            self._call("turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id})
+            self._call(
+                "turn/interrupt", {"threadId": self.thread_id, "turnId": self._active_turn_id}
+            )
 
     def _handle_notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "item/agentMessage/delta":
-            self._emit_event("delta", {"text": params.get("delta", ""), "item_id": params.get("itemId", "")}, receipt=self._active_run_id)
+            self._emit_event(
+                "delta",
+                {"text": params.get("delta", ""), "item_id": params.get("itemId", "")},
+                receipt=self._active_run_id,
+            )
         elif method in {"item/reasoning/summaryTextDelta", "item/reasoning/textDelta"}:
-            self._emit_event("reasoning.delta", {"text": params.get("delta", "")}, receipt=self._active_run_id)
+            self._emit_event(
+                "reasoning.delta", {"text": params.get("delta", "")}, receipt=self._active_run_id
+            )
         elif method in {"item/started", "item/completed"}:
             self._handle_item_notification(method, params)
         elif method == "serverRequest/resolved":
@@ -309,26 +406,40 @@ class CodexAdapter(BaseProviderAdapter):
         elif method == "turn/completed":
             self._handle_turn_completed(params)
         elif method == "error":
-            self._emit_event("error", {"text": (params.get("error") or {}).get("message", "Native error")}, receipt=self._active_run_id)
+            self._emit_event(
+                "error",
+                {"text": (params.get("error") or {}).get("message", "Native error")},
+                receipt=self._active_run_id,
+            )
         else:
             self._emit_unknown_notification(method or "unknown")
 
     def _handle_item_notification(self, method: str, params: dict[str, Any]) -> None:
         item = params.get("item", {})
         if item.get("type") == "agentMessage" and method == "item/completed" and item.get("text"):
-            self._emit_event("message", {"text": item["text"], "item_id": item.get("id", "")}, receipt=self._active_run_id)
+            self._emit_event(
+                "message",
+                {"text": item["text"], "item_id": item.get("id", "")},
+                receipt=self._active_run_id,
+            )
 
     def _handle_server_resolved(self, params: dict[str, Any]) -> None:
         key = str(params.get("requestId", ""))
         if key in self._pending_approvals:
             self._pending_approvals.pop(key)
-            self._emit_event("approval.resolved", {"request_id": key, "decision": "resolved", "receipt": self._active_run_id}, receipt=self._active_run_id)
+            self._emit_event(
+                "approval.resolved",
+                {"request_id": key, "decision": "resolved", "receipt": self._active_run_id},
+                receipt=self._active_run_id,
+            )
 
     def _handle_turn_completed(self, params: dict[str, Any]) -> None:
         turn = params.get("turn", {})
         if not self._active_turn_id:
             self._active_turn_id = turn.get("id")
-        status = {"failed": "error", "interrupted": "interrupted"}.get(turn.get("status"), "completed")
+        status = {"failed": "error", "interrupted": "interrupted"}.get(
+            turn.get("status"), "completed"
+        )
         err = (turn.get("error") or {}).get("message", "")
         self._settle_run(status, err)
 
@@ -337,10 +448,17 @@ class CodexAdapter(BaseProviderAdapter):
         return self._finish_transition()
 
 
-def _validate_codex_approval_answer(method: str, raw: Mapping[str, Any], answer: Any) -> dict[str, Any]:
+def _validate_codex_approval_answer(
+    method: str, raw: Mapping[str, Any], answer: Any
+) -> dict[str, Any]:
     params = raw.get("params", {})
     if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
-        choices = params.get("availableDecisions") or ("accept", "acceptForSession", "decline", "cancel")
+        choices = params.get("availableDecisions") or (
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel",
+        )
         if answer not in choices:
             raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Invalid Codex approval decision")
         return {"decision": copy.deepcopy(answer)}
@@ -348,13 +466,21 @@ def _validate_codex_approval_answer(method: str, raw: Mapping[str, Any], answer:
         return _validate_codex_permissions(params.get("permissions", {}), answer)
     if method == "mcpServer/elicitation/request":
         return _validate_codex_elicitation(params.get("requestedSchema"), answer)
-    raise AdapterProtocolError("UNSUPPORTED_APPROVAL", f"Unsupported Codex approval method: {method}")
+    raise AdapterProtocolError(
+        "UNSUPPORTED_APPROVAL", f"Unsupported Codex approval method: {method}"
+    )
 
 
 def _validate_codex_permissions(requested: Any, answer: Any) -> dict[str, Any]:
-    if not isinstance(answer, dict) or set(answer) - {"permissions", "scope", "strictAutoReview"} or "permissions" not in answer:
+    if (
+        not isinstance(answer, dict)
+        or set(answer) - {"permissions", "scope", "strictAutoReview"}
+        or "permissions" not in answer
+    ):
         raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Invalid Codex permission payload")
-    if not isinstance(answer["permissions"], dict) or not _is_subset(answer["permissions"], requested):
+    if not isinstance(answer["permissions"], dict) or not _is_subset(
+        answer["permissions"], requested
+    ):
         raise AdapterProtocolError("APPROVAL_SCOPE_EXCEEDED", "Permissions exceed observed request")
     if answer.get("scope", "turn") not in {"turn", "session"}:
         raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Invalid permission scope")
@@ -364,19 +490,27 @@ def _validate_codex_permissions(requested: Any, answer: Any) -> dict[str, Any]:
 
 
 def _validate_codex_elicitation(schema: Any, answer: Any) -> dict[str, Any]:
-    if not isinstance(answer, dict) or set(answer) - {"action", "content"} or answer.get("action") not in {"accept", "decline", "cancel"}:
+    if (
+        not isinstance(answer, dict)
+        or set(answer) - {"action", "content"}
+        or answer.get("action") not in {"accept", "decline", "cancel"}
+    ):
         raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Invalid elicitation answer")
     if answer["action"] == "accept" and schema:
         try:
             jsonschema.validate(answer.get("content"), schema)
         except jsonschema.ValidationError as exc:
-            raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Answer fails observed schema") from exc
+            raise AdapterProtocolError(
+                "INVALID_APPROVAL_ANSWER", "Answer fails observed schema"
+            ) from exc
     return copy.deepcopy(answer)
 
 
 def _is_subset(value: Any, observed: Any) -> bool:
     if isinstance(value, dict):
-        return isinstance(observed, dict) and all(k in observed and _is_subset(v, observed[k]) for k, v in value.items())
+        return isinstance(observed, dict) and all(
+            k in observed and _is_subset(v, observed[k]) for k, v in value.items()
+        )
     if isinstance(value, list):
         return isinstance(observed, list) and all(v in observed for v in value)
     return value == observed or value is None or value is False

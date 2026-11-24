@@ -727,7 +727,9 @@ class Protocol:
 
     def _codex_turn_start(self, data):
         self.turn = data["turn"]["id"]
-        self._notify_accept(self.active, native_thread_id=self.thread or None, native_turn_id=self.turn)
+        self._notify_accept(
+            self.active, native_thread_id=self.thread or None, native_turn_id=self.turn
+        )
         # A matching start reply is authoritative even if a native
         # implementation reuses a turn identifier.
         with contextlib.suppress(ValueError):
@@ -739,9 +741,7 @@ class Protocol:
             self.publish_settings()
             if self.turn_settings_receipt:
                 self.emit("settings", receipt=self.turn_settings_receipt, **self.settings)
-                self.emit(
-                    "settings_pending", receipt=self.turn_settings_receipt, cleared=True
-                )
+                self.emit("settings_pending", receipt=self.turn_settings_receipt, cleared=True)
                 self.next_settings_receipt = None
                 self.save_settings()
             self.emit("settings_pending", cleared=True)
@@ -750,7 +750,9 @@ class Protocol:
 
     def _codex_turn_started(self, params):
         self.turn = params["turn"]["id"]
-        self._notify_accept(self.active, native_thread_id=self.thread or None, native_turn_id=self.turn)
+        self._notify_accept(
+            self.active, native_thread_id=self.thread or None, native_turn_id=self.turn
+        )
 
     def pi(self, m):
         if self.operation_response(m):
@@ -1178,10 +1180,11 @@ class _CaptureV2Manager:
             "SELECT workspace_version, provider_instance_id FROM sessions WHERE id=?",
             (self.sid,),
         ).fetchone()
-        ws_ver = int(sess["workspace_version"]) if sess else int(self.row.get("workspace_version", 0))
-        pid = (
-            (sess["provider_instance_id"] if sess else self.row.get("provider_instance_id"))
-            or ("0" * 32)
+        ws_ver = (
+            int(sess["workspace_version"]) if sess else int(self.row.get("workspace_version", 0))
+        )
+        pid = (sess["provider_instance_id"] if sess else self.row.get("provider_instance_id")) or (
+            "0" * 32
         )
         attempt_id = uuid.uuid4().hex
         now_ts = time.time()
@@ -1415,10 +1418,16 @@ class _AdapterProtocolBridge:
         self.settings_busy = bool(self.adapter._settings_busy)
         self.settings_deadline = float(getattr(self.adapter, "_settings_deadline", 0.0))
         if self.active and self._on_accept:
-            prompt_pending = any(tag in ("prompt", "turn/start") for tag in self.adapter._calls.values())
-            if not prompt_pending or self.turn or any(
-                ev["kind"] in ("delta", "message", "reasoning.delta", "done")
-                for ev in transition.events
+            prompt_pending = any(
+                tag in ("prompt", "turn/start") for tag in self.adapter._calls.values()
+            )
+            if (
+                not prompt_pending
+                or self.turn
+                or any(
+                    ev["kind"] in ("delta", "message", "reasoning.delta", "done")
+                    for ev in transition.events
+                )
             ):
                 self._on_accept(
                     self.active,
@@ -1472,7 +1481,14 @@ class _AdapterProtocolBridge:
     def start(self):
         saved = json.loads(self.row.get("chat_settings", "{}"))
         next_sel = saved.get("next") or {}
-        settings = {"model": next_sel["model"], "options": {k: v for k, v in next_sel.items() if k != "model"}} if next_sel.get("model") else None
+        settings = (
+            {
+                "model": next_sel["model"],
+                "options": {k: v for k, v in next_sel.items() if k != "model"},
+            }
+            if next_sel.get("model")
+            else None
+        )
         self._apply(self.adapter.initialize(self.fence, settings=settings))
 
     def prompt(self, receipt, payload):
@@ -1564,7 +1580,9 @@ class _AdapterProtocolBridge:
         self._apply(self.adapter.command(self._cmd(receipt, cmd_payload)))
 
     def command(self, receipt, payload):
-        raise ValueError("Adapter v2 command dispatch is unsupported for " + str(payload.get("name")))
+        raise ValueError(
+            "Adapter v2 command dispatch is unsupported for " + str(payload.get("name"))
+        )
 
     def receive(self, message):
         self._apply(self.adapter.receive(message, self.fence))
@@ -1612,11 +1630,7 @@ def _create_protocol(
     flush,
     set_size,
 ):
-    on_accept = (
-        (lambda rec, **kw: v2.on_accept(db, rec, **kw))
-        if flags.native_capture_v2
-        else None
-    )
+    on_accept = (lambda rec, **kw: v2.on_accept(db, rec, **kw)) if flags.native_capture_v2 else None
     on_terminal = (
         (lambda rec, st, txt: v2.on_terminal(db, flush, rec, st, txt, set_size))
         if flags.native_capture_v2

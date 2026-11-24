@@ -137,7 +137,9 @@ class ProviderInstanceRegistry:
         """Return persisted instance ID if verifiable, otherwise 'legacy_unresolved'."""
         instance_id = session_row.get("provider_instance_id")
         if isinstance(instance_id, str) and len(instance_id) == 32:
-            if any(row.get("provider_instance_id") == instance_id for row in self._records.values()):
+            if any(
+                row.get("provider_instance_id") == instance_id for row in self._records.values()
+            ):
                 return instance_id
         return LEGACY_UNRESOLVED_INSTANCE_ID
 

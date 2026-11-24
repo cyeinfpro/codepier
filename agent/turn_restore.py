@@ -19,7 +19,13 @@ from shared.native_cli import append_control_tx, identifier, immediate
 from shared.util import DevError, fsync_directory
 
 RESTORE_MODES = frozenset({"native_rewind", "replacement_session", "files_only", "unsupported"})
-_GIT_ENV_STRIP = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+_GIT_ENV_STRIP = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+)
 
 
 def _clean_git_env() -> dict[str, str]:
@@ -71,7 +77,9 @@ def create_hidden_git_checkpoint(
             add_args.append(f":(exclude){pattern}")
         _run_git(root, add_args, env=env)
         tree_oid = _run_git(root, ["write-tree"], env=env)
-        parent_args = ["-p", head.stdout.strip()] if head.returncode == 0 and head.stdout.strip() else []
+        parent_args = (
+            ["-p", head.stdout.strip()] if head.returncode == 0 and head.stdout.strip() else []
+        )
         commit_oid = _run_git(
             root,
             ["commit-tree", tree_oid, *parent_args, "-m", f"codepier checkpoint {checkpoint_id}"],
@@ -131,9 +139,13 @@ class TurnRestoreCoordinator:
             raise DevError("RESTORE_UNSUPPORTED", "当前会话不支持所选回退模式", 409)
         if provider_capabilities is None:
             return
-        if mode == "native_rewind" and not provider_capabilities.get("conversation_rollback", {}).get("available"):
+        if mode == "native_rewind" and not provider_capabilities.get(
+            "conversation_rollback", {}
+        ).get("available"):
             raise DevError("RESTORE_UNSUPPORTED", "Provider 不支持原生回退", 409)
-        if mode == "replacement_session" and not provider_capabilities.get("context_import", {}).get("available"):
+        if mode == "replacement_session" and not provider_capabilities.get(
+            "context_import", {}
+        ).get("available"):
             raise DevError("RESTORE_UNSUPPORTED", "Provider 不支持替代会话承接", 409)
 
     def _load_journal(self, conn: sqlite3.Connection, restore_id: str) -> sqlite3.Row:
@@ -222,7 +234,9 @@ class TurnRestoreCoordinator:
         """Execute native rewind or prepare replacement thread before modifying files."""
         journal = self._load_journal(conn, restore_id)
         if journal["stage"] != "prepared":
-            raise DevError("RESTORE_INVALID_STAGE", f"当前阶段 {journal['stage']} 无法执行会话步骤", 409)
+            raise DevError(
+                "RESTORE_INVALID_STAGE", f"当前阶段 {journal['stage']} 无法执行会话步骤", 409
+            )
         now_ts = time.time() if now is None else now
         mode = journal["mode"]
         results = json.loads(journal["results_json"] or "{}")
@@ -253,7 +267,9 @@ class TurnRestoreCoordinator:
 
         if provider_fn is None:
             raise DevError("RESTORE_UNSUPPORTED", "暂未接入 Provider 原生回退", 409)
-        return self._apply_native_rewind(conn, journal, provider_fn, target_native_thread_id, now_ts)
+        return self._apply_native_rewind(
+            conn, journal, provider_fn, target_native_thread_id, now_ts
+        )
 
     def _apply_native_rewind(
         self,
@@ -309,8 +325,14 @@ class TurnRestoreCoordinator:
                 ),
             )
             if changed.rowcount != 1:
-                raise DevError("RESTORE_INVALID_STAGE", "Provider 回退结果需要对账，未恢复文件", 409)
-        return {"restore_id": restore_id, "stage": "provider_rewind_applied", "mode": journal["mode"]}
+                raise DevError(
+                    "RESTORE_INVALID_STAGE", "Provider 回退结果需要对账，未恢复文件", 409
+                )
+        return {
+            "restore_id": restore_id,
+            "stage": "provider_rewind_applied",
+            "mode": journal["mode"],
+        }
 
     def _restore_single_file(
         self,
@@ -345,7 +367,12 @@ class TurnRestoreCoordinator:
                 "sha256": hashlib.sha256(raw).hexdigest(),
             }
         except OSError as exc:
-            return {"path": rel, "status": "failed", "error_code": "FILE_WRITE_FAILED", "detail": str(exc)}
+            return {
+                "path": rel,
+                "status": "failed",
+                "error_code": "FILE_WRITE_FAILED",
+                "detail": str(exc),
+            }
 
     def restore_files_checked(
         self,

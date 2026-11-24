@@ -61,16 +61,21 @@ def _windows_smoke_report() -> dict[str, object]:
             ev.get("kind") == "stdout_line" for ev in events
         ):
             events.extend(transport.drain_events(time.monotonic() + 0.5))
-        transport.write((json.dumps({"hello": "世界😀", "quit": True}, ensure_ascii=False) + "\n").encode("utf-8"), "r" * 32)
+        transport.write(
+            (json.dumps({"hello": "世界😀", "quit": True}, ensure_ascii=False) + "\n").encode(
+                "utf-8"
+            ),
+            "r" * 32,
+        )
         deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not any(
-            ev.get("kind") == "eof" for ev in events
-        ):
+        while time.monotonic() < deadline and not any(ev.get("kind") == "eof" for ev in events):
             events.extend(transport.drain_events(time.monotonic() + 0.5))
         pid = transport._proc.pid if transport._proc else 0
         exit_state = transport.stop_and_drain(timeout=3.0)
         return {
-            "status": "PASSED_WINDOWS_PIPE_SMOKE" if exit_state.output_complete else "FAILED_WINDOWS_PIPE_SMOKE",
+            "status": "PASSED_WINDOWS_PIPE_SMOKE"
+            if exit_state.output_complete
+            else "FAILED_WINDOWS_PIPE_SMOKE",
             "os": os.name,
             "platform": sys.platform,
             "stage": "Win-1",

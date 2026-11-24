@@ -489,7 +489,9 @@ class NativeCLI:
             raise DevError("RESTORE_UNSUPPORTED", "暂未接入 Provider 原生回退", 409)
         resolved_pid = self.instance_registry.resolve_legacy_session(dict(row))
         pid = ("0" * 32) if resolved_pid == "legacy_unresolved" else resolved_pid
-        caps = describe_provider_capabilities(row["provider"], provider_instance_id=pid).model_dump()
+        caps = describe_provider_capabilities(
+            row["provider"], provider_instance_id=pid
+        ).model_dump()
         claims = [Claim("agent", "path", str(root), True, "process")]
         with closing(database(self.directory)) as conn:
             prep = self.restore_coordinator.prepare_restore(

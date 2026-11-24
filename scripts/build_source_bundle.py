@@ -311,13 +311,17 @@ def include(relative, *, public=False):
     if relative.suffix.lower() == ".jsonl":
         return (
             relative.parts[:3] == ("tests", "fixtures", "native")
-            and relative.parts[3:-1] in {
+            and relative.parts[3:-1]
+            in {
                 ("claude", "v1", "stream_and_block_repair"),
                 ("codex", "v1", "approval_and_next_turn_settings"),
                 ("pi", "v1", "basic_turn"),
             }
-            and relative.name in {
-                "events.expected.jsonl", "wire.in.jsonl", "wire.out.expected.jsonl",
+            and relative.name
+            in {
+                "events.expected.jsonl",
+                "wire.in.jsonl",
+                "wire.out.expected.jsonl",
             }
         )
     if relative.as_posix() in RETIRED_WEB_ASSETS:

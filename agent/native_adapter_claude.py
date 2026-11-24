@@ -39,11 +39,19 @@ class ClaudeAdapter(BaseProviderAdapter):
         self._failure: str | None = None
         self._had_text = False
 
-    def _call(self, method: str, params: dict[str, Any] | None = None, tag: str | None = None) -> str:
+    def _call(
+        self, method: str, params: dict[str, Any] | None = None, tag: str | None = None
+    ) -> str:
         self._call_serial += 1
         key = f"claude-{self._call_serial}"
         self._calls[key] = f"{method}:{tag or ''}"
-        self._emit_wire({"type": "control_request", "request_id": key, "request": {"subtype": method, **(params or {})}})
+        self._emit_wire(
+            {
+                "type": "control_request",
+                "request_id": key,
+                "request": {"subtype": method, **(params or {})},
+            }
+        )
         return key
 
     def initialize(
@@ -63,7 +71,11 @@ class ClaudeAdapter(BaseProviderAdapter):
         payload = cmd.payload
         action = payload.action
         if action in {"start_session", "resume_session"}:
-            self._emit_event("session", {"status": "ready" if self._ready else "initializing"}, receipt=cmd.receipt)
+            self._emit_event(
+                "session",
+                {"status": "ready" if self._ready else "initializing"},
+                receipt=cmd.receipt,
+            )
         elif action == "send":
             self._cmd_send(cmd.receipt, payload)
         elif action == "steer":
@@ -73,9 +85,13 @@ class ClaudeAdapter(BaseProviderAdapter):
         elif action == "answer_approval":
             self._cmd_approval(cmd.receipt, payload)
         elif action == "change_model":
-            self._cmd_change_model(cmd.receipt, payload.model, payload.options, payload.expected_settings_revision)
+            self._cmd_change_model(
+                cmd.receipt, payload.model, payload.options, payload.expected_settings_revision
+            )
         elif action == "change_options":
-            self._cmd_change_options(cmd.receipt, dict(payload.options), payload.expected_settings_revision)
+            self._cmd_change_options(
+                cmd.receipt, dict(payload.options), payload.expected_settings_revision
+            )
         elif action == "stop_session":
             self._cmd_stop(payload.worker_epoch)
         else:
@@ -86,7 +102,11 @@ class ClaudeAdapter(BaseProviderAdapter):
         if not self._ready or self._active_run_id or self._settings_busy:
             raise AdapterProtocolError("SESSION_NOT_READY", "Claude session is not ready for send")
         effective, rev = self._resolve_send_selection(payload)
-        if payload.selection_mode == "explicit" and effective.get("model") and effective["model"] != self._confirmed_settings.get("model"):
+        if (
+            payload.selection_mode == "explicit"
+            and effective.get("model")
+            and effective["model"] != self._confirmed_settings.get("model")
+        ):
             self._call("set_model", {"model": effective["model"]}, tag="explicit")
         self._active_run_id = receipt
         self._active_turn_id = receipt
@@ -97,11 +117,20 @@ class ClaudeAdapter(BaseProviderAdapter):
         self._pending_updates["selection_mode"] = payload.selection_mode
         self._emit_event(
             "command.claimed",
-            {"receipt": receipt, "attempt_id": receipt, "provider_instance_id": self.provider_instance_id},
+            {
+                "receipt": receipt,
+                "attempt_id": receipt,
+                "provider_instance_id": self.provider_instance_id,
+            },
             receipt=receipt,
             run_id=receipt,
         )
-        self._emit_event("user", {"text": payload.text, "effective_selection": effective}, receipt=receipt, run_id=receipt)
+        self._emit_event(
+            "user",
+            {"text": payload.text, "effective_selection": effective},
+            receipt=receipt,
+            run_id=receipt,
+        )
         self._emit_wire(
             {
                 "type": "user",
@@ -115,7 +144,12 @@ class ClaudeAdapter(BaseProviderAdapter):
     def _cmd_interrupt(self, receipt: str, payload: InterruptPayload) -> None:
         self._check_epoch_and_run(payload.worker_epoch, payload.target_run_id)
         self._interrupted_run_id = payload.target_run_id
-        self._pending_interrupt = (receipt, payload.target_run_id, payload.provider_turn_id, payload.worker_epoch)
+        self._pending_interrupt = (
+            receipt,
+            payload.target_run_id,
+            payload.provider_turn_id,
+            payload.worker_epoch,
+        )
         self._call("interrupt", tag=receipt)
 
     def _cmd_approval(self, receipt: str, payload: ApprovalPayload) -> None:
@@ -126,7 +160,11 @@ class ClaudeAdapter(BaseProviderAdapter):
         self._emit_wire(
             {
                 "type": "control_response",
-                "response": {"subtype": "success", "request_id": payload.observed_request_id, "response": response},
+                "response": {
+                    "subtype": "success",
+                    "request_id": payload.observed_request_id,
+                    "response": response,
+                },
             }
         )
         self._emit_event(
@@ -140,12 +178,18 @@ class ClaudeAdapter(BaseProviderAdapter):
         self, receipt: str, model: str, options: dict[str, Any], expected_rev: int
     ) -> None:
         if expected_rev != self._settings_revision:
-            raise AdapterProtocolError("STALE_SETTINGS_REVISION", "Settings revision does not match")
+            raise AdapterProtocolError(
+                "STALE_SETTINGS_REVISION", "Settings revision does not match"
+            )
         if not self._ready or self._active_run_id or self._settings_busy:
-            raise AdapterProtocolError("SESSION_NOT_READY", "Claude settings require an idle session")
+            raise AdapterProtocolError(
+                "SESSION_NOT_READY", "Claude settings require an idle session"
+            )
         patch = validate_settings({"model": model, **options}, "claude")
         if "effort" in patch and patch["effort"] != self._confirmed_settings.get("effort"):
-            raise AdapterProtocolError("UNSUPPORTED_OPTION", "Claude runtime effort change is unsupported")
+            raise AdapterProtocolError(
+                "UNSUPPORTED_OPTION", "Claude runtime effort change is unsupported"
+            )
         self._settings_busy = True
         self._settings_receipt = receipt
         self._settings_generation += 1
@@ -153,14 +197,16 @@ class ClaudeAdapter(BaseProviderAdapter):
         self._settings_deadline = self._clock() + 15.0
         self._call("set_model", {"model": patch["model"]}, tag=receipt)
 
-    def _cmd_change_options(
-        self, receipt: str, options: dict[str, Any], expected_rev: int
-    ) -> None:
+    def _cmd_change_options(self, receipt: str, options: dict[str, Any], expected_rev: int) -> None:
         if expected_rev != self._settings_revision:
-            raise AdapterProtocolError("STALE_SETTINGS_REVISION", "Settings revision does not match")
+            raise AdapterProtocolError(
+                "STALE_SETTINGS_REVISION", "Settings revision does not match"
+            )
         patch = validate_settings(options, "claude")
         if "effort" in patch and patch["effort"] != self._confirmed_settings.get("effort"):
-            raise AdapterProtocolError("UNSUPPORTED_OPTION", "Claude runtime effort change is unsupported")
+            raise AdapterProtocolError(
+                "UNSUPPORTED_OPTION", "Claude runtime effort change is unsupported"
+            )
         if "model" in patch:
             self._cmd_change_model(receipt, patch["model"], {}, expected_rev)
             return
@@ -213,14 +259,19 @@ class ClaudeAdapter(BaseProviderAdapter):
                 self._confirmed_settings["model"] = model["id"]
             if info.get("effort"):
                 self._confirmed_settings["effort"] = info["effort"]
-            self._emit_event("settings", {"actual": dict(self._confirmed_settings), "revision": self._settings_revision})
+            self._emit_event(
+                "settings",
+                {"actual": dict(self._confirmed_settings), "revision": self._settings_revision},
+            )
             self._emit_event("commands", {"commands": info.get("commands", [])})
         elif method == "set_model":
             self._handle_set_model_response(tag, ok)
         elif method == "interrupt":
             if not ok and self._pending_interrupt and self._pending_interrupt[0] == tag:
                 self._interrupted_run_id = None
-                self._emit_event("error", {"text": "Claude interrupt rejected"}, receipt=tag or None)
+                self._emit_event(
+                    "error", {"text": "Claude interrupt rejected"}, receipt=tag or None
+                )
 
     def _handle_set_model_response(self, receipt: str, ok: bool) -> None:
         if receipt == "explicit":
@@ -253,7 +304,11 @@ class ClaudeAdapter(BaseProviderAdapter):
             self._emit_wire(
                 {
                     "type": "control_response",
-                    "response": {"subtype": "error", "request_id": req_id, "error": "Unsupported control request"},
+                    "response": {
+                        "subtype": "error",
+                        "request_id": req_id,
+                        "error": "Unsupported control request",
+                    },
                 }
             )
             self._emit_unknown_request(str(subtype or "control_request"), req_id)
@@ -262,7 +317,11 @@ class ClaudeAdapter(BaseProviderAdapter):
             self._emit_wire(
                 {
                     "type": "control_response",
-                    "response": {"subtype": "success", "request_id": req_id, "response": {"behavior": "deny", "message": "No active run"}},
+                    "response": {
+                        "subtype": "success",
+                        "request_id": req_id,
+                        "response": {"behavior": "deny", "message": "No active run"},
+                    },
                 }
             )
             return
@@ -277,7 +336,11 @@ class ClaudeAdapter(BaseProviderAdapter):
         if req_id in self._pending_approvals:
             self._pending_approvals.pop(req_id)
             self._closed_requests.add(req_id)
-            self._emit_event("approval.resolved", {"request_id": req_id, "decision": "closed", "receipt": self._active_run_id}, receipt=self._active_run_id)
+            self._emit_event(
+                "approval.resolved",
+                {"request_id": req_id, "decision": "closed", "receipt": self._active_run_id},
+                receipt=self._active_run_id,
+            )
 
     def _handle_stream_event(self, frame: Mapping[str, Any]) -> None:
         event = frame.get("event") or {}
@@ -290,7 +353,11 @@ class ClaudeAdapter(BaseProviderAdapter):
     def _handle_assistant(self, frame: Mapping[str, Any]) -> None:
         content = (frame.get("message") or {}).get("content", [])
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ):
                 self._had_text = True
                 self._emit_event("message", {"text": block["text"]}, receipt=self._active_run_id)
 
@@ -304,9 +371,18 @@ class ClaudeAdapter(BaseProviderAdapter):
             self.thread_id = frame["session_id"]
             self._pending_updates["native_thread"] = self.thread_id
         failed = frame.get("is_error") is True or frame.get("subtype", "success") != "success"
-        if not failed and self._active_run_id and not self._had_text and isinstance(frame.get("result"), str):
+        if (
+            not failed
+            and self._active_run_id
+            and not self._had_text
+            and isinstance(frame.get("result"), str)
+        ):
             self._emit_event("message", {"text": frame["result"]}, receipt=self._active_run_id)
-        status = "interrupted" if self._interrupted_run_id == self._active_run_id else ("error" if failed else "completed")
+        status = (
+            "interrupted"
+            if self._interrupted_run_id == self._active_run_id
+            else ("error" if failed else "completed")
+        )
         self._settle_run(status)
 
     def expire(self, now_monotonic: float) -> AdapterTransition:
@@ -339,14 +415,22 @@ def _validate_claude_approval_answer(
         return {"behavior": "allow", "updatedInput": inputs}
     if method == "claude/question" and isinstance(answer, dict):
         questions = inputs.get("questions", [])
-        expected = {q.get("question") for q in questions if isinstance(q, dict) and q.get("question")}
+        expected = {
+            q.get("question") for q in questions if isinstance(q, dict) and q.get("question")
+        }
         if set(answer) != expected:
-            raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Answer must match observed questions")
+            raise AdapterProtocolError(
+                "INVALID_APPROVAL_ANSWER", "Answer must match observed questions"
+            )
         answers: dict[str, str] = {}
         for q in questions:
             qid = q["question"]
             vals = answer[qid]
-            if not isinstance(vals, list) or not vals or (not q.get("multiSelect") and len(vals) != 1):
+            if (
+                not isinstance(vals, list)
+                or not vals
+                or (not q.get("multiSelect") and len(vals) != 1)
+            ):
                 raise AdapterProtocolError("INVALID_APPROVAL_ANSWER", "Invalid question selection")
             answers[qid] = ", ".join(str(v) for v in vals)
         inputs["answers"] = answers

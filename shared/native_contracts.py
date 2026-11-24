@@ -131,10 +131,7 @@ def canonical_jcs(value: Any, *, _depth: int = 0) -> str:
             _jcs_string(k)
             items.append((k.encode("utf-16-be"), k, v))
         items.sort(key=lambda entry: entry[0])
-        parts = [
-            f"{_jcs_string(k)}:{canonical_jcs(v, _depth=_depth + 1)}"
-            for _, k, v in items
-        ]
+        parts = [f"{_jcs_string(k)}:{canonical_jcs(v, _depth=_depth + 1)}" for _, k, v in items]
         return "{" + ",".join(parts) + "}"
     raise ValueError(f"Unsupported JCS type: {type(value).__name__}")
 
@@ -191,9 +188,7 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _validate_schema_dict(
-    node: dict[str, Any], depth: int, pending: list[tuple[Any, int]]
-) -> None:
+def _validate_schema_dict(node: dict[str, Any], depth: int, pending: list[tuple[Any, int]]) -> None:
     if len(node) > 64:
         raise ValueError("options_schema object exceeds 64 keys")
     for key, val in node.items():
@@ -205,9 +200,7 @@ def _validate_schema_dict(
             pending.append((val, depth + 1))
 
 
-def _validate_schema_list(
-    node: list[Any], depth: int, pending: list[tuple[Any, int]]
-) -> None:
+def _validate_schema_list(node: list[Any], depth: int, pending: list[tuple[Any, int]]) -> None:
     if len(node) > 200:
         raise ValueError("options_schema list exceeds 200 entries")
     for item in node:
@@ -419,9 +412,7 @@ class ProviderCompletedBody(_StrictModel):
     receipt: str = Field(pattern=HEX32_PATTERN)
     attempt_id: str = Field(min_length=1, max_length=128)
     execution_state: Literal["completed", "failed", "interrupted", "uncertain"]
-    evidence_state: Literal[
-        "capture_pending", "unavailable", "not_requested", "frozen", "partial"
-    ]
+    evidence_state: Literal["capture_pending", "unavailable", "not_requested", "frozen", "partial"]
     error_code: str | None = Field(default=None, max_length=64)
 
 
