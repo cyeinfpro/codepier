@@ -1583,6 +1583,52 @@ class Runtime:
         return {"name": "operations_wait" if pending else "operations_get", "arguments": args}
 
     @iam.read_decision
+    def _render_operation_output(
+        self,
+        id,
+        row,
+        result,
+        data,
+        *,
+        pending,
+        include_result,
+        include_output,
+        limit,
+        offset,
+        unchanged,
+    ):
+        output, output_chars = self.outputs.read(
+            row, limit=limit, include_body=include_output, offset=offset
+        )
+        if offset is not None and offset > output_chars:
+            raise DevError("INVALID_ARGUMENTS", "output_offset exceeds the saved output length")
+        result["output_chars"] = output_chars
+        if include_output:
+            from shared.output_fidelity import output_page, output_next
+
+            start = output_chars - len(output) if offset is None else offset
+            evidence = data if include_result else (self.operation_result(row) or {}).get("data")
+            upstream = output_chars >= 131072 or bool(
+                isinstance(evidence, dict) and evidence.get("output_truncated")
+            )
+            if isinstance(evidence, dict):
+                for key in ("output_total_bytes", "output_total_sha256"):
+                    if key in evidence:
+                        result[key] = evidence[key]
+            output_page(result, output, output_chars, start=start, upstream=upstream)
+            output_next(result, operation_id=id, pending=pending)
+            if isinstance(data, dict) and "output" in data:
+                # Both receipt slots describe the same durable tail window.
+                output_page(data, output, output_chars, start=start, upstream=upstream)
+                output_next(data, operation_id=id, pending=pending)
+        else:
+            result.pop("output", None)
+            result["output_omitted"] = True
+            result["output_unchanged"] = unchanged
+            if isinstance(data, dict) and "output" in data:
+                data.pop("output")
+                data["output_omitted"] = True
+
     def operation(self, id: str, principal: Principal, view: dict | None = None):
         options = view or {}
         include_result = options.get("include_result", True)
@@ -1660,37 +1706,18 @@ class Runtime:
         else:
             result.pop("result", None)
             result["result_omitted"] = True
-        output, output_chars = self.outputs.read(
-            row, limit=limit, include_body=include_output, offset=offset
+        self._render_operation_output(
+            id,
+            row,
+            result,
+            data,
+            pending=pending,
+            include_result=include_result,
+            include_output=include_output,
+            limit=limit,
+            offset=offset,
+            unchanged=unchanged,
         )
-        if offset is not None and offset > output_chars:
-            raise DevError("INVALID_ARGUMENTS", "output_offset exceeds the saved output length")
-        result["output_chars"] = output_chars
-        if include_output:
-            from shared.output_fidelity import output_page, output_next
-
-            start = output_chars - len(output) if offset is None else offset
-            evidence = data if include_result else (self.operation_result(row) or {}).get("data")
-            upstream = output_chars >= 131072 or bool(
-                isinstance(evidence, dict) and evidence.get("output_truncated")
-            )
-            if isinstance(evidence, dict):
-                for key in ("output_total_bytes", "output_total_sha256"):
-                    if key in evidence:
-                        result[key] = evidence[key]
-            output_page(result, output, output_chars, start=start, upstream=upstream)
-            output_next(result, operation_id=id, pending=pending)
-            if isinstance(data, dict) and "output" in data:
-                # Both receipt slots describe the same durable tail window.
-                output_page(data, output, output_chars, start=start, upstream=upstream)
-                output_next(data, operation_id=id, pending=pending)
-        else:
-            result.pop("output", None)
-            result["output_omitted"] = True
-            result["output_unchanged"] = unchanged
-            if isinstance(data, dict) and "output" in data:
-                data.pop("output")
-                data["output_omitted"] = True
         for key in ("fingerprint", "idem", "payload", "journal_id"):
             result.pop(key, None)
         result.update(self.queue_annotations(row, principal))

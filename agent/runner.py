@@ -2570,6 +2570,12 @@ class Agent:
         allowed = task.get("projects", [])
         return "*" in allowed or project.get("alias") in allowed or project.get("id") in allowed
 
+    async def _guard_workload_launch(self, id, execution_project, full_access):
+        tool = self.integration_tool_names.get(id, "shell_exec" if full_access else "tasks_run")
+        await self.disk_call(self.integrations.control.guard, tool, execution_project)
+        if id in self.cancelled or self.stop_event.is_set():
+            raise DevError("CANCELLED", "Operation was cancelled before workload launch", 409)
+
     async def run_process(
         self,
         id,
@@ -2719,10 +2725,7 @@ class Agent:
                 raise DevError(
                     "ROOT_CHANGED", "Workspace mapping changed before workload launch", 409
                 )
-            tool = self.integration_tool_names.get(id, "shell_exec" if full_access else "tasks_run")
-            await self.disk_call(self.integrations.control.guard, tool, execution_project)
-            if id in self.cancelled or self.stop_event.is_set():
-                raise DevError("CANCELLED", "Operation was cancelled before workload launch", 409)
+            await self._guard_workload_launch(id, execution_project, full_access)
             if full_access:
                 from agent.shell import shell_denial
 
@@ -2789,6 +2792,15 @@ class Agent:
             command=plan.command,
             workspace_root="/workspace" if driver else None,
         )
+
+    async def _finish_stdout_capture(
+        self, id, process, process_event, append_output, decoder, output_filter
+    ):
+        process_event("process_stdout_eof", pid=process.pid)
+        await append_output(output_filter.feed(decoder.decode(b"", final=True), final=True))
+        log = getattr(self, "_execution_logs", {}).get(id)
+        if log is not None:
+            log.finish()
 
     async def _run_process_account(
         self,
@@ -2914,13 +2926,9 @@ class Agent:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
                 if not chunk:
-                    process_event("process_stdout_eof", pid=process.pid)
-                    await append_output(
-                        output_filter.feed(decoder.decode(b"", final=True), final=True)
+                    await self._finish_stdout_capture(
+                        id, process, process_event, append_output, decoder, output_filter
                     )
-                    log = getattr(self, "_execution_logs", {}).get(id)
-                    if log is not None:
-                        log.finish()
                     output_eof = True
                     return
                 # Fingerprint received pipe bytes before decoding/redaction/tail

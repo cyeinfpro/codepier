@@ -490,6 +490,47 @@ class NativeService:
         result = self._persist_sync_detailed(device, data)
         return None if result is None else (result["offsets"], result["changed"])
 
+    def _persist_output_chunks(self, db, chunks, offsets, deferred):
+        changed = False
+        used = None
+        for chunk in chunks:
+            sid = chunk.get("id") if isinstance(chunk, dict) else None
+            if sid not in offsets:
+                continue
+            state = self._chunk_blocked_state(db, sid, chunk)
+            if state in {"cleared", "deleted"}:
+                continue
+            try:
+                raw = base64.b64decode(chunk["data"], validate=True)
+                offset = chunk["offset"]
+                if type(offset) is not int or offset != offsets[sid] or not 0 < len(raw) <= 65536:
+                    continue
+                # Cache quota is explicit; withhold ACK so the Agent retains and retries data.
+                # The spool migration backfills a single counter; SQLite
+                # triggers keep it consistent with inserts, clears and rollback.
+                if used is None:
+                    used = db.execute(
+                        "SELECT bytes FROM native_output_quota WHERE singleton=1"
+                    ).fetchone()[0]
+                if used + len(raw) > TOTAL_QUOTA:
+                    db.execute(
+                        "UPDATE sessions SET error='HUB_CACHE_QUOTA: local Agent transcript retained; export/clear cache' WHERE id=?",
+                        (sid,),
+                    )
+                    deferred[sid] = "cache_quota"
+                    continue
+                inserted = db.execute(
+                    "INSERT OR IGNORE INTO output VALUES (?,?,?)", (sid, offset, raw)
+                )
+                if not inserted.rowcount:
+                    continue
+                offsets[sid] += len(raw)
+                used += len(raw)
+                changed = True
+            except (ValueError, KeyError, TypeError):
+                continue
+        return changed
+
     def _persist_sync_detailed(self, device, data):
         """Persist rows/chunks and classify every offered session.
 
@@ -641,47 +682,7 @@ class NativeService:
                     if isinstance(sid, str):
                         rejected[sid] = "invalid"
                     continue
-            used = None
-            for chunk in chunks:
-                sid = chunk.get("id") if isinstance(chunk, dict) else None
-                if sid not in offsets:
-                    continue
-                state = self._chunk_blocked_state(db, sid, chunk)
-                if state in {"cleared", "deleted"}:
-                    continue
-                try:
-                    raw = base64.b64decode(chunk["data"], validate=True)
-                    offset = chunk["offset"]
-                    if (
-                        type(offset) is not int
-                        or offset != offsets[sid]
-                        or not 0 < len(raw) <= 65536
-                    ):
-                        continue
-                    # Cache quota is explicit; withhold ACK so the Agent retains and retries data.
-                    # The spool migration backfills a single counter; SQLite
-                    # triggers keep it consistent with inserts, clears and rollback.
-                    if used is None:
-                        used = db.execute(
-                            "SELECT bytes FROM native_output_quota WHERE singleton=1"
-                        ).fetchone()[0]
-                    if used + len(raw) > TOTAL_QUOTA:
-                        db.execute(
-                            "UPDATE sessions SET error='HUB_CACHE_QUOTA: local Agent transcript retained; export/clear cache' WHERE id=?",
-                            (sid,),
-                        )
-                        deferred[sid] = "cache_quota"
-                        continue
-                    inserted = db.execute(
-                        "INSERT OR IGNORE INTO output VALUES (?,?,?)", (sid, offset, raw)
-                    )
-                    if not inserted.rowcount:
-                        continue
-                    offsets[sid] += len(raw)
-                    used += len(raw)
-                    changed = True
-                except (ValueError, KeyError, TypeError):
-                    continue
+            changed = self._persist_output_chunks(db, chunks, offsets, deferred) or changed
         if changed:
             self.revision += 1
             self._after_sync_persisted(rows, offsets)

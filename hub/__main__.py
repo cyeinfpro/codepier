@@ -68,6 +68,16 @@ def configure_storage(data_dir):
     os.environ.setdefault("SQLITE_TMPDIR", os.getenv("HUB_STATE_DIR") or os.environ["HUB_DATA_DIR"])
 
 
+def _restore_parser(sub):
+    restore = sub.add_parser("restore", help="验证备份，或将其恢复到全新的数据目录")
+    restore.add_argument("--backup", required=True, type=Path)
+    restore.add_argument("--keys", required=True, type=Path)
+    restore.add_argument("--scratch-dir", type=Path, help="解包和校验用的专用私有磁盘目录")
+    mode = restore.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--verify", action="store_true")
+    mode.add_argument("--output", type=Path)
+
+
 def main():
     parser = argparse.ArgumentParser(description="CodePier Hub")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -87,13 +97,7 @@ def main():
     backup = sub.add_parser("backup", help="校验并分别备份数据库和密钥")
     backup.add_argument("--output", required=True, type=Path)
     backup.add_argument("--keys-output", required=True, type=Path)
-    restore = sub.add_parser("restore", help="验证备份，或将其恢复到全新的数据目录")
-    restore.add_argument("--backup", required=True, type=Path)
-    restore.add_argument("--keys", required=True, type=Path)
-    restore.add_argument("--scratch-dir", type=Path, help="解包和校验用的专用私有磁盘目录")
-    mode = restore.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--verify", action="store_true")
-    mode.add_argument("--output", type=Path)
+    _restore_parser(sub)
     rekey = sub.add_parser(
         "rekey", help="离线轮换主密钥；保留私密备份，可恢复中断；运行中的 Hub 不允许轮换"
     )

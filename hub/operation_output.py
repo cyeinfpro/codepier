@@ -90,6 +90,13 @@ class OperationOutput:
                 else ""
             )
             return window(text), live["chars"]
+        count = self._saved_output_count(row, include_body, limit)
+        if count is not None:
+            return count
+        legacy = unseal(self.store, row.get("output") or "")
+        return window(legacy), len(legacy)
+
+    def _saved_output_count(self, row, include_body, limit):
         pointer = row.get("output")
         if not include_body and is_archive_pointer(pointer):
             if pointer != f"archive:v1:{row['id']}:output":
@@ -107,8 +114,6 @@ class OperationOutput:
                 if row.get("history_pruned_at") is not None:
                     chars = 0
                 return ("" if include_body else None), chars
-        legacy = unseal(self.store, row.get("output") or "")
-        return window(legacy), len(legacy)
 
     def receive(self, identifier, data):
         """Commit each accepted output before publishing its availability.

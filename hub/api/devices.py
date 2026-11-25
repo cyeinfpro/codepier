@@ -15,6 +15,17 @@ from shared.util import DevError, VERSION, normalize_url
 from hub.api.models import DeviceCreate, DeviceUpdate
 
 
+def _visible_latest_action(runtime, principal, latest):
+    if latest:
+        try:
+            runtime.authorize_loaded_operation_row(latest, principal)
+        except DevError:
+            latest = None
+        else:
+            latest = {k: latest[k] for k in ("id", "tool", "state", "created", "updated", "error")}
+    return latest
+
+
 @iam.read_decision
 def device_rows(store, runtime, principal):
     principal = iam.live_principal(store, principal)
@@ -73,16 +84,7 @@ def device_rows(store, runtime, principal):
         actions = info.get("device_actions") if isinstance(info.get("device_actions"), list) else []
         actions = sorted(set(actions) & DEVICE_ACTIONS)
         version = str(info.get("version") or management.get("installed_version") or "")[:80]
-        latest = latest_actions.get(row["id"])
-        if latest:
-            try:
-                runtime.authorize_loaded_operation_row(latest, principal)
-            except DevError:
-                latest = None
-            else:
-                latest = {
-                    k: latest[k] for k in ("id", "tool", "state", "created", "updated", "error")
-                }
+        latest = _visible_latest_action(runtime, principal, latest_actions.get(row["id"]))
         reason = str(management.get("reason") or "")[:300]
         if row["online"] and not actions and not reason:
             reason = "当前 Agent 版本尚未声明一键管理能力，请重新执行一次安装命令完成基础升级"

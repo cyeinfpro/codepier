@@ -136,7 +136,7 @@ def _load_keys(archive_path):
         return {name: archive.read(name) for name in names}
 
 
-def restore_backup(backup_path, keys_path, *, destination=None, scratch_dir=None):
+def _checked_scratch_dir(scratch_dir):
     if scratch_dir is not None:
         scratch_dir = Path(scratch_dir).expanduser().resolve(strict=True)
         info = scratch_dir.stat()
@@ -144,6 +144,19 @@ def restore_backup(backup_path, keys_path, *, destination=None, scratch_dir=None
             hasattr(os, "geteuid") and (info.st_uid != os.geteuid() or info.st_mode & 0o077)
         ):
             raise RuntimeError("Hub restore scratch directory must be private and owned")
+    return scratch_dir
+
+
+def _check_restore_capacity(archive, stage):
+    database_bytes = archive.getinfo(DATABASE).file_size
+    if database_bytes > shutil.disk_usage(stage).free:
+        raise RuntimeError(
+            "Hub restore scratch space is too small; choose a private disk-backed --scratch-dir"
+        )
+
+
+def restore_backup(backup_path, keys_path, *, destination=None, scratch_dir=None):
+    scratch_dir = _checked_scratch_dir(scratch_dir)
     with TemporaryDirectory(prefix=".codepier-restore-", dir=scratch_dir) as temp:
         stage = Path(temp)
         database = stage / DATABASE
@@ -155,11 +168,7 @@ def restore_backup(backup_path, keys_path, *, destination=None, scratch_dir=None
             manifest = json.loads(archive.read(MANIFEST))
             if not isinstance(manifest, dict) or manifest.get("format") != 1:
                 raise RuntimeError("Unknown Hub backup manifest")
-            database_bytes = archive.getinfo(DATABASE).file_size
-            if database_bytes > shutil.disk_usage(stage).free:
-                raise RuntimeError(
-                    "Hub restore scratch space is too small; choose a private disk-backed --scratch-dir"
-                )
+            _check_restore_capacity(archive, stage)
             with archive.open(DATABASE) as source, database.open("xb") as stream:
                 shutil.copyfileobj(source, stream)
         keys = _load_keys(keys_path)

@@ -1030,6 +1030,17 @@ class LspPool:
             self.hits += 1
         return reused
 
+    @staticmethod
+    def _peer_still_alive(entry):
+        return entry.peer is None or entry.peer.is_alive()
+
+    async def _evict_query_peer(self, key, entry):
+        async with self._lock:
+            if self._entries.get(key) is entry:
+                self._entries.pop(key, None)
+                self.evictions += 1
+        await entry.close()
+
     async def run_query(
         self,
         agent,
@@ -1081,21 +1092,11 @@ class LspPool:
                             admission,
                         )
                     except DevError as exc:
-                        if exc.code in _FATAL_POOL_ERRORS or (
-                            entry.peer is not None and not entry.peer.is_alive()
-                        ):
-                            async with self._lock:
-                                if self._entries.get(key) is entry:
-                                    self._entries.pop(key, None)
-                                    self.evictions += 1
-                            await entry.close()
+                        if exc.code in _FATAL_POOL_ERRORS or not self._peer_still_alive(entry):
+                            await self._evict_query_peer(key, entry)
                         raise
                     except BaseException:
-                        async with self._lock:
-                            if self._entries.get(key) is entry:
-                                self._entries.pop(key, None)
-                                self.evictions += 1
-                        await entry.close()
+                        await self._evict_query_peer(key, entry)
                         raise
                     finally:
                         await self._release_query_peer(agent, identifier, key, entry, pooled)
@@ -1273,6 +1274,21 @@ def _project_calls(projector, action, calls):
     return items
 
 
+async def _source_remains_current(source, agent, root, args, disk, fresh, sha):
+    if source is not None:
+
+        def current_sha():
+            return hashlib.sha256(
+                agent.engine.read_bytes(
+                    agent.engine.path(root, args["path"], False), verify_path=True
+                )
+            ).hexdigest()
+
+        latest = await disk(current_sha)
+        fresh = fresh and latest == sha
+    return fresh
+
+
 async def _execute_query(
     peer: Peer,
     agent,
@@ -1336,17 +1352,7 @@ async def _execute_query(
         )
     else:
         items = await _query_calls(peer, projector, action, params, disk)
-    if source is not None:
-
-        def current_sha():
-            return hashlib.sha256(
-                agent.engine.read_bytes(
-                    agent.engine.path(root, args["path"], False), verify_path=True
-                )
-            ).hexdigest()
-
-        latest = await disk(current_sha)
-        fresh = fresh and latest == sha
+    fresh = await _source_remains_current(source, agent, root, args, disk, fresh, sha)
     return {
         "action": action,
         "language": language,

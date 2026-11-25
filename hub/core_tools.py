@@ -32,6 +32,40 @@ def validate(name, raw):
         raise DevError("INVALID_ARGUMENTS", json.dumps(issues, ensure_ascii=False)[:1500]) from exc
 
 
+def _public_input_schema(tool, action, schema, _compact_input_schema):
+    # Describe the actual public call, including batched operation IDs and
+    # optional filters that are intentionally absent from the small catalog.
+    backend = schema
+    schema = _compact_input_schema(TOOLS[tool].model.model_json_schema())
+    properties = schema["properties"]
+    exposed = (backend.get("properties", {}).keys() & properties.keys()) | {"operation"}
+    extra = {k: v for k, v in backend.get("properties", {}).items() if k not in properties}
+    if tool == "process" and action in {"get", "wait", "cancel", "trace"}:
+        exposed |= {"operation_ids"}
+        extra.pop("operation_id", None)
+        if action in {"get", "wait"}:
+            exposed |= {"include_trace"}
+    schema["properties"] = {k: v for k, v in properties.items() if k in exposed}
+    schema["properties"]["operation"] = {"type": "string", "const": action}
+    if tool in {"workspace", "project_query"} and action == "tree":
+        schema["properties"]["limit"] = backend["properties"]["limit"]
+    required = set(backend.get("required", [])) & exposed
+    if "operation_id" in backend.get("required", []):
+        required.add("operation_ids")
+    if extra:
+        required_extra = sorted(set(backend.get("required", [])) & extra.keys())
+        schema["properties"]["options"] = {
+            "type": "object",
+            "properties": extra,
+            "additionalProperties": False,
+        }
+        if required_extra:
+            schema["properties"]["options"]["required"] = required_extra
+            required.add("options")
+    schema["required"] = sorted(required | {"operation"})
+    return schema
+
+
 def help_result(tool="", action="", *, scopes=None):
     from shared.public_collaboration import PUBLIC_TOOLS, action_help
 
@@ -73,36 +107,7 @@ def help_result(tool="", action="", *, scopes=None):
             if field in schema.get("required", []):
                 schema["required"].remove(field)
     elif tool != target:
-        # Describe the actual public call, including batched operation IDs and
-        # optional filters that are intentionally absent from the small catalog.
-        backend = schema
-        schema = _compact_input_schema(TOOLS[tool].model.model_json_schema())
-        properties = schema["properties"]
-        exposed = (backend.get("properties", {}).keys() & properties.keys()) | {"operation"}
-        extra = {k: v for k, v in backend.get("properties", {}).items() if k not in properties}
-        if tool == "process" and action in {"get", "wait", "cancel", "trace"}:
-            exposed |= {"operation_ids"}
-            extra.pop("operation_id", None)
-            if action in {"get", "wait"}:
-                exposed |= {"include_trace"}
-        schema["properties"] = {k: v for k, v in properties.items() if k in exposed}
-        schema["properties"]["operation"] = {"type": "string", "const": action}
-        if tool in {"workspace", "project_query"} and action == "tree":
-            schema["properties"]["limit"] = backend["properties"]["limit"]
-        required = set(backend.get("required", [])) & exposed
-        if "operation_id" in backend.get("required", []):
-            required.add("operation_ids")
-        if extra:
-            required_extra = sorted(set(backend.get("required", [])) & extra.keys())
-            schema["properties"]["options"] = {
-                "type": "object",
-                "properties": extra,
-                "additionalProperties": False,
-            }
-            if required_extra:
-                schema["properties"]["options"]["required"] = required_extra
-                required.add("options")
-        schema["required"] = sorted(required | {"operation"})
+        schema = _public_input_schema(tool, action, schema, _compact_input_schema)
     if tool == "read" and action == "batch":
         from shared.core_contracts import ReadBatchOptions
 

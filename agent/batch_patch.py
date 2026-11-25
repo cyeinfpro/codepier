@@ -38,6 +38,24 @@ def _case_sensitive_directory(parent):
     return sys.platform not in ("darwin", "win32")
 
 
+def _patch_identity(path, volume_case):
+    try:
+        existing = path.stat()
+    except FileNotFoundError:
+        parent = path.parent.resolve()
+        parent_stat = parent.stat() if parent.is_dir() else None
+        key = (parent_stat.st_dev, parent_stat.st_ino) if parent_stat else str(parent)
+        sensitive = (
+            volume_case.setdefault(parent, _case_sensitive_directory(parent))
+            if parent not in volume_case
+            else volume_case[parent]
+        )
+        identity = ("new", key, path.name if sensitive else path.name.casefold())
+    else:
+        identity = ("existing", existing.st_dev, existing.st_ino)
+    return identity
+
+
 def apply_patch(engine, project, args):
     with engine.mutation_lock:
         root, _ = engine.root(project, True)
@@ -90,27 +108,13 @@ def apply_patch(engine, project, args):
                     "added_lines": 0,
                     "removed_lines": 0,
                 }
-        plans, touched, budget = [], set(), 0
-        volume_case = {}
+        plans, touched, budget, volume_case = [], set(), 0, {}
 
         def prepare(relative, expected, after, mode=None, *, edits=None):
             nonlocal budget
             path = engine.path(root, relative, False)
             relative = path.relative_to(root).as_posix()
-            try:
-                existing = path.stat()
-            except FileNotFoundError:
-                parent = path.parent.resolve()
-                parent_stat = parent.stat() if parent.is_dir() else None
-                key = (parent_stat.st_dev, parent_stat.st_ino) if parent_stat else str(parent)
-                sensitive = (
-                    volume_case.setdefault(parent, _case_sensitive_directory(parent))
-                    if parent not in volume_case
-                    else volume_case[parent]
-                )
-                identity = ("new", key, path.name if sensitive else path.name.casefold())
-            else:
-                identity = ("existing", existing.st_dev, existing.st_ino)
+            identity = _patch_identity(path, volume_case)
             if identity in touched:
                 raise DevError("PATCH_DUPLICATE_PATH", "同一批补丁不能重复触碰同一路径", 409)
             touched.add(identity)

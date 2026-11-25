@@ -86,6 +86,56 @@ class Controls:
                 (project["id"], root, int(paused), time.time()),
             )
 
+    async def _stop_native_sessions(self, project, args):
+        native = []
+        if args.get("include_native"):
+            for row in await disk_call(self.agent.native.live):
+                if row["project_id"] != project["id"]:
+                    continue
+                if row.get("pending_launch"):
+                    if await disk_call(
+                        self.agent.native.request_pending_project_stop, project["id"], row["id"]
+                    ):
+                        native.append({"session_id": row["id"], "state": "stop_requested"})
+                        continue
+                    # A spawn which won the gate must go through normal
+                    # stop ownership, not a success claim for cancellation.
+                    recent = {item["id"]: item for item in await disk_call(self.agent.native.live)}
+                    row = recent.get(row["id"], row)
+                    if "root" not in row:
+                        native.append({"session_id": row["id"], "state": "unconfirmed"})
+                        continue
+                current = {**project, "root": row["root"], "device_id": row["device_id"]}
+                receipt = uuid.uuid4().hex
+                try:
+                    writer = uuid.uuid4().hex
+                    if row.get("mode") != "chat":
+                        await disk_call(
+                            self.agent.native.action,
+                            "lease",
+                            current,
+                            {"id": row["id"], "writer": writer},
+                        )
+                    result = await disk_call(
+                        self.agent.native.action,
+                        "stop",
+                        current,
+                        {"id": row["id"], "receipt": receipt, "writer": writer},
+                    )
+                    native.append(
+                        {"session_id": row["id"], "receipt": receipt, "state": result["state"]}
+                    )
+                except (DevError, ValueError) as exc:
+                    native.append(
+                        {
+                            "session_id": row["id"],
+                            "state": "unconfirmed",
+                            "reason": getattr(exc, "code", "NATIVE_STOP_UNCONFIRMED"),
+                        }
+                    )
+            self.agent.native.sync_wake.set()
+        return native
+
     async def action(self, identifier, project, args):
         if not project.get("_integration_admin"):
             raise DevError("OWNER_REQUIRED", "只有面板或本机主理人可操作接入控制", 403)
@@ -129,55 +179,7 @@ class Controls:
                             "reason": "文件或输入操作已开始，保留原回执核查",
                         }
                     )
-            native = []
-            if args.get("include_native"):
-                for row in await disk_call(self.agent.native.live):
-                    if row["project_id"] != project["id"]:
-                        continue
-                    if row.get("pending_launch"):
-                        if await disk_call(
-                            self.agent.native.request_pending_project_stop, project["id"], row["id"]
-                        ):
-                            native.append({"session_id": row["id"], "state": "stop_requested"})
-                            continue
-                        # A spawn which won the gate must go through normal
-                        # stop ownership, not a success claim for cancellation.
-                        recent = {
-                            item["id"]: item for item in await disk_call(self.agent.native.live)
-                        }
-                        row = recent.get(row["id"], row)
-                        if "root" not in row:
-                            native.append({"session_id": row["id"], "state": "unconfirmed"})
-                            continue
-                    current = {**project, "root": row["root"], "device_id": row["device_id"]}
-                    receipt = uuid.uuid4().hex
-                    try:
-                        writer = uuid.uuid4().hex
-                        if row.get("mode") != "chat":
-                            await disk_call(
-                                self.agent.native.action,
-                                "lease",
-                                current,
-                                {"id": row["id"], "writer": writer},
-                            )
-                        result = await disk_call(
-                            self.agent.native.action,
-                            "stop",
-                            current,
-                            {"id": row["id"], "receipt": receipt, "writer": writer},
-                        )
-                        native.append(
-                            {"session_id": row["id"], "receipt": receipt, "state": result["state"]}
-                        )
-                    except (DevError, ValueError) as exc:
-                        native.append(
-                            {
-                                "session_id": row["id"],
-                                "state": "unconfirmed",
-                                "reason": getattr(exc, "code", "NATIVE_STOP_UNCONFIRMED"),
-                            }
-                        )
-                self.agent.native.sync_wake.set()
+            native = await self._stop_native_sessions(project, args)
             browser = await self.agent.integrations.browser.release_project(project)
             deadline = time.monotonic() + 5
             while (  # noqa: ASYNC110 -- External transport/process lifecycle owns this bounded wait.

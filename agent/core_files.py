@@ -169,6 +169,55 @@ class _TextPage:
         }
 
 
+class _FilePageStream:
+    """Classify and hash the same bounded stream consumed by the page decoder."""
+
+    def __init__(self, text_page, text_only):
+        self.text_page = text_page
+        self.text_only = text_only
+        self.hasher = hashlib.sha256()
+        self.hint = bytearray()
+        self.image = bytearray()
+        self.mime = None
+        self.classified = False
+        self.image_exceeds_budget = False
+
+    def _classified_chunk(self, block):
+        if not self.mime:
+            self.text_page.consume(block)
+        elif not self.text_only and not self.image_exceeds_budget:
+            if len(self.image) + len(block) > MAX_INLINE_IMAGE_BYTES:
+                self.image_exceeds_budget = True
+                self.image.clear()
+            else:
+                self.image.extend(block)
+
+    def _classify(self):
+        if self.hint.startswith(_PNG):
+            self.mime = "image/png"
+        elif self.hint.startswith(_JPEG):
+            self.mime = "image/jpeg"
+        self.classified = True
+        self._classified_chunk(bytes(self.hint))
+        self.hint.clear()
+
+    def consume(self, block):
+        self.hasher.update(block)
+        if not self.classified:
+            need = len(_PNG) - len(self.hint)
+            self.hint.extend(block[:need])
+            block = block[need:]
+            if len(self.hint) == len(_PNG):
+                self._classify()
+        if self.classified and block:
+            self._classified_chunk(block)
+
+    def finish(self):
+        if not self.classified:
+            self._classify()
+        return self.hasher.hexdigest()
+
+
 class CoreFiles:
     def __init__(self, engine):
         self.engine = engine
@@ -210,67 +259,34 @@ class CoreFiles:
     def read_one(self, root, args, *, text_only=False):
         engine = self.engine
         path = engine.path(root, args["path"], False)
-        hasher = hashlib.sha256()
         text_page = _TextPage(args["offset"], args["limit"], self.output_bytes)
-        hint = bytearray()
-        image = bytearray()
-        mime = None
-        classified = False
-        image_exceeds_budget = False
-
-        def classified_chunk(block):
-            nonlocal image_exceeds_budget
-            if mime:
-                if not text_only and not image_exceeds_budget:
-                    if len(image) + len(block) > MAX_INLINE_IMAGE_BYTES:
-                        image_exceeds_budget = True
-                        image.clear()
-                    else:
-                        image.extend(block)
-            else:
-                text_page.consume(block)
-
-        def classify():
-            nonlocal mime, classified
-            if hint.startswith(_PNG):
-                mime = "image/png"
-            elif hint.startswith(_JPEG):
-                mime = "image/jpeg"
-            classified = True
-            classified_chunk(bytes(hint))
-            hint.clear()
-
-        def consume(block):
-            hasher.update(block)
-            if not classified:
-                need = len(_PNG) - len(hint)
-                hint.extend(block[:need])
-                block = block[need:]
-                if len(hint) == len(_PNG):
-                    classify()
-            if classified and block:
-                classified_chunk(block)
-
+        stream = _FilePageStream(text_page, text_only)
         try:
-            size = engine.read_chunks(path, consume, max_bytes=MAX_TEXT_EDIT, verify_path=True)
+            size = engine.read_chunks(
+                path, stream.consume, max_bytes=MAX_TEXT_EDIT, verify_path=True
+            )
         except DevError as exc:
             if exc.code != "FILE_TOO_LARGE" or text_only:
                 raise
             return self.asset_metadata(path, args, exc.code)
         # An open descriptor is not ongoing authority over its project path.
         engine.path(root, args["path"], False)
-        if not classified:
-            classify()
-        sha = hasher.hexdigest()
+        sha = stream.finish()
         if args["expected_sha256"] and args["expected_sha256"] != sha:
             raise DevError("SHA_CONFLICT", "分页读取期间文件改变，请从头重新读取", 409)
         meta = {"path": path.relative_to(root).as_posix(), "sha256": sha, "bytes": size}
-        if mime:
-            if text_only:
-                raise DevError("BINARY_FILE", "批量读取仅支持 UTF-8 文本；图片请单独读取")
-            if image_exceeds_budget:
-                return self._asset_metadata(meta, args, "IMAGE_TOO_LARGE")
-            return self._read_image(mime, bytes(image), path, args, sha, meta)
+        if stream.mime:
+            return self._render_image_page(stream, path, args, sha, meta)
+        return self._render_text_page(text_page, args, meta, text_only)
+
+    def _render_image_page(self, stream, path, args, sha, meta):
+        if stream.text_only:
+            raise DevError("BINARY_FILE", "批量读取仅支持 UTF-8 文本；图片请单独读取")
+        if stream.image_exceeds_budget:
+            return self._asset_metadata(meta, args, "IMAGE_TOO_LARGE")
+        return self._read_image(stream.mime, bytes(stream.image), path, args, sha, meta)
+
+    def _render_text_page(self, text_page, args, meta, text_only):
         text_page.consume(b"", final=True)
         if text_page.binary or text_page.encoding_error:
             code = "BINARY_FILE" if text_page.binary else "ENCODING"

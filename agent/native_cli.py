@@ -581,6 +581,40 @@ class NativeCLI:
             return True, self._handle_restore_action(project, root, args)
         return False, None
 
+    def _launch_session_worker(self, db, project, sid, mode, cwd, env, detached):
+        with self.launch_gate:
+            if self._pending_launch_aborted(project["id"], sid):
+                db.execute(
+                    "UPDATE sessions SET status='interrupted',error='Project stop cancelled launch' WHERE id=?",
+                    (sid,),
+                )
+                db.commit()
+                raise DevError("CLI_START_CANCELLED", "项目已请求停止，未启动会话", 409)
+            p = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(
+                        Path(__file__).with_name(
+                            "chat_worker.py" if mode == "chat" else "native_worker.py"
+                        )
+                    ),
+                    str(self.directory),
+                    sid,
+                    *([str(self.agent.engine.config_path)] if mode == "chat" else []),
+                ],
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                **detached,
+            )
+            self.children.append(p)
+            for launch in self.pending_starts.values():
+                if launch["project_id"] == project["id"] and launch["id"] == sid:
+                    launch["launch_committed"] = True
+
     def _action(self, action, project, args):
         # Erasing this caller's stopped replay does not launch a shell or
         # modify the project. Keep current mapping and session ownership checks.
@@ -807,38 +841,7 @@ class NativeCLI:
                         if os.name == "nt"
                         else {"start_new_session": True}
                     )
-                    with self.launch_gate:
-                        if self._pending_launch_aborted(project["id"], sid):
-                            db.execute(
-                                "UPDATE sessions SET status='interrupted',error='Project stop cancelled launch' WHERE id=?",
-                                (sid,),
-                            )
-                            db.commit()
-                            raise DevError("CLI_START_CANCELLED", "项目已请求停止，未启动会话", 409)
-                        p = subprocess.Popen(
-                            [
-                                sys.executable,
-                                str(
-                                    Path(__file__).with_name(
-                                        "chat_worker.py" if mode == "chat" else "native_worker.py"
-                                    )
-                                ),
-                                str(self.directory),
-                                sid,
-                                *([str(self.agent.engine.config_path)] if mode == "chat" else []),
-                            ],
-                            cwd=cwd,
-                            env=env,
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            close_fds=True,
-                            **detached,
-                        )
-                        self.children.append(p)
-                        for launch in self.pending_starts.values():
-                            if launch["project_id"] == project["id"] and launch["id"] == sid:
-                                launch["launch_committed"] = True
+                    self._launch_session_worker(db, project, sid, mode, cwd, env, detached)
                 except OSError:
                     db.execute(
                         "UPDATE sessions SET status='interrupted',error='Worker launch failed' WHERE id=?",

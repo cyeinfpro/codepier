@@ -407,38 +407,9 @@ class FileEngine:
                 ) from exc
             raise
         try:
-            s = os.fstat(fd)
-            if not stat.S_ISREG(s.st_mode):
-                raise DevError("NOT_FILE", "只能读取普通文件")
-            if s.st_nlink > 1:
-                raise DevError("HARDLINK_BLOCKED", "不读写有多个硬链接的文件", 403)
-            if s.st_size > max_bytes:
-                raise DevError(
-                    "FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；未读取或修改此文件"
-                )
-            size = 0
-            while size <= max_bytes:
-                block = os.read(fd, min(65536, max_bytes + 1 - size))
-                if not block:
-                    break
-                size += len(block)
-                if size > max_bytes:
-                    raise DevError("FILE_TOO_LARGE", f"文件超过 {max_bytes} bytes")
-                consume(block)
-            latest = os.fstat(fd)
-            if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (
-                latest.st_size,
-                latest.st_mtime_ns,
-                latest.st_ctime_ns,
-            ):
-                raise DevError("FILE_CHANGED", "文件在读取期间改变，请重新读取", 409)
-            if verify_path:
-                current = path.lstat()
-                if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
-                    latest.st_dev,
-                    latest.st_ino,
-                ):
-                    raise DevError("FILE_CHANGED", "文件名在读取核验期间指向了不同文件", 409)
+            s = self._validate_read_descriptor(fd, max_bytes)
+            size = self._consume_bounded_chunks(fd, max_bytes, consume)
+            self._check_read_identity(fd, path, s, verify_path)
             return size
         except OSError as exc:
             if exc.errno in STORAGE_UNAVAILABLE:
@@ -451,6 +422,46 @@ class FileEngine:
             raise
         finally:
             os.close(fd)
+
+    def _validate_read_descriptor(self, fd, max_bytes):
+        s = os.fstat(fd)
+        if not stat.S_ISREG(s.st_mode):
+            raise DevError("NOT_FILE", "只能读取普通文件")
+        if s.st_nlink > 1:
+            raise DevError("HARDLINK_BLOCKED", "不读写有多个硬链接的文件", 403)
+        if s.st_size > max_bytes:
+            raise DevError(
+                "FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；未读取或修改此文件"
+            )
+        return s
+
+    def _consume_bounded_chunks(self, fd, max_bytes, consume):
+        size = 0
+        while size <= max_bytes:
+            block = os.read(fd, min(65536, max_bytes + 1 - size))
+            if not block:
+                break
+            size += len(block)
+            if size > max_bytes:
+                raise DevError("FILE_TOO_LARGE", f"文件超过 {max_bytes} bytes")
+            consume(block)
+        return size
+
+    def _check_read_identity(self, fd, path, s, verify_path):
+        latest = os.fstat(fd)
+        if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (
+            latest.st_size,
+            latest.st_mtime_ns,
+            latest.st_ctime_ns,
+        ):
+            raise DevError("FILE_CHANGED", "文件在读取期间改变，请重新读取", 409)
+        if verify_path:
+            current = path.lstat()
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+                latest.st_dev,
+                latest.st_ino,
+            ):
+                raise DevError("FILE_CHANGED", "文件名在读取核验期间指向了不同文件", 409)
 
     @staticmethod
     def text(data: bytes) -> str:
