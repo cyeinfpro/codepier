@@ -1033,7 +1033,14 @@ class Runtime:
 
     @iam.read_decision
     def operation_row(
-        self, id: str, principal: Principal, *, status_only=False, include_output=True
+        self,
+        id: str,
+        principal: Principal,
+        *,
+        status_only=False,
+        include_output=True,
+        compact_output=False,
+        compact_result=False,
     ):
         principal = refresh_profile_principal(self.store, principal)
         # These two projections are code-defined; operation IDs remain bound
@@ -1043,6 +1050,23 @@ class Runtime:
             if status_only
             else "*"
         )
+        if not status_only and (compact_output or compact_result):
+            # Keep the public metadata shape compatible with additive Hub
+            # schemas while omitting known-count output and unrequested bodies.
+            fields = [field["name"] for field in self.store.all("PRAGMA table_info(operations)")]
+            projection = []
+            for name in fields:
+                column = '"' + name.replace('"', '""') + '"'
+                if name == "output" and compact_output and "terminal_output_chars" in fields:
+                    projection.append(
+                        "CASE WHEN terminal_output_chars IS NULL OR output LIKE 'archive:v1:%' "
+                        "THEN output ELSE '' END AS output"
+                    )
+                elif name == "result" and compact_result:
+                    projection.append("CASE WHEN result IS NULL THEN NULL ELSE 1 END AS result")
+                else:
+                    projection.append(column)
+            columns = ",".join(projection)
         row = self.store.one(f"SELECT {columns} FROM operations WHERE id=?", (id,))
         return self._authorize_operation_row(row, principal, status_only, include_output)
 
@@ -1560,11 +1584,18 @@ class Runtime:
 
     @iam.read_decision
     def operation(self, id: str, principal: Principal, view: dict | None = None):
-        row = self.operation_row(id, principal, include_output=False)
-        result = dict(row)
         options = view or {}
         include_result = options.get("include_result", True)
         include_output = options.get("include_output", True)
+        row = self.operation_row(
+            id,
+            principal,
+            include_output=False,
+            compact_output=not include_output,
+            compact_result=not include_result and not include_output,
+        )
+        result = dict(row)
+        result.pop("terminal_output_chars", None)
         unchanged = (
             options.get("after_output_seq") is not None
             and options["after_output_seq"] == row["output_seq"]
@@ -1713,21 +1744,31 @@ class Runtime:
             if args[key]:
                 clauses.append(column + "=?")
                 values.append(args[key])
-        if args["before_created"] is not None:
+        from hub.call_log import _cursor, _decode_cursor
+
+        filters = {key: args[key] for key in ("project", "state", "tool", "idempotency_key")}
+        cursor = args.get("cursor")
+        if cursor:
+            if args["before_created"] is not None:
+                raise DevError("INVALID_CURSOR", "不能同时使用 cursor 与 before_created")
+            created, op_id = _decode_cursor(cursor, filters)
+            clauses.append("(created<? OR (created=? AND id<?))")
+            values.extend((created, created, op_id))
+        elif args["before_created"] is not None:
             clauses.append("created<?")
             values.append(args["before_created"])
         sql = "SELECT id,project_id,tool,state,created,updated,attempts,accepted_at,cancel_requested,error FROM operations"
         rows = self.store.all(
             sql
             + (" WHERE " + " AND ".join(clauses) if clauses else "")
-            + " ORDER BY created DESC LIMIT ?",
+            + " ORDER BY created DESC,id DESC LIMIT ?",
             (*values, args["limit"] + 1),
         )
+        last = rows[args["limit"] - 1] if len(rows) > args["limit"] else None
         return {
             "operations": rows[: args["limit"]],
-            "next_before_created": rows[args["limit"] - 1]["created"]
-            if len(rows) > args["limit"]
-            else None,
+            "next_before_created": last["created"] if last else None,
+            "next_cursor": _cursor(last["created"], last["id"], filters) if last else None,
         }
 
     async def invoke(self, name: str, raw: dict, principal: Principal):
@@ -2648,7 +2689,11 @@ class Runtime:
                         principal.grant_id,
                         name,
                         json.dumps(
-                            operation_summary(args, maintenance=maintenance is not None),
+                            operation_summary(
+                                args,
+                                maintenance=maintenance is not None,
+                                source_effect=self.knowledge_maintenance.source_effect(name, args),
+                            ),
                             ensure_ascii=False,
                         ),
                         fingerprint,
@@ -3573,12 +3618,13 @@ class Runtime:
     def _annotate_completion_result(op, result):
         if result["ok"] and isinstance(result.get("data"), dict) and "exit_code" in result["data"]:
             data = dict(result["data"])
-            for key in ("runtime_cleanup", "runtime_outcome"):
+            for key in ("runtime_cleanup", "runtime_outcome", "output_capture"):
                 if key in data and not isinstance(data[key], dict):
                     data[key] = {
                         "state": "unconfirmed",
                         "pending": True,
                         "code": "INVALID_RUNTIME_RESULT",
+                        "complete": False,
                     }
             data["command_ok"] = (
                 type(data["exit_code"]) is int
@@ -3586,6 +3632,7 @@ class Runtime:
                 and not data.get("timed_out")
                 and not data.get("cancelled")
                 and not (data.get("runtime_cleanup") or {}).get("pending")
+                and (data.get("output_capture") or {}).get("complete", True)
                 and (data.get("runtime_outcome") or {}).get("state", "confirmed") == "confirmed"
             )
             from shared.runtime_results import failure_context
@@ -3713,6 +3760,8 @@ class Runtime:
                     if data.get("runtime_cleanup", {}).get("pending")
                     else "项目命令执行超时"
                     if data.get("timed_out")
+                    else "项目命令输出未完整收集；请查询原操作，勿盲目重试"
+                    if (data.get("output_capture") or {}).get("complete") is False
                     else f"项目命令退出码 {data.get('exit_code')}；请查看原操作输出"
                 }
         if (
@@ -3751,12 +3800,13 @@ class Runtime:
                 else None
             )
             changed = self.store.execute(
-                "UPDATE operations SET state=?,result=?,error=?,output=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=?,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
+                "UPDATE operations SET state=?,result=?,error=?,output=?,terminal_output_chars=?,updated=?,output_seq=output_seq+?,media_expires_at=?,payload=?,transport_error=NULL WHERE id=? AND state NOT IN ('succeeded','failed','cancelled')",
                 (
                     state,
                     seal(self.store, encoded),
                     error.get("message"),
                     seal(self.store, output),
+                    len(output),
                     time.time(),
                     int(output != previous),
                     media_expiry,
@@ -3790,11 +3840,24 @@ class Runtime:
             self.diagnostics.connection.write_errors += 1
         # Notify after commit, even if auxiliary auditing subsequently fails.
         self.notify_operation(op["id"])
-        self.store.after_commit(
-            lambda: self.knowledge_maintenance.nudge(
-                op.get("project_id"), op["device_id"], op["tool"]
+        try:
+            admission_meta = json.loads(op.get("args_summary") or "{}").get("_log") or {}
+            effect = admission_meta.get("source_effect", "possible")
+        except (AttributeError, TypeError, ValueError):
+            effect = "possible"
+        snapshot = data.get("snapshot_execution") or {}
+        if not (
+            effect == "snapshot_scoped"
+            and state == "succeeded"
+            and isinstance(snapshot, dict)
+            and snapshot.get("mode") == "copy_on_write"
+            and snapshot.get("retained") is False
+        ):
+            self.store.after_commit(
+                lambda: self.knowledge_maintenance.nudge(
+                    op.get("project_id"), op["device_id"], op["tool"]
+                )
             )
-        )
         self.store.audit(
             op["actor"],
             op["tool"],

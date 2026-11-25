@@ -119,3 +119,36 @@ async def test_tool_output_sse_stream_completes_and_checks_auth(service):
         snap = read_snapshot(db, sid, scope_key="sc_1")
         assert snap["items"][0]["exit_code"] == 0
         assert snap["items"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_terminal_tool_sse_drains_all_windows_after_cross_batch_spill(service):
+    obj, _, sid = service
+    routes = make_native_router(TestAuth(), obj.runtime).routes
+    out_ep = _endpoint(routes, "/sessions/{sid}/items/{key}/output")
+
+    def event(text, status):
+        return (json.dumps(
+            {"type": "tool", "receipt": "r1", "tool_id": "t1", "status": status, "text": text},
+            ensure_ascii=False,
+        ) + "\n").encode()
+
+    prefix = "🙂头"
+    remainder = "x" * 9000
+    initial = event(prefix, "delta")
+    await sync(obj, sid, initial, 0)
+    await obj.drain_projections(sid)
+    await sync(obj, sid, event(remainder, "delta") + event("", "completed"), len(initial))
+    await obj.drain_projections(sid)
+
+    req = request()
+    req.is_disconnected = lambda: asyncio.sleep(0, result=False)
+    one = await out_ep(sid, "r1:tool:t1", req, after_offset=0, tail_bytes=1)
+    assert one["text"] == "🙂"
+    assert one["to_offset"] == 4
+    resp = await out_ep(sid, "r1:tool:t1", req, after_offset=0, tail_bytes=4096, stream=True)
+    frames = [_parse_sse(raw)[1] async for raw in resp.body_iterator]
+    assert len(frames) == 3
+    assert "".join(frame["text"] for frame in frames) == prefix + remainder
+    assert not any(frame["running"] for frame in frames)
+    assert frames[-1]["to_offset"] == frames[-1]["total_bytes"]

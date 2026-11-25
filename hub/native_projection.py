@@ -170,6 +170,30 @@ def ensure_projection_schema(db) -> None:
     """Create projection tables and indexes idempotently in native.sqlite3."""
     db.executescript(
         """
+        BEGIN IMMEDIATE;
+
+        CREATE TABLE IF NOT EXISTS native_output_quota (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            bytes INTEGER NOT NULL CHECK(bytes>=0)
+        );
+
+        INSERT INTO native_output_quota(singleton,bytes)
+        SELECT 1,(SELECT COALESCE(SUM(length(data)),0) FROM output)
+        WHERE NOT EXISTS (SELECT 1 FROM native_output_quota WHERE singleton=1);
+
+        CREATE TRIGGER IF NOT EXISTS native_output_quota_insert
+        AFTER INSERT ON output BEGIN
+          UPDATE native_output_quota SET bytes=bytes+length(NEW.data) WHERE singleton=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS native_output_quota_delete
+        AFTER DELETE ON output BEGIN
+          UPDATE native_output_quota SET bytes=bytes-length(OLD.data) WHERE singleton=1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS native_output_quota_update
+        AFTER UPDATE OF data ON output BEGIN
+          UPDATE native_output_quota SET bytes=bytes-length(OLD.data)+length(NEW.data) WHERE singleton=1;
+        END;
+
         CREATE TABLE IF NOT EXISTS native_projection_heads (
           session_id TEXT PRIMARY KEY,
           epoch TEXT NOT NULL,
@@ -255,6 +279,7 @@ def ensure_projection_schema(db) -> None:
           secret_hex TEXT NOT NULL,
           created REAL NOT NULL
         );
+        COMMIT;
         """
     )
 
@@ -495,12 +520,13 @@ def assert_complete_line_boundary(db, session_id: str, cursor: int) -> None:
         raise DevError("CLI_OFFSET", "事件游标不是已完成的事件边界", 409)
 
 
-def _ingested_cursor(db, session_id: str) -> int:
+def ingested_cursor(db, session_id: str) -> int:
+    # Stored chunks are bounded and writes must use the exact previous end.
     row = db.execute(
-        "SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?",
+        "SELECT offset+length(data) FROM output WHERE session=? ORDER BY offset DESC LIMIT 1",
         (session_id,),
     ).fetchone()
-    return strict_safe_int(int(row[0]))
+    return strict_safe_int(int(row[0])) if row else 0
 
 
 def _collect_raw_buffer(
@@ -540,7 +566,7 @@ def scan_complete_jsonl_lines(
     strict_safe_int(start_cursor)
     strict_safe_int(max_bytes, minimum=0)
     strict_safe_int(max_lines, minimum=1)
-    ingested = _ingested_cursor(db, sid)
+    ingested = ingested_cursor(db, sid)
     if start_cursor > ingested:
         return ScanResult(
             [],
@@ -663,6 +689,8 @@ def _resolve_claude_item_id(
         return item_id if isinstance(item_id, str) else None
     prefix = item_id[:-1]
     text = body.get("text")
+    if loader := state.get("load_claude_candidates"):
+        loader(event.receipt, prefix)
     matches = [
         it
         for it in state["items"].values()
@@ -758,6 +786,8 @@ def _get_or_create_item(
     state: dict[str, Any], key: str, kind: str, event: NormalizedEvent
 ) -> tuple[dict[str, Any], bool]:
     existing = state["items"].get(key)
+    if existing is None and (loader := state.get("load_item")):
+        existing = loader(key)
     if existing is not None:
         return existing, False
     item = {
@@ -853,6 +883,8 @@ def _handle_meta_event(state: dict[str, Any], event: NormalizedEvent, body: dict
 
 
 def _close_turn_items(state: dict[str, Any], receipt: str | None, resolution: str) -> None:
+    if loader := state.get("load_closing_items"):
+        loader(receipt)
     for item in state["items"].values():
         if receipt and item["summary"].get("receipt") != receipt:
             continue
@@ -929,8 +961,18 @@ def _apply_text_change(
         item["summary"]["body_externalized"] = False
         item["body_ref"] = None
     prev_entry = state["touched"].get(item["item_key"])
-    if prev_entry and prev_entry[0] == "append_text" and op == "append_text":
-        state["touched"][item["item_key"]] = ("append_text", prev_entry[1], prev_entry[2] + text)
+    if prev_entry:
+        previous_op, previous_base, previous_text = prev_entry
+        if previous_op == "upsert":
+            state["touched"][item["item_key"]] = ("upsert", None, None)
+        elif previous_op == "append_text" and op == "append_text":
+            state["touched"][item["item_key"]] = (
+                "append_text",
+                previous_base,
+                previous_text + text,
+            )
+        else:
+            state["touched"][item["item_key"]] = ("replace_body", previous_base, None)
     elif op == "append_text":
         state["touched"][item["item_key"]] = ("append_text", base_rev, text)
     else:
@@ -979,8 +1021,10 @@ def _apply_tool_output(
             "output_epoch": item["output_epoch"],
             "byte_length": len(item["output_bytes"]),
         }
+        item["summary"].pop("inline_output", None)
         state["output_dirty"].add(item["item_key"])
         return ("replace" if not is_delta else "append"), ""
+    item["summary"]["inline_output"] = item["output_bytes"].decode("utf-8")
     return ("append" if is_delta else "replace"), chunk_str
 
 
@@ -1124,7 +1168,11 @@ def _hydrate_existing_item(row, body_bytes: bytes, output_bytes: bytes) -> dict[
         "full_text": body_bytes.decode("utf-8", errors="replace")
         if row["body_ref"]
         else str(summary.get("inline_text", "")),
-        "output_bytes": output_bytes,
+        "output_bytes": (
+            output_bytes
+            if summary.get("output_ref") or row["kind"] != "tool"
+            else str(summary.get("inline_output", summary.get("inline_text", ""))).encode("utf-8")
+        ),
         "output_epoch": (summary.get("output_ref") or {}).get("output_epoch"),
         "summary": summary,
     }
@@ -1156,31 +1204,84 @@ def _load_item_output_bytes(
     return b"".join(parts)
 
 
+def _hydrate_stored_item(db, sid: str, epoch: str, row) -> dict[str, Any]:
+    summary = json.loads(row["summary_json"])
+    gen = strict_safe_int(summary.get("content_generation", 1), minimum=1)
+    key = row["item_key"]
+    body = _load_item_body_bytes(db, sid, epoch, key, gen) if row["body_ref"] else b""
+    out_ep = (summary.get("output_ref") or {}).get("output_epoch")
+    output = _load_item_output_bytes(db, sid, epoch, key, out_ep) if out_ep else b""
+    item = _hydrate_existing_item(row, body, output)
+    if row["body_ref"]:
+        item["stored_body_bytes"] = len(body)
+        item["stored_body_generation"] = gen
+    if out_ep:
+        item["stored_output_bytes"] = len(output)
+    return item
+
+
 def _load_relevant_items(db, sid: str, epoch: str) -> dict[str, dict[str, Any]]:
-    items: dict[str, dict[str, Any]] = {}
-    rows = db.execute(
-        "SELECT * FROM native_projection_items WHERE session_id=? AND epoch=? ORDER BY first_cursor, item_key",
-        (sid, epoch),
-    ).fetchall()
-    for row in rows:
-        summary = json.loads(row["summary_json"])
-        gen = strict_safe_int(summary.get("content_generation", 1), minimum=1)
-        body_bytes = (
-            _load_item_body_bytes(db, sid, epoch, row["item_key"], gen) if row["body_ref"] else b""
+    return {
+        row["item_key"]: _hydrate_stored_item(db, sid, epoch, row)
+        for row in db.execute(
+            "SELECT * FROM native_projection_items WHERE session_id=? AND epoch=? ORDER BY first_cursor,item_key",
+            (sid, epoch),
         )
-        out_ep = (summary.get("output_ref") or {}).get("output_epoch")
-        out_bytes = (
-            _load_item_output_bytes(db, sid, epoch, row["item_key"], out_ep) if out_ep else b""
+    }
+
+
+def _projection_loaders(db, sid, epoch, state):
+    def load_items(where, params=()):
+        for row in db.execute(
+            "SELECT * FROM native_projection_items WHERE session_id=? AND epoch=? AND ("
+            + where
+            + ") ORDER BY first_cursor,item_key",
+            (sid, epoch, *params),
+        ):
+            key = row["item_key"]
+            if key not in state["items"]:
+                state["items"][key] = _hydrate_stored_item(db, sid, epoch, row)
+
+    def load_item(key):
+        load_items("item_key=?", (key,))
+        return state["items"].get(key)
+
+    def load_closing_items(receipt):
+        predicate = "active=1 OR (pending=1 AND kind='approval')"
+        if receipt:
+            load_items(
+                "(" + predicate + ") AND json_extract(summary_json,'$.receipt')=?",
+                (receipt,),
+            )
+        else:
+            load_items(predicate)
+
+    def load_claude_candidates(receipt, prefix):
+        load_items(
+            """kind='assistant' AND json_extract(summary_json,'$.receipt') IS ?
+            AND json_extract(summary_json,'$.last_type') IN ('delta','message.delta')
+            AND substr(json_extract(summary_json,'$.item_id'),1,length(?))=?""",
+            (receipt, prefix, prefix),
         )
-        items[row["item_key"]] = _hydrate_existing_item(row, body_bytes, out_bytes)
-    return items
+
+    return {
+        "load_item": load_item,
+        "load_closing_items": load_closing_items,
+        "load_claude_candidates": load_claude_candidates,
+    }
 
 
 def _build_body_write_rows(item: dict[str, Any], revision: int) -> list[dict[str, Any]]:
     raw = item["full_text"].encode("utf-8")
     total = len(raw)
     rows = []
-    for start in range(0, max(1, total), BODY_CHUNK_STORE_BYTES):
+    origin = (
+        item.get("stored_body_bytes", 0)
+        if item.get("stored_body_generation") == item["content_generation"]
+        else 0
+    )
+    first = (origin // BODY_CHUNK_STORE_BYTES) * BODY_CHUNK_STORE_BYTES
+    for start in range(first, max(1, total), BODY_CHUNK_STORE_BYTES):
         chunk = raw[start : start + BODY_CHUNK_STORE_BYTES]
         rows.append(
             {
@@ -1202,7 +1303,9 @@ def _build_output_write_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
     if not out_ep:
         return []
     rows = []
-    for start in range(0, max(1, len(raw)), BODY_CHUNK_STORE_BYTES):
+    origin = item.get("stored_output_bytes", 0)
+    first = (origin // BODY_CHUNK_STORE_BYTES) * BODY_CHUNK_STORE_BYTES
+    for start in range(first, max(1, len(raw)), BODY_CHUNK_STORE_BYTES):
         chunk = raw[start : start + BODY_CHUNK_STORE_BYTES]
         rows.append(
             {
@@ -1356,7 +1459,7 @@ def _stage_from_scan(
         "provider": srow["provider"],
         "epoch": base.epoch,
         "next_revision": base.revision + 1,
-        "items": _load_relevant_items(db, sid, base.epoch),
+        "items": {},
         "summary": summary,
         "summary_patch": summary_patch,
         "touched": {},
@@ -1365,6 +1468,7 @@ def _stage_from_scan(
         "body_inline_bytes": body_inline_bytes,
         "tool_inline_bytes": tool_inline_bytes,
     }
+    state.update(_projection_loaders(db, sid, base.epoch, state))
     accepted_end = base.applied_cursor
     source_state = "ready"
     blocked_cursor: int | None = None
@@ -1834,7 +1938,12 @@ def _enrich_body_ref_meta(db, sid: str, epoch: str, item: dict[str, Any]) -> Non
         return
     gen = item["body"]["content_generation"]
     row = db.execute(
-        "SELECT total_bytes, data FROM native_projection_bodies WHERE session_id=? AND epoch=? AND item_key=? AND content_generation=? ORDER BY start_byte LIMIT 1",
+        """SELECT (SELECT total_bytes FROM native_projection_bodies t
+                   WHERE t.session_id=b.session_id AND t.epoch=b.epoch AND t.item_key=b.item_key
+                   AND t.content_generation=b.content_generation ORDER BY t.start_byte DESC LIMIT 1
+                 ) AS total_bytes, substr(b.data,1,1028) AS data
+           FROM native_projection_bodies b WHERE session_id=? AND epoch=? AND item_key=?
+           AND content_generation=? ORDER BY start_byte LIMIT 1""",
         (sid, epoch, item["key"], gen),
     ).fetchone()
     if row:
@@ -1866,7 +1975,7 @@ def read_snapshot(
                 409,
             )
         head = read_head(db, sid)
-        ingested = _ingested_cursor(db, sid)
+        ingested = ingested_cursor(db, sid)
         if head is None:
             epoch = _active_epoch_for_session(db, sid, None)
             snap = _empty_building_snapshot(
@@ -2156,7 +2265,35 @@ def _align_utf8_bounds(raw: bytes, start_in_buf: int, end_in_buf: int) -> tuple[
     if e < len(raw):
         while e > s and (raw[e] & 0xC0) == 0x80:
             e -= 1
-    return s, e
+    if e <= s < len(raw) and end_in_buf > start_in_buf:
+        # A caller may request fewer than the bytes in one UTF-8 code point.
+        # Returning the whole code point (at most four bytes) ensures progress.
+        e = s + 1
+        while e < len(raw) and (raw[e] & 0xC0) == 0x80:
+            e += 1
+    return s, max(s, e)
+
+
+def _stored_range(db, table, epoch_column, start_column, keys, start, stop):
+    # Names are fixed internal SQL identifiers supplied by two call sites.
+    # Seek the chunk at/before the requested offset, then load only the
+    # touched chunks plus a four-byte UTF-8 boundary allowance.
+    predicate = f"session_id=? AND epoch=? AND item_key=? AND {epoch_column}=?"
+    first = db.execute(
+        f"SELECT {start_column} FROM {table} WHERE {predicate} AND {start_column}<=? "
+        f"ORDER BY {start_column} DESC LIMIT 1",
+        (*keys, start),
+    ).fetchone()
+    origin = int(first[0]) if first else start
+    raw = b"".join(
+        bytes(row[0])
+        for row in db.execute(
+            f"SELECT data FROM {table} WHERE {predicate} "
+            f"AND {start_column}>=? AND {start_column}<? ORDER BY {start_column}",
+            (*keys, origin, stop + 4),
+        )
+    )
+    return origin, raw
 
 
 def read_item_body_chunk(
@@ -2192,13 +2329,34 @@ def read_item_body_chunk(
         current_gen = strict_safe_int(summary.get("content_generation", 1), minimum=1)
         if generation != current_gen:
             raise DevError("BODY_REVISION_EXPIRED", "正文版本已更新，请重新读取条目", 409)
-        raw = _load_item_body_bytes(db, sid, epoch, item_key, generation)
-        if not raw and not item_row["body_ref"]:
+        origin = 0
+        if item_row["body_ref"]:
+            keys = sid, epoch, item_key, generation
+            bounds = db.execute(
+                """SELECT total_bytes FROM native_projection_bodies WHERE session_id=?
+                   AND epoch=? AND item_key=? AND content_generation=?
+                   ORDER BY start_byte DESC LIMIT 1""",
+                keys,
+            ).fetchone()
+            total = int(bounds[0]) if bounds else 0
+            stop = min(total, start_byte + max_bytes)
+            origin, raw = _stored_range(
+                db,
+                "native_projection_bodies",
+                "content_generation",
+                "start_byte",
+                keys,
+                min(start_byte, total),
+                max(0, stop),
+            )
+        else:
             raw = str(summary.get("inline_text", "")).encode("utf-8")
-        total = len(raw)
+            total = len(raw)
         if start_byte > total:
             raise DevError("CLI_OFFSET", "正文偏移超出范围", 409)
-        s, e = _align_utf8_bounds(raw, start_byte, min(total, start_byte + max_bytes))
+        s, e = _align_utf8_bounds(
+            raw, start_byte - origin, min(total, start_byte + max_bytes) - origin
+        )
         db.commit()
         return {
             "session_id": sid,
@@ -2206,10 +2364,10 @@ def read_item_body_chunk(
             "item_key": item_key,
             "content_generation": generation,
             "content_revision": strict_safe_int(item_row["item_revision"]),
-            "start_byte": s,
-            "end_byte": e,
+            "start_byte": origin + s,
+            "end_byte": origin + e,
             "total_bytes": total,
-            "has_more": e < total,
+            "has_more": origin + e < total,
             "text": raw[s:e].decode("utf-8"),
         }
     except BaseException:
@@ -2245,26 +2403,47 @@ def read_tool_output_view(
         summary = json.loads(item_row["summary_json"])
         out_ref = summary.get("output_ref") or {}
         out_epoch = str(out_ref.get("output_epoch") or "")
-        rows = (
-            db.execute(
-                "SELECT start_offset,end_offset,data,running FROM native_projection_outputs WHERE session_id=? AND epoch=? AND item_key=? AND output_epoch=? ORDER BY start_offset",
-                (sid, epoch, item_key, out_epoch),
-            ).fetchall()
-            if out_epoch
-            else []
-        )
-        raw = (
-            b"".join(bytes(r["data"]) for r in rows)
-            if rows
-            else str(summary.get("inline_text", "")).encode("utf-8")
-        )
-        min_offset = int(rows[0]["start_offset"]) if rows else 0
-        total = min_offset + len(raw)
+        min_offset = origin = 0
+        if out_epoch:
+            keys = sid, epoch, item_key, out_epoch
+            predicate = "session_id=? AND epoch=? AND item_key=? AND output_epoch=?"
+            first = db.execute(
+                f"SELECT start_offset FROM native_projection_outputs WHERE {predicate} "
+                "ORDER BY start_offset LIMIT 1",
+                keys,
+            ).fetchone()
+            last = db.execute(
+                f"SELECT end_offset FROM native_projection_outputs WHERE {predicate} "
+                "ORDER BY start_offset DESC LIMIT 1",
+                keys,
+            ).fetchone()
+            if first is None or last is None:
+                raise DevError("HISTORY_UNAVAILABLE", "工具输出分块不可用", 409)
+            min_offset, total = int(first[0]), int(last[0])
+            if after_offset is None or after_offset < min_offset or after_offset > total:
+                start = max(min_offset, total - tail_bytes)
+                stop = total
+            else:
+                start = after_offset
+                stop = min(total, start + tail_bytes)
+            origin, raw = _stored_range(
+                db,
+                "native_projection_outputs",
+                "output_epoch",
+                "start_offset",
+                keys,
+                start,
+                stop,
+            )
+        else:
+            raw = str(summary.get("inline_output", summary.get("inline_text", ""))).encode("utf-8")
+            total = len(raw)
         running = bool(item_row["active"])
         res = _slice_tool_output(
             raw,
             min_offset=min_offset,
             total=total,
+            raw_offset=origin,
             after_offset=after_offset,
             tail_bytes=tail_bytes,
             output_epoch=out_epoch or f"{epoch}:{item_key}",
@@ -2286,28 +2465,30 @@ def _slice_tool_output(
     tail_bytes: int,
     output_epoch: str,
     running: bool,
+    raw_offset: int | None = None,
 ) -> dict[str, Any]:
+    origin = min_offset if raw_offset is None else raw_offset
     if after_offset is None or after_offset < min_offset or after_offset > total:
-        raw_start = max(0, len(raw) - tail_bytes)
-        s, e = _align_utf8_bounds(raw, raw_start, len(raw))
-        from_off = min_offset + s
+        raw_start = max(min_offset, total - tail_bytes) - origin
+        s, e = _align_utf8_bounds(raw, raw_start, total - origin)
+        from_off = origin + s
         return {
             "kind": "replace",
             "output_epoch": output_epoch,
             "from_offset": from_off,
-            "to_offset": min_offset + e,
+            "to_offset": origin + e,
             "total_bytes": total,
             "truncated_before": from_off > 0,
             "running": running,
             "text": raw[s:e].decode("utf-8"),
         }
-    rel_start = after_offset - min_offset
-    s, e = _align_utf8_bounds(raw, rel_start, min(len(raw), rel_start + tail_bytes))
+    rel_start = after_offset - origin
+    s, e = _align_utf8_bounds(raw, rel_start, min(total - origin, rel_start + tail_bytes))
     return {
         "kind": "append",
         "output_epoch": output_epoch,
-        "from_offset": min_offset + s,
-        "to_offset": min_offset + e,
+        "from_offset": origin + s,
+        "to_offset": origin + e,
         "total_bytes": total,
         "truncated_before": False,
         "running": running,

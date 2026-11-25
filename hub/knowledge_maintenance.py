@@ -242,10 +242,29 @@ class KnowledgeMaintenance:
         self.store.execute("DELETE FROM knowledge_maintenance WHERE id=?", (victim["id"],))
         return True
 
+    @staticmethod
+    def source_effect(name, args):
+        # This is a maintenance hint, not a permission claim. A requested
+        # copy-on-write snapshot scopes normal writes but is not an OS sandbox.
+        # Explicit writes and ordinary shell execution stay conservative.
+        if (
+            name == "exec"
+            and args.get("isolation") == "snapshot"
+            and args.get("target") == "agent"
+            and not any(
+                resource.get("mode", "write") == "write"
+                for resource in args.get("resources", ())
+                if isinstance(resource, dict)
+            )
+        ):
+            return "snapshot_scoped"
+        return "possible"
+
     def enroll_on_write(self, name, args, project, principal):
         if (
             not self.auto_enroll
             or name not in MUTATING_TOOLS
+            or self.source_effect(name, args) == "snapshot_scoped"
             or not principal.grant_id
             or principal.admin
             or principal.instance_admin

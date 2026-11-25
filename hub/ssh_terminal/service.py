@@ -1130,15 +1130,27 @@ class TerminalService:
 
     async def list(self, principal):
         principal = await self.store.run(iam.live_principal, self.store, principal)
-        rows = await self.store.run(self.repository.list, principal.space_id, principal.user_id)
-        visible = []
-        for row in rows:
-            try:
-                await self.store.run(self._authorize, principal, row["project_id"], None, row)
-                visible.append(self.repository.public(row))
-            except DevError:
-                continue
-        return {"sessions": visible}
+
+        def load_visible():
+            scope = (principal.space_id, principal.user_id)
+            history = self.repository.list(*scope)
+            active = self.repository.list_active(*scope)
+            visible = {}
+            for row in [*active, *history]:
+                if row["id"] in visible:
+                    continue
+                try:
+                    self._authorize(principal, row["project_id"], None, row)
+                except DevError:
+                    visible[row["id"]] = None
+                else:
+                    visible[row["id"]] = self.repository.public(row)
+            return {
+                "sessions": [visible[row["id"]] for row in history if visible[row["id"]]],
+                "active_sessions": [visible[row["id"]] for row in active if visible[row["id"]]],
+            }
+
+        return await self.store.run(load_visible)
 
     async def ticket(self, sid, principal, body):
         self._guard_maintenance()
@@ -1189,12 +1201,13 @@ class TerminalService:
         self._guard_maintenance()
         if session.create_task and not session.create_task.done():
             await asyncio.shield(session.create_task)
-        if session.row["state"] in {"creating", "connecting"}:
-            await asyncio.wait_for(
-                session.ready.wait(), self.config.connect_timeout + self.config.login_timeout + 10
-            )
+        # A reloaded creating/connecting row has no local producer for the
+        # ready event. Inspect the original identity before deciding to wait.
         self._guard_maintenance()
-        agent = self.agent(session.row["device_id"])
+        device_id = session.row["device_id"]
+        original_generation = session.row["runtime_generation"]
+        agent = self.agent(device_id)
+        not_found = False
         try:
             status = await agent.request(
                 "status",
@@ -1206,7 +1219,26 @@ class TerminalService:
         except TerminalProtocolError as exc:
             if exc.code not in {"SESSION_NOT_FOUND", "STALE_GENERATION"}:
                 raise
+            not_found = exc.code == "SESSION_NOT_FOUND"
         if session.row["mode"] != "tmux":
+            if not_found and self._confirmed_direct(session.row):
+                await self.authorize(session, principal=principal)
+                if (
+                    self._current_terminal_agent(device_id, agent)
+                    and original_generation == session.row["runtime_generation"]
+                    and self._confirmed_direct(session.row)
+                ):
+                    await self.update(
+                        session,
+                        {
+                            "state": "failed",
+                            "reason_code": "SESSION_NOT_RECOVERABLE",
+                            "recoverability": "none",
+                            "remote_session_state": "unknown",
+                            "ssh_connected": False,
+                            "output_complete": False,
+                        },
+                    )
             raise TerminalProtocolError(
                 "SESSION_NOT_RECOVERABLE", "Agent 已重启，普通 SSH 会话不能恢复原 shell"
             )

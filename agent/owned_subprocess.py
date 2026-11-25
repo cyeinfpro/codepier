@@ -82,6 +82,10 @@ class OwnedProcess:
             await asyncio.sleep(0.02)
         return self.returncode
 
+    @property
+    def cleanup_confirmed(self):
+        return getattr(self, "_cleanup_confirmed", False)
+
     async def stop_owned(self):
         async with self._stop_lock:
             if self._released:
@@ -92,7 +96,7 @@ class OwnedProcess:
             work = asyncio.create_task(asyncio.to_thread(stop_owned_group, self.pid, grouped=True))
             cancellation = None
             try:
-                _, code = await asyncio.shield(work)
+                confirmed, code = await asyncio.shield(work)
             except asyncio.CancelledError as exc:
                 # The native cleanup still owns the child. Settle it before
                 # releasing our lock or allowing a second cleanup/reap.
@@ -102,7 +106,8 @@ class OwnedProcess:
                         await asyncio.shield(work)
                     except asyncio.CancelledError:
                         continue
-                _, code = work.result()
+                confirmed, code = work.result()
+            self._cleanup_confirmed = confirmed
             if code is not None:
                 self._observed = observed if observed is not None else code
                 self._released = True

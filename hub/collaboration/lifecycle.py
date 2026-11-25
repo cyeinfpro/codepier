@@ -421,6 +421,8 @@ class CollaborationLoops:
             with suppress(asyncio.CancelledError):
                 await task
         self.started = False
+        if pool := getattr(self.service, "network_pool", None):
+            await pool.close()
         for name in self.service.health:
             self.service.health[name] = {"status": "stopped", "observed_at": self.service.clock()}
 
@@ -429,10 +431,13 @@ def install(runtime, *, config=None):
     from hub.collaboration.service import CollaborationService
     from hub.collaboration.events import EventService
     from hub.collaboration.monitor import MonitorService
+    from hub.collaboration.network import PinnedClients, probe, webhook
+    from functools import partial
 
     service = CollaborationService(runtime, config=config)
-    service.events = EventService(service)
-    service.monitor = MonitorService(service)
+    service.network_pool = PinnedClients()
+    service.events = EventService(service, sender=partial(webhook, pool=service.network_pool))
+    service.monitor = MonitorService(service, prober=partial(probe, pool=service.network_pool))
     service.health = {
         name: {"status": "not_started" if enabled else "disabled"}
         for name, enabled in (

@@ -7,6 +7,9 @@ All replacements match the original snapshot; no fuzzy substitution guesses.
 from __future__ import annotations
 
 import base64
+import codecs
+import hashlib
+import re
 from agent.filesystem import MAX_TEXT_EDIT
 from shared.crypto import digest
 from shared.util import DevError
@@ -75,6 +78,97 @@ def _read_page_bytes(project, *, fallback):
     return max(OUTPUT_BYTES, budget) if type(budget) is int else fallback
 
 
+# Same Unicode line boundaries as str.splitlines(keepends=True).
+_LINE_END = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+_PNG = b"\x89PNG\r\n\x1a\n"
+_JPEG = b"\xff\xd8\xff"
+
+
+class _TextPage:
+    def __init__(self, offset, limit, budget):
+        self.decoder = codecs.getincrementaldecoder("utf-8")()
+        self.start = offset - 1
+        self.limit = limit
+        self.budget = budget
+        self.line_no = 0
+        self.body = bytearray()
+        self.line = bytearray()
+        self.page_lines = 0
+        self.pending_cr = False
+        self.line_open = False
+        self.full = False
+        self.too_large = False
+        self.binary = False
+        self.encoding_error = False
+
+    def _part(self, part, *, end=False):
+        self.line_open |= bool(part)
+        if not self.full and self.start <= self.line_no < self.start + self.limit:
+            if part:
+                data = part.encode("utf-8")
+                if len(self.body) + len(self.line) + len(data) > self.budget:
+                    self.too_large = self.page_lines == 0
+                    self.full = True
+                    self.line.clear()
+                else:
+                    self.line.extend(data)
+            if end and not self.full:
+                self.body.extend(self.line)
+                self.line.clear()
+                self.page_lines += 1
+        if end:
+            self.line_no += 1
+            self.line_open = False
+
+    def _scan(self, text, final):
+        if self.pending_cr:
+            text = "\r" + text
+        self.pending_cr = not final and text.endswith("\r")
+        if self.pending_cr:
+            text = text[:-1]
+        start = 0
+        for match in _LINE_END.finditer(text):
+            end = match.end()
+            self._part(text[start:end], end=True)
+            start = end
+        if start < len(text):
+            self._part(text[start:])
+        if final and self.line_open:
+            self._part("", end=True)
+
+    def consume(self, block, *, final=False):
+        if b"\x00" in block:
+            self.binary = True
+        if self.binary or self.encoding_error:
+            return
+        try:
+            text = self.decoder.decode(block, final=final)
+        except UnicodeDecodeError:
+            self.encoding_error = True
+            return
+        # Preserve a pending CR when a chunk ends inside a UTF-8 code point.
+        if text or final:
+            self._scan(text, final)
+
+    def result(self):
+        if self.start > 0 and self.start >= self.line_no:
+            raise DevError("INVALID_OFFSET", "offset 超出文件行数")
+        if self.too_large:
+            raise DevError(
+                "LINE_TOO_LARGE",
+                f"此行超过 {self.budget // 1024} KiB 单次输出上限；未返回半行",
+            )
+        end = self.start + self.page_lines
+        return {
+            "content": self.body.decode("utf-8"),
+            "offset": self.start + 1,
+            "end_line": end,
+            "total_lines": self.line_no,
+            "truncated": end < self.line_no,
+            "next_offset": end + 1 if end < self.line_no else None,
+        }
+
+
 class CoreFiles:
     def __init__(self, engine):
         self.engine = engine
@@ -116,65 +210,82 @@ class CoreFiles:
     def read_one(self, root, args, *, text_only=False):
         engine = self.engine
         path = engine.path(root, args["path"], False)
+        hasher = hashlib.sha256()
+        text_page = _TextPage(args["offset"], args["limit"], self.output_bytes)
+        hint = bytearray()
+        image = bytearray()
+        mime = None
+        classified = False
+        image_exceeds_budget = False
+
+        def classified_chunk(block):
+            nonlocal image_exceeds_budget
+            if mime:
+                if not text_only and not image_exceeds_budget:
+                    if len(image) + len(block) > MAX_INLINE_IMAGE_BYTES:
+                        image_exceeds_budget = True
+                        image.clear()
+                    else:
+                        image.extend(block)
+            else:
+                text_page.consume(block)
+
+        def classify():
+            nonlocal mime, classified
+            if hint.startswith(_PNG):
+                mime = "image/png"
+            elif hint.startswith(_JPEG):
+                mime = "image/jpeg"
+            classified = True
+            classified_chunk(bytes(hint))
+            hint.clear()
+
+        def consume(block):
+            hasher.update(block)
+            if not classified:
+                need = len(_PNG) - len(hint)
+                hint.extend(block[:need])
+                block = block[need:]
+                if len(hint) == len(_PNG):
+                    classify()
+            if classified and block:
+                classified_chunk(block)
+
         try:
-            data = engine.read_bytes(path, max_bytes=MAX_TEXT_EDIT)
+            size = engine.read_chunks(path, consume, max_bytes=MAX_TEXT_EDIT, verify_path=True)
         except DevError as exc:
             if exc.code != "FILE_TOO_LARGE" or text_only:
                 raise
             return self.asset_metadata(path, args, exc.code)
-        sha = digest(data)
+        # An open descriptor is not ongoing authority over its project path.
+        engine.path(root, args["path"], False)
+        if not classified:
+            classify()
+        sha = hasher.hexdigest()
         if args["expected_sha256"] and args["expected_sha256"] != sha:
             raise DevError("SHA_CONFLICT", "分页读取期间文件改变，请从头重新读取", 409)
-        meta = {"path": path.relative_to(root).as_posix(), "sha256": sha, "bytes": len(data)}
-        mime = (
-            "image/png"
-            if data.startswith(b"\x89PNG\r\n\x1a\n")
-            else "image/jpeg"
-            if data.startswith(b"\xff\xd8\xff")
-            else None
-        )
-        if mime and text_only:
-            raise DevError("BINARY_FILE", "批量读取仅支持 UTF-8 文本；图片请单独读取")
+        meta = {"path": path.relative_to(root).as_posix(), "sha256": sha, "bytes": size}
         if mime:
-            return self._read_image(mime, data, path, args, sha, meta)
-        try:
-            lines = engine.text(data).splitlines(keepends=True)
-        except DevError as exc:
-            if exc.code not in {"BINARY_FILE", "ENCODING"} or text_only:
-                raise
-            return self.asset_metadata(path, args, exc.code)
-        start = args["offset"] - 1
-        if start > 0 and start >= len(lines):
-            raise DevError("INVALID_OFFSET", "offset 超出文件行数")
-        selected, size = [], 0
-        for line in lines[start : start + args["limit"]]:
-            count = len(line.encode("utf-8"))
-            if size + count > self.output_bytes:
-                if not selected:
-                    raise DevError(
-                        "LINE_TOO_LARGE",
-                        f"此行超过 {self.output_bytes // 1024} KiB 单次输出上限；未返回半行",
-                    )
-                break
-            selected.append(line)
-            size += count
-        end = start + len(selected)
-        more = end < len(lines)
-        return {
-            **meta,
-            "content": "".join(selected),
-            "offset": start + 1,
-            "end_line": end,
-            "total_lines": len(lines),
-            "truncated": more,
-            "next_offset": end + 1 if more else None,
-        }
+            if text_only:
+                raise DevError("BINARY_FILE", "批量读取仅支持 UTF-8 文本；图片请单独读取")
+            if image_exceeds_budget:
+                return self._asset_metadata(meta, args, "IMAGE_TOO_LARGE")
+            return self._read_image(mime, bytes(image), path, args, sha, meta)
+        text_page.consume(b"", final=True)
+        if text_page.binary or text_page.encoding_error:
+            code = "BINARY_FILE" if text_page.binary else "ENCODING"
+            if text_only:
+                raise DevError(
+                    code,
+                    "该文件是二进制文件，不作为源码文本读取"
+                    if code == "BINARY_FILE"
+                    else "当前只编辑 UTF-8 文件，未改动文件编码",
+                )
+            return self._asset_metadata(meta, args, code)
+        return {**meta, **text_page.result()}
 
     @staticmethod
-    def asset_metadata(path, args, reason):
-        from agent.file_blobs import snapshot
-
-        info = snapshot(path)
+    def _asset_metadata(info, args, reason):
         if args["expected_sha256"] and args["expected_sha256"] != info["sha256"]:
             raise DevError("SHA_CONFLICT", "文件已改变，请重新读取", 409)
         return {
@@ -188,6 +299,12 @@ class CoreFiles:
             "next_offset": None,
             "hint": "仅返回摘要；单项 edit delete/move 可处理此文件，不表示已读取文本",
         }
+
+    @staticmethod
+    def asset_metadata(path, args, reason):
+        from agent.file_blobs import snapshot
+
+        return CoreFiles._asset_metadata(snapshot(path), args, reason)
 
     def read_batch(self, root, args):
         # One admitted operation, one root, no sub-dispatch or authorization retry.

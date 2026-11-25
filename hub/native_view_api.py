@@ -295,7 +295,7 @@ def _tool_output_stream(
                 if emitted:
                     yield _sse_frame("output", frame, event_id=str(frame["to_offset"]))
                     cursor = int(frame["to_offset"])
-                if not frame["running"]:
+                if not frame["running"] and frame["to_offset"] >= frame["total_bytes"]:
                     if not emitted:
                         yield _sse_frame("output", frame, event_id=str(frame["to_offset"]))
                     return

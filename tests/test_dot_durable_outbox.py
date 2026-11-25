@@ -160,3 +160,47 @@ def test_quota_retention_and_cleanup_never_delete_unconfirmed_body(collab, tmp_p
         assert json.loads(kwargs['unseal'](outbox.db.execute('SELECT body FROM dot_outbox_entries').fetchone()[0]))['arguments']['body_text'] == args['body_text']
     finally:
         outbox.close()
+
+
+@pytest.mark.parametrize("kind", ["message", "message_v2"])
+def test_explicit_question_receipt_matches_original_request(collab, tmp_path, kind):
+    from shared.collaboration_contracts import DotChatMessage, DotChatMessageV2
+    from tests.test_owner_task_context import item
+
+    c, outbox, identity, args, _path, _kwargs = setup(collab, tmp_path)
+    source = item(c, args["reply_to_id"])
+    args["response_request"] = {
+        **source["response_request_options"],
+        "reason": "plan_confirmation",
+    }
+    args["complete"] = False
+    entry = outbox.enqueue(identity, kind, args)
+    used = []
+
+    async def authorize(envelope):
+        model = DotChatMessageV2 if kind == "message_v2" else DotChatMessage
+        c.s.dot_chat.scope(envelope["arguments"], c.actor, model, connector=True)
+
+    async def lookup(envelope):
+        return await callbacks(c)["lookup"](envelope)
+
+    async def send(envelope):
+        handler = c.s.dot_chat.message_v2 if kind == "message_v2" else c.s.dot_chat.message
+        used.append(handler(envelope["arguments"], c.actor))
+        raise TimeoutError("fixture lost sender response after commit")
+
+    try:
+        first = asyncio.run(
+            outbox.deliver(entry["id"], authorize=authorize, lookup=lookup, send=send)
+        )
+        assert first["state"] == "checking_receipt"
+        assert len(used) == 1
+        c.clock[0] += 60
+        final = asyncio.run(
+            outbox.deliver(entry["id"], authorize=authorize, lookup=lookup, send=send)
+        )
+        assert final["state"] == "committed"
+        assert len(used) == 1 and "可在这里直接回复" in used[0]["message"]["body_text"]
+        assert outbox.list()["items"][0]["request_digest"] == entry["request_digest"]
+    finally:
+        outbox.close()

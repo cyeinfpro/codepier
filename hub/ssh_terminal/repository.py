@@ -148,6 +148,15 @@ class TerminalRepository:
             (space, owner),
         )
 
+    def list_active(self, space, owner):
+        return self.store.all(
+            "SELECT * FROM vps_terminal_sessions "
+            "WHERE space_id=? AND owner_user_id=? "
+            "AND state NOT IN ('exited','failed','close_unknown') "
+            "ORDER BY updated DESC, id DESC",
+            (space, owner),
+        )
+
     def counts(self, space, owner, device):
         rows = self.store.all(
             "SELECT space_id,owner_user_id,device_id FROM vps_terminal_sessions WHERE state NOT IN ('exited','failed','close_unknown')"

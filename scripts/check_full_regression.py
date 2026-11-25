@@ -61,18 +61,15 @@ def snapshot():
         ".github",
         "requirements",
     ):
-        for path in sorted((ROOT / directory).rglob("*")):
-            relative = path.relative_to(ROOT)
-            if (
-                not path.is_file()
-                or path.is_symlink()
-                or any(
-                    part in {"node_modules", "__pycache__", ".git", ".pytest_cache"}
-                    for part in relative.parts
-                )
-            ):
-                continue
-            result[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        excluded = {"node_modules", "__pycache__", ".git", ".pytest_cache"}
+        for parent, dirs, files in os.walk(ROOT / directory, topdown=True, followlinks=False):
+            dirs[:] = sorted(name for name in dirs if name not in excluded)
+            for name in sorted(files):
+                path = Path(parent) / name
+                if name in excluded or path.is_symlink() or not path.is_file():
+                    continue
+                relative = path.relative_to(ROOT)
+                result[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     for path in sorted(ROOT.iterdir()):
         if (
             path.is_file()

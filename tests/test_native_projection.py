@@ -413,3 +413,26 @@ def test_worker_epoch_change_preserves_stream_epoch(service):
         _run_all_steps(db, sid)
         ep2 = read_head(db, sid).watermark.epoch
         assert ep2 == ep1
+
+
+def test_same_batch_create_then_append_preserves_complete_upsert_and_quota(service):
+    obj, _, sid = service
+    payload = b"".join(
+        json.dumps({"type": "delta", "receipt": "r1", "item_id": "m1", "text": text}).encode()
+        + b"\n" for text in ("a", "b")
+    )
+    with closing(database(obj.directory)) as db:
+        ensure_projection_schema(db)
+        _insert_raw(db, sid, 0, payload)
+        db.commit()
+        assert db.execute("SELECT bytes FROM native_output_quota").fetchone()[0] == len(payload)
+        stage = prepare_projection_step(db, sid)
+        assert stage and stage.changes[0]["op"] == "upsert"
+        assert commit_projection_step(db, sid, stage)
+        snapshot = read_snapshot(db, sid, scope_key="sc_1")
+        assert snapshot["items"][0]["body"]["text"] == "ab"
+        db.execute("BEGIN")
+        db.execute("DELETE FROM output WHERE session=?", (sid,))
+        assert db.execute("SELECT bytes FROM native_output_quota").fetchone()[0] == 0
+        db.rollback()
+        assert db.execute("SELECT bytes FROM native_output_quota").fetchone()[0] == len(payload)

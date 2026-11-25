@@ -968,8 +968,8 @@ export class TerminalLayout {
       }),
     );
     const list = el("div", "vt-recent-list");
-    const sessions = this.store.remoteSessions
-      .filter((session) => !["exited", "closed"].includes(session.state))
+    const sessions = this.store.list()
+      .filter((session) => !this.store.isEnded(session))
       .slice(0, 20);
     for (const session of sessions) {
       const id = session.session_id || session.id,

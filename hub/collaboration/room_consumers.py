@@ -1775,13 +1775,17 @@ class RoomConsumers(FencedConsumerEngine):
                     count += 1
         return count
 
+    def recover_waiting_inputs(self):
+        if self.c.config.enabled and self.c.config.events_enabled:
+            from hub.collaboration.room_waiting_inputs import recover_waiting
+
+            recover_waiting(self.c)
+
     def recover(self, *, max_wakes=4):
         """Bounded deterministic reminders; no idle model polling or execution."""
         if not self.c.config.enabled or not self.c.config.events_enabled or max_wakes <= 0:
             return 0
-        from hub.collaboration.room_waiting_inputs import recover_waiting
-
-        recover_waiting(self.c)
+        self.recover_waiting_inputs()
         with self.store.transaction():
             count = self._recover_probes(max_wakes)
             if count >= max_wakes:

@@ -1,5 +1,5 @@
 {
-  "version": "1.34.12",
+  "version": "1.34.13",
   "algorithm": "sha256",
   "assets": {
     "access-profiles.css": {
@@ -27,8 +27,8 @@
       "bytes": 23018
     },
     "app.js": {
-      "sha256": "f270ea879bef764199026c810764e0c510e357e3c4676c974682487d08f135a7",
-      "bytes": 177895
+      "sha256": "8b6759ca483685a35cea7704bec2d6eec4d8ddb17217effaf746b1d32e9ae96d",
+      "bytes": 178106
     },
     "appearance.js": {
       "sha256": "c62c6dbe6c731e82c69b11c29f0d31c3ac7066f5d9c18d933dddcf6f1c3e919c",
@@ -75,8 +75,8 @@
       "bytes": 105357
     },
     "chat.js": {
-      "sha256": "5a88bed7c0b871a3d71a5bfb84055f594eaf80d78e40a1ff3084daf74f16fb89",
-      "bytes": 179945
+      "sha256": "a52585681a0fd48e6f55cb0fe742d2787468d5d109086b4ec1832fc295785deb",
+      "bytes": 180470
     },
     "collaboration-room-store.js": {
       "sha256": "4b7eecf2253803824118da618bd2eafb2f3dfb4436ba8a388388deddf8402efc",
@@ -103,8 +103,8 @@
       "bytes": 9269
     },
     "core/bundle.js": {
-      "sha256": "72f6118505512938d2161a6aa1f69924521e229a89482e151c906644730f9dbc",
-      "bytes": 100475
+      "sha256": "da99f6e74f64ac6dc71cae053409c2719fd7b06de0d33f33d17d5f60ad769a2d",
+      "bytes": 101392
     },
     "favicon.svg": {
       "sha256": "f99761d39d805b7f995e20bb44df1b1adfe17fc9cef8caf47c965e1af713032f",
@@ -247,8 +247,8 @@
       "bytes": 30193
     },
     "vps-terminal.js": {
-      "sha256": "2b775b7556b2f10933817a9295e14ca44270f1ed1724fc6d505860a7346376d5",
-      "bytes": 657313
+      "sha256": "0a015919d6f16e32d3b4329cd6e4412df2e70e092e5c9587a450d56dffbc5edf",
+      "bytes": 657679
     },
     "vps.css": {
       "sha256": "74083c65c117f533e30ed8751d754598486a87bbafb566d1cfff183a7a2cf8f6",

@@ -211,3 +211,64 @@ async def test_expired_unsent_lease_requeues_same_event_without_advancing_cursor
     assert again['body'] == item['body'] and again['event_id'] == item['event_id']
     await events.deliver(again)
     assert service.store.one('SELECT state FROM mcp_event_deliveries WHERE id=?', (item['delivery_id'],))['state'] == 'accepted'
+
+
+@pytest.mark.asyncio
+async def test_pinned_client_pool_does_not_share_cross_host_policy_and_revalidates_dns(monkeypatch):
+    import httpx
+
+    addresses = iter((["8.8.8.8"], ["8.8.8.8"], ["8.8.4.4"]))
+    async def resolve(_host, _port):
+        return next(addresses)
+
+    closed = []
+    class Client:
+        async def aclose(self):
+            closed.append(self)
+
+    monkeypatch.setattr(network, "_client", Client)
+    monkeypatch.setattr(network, "resolve", resolve)
+    pool = network.PinnedClients(capacity=4)
+    url = "https://example.invalid/fixture"
+    before = await network.callback_destination(url)
+    same = await network.callback_destination(url)
+    switched = await network.callback_destination(url)
+    async with pool.borrow(before, "callback") as original:
+        async with pool.borrow(same, "callback") as again:
+            assert again is original
+        async with pool.borrow(switched, "callback") as changed_address:
+            assert changed_address is not original
+        async with pool.borrow(
+            (httpx.URL("https://8.8.8.8/fixture"), "other.invalid", "other.invalid"),
+            "callback",
+        ) as changed_sni:
+            assert changed_sni is not original
+        async with pool.borrow(same, ("probe", (), False)) as probe:
+            assert probe is not original
+    await pool.close()
+    assert len(closed) == 4
+
+
+def test_each_recovery_lane_gets_wake_budget_under_constant_load():
+    from types import SimpleNamespace
+
+    served = dict.fromkeys(("relay", "mailbox", "room_consumers", "task_liveness"), 0)
+    local = []
+    def lane(name):
+        def recover(*, max_wakes):
+            served[name] += max_wakes
+            return max_wakes
+        return SimpleNamespace(recover=recover, recover_waiting_inputs=lambda: local.append(name))
+    c = SimpleNamespace(
+        store=None,
+        rooms=SimpleNamespace(recover_paused_work=lambda: None),
+        dot_relay=lane("relay"),
+        dot_mailbox=lane("mailbox"),
+        room_consumers=lane("room_consumers"),
+        task_liveness=lane("task_liveness"),
+    )
+    events = EventService(c)
+    for _ in range(4):
+        events._run_tick_work(0, False, True, False)
+    assert served == dict.fromkeys(served, 4)
+    assert local == ["room_consumers"] * 3

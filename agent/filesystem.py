@@ -368,6 +368,26 @@ class FileEngine:
         max_bytes: int = MAX_FILE,
         verify_path: bool = False,
     ) -> bytes | None:
+        chunks: list[bytes] = []
+        size = self.read_chunks(
+            path, chunks.append, missing=missing, max_bytes=max_bytes, verify_path=verify_path
+        )
+        return b"".join(chunks) if size is not None else None
+
+    def read_chunks(
+        self,
+        path: Path,
+        consume,
+        *,
+        missing: bool = False,
+        max_bytes: int = MAX_FILE,
+        verify_path: bool = False,
+    ) -> int | None:
+        """Visit guarded file chunks without retaining the whole file.
+
+        Consumers must stage results locally. No output is valid until this
+        method returns after verifying the descriptor and, optionally, name.
+        """
         try:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             fd = os.open(path, flags)
@@ -396,16 +416,15 @@ class FileEngine:
                 raise DevError(
                     "FILE_TOO_LARGE", f"单个文件上限为 {max_bytes} bytes；未读取或修改此文件"
                 )
-            chunks, size = [], 0
+            size = 0
             while size <= max_bytes:
                 block = os.read(fd, min(65536, max_bytes + 1 - size))
                 if not block:
                     break
-                chunks.append(block)
                 size += len(block)
-            data = b"".join(chunks)
-            if len(data) > max_bytes:
-                raise DevError("FILE_TOO_LARGE", f"文件超过 {max_bytes} bytes")
+                if size > max_bytes:
+                    raise DevError("FILE_TOO_LARGE", f"文件超过 {max_bytes} bytes")
+                consume(block)
             latest = os.fstat(fd)
             if (s.st_size, s.st_mtime_ns, s.st_ctime_ns) != (
                 latest.st_size,
@@ -420,7 +439,7 @@ class FileEngine:
                     latest.st_ino,
                 ):
                     raise DevError("FILE_CHANGED", "文件名在读取核验期间指向了不同文件", 409)
-            return data
+            return size
         except OSError as exc:
             if exc.errno in STORAGE_UNAVAILABLE:
                 raise DevError(

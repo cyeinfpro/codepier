@@ -373,7 +373,7 @@ def test_routes_are_mounted_and_require_a_panel_login(terminal_api):
     response = api.client.get("/api/vps-terminal/sessions")
     assert response.status_code == 401 and response.json()["error"]["code"] == "LOGIN_REQUIRED"
     response = api.alice.get("/api/vps-terminal/sessions")
-    assert response.status_code == 200 and response.json() == {"sessions": []}
+    assert response.status_code == 200 and response.json() == {"sessions": [], "active_sessions": []}
 
 
 def test_diagnostics_returns_only_authorized_safe_measurements_and_a_local_status_probe(

@@ -684,3 +684,31 @@ async def test_reported_package_failure_is_distinct_and_stays_fenced():
     assert status["state"] == "failed" and status["verification_only"]
     assert status["reason_code"] == "TMUX_INSTALL_FAILED"
     assert await queue.install_missing("space", "install", **admin) == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_after_final_write_error_rechecks_installed_target(monkeypatch):
+    now, steps, store = [100.0], [], FakeStore()
+    store.target("target")
+    queue = service(store, steps, clock=lambda: now[0])
+    admin = {"authorized_user_id": "administrator"}
+    await queue.backfill("space", "scan", **admin)
+    assert await queue.run_one()
+    assert await queue.install_missing("space", "install", **admin) == 1
+    original_update = queue._update
+
+    def cannot_commit(*_args):
+        raise sqlite3.OperationalError("fixture write was interrupted")
+
+    monkeypatch.setattr(queue, "_update", cannot_commit)
+    with pytest.raises(sqlite3.OperationalError):
+        await queue.run_one()
+    job = store.one("SELECT * FROM vps_readiness_jobs")
+    assert job["state"] == "installing" and job["verify_only"] == 1
+    assert not await queue.run_one()
+    monkeypatch.setattr(queue, "_update", original_update)
+    now[0] = job["lease_until"] + 0.1
+    assert await queue.run_one()
+    original_update(job["id"], job["lease_token"], "failed", "STALE_OWNER")
+    assert (await queue.status("space", "target"))["state"] == "ready"
+    assert sum(step == "install" for step, _ in steps) == 1

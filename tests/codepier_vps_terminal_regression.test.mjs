@@ -1157,3 +1157,20 @@ test("mobile HUD, transient notice, initial grid, coarse WebGL, WakeLock, swipe,
     env.restore();
   }
 });
+
+test("terminal HTTP read generation and older active session inventory", async () => {
+  const pending = [];
+  const store = new TerminalStore({ api: () => new Promise(resolve => pending.push(resolve)) });
+  const stale = store.refreshSessions();
+  const latest = store.refreshSessions();
+  pending[1]({
+    sessions: Array.from({ length: 200 }, (_, i) => ({ id: `closed-${i}`, state: "exited" })),
+    active_sessions: [{ id: "old-live", vps_id: "first", state: "ready" }],
+  });
+  await latest;
+  pending[0]({ sessions: [{ id: "wrong", state: "ready" }] });
+  await stale;
+  assert.equal(store.count(), 1);
+  assert.equal(store.list().some(item => item.id === "wrong"), false);
+  assert.deepEqual({ ...store.activeCountsByVPS() }, { first: 1 });
+});

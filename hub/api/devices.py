@@ -17,17 +17,46 @@ from hub.api.models import DeviceCreate, DeviceUpdate
 
 @iam.read_decision
 def device_rows(store, runtime, principal):
+    principal = iam.live_principal(store, principal)
     candidates = store.all(
-        "SELECT id,name,enabled,info,last_seen,created,owner_user_id FROM devices WHERE space_id=? ORDER BY created",
+        "SELECT id,name,enabled,info,last_seen,created,owner_user_id FROM devices WHERE space_id=? ORDER BY created,id",
         (principal.space_id,),
     )
     rows = []
     for row in candidates:
-        try:
-            iam.require_device(store, principal, row["id"])
-        except DevError:
-            continue
+        if not principal.admin and (
+            principal.grant_id or row["owner_user_id"] != principal.user_id
+        ):
+            try:
+                iam.require_device(store, principal, row["id"])
+            except DevError:
+                continue
         rows.append(row)
+    if not rows:
+        return []
+    ids = json.dumps([row["id"] for row in rows])
+    project_counts = {
+        row["device_id"]: row["n"]
+        for row in store.all(
+            """SELECT device_id,COUNT(*) AS n FROM projects
+               WHERE device_id IN (SELECT value FROM json_each(?)) GROUP BY device_id""",
+            (ids,),
+        )
+    }
+    latest_actions = {
+        row["device_id"]: row
+        for row in store.all(
+            f"""SELECT id,tool,state,created,updated,error,device_id,grant_id,
+                       project_id,space_id,owner_user_id,visibility,args_summary
+                FROM operations WHERE id IN (
+                    SELECT (SELECT id FROM operations
+                            WHERE device_id=d.value AND {DEVICE_ACTION_PREDICATE}
+                            ORDER BY created DESC,id DESC LIMIT 1)
+                    FROM json_each(?) d
+                )""",
+            (ids,),
+        )
+    }
     for row in rows:
         try:
             info = json.loads(row["info"] or "{}")
@@ -39,23 +68,21 @@ def device_rows(store, runtime, principal):
         row["last_seen"] = runtime.device_last_seen(row["id"], row["last_seen"])
         row["info"] = info
         row["online"] = runtime.online(row["id"])
-        row["project_count"] = store.one(
-            "SELECT count(*) AS n FROM projects WHERE device_id=?", (row["id"],)
-        )["n"]
+        row["project_count"] = project_counts.get(row["id"], 0)
         management = info.get("management") if isinstance(info.get("management"), dict) else {}
         actions = info.get("device_actions") if isinstance(info.get("device_actions"), list) else []
         actions = sorted(set(actions) & DEVICE_ACTIONS)
         version = str(info.get("version") or management.get("installed_version") or "")[:80]
-        latest = store.one(
-            "SELECT id,tool,state,created,updated,error FROM operations "
-            f"WHERE device_id=? AND {DEVICE_ACTION_PREDICATE} ORDER BY created DESC LIMIT 1",
-            (row["id"],),
-        )
+        latest = latest_actions.get(row["id"])
         if latest:
             try:
-                runtime.operation_row(latest["id"], principal, status_only=True)
+                runtime.authorize_loaded_operation_row(latest, principal)
             except DevError:
                 latest = None
+            else:
+                latest = {
+                    k: latest[k] for k in ("id", "tool", "state", "created", "updated", "error")
+                }
         reason = str(management.get("reason") or "")[:300]
         if row["online"] and not actions and not reason:
             reason = "当前 Agent 版本尚未声明一键管理能力，请重新执行一次安装命令完成基础升级"

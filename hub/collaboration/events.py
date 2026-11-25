@@ -1921,21 +1921,31 @@ class EventService:
                 self._recovery_step("continuations", lambda: recovery(limit=8))
         if run_recovery:
             self._recovery_step("paused_work", self.c.rooms.recover_paused_work)
-            available = max(0, 4 - self._recovery_step("relay", self.c.dot_relay.recover, 0))
-            for name, service in (
+            sources = (
+                ("relay", self.c.dot_relay),
                 ("mailbox", getattr(self.c, "dot_mailbox", None)),
                 ("room_consumers", getattr(self.c, "room_consumers", None)),
                 ("task_liveness", self.c.task_liveness),
-            ):
+            )
+            start = getattr(self, "_recovery_source_cursor", 0)
+            self._recovery_source_cursor = (start + 1) % len(sources)
+            available = 4
+            for name, service in sources[start:] + sources[:start]:
+                if available <= 0:
+                    if name == "room_consumers" and (
+                        waiting := getattr(service, "recover_waiting_inputs", None)
+                    ):
+                        self._recovery_step("room_waiting_inputs", waiting)
+                    continue
                 if service is not None:
                     used = self._recovery_step(
                         name,
                         lambda service=service, available=available: service.recover(
-                            max_wakes=available,
+                            max_wakes=available
                         ),
                         0,
                     )
-                    available = max(0, available - used)
+                    available -= min(available, max(0, used))
         # Reserve commits independently and is attempted even if a recovery
         # source failed. Do not catch lease errors or report phantom items.
         return self.reserve(capacity) if run_dispatch else []

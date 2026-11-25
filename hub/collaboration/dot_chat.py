@@ -632,7 +632,8 @@ class DotChatService:
             self.c.dot_consumers.guard(
                 args, principal, room, dot, require_revision=bool(args["complete"])
             )
-            question_spec = args.pop("response_request", None)
+            question_spec = args.get("response_request")
+            display_body = args["body_text"]
             question_code = (
                 self.c.owner_task_context.code(dot, args["idempotency_key"])
                 if question_spec
@@ -646,7 +647,7 @@ class DotChatService:
             if question_spec:
                 self.c.chatroom.require_message_visible(principal, source)
                 self.c.owner_task_context.prepare(room, dot, source, question_spec)
-                args["body_text"] += (
+                display_body += (
                     "\n\n可在这里直接回复。多件事待确认时，请回复“确认 "
                     + question_code
                     + "”或“取消 "
@@ -678,7 +679,7 @@ class DotChatService:
                     "environment_id": room["environment_id"],
                     "room_id": room["id"],
                     "conversation_id": dot["conversation_id"],
-                    "body_text": args["body_text"],
+                    "body_text": display_body,
                     "reply_to_id": args["reply_to_id"],
                     "client_message_id": client_message_id,
                     "idempotency_key": args["idempotency_key"],
@@ -717,9 +718,18 @@ class DotChatService:
                 )
                 stored = self.c.object("collaboration_messages", room, stored["id"])
                 result = {**result, "message": self.c.chatroom.view(stored)}
-            self.c.task_liveness.record_receipt(
-                dot, args, receipt_kind, {**stored, "version": result["message"]["version"]}
-            )
+            receipt_message = {**stored, "version": result["message"]["version"]}
+            if prior and question_spec:
+                # record() above has already confirmed the original question
+                # specification and chatroom.create has verified the exact
+                # rendered title/body and bound idempotency identity.
+                legacy_args = {k: v for k, v in args.items() if k != "response_request"}
+                legacy_args["body_text"] = display_body
+                self.c.task_liveness.record_receipt(
+                    dot, args, receipt_kind, receipt_message, legacy_args=legacy_args
+                )
+            else:
+                self.c.task_liveness.record_receipt(dot, args, receipt_kind, receipt_message)
             self.c.channels.queue_reply(stored)
             if version2:
                 result = {

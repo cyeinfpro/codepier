@@ -327,7 +327,7 @@ def structured_argument_summary(tool: str, args: dict) -> dict:
     return {"kind": "generic", "primary": fallback, "dir": "", "name": "", "badges": badges}
 
 
-def operation_summary(args: dict, *, maintenance=False) -> dict:
+def operation_summary(args: dict, *, maintenance=False, source_effect="possible") -> dict:
     """Persist counts alongside the existing privacy-preserving summary."""
     from shared.util import safe_summary
 
@@ -340,6 +340,8 @@ def operation_summary(args: dict, *, maintenance=False) -> dict:
         meta["command_chars"] = len(args["command"])
     if isinstance(args.get("edits"), list):
         meta["edit_count"] = len(args["edits"])
+    if source_effect == "snapshot_scoped":
+        meta["source_effect"] = source_effect
     result["_log"] = meta
     return result
 

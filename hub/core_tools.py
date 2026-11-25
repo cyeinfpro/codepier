@@ -87,6 +87,8 @@ def help_result(tool="", action="", *, scopes=None):
                 exposed |= {"include_trace"}
         schema["properties"] = {k: v for k, v in properties.items() if k in exposed}
         schema["properties"]["operation"] = {"type": "string", "const": action}
+        if tool in {"workspace", "project_query"} and action == "tree":
+            schema["properties"]["limit"] = backend["properties"]["limit"]
         required = set(backend.get("required", [])) & exposed
         if "operation_id" in backend.get("required", []):
             required.add("operation_ids")
@@ -300,7 +302,14 @@ async def invoke(runtime, name, raw, principal):
                 "operations_list",
                 {
                     k: args[k]
-                    for k in ("project", "state", "idempotency_key", "limit", "before_created")
+                    for k in (
+                        "project",
+                        "state",
+                        "idempotency_key",
+                        "limit",
+                        "before_created",
+                        "cursor",
+                    )
                 }
                 | options,
                 principal,

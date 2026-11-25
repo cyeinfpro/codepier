@@ -281,25 +281,28 @@ export class NativeSnapshotCache {
     return true;
   }
 
-  enqueue(stateOrEnvelope, ownerCheck = null) {
+  enqueue(stateOrEnvelope, ownerCheck = null, options = {}) {
     if (typeof ownerCheck === "function" && !ownerCheck()) return false;
-    const core = serializeStateSnapshot(stateOrEnvelope);
-    const envelope = {
-      ...core,
-      savedAt: this.now(),
-    };
-    assertSerializableValue(envelope);
+    const defer = options.immutableRevision === true && !stateOrEnvelope.snapshot;
+    const core = defer ? null : serializeStateSnapshot(stateOrEnvelope);
+    const envelope = core && { ...core, savedAt: this.now() };
+    if (envelope) assertSerializableValue(envelope);
     const key = NativeSnapshotCache.makeKey({
-      scopeKey: envelope.snapshot.scope_key,
-      sessionId: envelope.snapshot.session_id,
-      schemaVersion: envelope.snapshot.schema_version,
+      scopeKey: envelope?.snapshot.scope_key ?? stateOrEnvelope.scopeKey,
+      sessionId: envelope?.snapshot.session_id ?? stateOrEnvelope.sessionId,
+      schemaVersion: envelope?.snapshot.schema_version ?? stateOrEnvelope.schemaVersion ?? 2,
     });
-    this.pendingWrites.set(key, { envelope, ownerCheck });
+    this.pendingWrites.set(key, {
+      envelope,
+      revisionState: defer ? stateOrEnvelope : null,
+      ownerCheck,
+    });
     if (!this.scheduledFlush) {
-      this.scheduledFlush = Promise.resolve().then(() => {
+      const flush = () => {
         this.scheduledFlush = null;
         this.flush();
-      });
+      };
+      this.scheduledFlush = defer ? setTimeout(flush, 24) : Promise.resolve().then(flush);
     }
     return true;
   }
@@ -312,13 +315,23 @@ export class NativeSnapshotCache {
     for (const [key, entry] of batch) {
       if (typeof entry.ownerCheck === "function" && !entry.ownerCheck())
         continue;
-      const serialized = JSON.stringify(entry.envelope);
+      let envelope = entry.envelope;
+      if (!envelope) {
+        try {
+          envelope = { ...serializeStateSnapshot(entry.revisionState), savedAt: this.now() };
+          assertSerializableValue(envelope);
+        } catch {
+          // Snapshot persistence is best effort; never cache an invalid revision.
+          continue;
+        }
+      }
+      const serialized = JSON.stringify(envelope);
       const bytes = TEXT_ENCODER.encode(serialized).length;
       if (bytes > this.maxBytes || this.maxEntries === 0) {
         this._deleteKey(key);
         continue;
       }
-      this._writeRecord(key, serialized, bytes, entry.envelope.savedAt);
+      this._writeRecord(key, serialized, bytes, envelope.savedAt);
       written += 1;
     }
     return written;

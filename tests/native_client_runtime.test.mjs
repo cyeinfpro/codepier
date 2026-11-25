@@ -844,3 +844,46 @@ test('HeightIndex, visibleRange, anchor survival, PinSet, and flushVisibleDirty 
   assert.equal(scheduled, 1);
   assert.equal(resolveSurvivingAnchor(view, { key: 'missing' }, 42), 42);
 });
+
+test("transient snapshot replacement failure retries without losing the reset owner", async () => {
+  const scope = { identity: { scopeKey: SCOPE_KEY, sessionId: SID }, authoritative: { resumeToken: "known" } };
+  const events = [];
+  let stream = 0;
+  let resolveBlocked;
+  const blocked = new Promise(resolve => { resolveBlocked = resolve; });
+  let tries = 0;
+  startNativeTransport(scope, {
+    consumeAttempt: async () => (++stream === 1 ? { kind: "reset", reason: "TRANSIENT_GAP" } : { kind: "blocked" }),
+    replaceSnapshotBounded: async () => (++tries === 1 ? "retryable_failure" : "replaced"),
+    delayAbortable: async delay => { events.push(delay); },
+    publishBlocked: () => { resolveBlocked(); },
+  });
+  await blocked;
+  await Promise.resolve();
+  assert.equal(stream, 2);
+  assert.equal(tries, 2);
+  assert.equal(events.length, 1);
+  assert.equal(scope.stopNative, null);
+});
+
+test("snapshot access denial reaches the cache invalidation hook without retry", async () => {
+  const scope = { identity: { scopeKey: SCOPE_KEY, sessionId: SID }, authoritative: { resumeToken: "known" } };
+  const events = [];
+  const denied = { kind: "blocked", status: 403 };
+  startNativeTransport(scope, {
+    consumeAttempt: async () => ({ kind: "reset", reason: "TRANSIENT_GAP" }),
+    replaceSnapshotBounded: async () => {
+      events.push("snapshot");
+      return denied;
+    },
+    delayAbortable: async () => { events.push("unexpected-retry"); },
+    publishResetHalted: () => { events.push("unexpected-halt"); },
+    publishBlocked: (sc, outcome) => {
+      assert.equal(outcome, denied);
+      events.push(sc.identity.scopeKey);
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["snapshot", SCOPE_KEY]);
+  assert.equal(scope.stopNative, null);
+});

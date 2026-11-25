@@ -965,7 +965,18 @@ function connectEvents() {
   let opened = isReconnect,
     checkingAccess = false,
     refreshing = false,
-    refreshAgain = null;
+    refreshAgain = null,
+    scheduledEventPage = null;
+  const schedulePageRefresh = (key, callback) => {
+    if (S.eventTimer && scheduledEventPage === key) return;
+    clearTimeout(S.eventTimer);
+    scheduledEventPage = key;
+    S.eventTimer = setTimeout(() => {
+      S.eventTimer = null;
+      scheduledEventPage = null;
+      if (current()) callback();
+    }, 500);
+  };
   const refreshPanel = async (page = S.page) => {
     if (!current() || S.page !== page || $(".modal")) return;
     if (shouldDeferMobilePanelRefresh()) {
@@ -1000,11 +1011,8 @@ function connectEvents() {
       if (refreshAgain && current() && refreshAgain === S.page) {
         const pendingPage = refreshAgain;
         refreshAgain = null;
-        clearTimeout(S.eventTimer);
-        S.eventTimer = setTimeout(() => {
-          S.eventTimer = null;
-          refreshPanel(pendingPage);
-        }, 500);
+        if (!S.eventTimer || scheduledEventPage === pendingPage)
+          schedulePageRefresh(pendingPage, () => refreshPanel(pendingPage));
       }
     }
   };
@@ -1158,11 +1166,10 @@ function connectEvents() {
       if (typeof CodePierCallLog.onServerEvent === "function") {
         CodePierCallLog.onServerEvent(m, { ingested: m.type === "operation" });
       } else {
-        clearTimeout(S.eventTimer);
-        S.eventTimer = setTimeout(() => {
-          if (current() && S.page === "audit" && S.auditMode === "operations")
+        schedulePageRefresh("audit/operations", () => {
+          if (S.page === "audit" && S.auditMode === "operations")
             CodePierCallLog.refresh(true).catch(() => {});
-        }, 500);
+        });
       }
       return;
     }
@@ -1181,11 +1188,9 @@ function connectEvents() {
     };
     if (dependencies[S.page]?.includes(m.type)) {
       const page = S.page;
-      clearTimeout(S.eventTimer);
-      S.eventTimer = setTimeout(() => {
-        S.eventTimer = null;
-        if (current() && S.page === page) refreshPanel(page);
-      }, 500);
+      schedulePageRefresh(page, () => {
+        if (S.page === page) refreshPanel(page);
+      });
     }
   };
 }

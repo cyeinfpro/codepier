@@ -246,6 +246,61 @@ CREATE INDEX IF NOT EXISTS native_restore_by_session
 """
 
 
+_RETENTION_COLUMNS = {
+    "sessions": ("size",),
+    "commands": ("payload",),
+    "attachments": ("size",),
+    "native_control_events": ("payload_json",),
+    "native_turns": ("coverage_json",),
+    "native_restore_journals": ("plan_json", "results_json"),
+}
+
+
+def _retention_expression(columns, prefix=""):
+    return " + ".join(
+        f"COALESCE({prefix}{column},0)"
+        if column == "size"
+        else f"COALESCE(length(CAST({prefix}{column} AS BLOB)),0)"
+        for column in columns
+    )
+
+
+def _migrate_v6(db):
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if db.execute("PRAGMA user_version").fetchone()[0] >= 6:
+            db.commit()
+            return
+        db.execute(
+            "CREATE TABLE native_retention_ledger (id INTEGER PRIMARY KEY CHECK(id=1), bytes INTEGER NOT NULL CHECK(bytes>=0))"
+        )
+        db.execute("INSERT INTO native_retention_ledger VALUES(1,?)", (_sum_retained_bytes(db),))
+        for table, columns in _RETENTION_COLUMNS.items():
+            added = _retention_expression(columns, "NEW.")
+            removed = _retention_expression(columns, "OLD.")
+            for suffix, event, delta in (
+                ("insert", "INSERT", f"({added})"),
+                ("update", "UPDATE OF " + ",".join(columns), f"({added}) - ({removed})"),
+                ("delete", "DELETE", f"-({removed})"),
+            ):
+                # All identifiers and expressions come from the fixed schema above.
+                db.execute(
+                    f"CREATE TRIGGER native_retention_{table}_{suffix} AFTER {event} ON {table} "
+                    f"BEGIN UPDATE native_retention_ledger SET bytes=bytes+{delta} WHERE id=1; END"
+                )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS native_session_history_order ON sessions(created DESC,id)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS native_session_live_heartbeat ON sessions(status,heartbeat)"
+        )
+        db.execute("PRAGMA user_version=6")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
 def database(directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -267,6 +322,10 @@ def database(directory):
         version = 4
     if version < 5:
         _migrate_v5(db)
+        version = 5
+    if version < 6:
+        _migrate_v6(db)
+    db.execute("PRAGMA recursive_triggers=ON")
     os.chmod(path, 0o600)
     return db
 
@@ -510,23 +569,26 @@ def append_control_tx(
     return spool_start, spool_end
 
 
+def _sum_retained_bytes(db):
+    return sum(
+        db.execute(
+            f"SELECT COALESCE(SUM({_retention_expression(columns)}),0) FROM {table}"
+        ).fetchone()[0]
+        for table, columns in _RETENTION_COLUMNS.items()
+    )
+
+
 def retained_bytes(db):
-    """Logical retained bytes, not SQLite's reusable free pages or WAL copies."""
-    output = db.execute("SELECT COALESCE(sum(size),0) FROM sessions").fetchone()[0]
-    commands = db.execute(
-        "SELECT COALESCE(sum(length(CAST(payload AS BLOB))),0) FROM commands"
-    ).fetchone()[0]
-    uploads = db.execute("SELECT COALESCE(sum(size),0) FROM attachments").fetchone()[0]
-    control = db.execute(
-        "SELECT COALESCE(sum(length(CAST(payload_json AS BLOB))),0) FROM native_control_events"
-    ).fetchone()[0]
-    turns = db.execute(
-        "SELECT COALESCE(sum(length(CAST(COALESCE(coverage_json,'') AS BLOB))),0) FROM native_turns"
-    ).fetchone()[0]
-    restores = db.execute(
-        "SELECT COALESCE(sum(length(CAST(plan_json AS BLOB)) + length(CAST(results_json AS BLOB))),0) FROM native_restore_journals"
-    ).fetchone()[0]
-    return output + commands + uploads + control + turns + restores
+    """Logical retained bytes from the same write transaction as the spool."""
+    try:
+        row = db.execute("SELECT bytes FROM native_retention_ledger WHERE id=1").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: native_retention_ledger" not in str(exc):
+            raise
+        return _sum_retained_bytes(db)  # Older explicitly supplied snapshot databases.
+    if row is None:
+        raise sqlite3.DatabaseError("native retention ledger row is missing")
+    return row[0]
 
 
 def public(row):

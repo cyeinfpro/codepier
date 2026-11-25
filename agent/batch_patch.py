@@ -6,12 +6,36 @@ supplies per-file backups and compare-and-swap; local editors remain concurrent.
 
 from __future__ import annotations
 import stat
+import os
 import sys
 import uuid
 from shared.crypto import digest
 from shared.util import DevError, atomic_json
 
 MAX_BATCH_BYTES = 2 * 1024 * 1024
+
+
+def _case_sensitive_directory(parent):
+    """Observe alternate-case lookups without creating a file during preview."""
+    if parent.is_dir():
+        names = set(os.listdir(parent))
+        for name in sorted(names):
+            alt = name.swapcase()
+            if name == alt or alt in names:
+                continue
+            try:
+                # Compare directory entries, not their targets: an unrelated
+                # dangling symlink is still valid evidence of case folding.
+                original = (parent / name).lstat()
+            except FileNotFoundError:
+                continue
+            try:
+                alternate = (parent / alt).lstat()
+            except FileNotFoundError:
+                return True
+            if os.path.samestat(original, alternate):
+                return False
+    return sys.platform not in ("darwin", "win32")
 
 
 def apply_patch(engine, project, args):
@@ -67,17 +91,26 @@ def apply_patch(engine, project, args):
                     "removed_lines": 0,
                 }
         plans, touched, budget = [], set(), 0
+        volume_case = {}
 
         def prepare(relative, expected, after, mode=None, *, edits=None):
             nonlocal budget
             path = engine.path(root, relative, False)
             relative = path.relative_to(root).as_posix()
-            # real path keys also reject alias/case collisions on macOS/Windows.
-            identity = (
-                str(path.resolve()).casefold()
-                if sys.platform in ("darwin", "win32")
-                else str(path.resolve())
-            )
+            try:
+                existing = path.stat()
+            except FileNotFoundError:
+                parent = path.parent.resolve()
+                parent_stat = parent.stat() if parent.is_dir() else None
+                key = (parent_stat.st_dev, parent_stat.st_ino) if parent_stat else str(parent)
+                sensitive = (
+                    volume_case.setdefault(parent, _case_sensitive_directory(parent))
+                    if parent not in volume_case
+                    else volume_case[parent]
+                )
+                identity = ("new", key, path.name if sensitive else path.name.casefold())
+            else:
+                identity = ("existing", existing.st_dev, existing.st_ino)
             if identity in touched:
                 raise DevError("PATCH_DUPLICATE_PATH", "同一批补丁不能重复触碰同一路径", 409)
             touched.add(identity)

@@ -221,6 +221,7 @@ def _migrate(db):
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS project_space_alias ON projects(space_id,alias_key)"
     )
+    db.execute("CREATE INDEX IF NOT EXISTS projects_device ON projects(device_id)")
     _rebuild(
         db,
         "vps_connections",

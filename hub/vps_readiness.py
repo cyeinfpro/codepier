@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS vps_readiness_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt REAL NOT NULL,
     updated REAL NOT NULL,
+    lease_token TEXT,
+    lease_until REAL,
     UNIQUE(space_id,vps_id,connection_revision)
 )
 """
@@ -73,6 +75,7 @@ class ReadinessTarget:
     connection_revision: int
     grant_id: str
     host_verification: str = HOST_VERIFICATION_REQUIRED
+    lease_token: str | None = None
 
     @classmethod
     def from_row(cls, row):
@@ -88,6 +91,7 @@ class ReadinessTarget:
                     "connection_revision",
                     "grant_id",
                     "host_verification",
+                    "lease_token",
                 )
             )
         )
@@ -121,8 +125,12 @@ class VPSReadiness:
             install_timeout,
         )
         self.clock = clock
+        # Five bounded checks plus the bounded installer; add room for the
+        # storage round trips. A persisted install fence survives expiry.
+        self.lease_seconds = max(30, 5 * check_timeout + install_timeout + 15)
         self._wake = asyncio.Event()
         self._workers = []
+        self._stopping = False
 
     def _initialize(self):
         self.store.execute(_SCHEMA)
@@ -140,6 +148,10 @@ class VPSReadiness:
                     "ALTER TABLE vps_readiness_jobs ADD COLUMN host_verification TEXT NOT NULL "
                     "DEFAULT 'required' CHECK(host_verification IN ('required','skip'))"
                 )
+            if "lease_token" not in columns:
+                db.execute("ALTER TABLE vps_readiness_jobs ADD COLUMN lease_token TEXT")
+            if "lease_until" not in columns:
+                db.execute("ALTER TABLE vps_readiness_jobs ADD COLUMN lease_until REAL")
         self.store.execute(_DUE_INDEX)
         # Earlier versions set the fence even on independently verified
         # ready results. Resolve those historical rows without changing age.
@@ -150,7 +162,8 @@ class VPSReadiness:
         # Hub instance lock prevents another live Hub sharing this database.
         # An interrupted installation is never replayed, only re-inspected.
         self.store.execute(
-            """UPDATE vps_readiness_jobs SET state='queued',next_attempt=?,updated=?
+            """UPDATE vps_readiness_jobs SET state='queued',next_attempt=?,updated=?,
+                 lease_token=NULL,lease_until=NULL
                WHERE state IN ('running','installing')""",
             (self.clock(), self.clock()),
         )
@@ -168,16 +181,29 @@ class VPSReadiness:
             (now, now, HOST_VERIFICATION_SKIP),
         )
 
+    def _spawn_worker(self, index):
+        worker = asyncio.create_task(self._worker(), name=f"vps-readiness-{index}")
+
+        def supervise(done):
+            if done.cancelled():
+                return
+            error = done.exception()
+            if not self._stopping and index < len(self._workers) and self._workers[index] is done:
+                _LOGGER.warning("VPS readiness worker exited (%s)", type(error).__name__)
+                self._workers[index] = self._spawn_worker(index)
+
+        worker.add_done_callback(supervise)
+        return worker
+
     async def start(self):
         if self._workers:
             return
         await self.store.run(self._initialize)
-        self._workers = [
-            asyncio.create_task(self._worker(), name=f"vps-readiness-{i}")
-            for i in range(self.concurrency)
-        ]
+        self._stopping = False
+        self._workers = [self._spawn_worker(i) for i in range(self.concurrency)]
 
     async def stop(self):
+        self._stopping = True
         workers, self._workers = self._workers, []
         for worker in workers:
             worker.cancel()
@@ -468,6 +494,12 @@ class VPSReadiness:
     def _claim(self):
         now = self.clock()
         with self.store.transaction() as db:
+            db.execute(
+                """UPDATE vps_readiness_jobs SET state='queued',next_attempt=?,updated=?,
+                       lease_token=NULL,lease_until=NULL
+                   WHERE state IN ('running','installing') AND lease_until<=?""",
+                (now, now, now),
+            )
             row = db.execute(
                 """SELECT q.* FROM vps_readiness_jobs AS q
                    WHERE q.state='queued' AND q.next_attempt<=?
@@ -479,37 +511,44 @@ class VPSReadiness:
             ).fetchone()
             if not row:
                 return None
+            lease_token = uuid4().hex
             db.execute(
-                "UPDATE vps_readiness_jobs SET state='running',attempts=attempts+1,updated=? WHERE id=?",
-                (now, row["id"]),
+                """UPDATE vps_readiness_jobs SET state='running',attempts=attempts+1,
+                       updated=?,lease_token=?,lease_until=? WHERE id=?""",
+                (now, lease_token, now + self.lease_seconds, row["id"]),
             )
-            return dict(row) | {"attempts": row["attempts"] + 1}
+            return dict(row) | {"attempts": row["attempts"] + 1, "lease_token": lease_token}
 
-    def _current(self, identifier):
+    def _current(self, identifier, lease_token):
         return bool(
             self.store.one(
-                f"SELECT id FROM vps_readiness_jobs WHERE id=? AND {_CURRENT_TARGET}", (identifier,)
+                f"""SELECT id FROM vps_readiness_jobs
+                      WHERE id=? AND lease_token=? AND lease_until>? AND {_CURRENT_TARGET}""",
+                (identifier, lease_token, self.clock()),
             )
         )
 
-    def _begin_install(self, identifier):
+    def _begin_install(self, identifier, lease_token):
         return (
             self.store.execute(
                 f"""UPDATE vps_readiness_jobs SET state='installing',verify_only=1,attempts=1,updated=?
                 WHERE id=? AND state='running' AND intent='install'
-                  AND verify_only=0 AND {_CURRENT_TARGET}""",
-                (self.clock(), identifier),
+                  AND verify_only=0 AND lease_token=? AND lease_until>? AND {_CURRENT_TARGET}""",
+                (self.clock(), identifier, lease_token, self.clock()),
             ).rowcount
             == 1
         )
 
-    def _update(self, identifier, state, reason=None, delay=0, clear_install_fence=False):
+    def _update(
+        self, identifier, lease_token, state, reason=None, delay=0, clear_install_fence=False
+    ):
         now = self.clock()
         self.store.execute(
             """UPDATE vps_readiness_jobs SET state=?,reason_code=?,next_attempt=?,updated=?,
-                   verify_only=CASE WHEN ? THEN 0 ELSE verify_only END
-               WHERE id=? AND state IN ('running','installing')""",
-            (state, reason, now + delay, now, clear_install_fence, identifier),
+                   verify_only=CASE WHEN ? THEN 0 ELSE verify_only END,
+                   lease_token=NULL, lease_until=NULL
+               WHERE id=? AND state IN ('running','installing') AND lease_token=? AND lease_until>?""",
+            (state, reason, now + delay, now, clear_install_fence, identifier, lease_token, now),
         )
 
     async def _dispatch_allowed(self, target, action):
@@ -517,10 +556,20 @@ class VPSReadiness:
             allowed = await asyncio.wait_for(self.authorize(target, action), self.check_timeout)
         except Exception:
             return False
-        return allowed is True and await self.store.run(self._current, target.id)
+        return allowed is True and await self.store.run(
+            self._current, target.id, target.lease_token
+        )
 
     async def _finish(self, target, state, reason=None, delay=0, *, clear_install_fence=False):
-        await self.store.run(self._update, target.id, state, reason, delay, clear_install_fence)
+        await self.store.run(
+            self._update,
+            target.id,
+            target.lease_token,
+            state,
+            reason,
+            delay,
+            clear_install_fence,
+        )
         if reason and reason != "TMUX_MISSING":
             _LOGGER.info("VPS readiness job=%s state=%s reason=%s", target.id, state, reason)
         if not delay:
@@ -536,7 +585,7 @@ class VPSReadiness:
             return "failed"
 
     async def _resolve_probe(self, target, result, attempts, *, verify_only):
-        if not await self.store.run(self._current, target.id):
+        if not await self.store.run(self._current, target.id, target.lease_token):
             return await self._finish(target, "failed", "TARGET_CHANGED")
         if result == "ready":
             # A successful authorized probe resolves an earlier interrupted or
@@ -591,7 +640,7 @@ class VPSReadiness:
             # Called by the native executor only after its SSH preflight and
             # immediately before sending a package command. Restart can never
             # replay a write once this checkpoint has been committed.
-            return await self.store.run(self._begin_install, target.id)
+            return await self.store.run(self._begin_install, target.id, target.lease_token)
 
         try:
             outcome = await asyncio.wait_for(
@@ -640,9 +689,18 @@ class VPSReadiness:
         return True
 
     async def _worker(self):
+        failures = 0
         while True:
             self._wake.clear()
-            if await self.run_one():
+            try:
+                worked = await self.run_one()
+            except Exception as exc:
+                failures = min(failures + 1, 6)
+                _LOGGER.warning("VPS readiness worker deferred (%s)", type(exc).__name__)
+                await asyncio.sleep(min(10, 0.25 * 2 ** (failures - 1)))
+                continue
+            failures = 0
+            if worked:
                 continue
             try:
                 await asyncio.wait_for(self._wake.wait(), self.poll_seconds)

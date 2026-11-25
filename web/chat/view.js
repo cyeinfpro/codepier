@@ -421,7 +421,9 @@ function chatEnsureOutputManager(v) {
                   item.body.textContent = st.text;
                   chatSyncToolTruncatedNotice(item, st);
                 }
-                if (!st.running) ac.abort();
+                const totalBytes = payload.total_bytes;
+                if (!st.running && Number.isSafeInteger(totalBytes) && st.toOffset >= totalBytes)
+                  ac.abort();
               },
               ac.signal,
             );

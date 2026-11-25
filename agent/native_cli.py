@@ -142,34 +142,37 @@ class NativeCLI:
             "_native_space": security["space"] if security else "",
         }
 
+    def _reconcile_stale(self, db):
+        stale = db.execute(
+            "SELECT * FROM sessions WHERE status IN ('starting','running','stopping','orphaned') AND heartbeat<?",
+            (time.time() - 30,),
+        ).fetchall()
+        for row in stale:
+            if worker_present(self.directory, row["id"]):
+                continue  # A stalled heartbeat does not prove process death.
+            if process_exists(row["child_pid"]):
+                db.execute(
+                    "UPDATE sessions SET status='orphaned',error='Worker unavailable but child may still exist; inspect host before maintenance',updated=? WHERE id=?",
+                    (time.time(), row["id"]),
+                )
+            else:
+                db.execute(
+                    "UPDATE sessions SET status='interrupted',error='Worker and child unavailable; use native resume',lease='',lease_until=0,updated=? WHERE id=?",
+                    (time.time(), row["id"]),
+                )
+                db.execute(
+                    "UPDATE commands SET state='uncertain' WHERE session=? AND state='claimed'",
+                    (row["id"],),
+                )
+                db.execute(
+                    "UPDATE commands SET state='cancelled' WHERE session=? AND state='queued'",
+                    (row["id"],),
+                )
+
     def rows(self):
         self.children = [p for p in self.children if p.poll() is None]
         with self.connect_db() as db:
-            stale = db.execute(
-                "SELECT * FROM sessions WHERE status IN ('starting','running','stopping','orphaned') AND heartbeat<?",
-                (time.time() - 30,),
-            ).fetchall()
-            for row in stale:
-                if worker_present(self.directory, row["id"]):
-                    continue  # A stalled heartbeat does not prove process death.
-                if process_exists(row["child_pid"]):
-                    db.execute(
-                        "UPDATE sessions SET status='orphaned',error='Worker unavailable but child may still exist; inspect host before maintenance',updated=? WHERE id=?",
-                        (time.time(), row["id"]),
-                    )
-                else:
-                    db.execute(
-                        "UPDATE sessions SET status='interrupted',error='Worker and child unavailable; use native resume',lease='',lease_until=0,updated=? WHERE id=?",
-                        (time.time(), row["id"]),
-                    )
-                    db.execute(
-                        "UPDATE commands SET state='uncertain' WHERE session=? AND state='claimed'",
-                        (row["id"],),
-                    )
-                    db.execute(
-                        "UPDATE commands SET state='cancelled' WHERE session=? AND state='queued'",
-                        (row["id"],),
-                    )
+            self._reconcile_stale(db)
             return [
                 self.security_metadata(db, r)
                 for r in db.execute("SELECT * FROM sessions ORDER BY created DESC,id")
@@ -177,10 +180,12 @@ class NativeCLI:
 
     def live(self):
         with self.launch_gate:
-            pending = list(self.pending_starts.values())
+            pending = [
+                dict(row) for row in self.pending_starts.values() if not row.get("launch_committed")
+            ]
         running = {r["id"]: r for r in self.rows() if r["status"] in LIVE}
         for row in pending:
-            running.setdefault(row["id"], row)
+            running[row["id"]] = {**running.get(row["id"], {}), **row}
         return list(running.values())
 
     def discover(self):
@@ -257,12 +262,34 @@ class NativeCLI:
                 "id": sid,
                 "project_id": project["id"],
                 "status": "starting",
+                "pending_launch": True,
+                "stop_requested": False,
             }
         try:
             return self._action(action, project, args)
         finally:
             with self.launch_gate:
                 self.pending_starts.pop(ticket, None)
+
+    def request_pending_project_stop(self, project_id, sid):
+        requested = False
+        with self.launch_gate:
+            for launch in self.pending_starts.values():
+                if (
+                    launch["project_id"] == project_id
+                    and launch["id"] == sid
+                    and not launch.get("launch_committed")
+                ):
+                    launch["stop_requested"] = True
+                    requested = True
+        return requested
+
+    def _pending_launch_aborted(self, project_id, sid):
+        # Caller holds launch_gate to linearize with the stop intent.
+        return any(
+            row["project_id"] == project_id and row["id"] == sid and row["stop_requested"]
+            for row in self.pending_starts.values()
+        )
 
     def _current_flags(self):
         return resolve_native_flags(getattr(self.agent, "native_flags", None))
@@ -780,27 +807,38 @@ class NativeCLI:
                         if os.name == "nt"
                         else {"start_new_session": True}
                     )
-                    p = subprocess.Popen(
-                        [
-                            sys.executable,
-                            str(
-                                Path(__file__).with_name(
-                                    "chat_worker.py" if mode == "chat" else "native_worker.py"
-                                )
-                            ),
-                            str(self.directory),
-                            sid,
-                            *([str(self.agent.engine.config_path)] if mode == "chat" else []),
-                        ],
-                        cwd=cwd,
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        close_fds=True,
-                        **detached,
-                    )
-                    self.children.append(p)
+                    with self.launch_gate:
+                        if self._pending_launch_aborted(project["id"], sid):
+                            db.execute(
+                                "UPDATE sessions SET status='interrupted',error='Project stop cancelled launch' WHERE id=?",
+                                (sid,),
+                            )
+                            db.commit()
+                            raise DevError("CLI_START_CANCELLED", "项目已请求停止，未启动会话", 409)
+                        p = subprocess.Popen(
+                            [
+                                sys.executable,
+                                str(
+                                    Path(__file__).with_name(
+                                        "chat_worker.py" if mode == "chat" else "native_worker.py"
+                                    )
+                                ),
+                                str(self.directory),
+                                sid,
+                                *([str(self.agent.engine.config_path)] if mode == "chat" else []),
+                            ],
+                            cwd=cwd,
+                            env=env,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            close_fds=True,
+                            **detached,
+                        )
+                        self.children.append(p)
+                        for launch in self.pending_starts.values():
+                            if launch["project_id"] == project["id"] and launch["id"] == sid:
+                                launch["launch_committed"] = True
                 except OSError:
                     db.execute(
                         "UPDATE sessions SET status='interrupted',error='Worker launch failed' WHERE id=?",
@@ -1484,26 +1522,65 @@ class NativeCLI:
         # ACK-clocked: the next packet may go out as soon as the window opens.
         self.sync_wake.set()
 
+    def _sync_rows(self):
+        states = tuple(sorted(LIVE))
+        placeholders = ",".join("?" for _ in states)
+        select = (
+            "SELECT s.*, n.owner AS _sync_owner, n.space AS _sync_space FROM sessions s "
+            "LEFT JOIN native_security n ON n.kind='session' AND n.id=s.id WHERE "
+        )
+        order = " ORDER BY s.created DESC,s.id"
+        with self.connect_db() as db:
+            self._reconcile_stale(db)
+            live = db.execute(select + f"s.status IN ({placeholders})" + order, states).fetchall()
+            remaining = max(0, 250 - len(live))
+            history = []
+            if remaining:
+                seek = getattr(self, "history_sync_seek", None)
+                predicate = f"s.status NOT IN ({placeholders})"
+                if seek is not None:
+                    created, sid = seek
+                    history = db.execute(
+                        select
+                        + predicate
+                        + " AND (s.created<? OR (s.created=? AND s.id>?))"
+                        + order
+                        + " LIMIT ?",
+                        (*states, created, created, sid, remaining),
+                    ).fetchall()
+                if len(history) < remaining:
+                    query = select + predicate
+                    values = states
+                    if seek is not None:
+                        query += " AND (s.created>? OR (s.created=? AND s.id<=?))"
+                        values = (*states, created, created, sid)
+                    history += db.execute(
+                        query + order + " LIMIT ?", (*values, remaining - len(history))
+                    ).fetchall()
+                if history:
+                    last = history[min(8, len(history)) - 1]
+                    self.history_sync_seek = (last["created"], last["id"])
+                else:
+                    self.history_sync_seek = None
+
+        def published(row):
+            return {
+                **public(row),
+                "_native_owner": row["_sync_owner"] or "",
+                "_native_space": row["_sync_space"] or "",
+            }
+
+        return [published(row) for row in live], [published(row) for row in history]
+
     def snapshot(self, skip=frozenset(), allow_chunks=True):
-        all_rows = self.rows()
-        live = [r for r in all_rows if r["status"] in LIVE]
-        history = [r for r in all_rows if r["status"] not in LIVE]
-        # Every active conversation participates in every cycle, even with a
-        # thousand old sessions. Rotate live priority; reserve early positions
-        # for old transcripts so a large backfill cannot starve live output or
-        # be permanently starved by it.
+        self.children = [p for p in self.children if p.poll() is None]
+        live, history = self._sync_rows()
+        # Keep every live session in each cycle and give backfill a rotating
+        # slice rather than loading and enriching the whole database.
         if live:
             cursor = getattr(self, "live_sync_cursor", 0) % len(live)
             live = live[cursor:] + live[:cursor]
             self.live_sync_cursor = (cursor + 1) % len(live)
-        if history:
-            self.sync_cursor %= len(history)
-            history = (history[self.sync_cursor :] + history[: self.sync_cursor])[
-                : max(0, 250 - len(live))
-            ]
-            self.sync_cursor = (self.sync_cursor + max(1, min(8, len(history)))) % len(
-                [r for r in all_rows if r["status"] not in LIVE]
-            )
         sessions = live[:4] + history[:4] + live[4:] + history[4:]
         chunks = []
         budget = 196608

@@ -520,6 +520,46 @@ def probe_finished(path, docker):
     return {"stage": "probe-checked"}
 
 
+_READY_PROBE = """
+import json, os
+from urllib.request import ProxyHandler, build_opener
+port = int(os.environ.get("HUB_PORT", "8765"))
+opener = build_opener(ProxyHandler({}))
+base = f"http://127.0.0.1:{port}"
+with opener.open(base + "/readyz", timeout=2) as response:
+    if response.status != 200 or json.load(response).get("status") != "ok":
+        raise SystemExit(1)
+with opener.open(base + "/healthz", timeout=2) as response:
+    print(json.dumps(json.load(response)))
+"""
+
+
+def confirm_hub_ready(docker, hub_id, expected_version, *, timeout=45):
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            probe = docker.run(
+                ["exec", hub_id, "python", "-c", _READY_PROBE],
+                check=False,
+                timeout=min(5, remaining),
+            )
+            health = json.loads(probe.stdout) if probe.returncode == 0 else {}
+            maintenance = health.get("panel_update") if isinstance(health, dict) else None
+            if (
+                isinstance(maintenance, dict)
+                and maintenance.get("maintenance") is False
+                and health.get("status") == "ok"
+                and health.get("version") == expected_version
+            ):
+                return
+        except (ValueError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise RuntimeError(
+        "CodePier Hub readiness, expected version or maintenance state was not confirmed"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -588,6 +628,11 @@ def main():
                     or hubs[0]["State"].get("Health", {}).get("Status") != "healthy"
                 ):
                     raise RuntimeError("New CodePier Hub health was not confirmed")
+                release = json.loads((root / "RELEASE.json").read_text())
+                expected = release.get("version") if isinstance(release, dict) else None
+                if not isinstance(expected, str) or not expected:
+                    raise RuntimeError("Expected CodePier release version is missing")
+                confirm_hub_ready(docker, hubs[0]["Id"], expected)
                 if state.get("containers"):
                     # Same-image Compose up can reuse stopped containers. Restore
                     # only their recorded policy; replacements keep Compose's policy.

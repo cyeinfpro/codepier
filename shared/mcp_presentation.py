@@ -266,6 +266,7 @@ _EXEC_RESULT = _RECEIPT | frozenset(
         "authentication_state",
         "authentication_method",
         "remote_execution_state",
+        "output_capture",
         "exit_signal",
         "runtime",
         "failure_context",

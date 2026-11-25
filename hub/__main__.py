@@ -90,6 +90,7 @@ def main():
     restore = sub.add_parser("restore", help="验证备份，或将其恢复到全新的数据目录")
     restore.add_argument("--backup", required=True, type=Path)
     restore.add_argument("--keys", required=True, type=Path)
+    restore.add_argument("--scratch-dir", type=Path, help="解包和校验用的专用私有磁盘目录")
     mode = restore.add_mutually_exclusive_group(required=True)
     mode.add_argument("--verify", action="store_true")
     mode.add_argument("--output", type=Path)
@@ -126,6 +127,7 @@ def main():
                     args.backup.expanduser(),
                     args.keys.expanduser(),
                     destination=args.output.expanduser() if args.output else None,
+                    scratch_dir=args.scratch_dir,
                 )
             )
         except InvalidToken:

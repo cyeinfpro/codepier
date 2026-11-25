@@ -214,3 +214,41 @@ def test_additive_migration_does_not_rewrite_history_or_credentials(tmp_path):
         assert 'fixture credential' not in json.dumps(upgraded.stats_snapshot())
     finally:
         upgraded.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_status_uses_saved_length_and_legacy_prefix_is_plain_text(runtime, monkeypatch):
+    instance, principal, _, identifier = await start(runtime)
+    finish(instance, identifier, output="结果" * 6000)
+    def unexpected_decrypt(*_args):
+        raise AssertionError("compact output metadata must not decrypt the terminal body")
+    monkeypatch.setattr(instance.store, "decrypt", unexpected_decrypt)
+    view = {"include_result": False, "include_output": False}
+    assert instance.operation(identifier, principal, view)["output_chars"] == 12000
+    legacy = "archive:v1: service restarted"
+    instance.store.execute(
+        "UPDATE operations SET terminal_output_chars=NULL,output=? WHERE id=?",
+        (legacy, identifier),
+    )
+    assert instance.operation(identifier, principal, view)["output_chars"] == len(legacy)
+
+
+@pytest.mark.asyncio
+async def test_operation_list_composite_cursor_keeps_same_timestamp_rows(runtime):
+    instance, principal = runtime
+    for number in range(4):
+        await instance.invoke(
+            "shell_exec",
+            dict(project="ProjectAlpha", command="fixture", idempotency_key=f"cursor-{number}"),
+            principal,
+        )
+    instance.store.execute("UPDATE operations SET created=1000")
+    query = dict(project="ProjectAlpha", state="", tool="shell_exec", idempotency_key="",
+                 limit=2, before_created=None)
+    first = instance.list_operations(query, principal)
+    second = instance.list_operations({**query, "cursor": first["next_cursor"]}, principal)
+    ids = [row["id"] for page in (first, second) for row in page["operations"]]
+    assert len(ids) == len(set(ids)) == 4
+    assert ids == sorted(ids, reverse=True) and second["next_cursor"] is None
+    with pytest.raises(DevError):
+        instance.list_operations({**query, "state": "queued", "cursor": first["next_cursor"]}, principal)

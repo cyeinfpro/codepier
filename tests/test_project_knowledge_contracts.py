@@ -703,3 +703,32 @@ def test_factor_shared_union_properties_preserves_closed_objects_and_values(clos
     assert schema == before
     if closed == 'neither':
         assert compact['properties']['common'] == shared
+
+
+@pytest.mark.asyncio
+async def test_tree_limit_matches_help_and_only_applies_to_tree():
+    from hub import core_tools
+    from pydantic import ValidationError
+    from shared.contracts import Tree
+    from shared.core_contracts import Workspace
+
+    tree_limit = Tree.model_json_schema()["properties"]["limit"]
+    cap = tree_limit["maximum"]
+
+    class Runtime:
+        async def invoke(self, name, args, _principal):
+            assert name == "fs_tree"
+            return Tree.model_validate(args)
+
+    found = await core_tools.invoke(
+        Runtime(), "workspace", {"operation": "tree", "project": "Sample", "limit": cap}, None
+    )
+    assert found.limit == cap
+    default = await core_tools.invoke(
+        Runtime(), "workspace", {"operation": "tree", "project": "Sample"}, None
+    )
+    assert default.limit == tree_limit["default"]
+    with pytest.raises(ValidationError):
+        Workspace(operation="tree", limit=cap + 1)
+    with pytest.raises(ValidationError):
+        Workspace(operation="list", limit=101)

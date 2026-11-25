@@ -730,6 +730,7 @@
     "tests/test_account_connection_journeys.py",
     "tests/test_adaptive_agent_integration.py",
     "tests/test_adaptive_project_scheduler.py",
+    "tests/test_agent_audit_ar05_ar07_ar08_ar10.py",
     "tests/test_agent_bootstrap_download.py",
     "tests/test_agent_communication_resilience.py",
     "tests/test_agent_connection_diagnostics.py",

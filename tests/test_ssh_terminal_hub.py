@@ -142,7 +142,11 @@ class MemoryAgent:
     def __init__(self, generation=GEN):
         self.device_id, self.generation = "device-a", generation
         self.closed = False
-        self.saved_vps_password_only_supported = True
+        from hub.vps_connection import agent_vps_ssh_capability
+
+        self.agent_vps_ssh = agent_vps_ssh_capability(
+            available=True, exec_supported=False, terminal_supported=True, probe_supported=False
+        )
         self.requests, self.inputs, self.acks = [], [], []
         self.handler = None
 
@@ -617,6 +621,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         gate.active = lambda: flag.active
         self.service.runtime.panel_maintenance = gate
         return flag
+
+    async def test_reloaded_creating_session_checks_original_status_before_waiting(self):
+        await self.service.update(self.session, {"state": "creating"})
+        self.session.ready.clear()
+        self.session.create_task = None
+
+        self.assertIs(
+            await asyncio.wait_for(self.service.ensure_ready(self.session), timeout=0.5),
+            self.agent,
+        )
+        self.assertEqual([req[0] for req in self.agent.requests], ["status"])
+        self.assertEqual(self.session.row["state"], "ready")
 
     async def test_maintenance_uses_durable_remote_outcome_after_cache_eviction(self):
         self.service.sessions.clear()

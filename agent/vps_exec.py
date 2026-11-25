@@ -611,6 +611,7 @@ class _OutputCapture:
         self.output_truncated = False
         self.decoded_output = ""
         self.stream_lock = asyncio.Lock()
+        self.stream_evidence: dict[str, dict[str, Any]] = {}
         self.stream_finalizers: list[Callable[[], Awaitable[None]]] = []
 
     async def append_filtered_text(self, text: str) -> None:
@@ -624,15 +625,19 @@ class _OutputCapture:
         if self.on_output is not None:
             await _invoke_maybe_async(self.on_output, self.decoded_output, False)
 
-    def start_reader(self, stream: Any) -> asyncio.Task[None]:
+    def start_reader(self, stream: Any, name: str) -> asyncio.Task[None]:
         # SSH stdout and extended-data stderr are independent byte streams.
         # Decode and filter each before merging their display text. Keep
         # the original combined filter as a final check on joined output.
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         stream_filter = ProcessOutput(self.redaction_values)
+        digest = hashlib.sha256()
+        evidence = self.stream_evidence[name] = {"bytes": 0, "state": "reading"}
 
         async def on_raw_chunk(chunk: bytes) -> None:
             async with self.stream_lock:
+                evidence["bytes"] += len(chunk)
+                digest.update(chunk)
                 self.output_total_bytes += len(chunk)
                 self.output_total_hash.update(chunk)
                 text = stream_filter.feed(decoder.decode(chunk))
@@ -643,7 +648,22 @@ class _OutputCapture:
             await self.append_filtered_text(self.output_filter.feed(text))
 
         self.stream_finalizers.append(finalize_stream)
-        return asyncio.create_task(_read_stream(stream, on_chunk=on_raw_chunk))
+
+        async def read() -> None:
+            try:
+                await _read_stream(stream, on_chunk=on_raw_chunk)
+            except asyncio.CancelledError:
+                evidence["state"] = "interrupted"
+                raise
+            except Exception:
+                evidence["state"] = "read_failed"
+                raise
+            else:
+                evidence["state"] = "eof"
+            finally:
+                evidence["sha256"] = digest.hexdigest()
+
+        return asyncio.create_task(read())
 
     async def flush_output(self) -> None:
         async with self.stream_lock:
@@ -808,20 +828,28 @@ async def _collect_process(
 ) -> tuple[bool, bool]:
     stdout_stream = getattr(process, "stdout", None)
     stderr_stream = getattr(process, "stderr", None)
-    readers = [capture.start_reader(stdout_stream)]
+    readers = [capture.start_reader(stdout_stream, "stdout")]
     if stderr_stream is not None and stderr_stream is not stdout_stream:
-        readers.append(capture.start_reader(stderr_stream))
+        readers.append(capture.start_reader(stderr_stream, "stderr"))
 
     async def _wait_exit() -> None:
-        await process.wait()
+        # wait() also consumes stdout and stderr through communicate().
+        await process.wait_closed()
 
     waiter = asyncio.create_task(_wait_exit())
-    timed_out, was_cancelled = await _wait_process(state, process, waiter)
-    if timed_out or was_cancelled:
-        await _terminate_remote_process(process, wait_seconds=min(1.0, state.cleanup_timeout))
-    await _drain_process(state, readers, waiter)
-    await capture.flush_output()
-    return timed_out, was_cancelled
+    try:
+        timed_out, was_cancelled = await _wait_process(state, process, waiter)
+        if timed_out or was_cancelled:
+            await _terminate_remote_process(process, wait_seconds=min(1.0, state.cleanup_timeout))
+        await _drain_process(state, readers, waiter)
+        await capture.flush_output()
+        return timed_out, was_cancelled
+    finally:
+        tasks = [task for task in (*readers, waiter) if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _finished_receipt(
@@ -918,6 +946,10 @@ def _finished_receipt(
             "retryable": False,
         },
     )
+    confirmed_result["output_capture"] = {
+        "complete": all(item["state"] == "eof" for item in capture.stream_evidence.values()),
+        "streams": capture.stream_evidence,
+    }
     return confirmed_result
 
 

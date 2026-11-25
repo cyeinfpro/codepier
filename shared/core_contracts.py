@@ -471,7 +471,9 @@ class Workspace(ComputerArgs):
     workspace_id: str = Field(default="", pattern=r"^(|[a-f0-9]{32})$")
     path: str = Field(default=".", max_length=1024)
     depth: int = Field(default=2, ge=1, le=8)
-    limit: int = Field(default=30, ge=1, le=100)
+    limit: int = Field(
+        default=30, ge=1, le=2000, description="Tree: default 300, max 2000. Otherwise: max 100."
+    )
     context_id: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     capture_baseline: bool = False
     query: str = Field(default="", max_length=200)
@@ -481,6 +483,16 @@ class Workspace(ComputerArgs):
     expected_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     explicit: bool = False
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def operation_limit(self):
+        if self.operation == "tree":
+            # Unset fields are passed through by the facade, so the Tree
+            # operation itself supplies its authoritative default.
+            return self
+        if self.limit > 100:
+            raise ValueError("limit must be at most 100 for non-tree workspace operations")
+        return self
 
 
 class Process(ComputerArgs):
@@ -510,6 +522,7 @@ class Process(ComputerArgs):
     state: str = Field(default="", max_length=30)
     limit: int = Field(default=20, ge=1, le=100)
     before_created: float | None = None
+    cursor: str = Field(default="", max_length=1024)
     wait_seconds: int = Field(default=5, ge=0, le=10)
     include_trace: bool = False
     include_output: bool = True

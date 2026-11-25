@@ -67,6 +67,16 @@ async def test_stream_fingerprint_survives_terminal_paths(tmp_path, ending):
         data = agent.journal.status(operation)["result"]["data"]
         assert data["output_total_bytes"] == len(raw)
         assert data["output_total_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert data["output_capture"] == {
+            "complete": True,
+            "streams": {
+                "stdout": {
+                    "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "state": "eof",
+                }
+            },
+        }
         assert data["output_truncated"]
         assert len(data["output"]) <= 131072
         assert data["output"].endswith("�tail\n")

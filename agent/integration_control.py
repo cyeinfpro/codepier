@@ -93,16 +93,16 @@ class Controls:
             raise DevError("PROJECT_CONTROL_SCOPE", "接入控制作用于整个项目，请切回原项目后操作")
         action = args["action"]
         if action == "status":
-            return self.state(project)
+            return await disk_call(self.state, project)
         if args["confirm"] != project.get("alias"):
             raise DevError("CONFIRMATION_REQUIRED", "请准确输入项目名称确认操作", 409)
         # A slow stop serializes this project's controls, not every project.
         lock = self.locks.setdefault(project["id"], asyncio.Lock())
         async with lock:
             if action in {"pause", "resume"}:
-                self.set(project, action == "pause")
-                return {**self.state(project), "action": action}
-            self.set(project, True)
+                await disk_call(self.set, project, action == "pause")
+                return {**(await disk_call(self.state, project)), "action": action}
+            await disk_call(self.set, project, True)
             candidates = {
                 i: p
                 for i, p in self.agent.integration_projects.items()
@@ -134,6 +134,21 @@ class Controls:
                 for row in await disk_call(self.agent.native.live):
                     if row["project_id"] != project["id"]:
                         continue
+                    if row.get("pending_launch"):
+                        if await disk_call(
+                            self.agent.native.request_pending_project_stop, project["id"], row["id"]
+                        ):
+                            native.append({"session_id": row["id"], "state": "stop_requested"})
+                            continue
+                        # A spawn which won the gate must go through normal
+                        # stop ownership, not a success claim for cancellation.
+                        recent = {
+                            item["id"]: item for item in await disk_call(self.agent.native.live)
+                        }
+                        row = recent.get(row["id"], row)
+                        if "root" not in row:
+                            native.append({"session_id": row["id"], "state": "unconfirmed"})
+                            continue
                     current = {**project, "root": row["root"], "device_id": row["device_id"]}
                     receipt = uuid.uuid4().hex
                     try:
@@ -179,10 +194,12 @@ class Controls:
             for row in native:
                 active = active_native.get(row["session_id"])
                 row["stopped_verified"] = active is None
-                if active:
+                if active and (
+                    row["state"] != "stop_requested" or not active.get("pending_launch")
+                ):
                     row["state"] = active["status"]
             return {
-                **self.state(project),
+                **(await disk_call(self.state, project)),
                 "action": "stop",
                 "cancel_requested": requested,
                 "stopped_verified": confirmed,

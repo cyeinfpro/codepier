@@ -205,3 +205,27 @@ def test_unconfirmed_file_durability_is_marked_for_review(tmp_path):
         assert runtime.operation_result(operation)["error"]["code"] == "DURABILITY_UNCONFIRMED"
     finally:
         store.close()
+
+
+def test_restore_private_disk_scratch_checked_before_destination_creation(tmp_path, monkeypatch):
+    import hub.backup as backup_module
+
+    store = Store(tmp_path / "source")
+    backup = tmp_path / "archives" / "hub.zip"
+    keys = tmp_path / "keys" / "keys.zip"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir(mode=0o700)
+    try:
+        expected = write_backup(store.state_directory, backup, keys)
+        assert restore_backup(backup, keys, scratch_dir=scratch) == expected
+        assert not list(scratch.iterdir())
+        usage = backup_module.shutil.disk_usage
+        monkeypatch.setattr(
+            backup_module.shutil, "disk_usage", lambda path: usage(path)._replace(free=1)
+        )
+        destination = tmp_path / "output"
+        with pytest.raises(RuntimeError, match="scratch space"):
+            restore_backup(backup, keys, scratch_dir=scratch, destination=destination)
+        assert not destination.exists() and not list(scratch.iterdir())
+    finally:
+        store.close()

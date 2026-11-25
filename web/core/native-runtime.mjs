@@ -281,7 +281,7 @@ function createRuntimeAttemptIo(scope, io, owner, owns, catchUpBudget, now) {
     if (synchronized) {
       const outcome = applyNativeBatch(scope.authoritative, verified);
       if (outcome.kind === "applied") {
-        commit(scope, outcome.value, owner, summary ? [summary] : []);
+        commit(scope, outcome.value, owner, summary ? [summary] : [], outcome);
         return;
       }
       if (outcome.kind === "duplicate") return;
@@ -426,14 +426,27 @@ export function startNativeTransport(scope, io, options = {}) {
             io.publishResetHalted?.(scope, outcome);
             return;
           }
+          let replaced = false;
+          for (let attempt = 0; attempt < 4 && owns(); attempt += 1) {
+            const result = await io.replaceSnapshotBounded(scope, owner, life.signal, outcome);
+            if (!owns() || result === "superseded" || result === "fallback_v1") return;
+            if (result?.kind === "blocked") {
+              io.publishBlocked?.(scope, result);
+              return;
+            }
+            if (result === true || result === "replaced") {
+              replaced = true;
+              break;
+            }
+            if (result === "terminal_failure") break;
+            if (attempt < 3) await wait(retryDelay(attempt + 1, prevDelay), life.signal);
+          }
+          if (!owns()) return;
+          if (!replaced) {
+            io.publishResetHalted?.(scope, { ...outcome, reason: "SNAPSHOT_RECOVERY_FAILED" });
+            return;
+          }
           if (fp) seenResets.add(fp);
-          const replaced = await io.replaceSnapshotBounded(
-            scope,
-            owner,
-            life.signal,
-            outcome,
-          );
-          if (!owns() || replaced === false) return;
           continue;
         }
 
@@ -453,6 +466,8 @@ export function startNativeTransport(scope, io, options = {}) {
       }
     } catch (error) {
       if (owns()) io.publishFatal?.(scope, error);
+    } finally {
+      if (owns()) stop();
     }
   })();
 

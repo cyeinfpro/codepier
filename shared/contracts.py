@@ -357,6 +357,7 @@ class OperationList(Args):
     idempotency_key: str = Field(default="", max_length=128)
     limit: int = Field(default=20, ge=1, le=100)
     before_created: float | None = None
+    cursor: str = Field(default="", max_length=1024)
 
 
 class Cancel(Operation):
@@ -1160,6 +1161,7 @@ OUTPUT_SCHEMAS: dict[str, dict] = {
                 "items": {"type": "object", "additionalProperties": True},
             },
             "next_before_created": _NULLABLE_NUM,
+            "next_cursor": _NULLABLE_STR,
         },
         ("operations",),
     ),

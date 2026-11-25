@@ -172,3 +172,31 @@ def test_proxy_plan_is_durable_before_cutover_and_reused_on_resume(tmp_path,monk
     monkeypatch.setattr(upgrade.proxy,'preflight',retired_networks)
     resumed=upgrade.prepare(path,docker)
     assert resumed['resumed'] and resumed['proxy_trust']==plan
+
+
+def test_cutover_requires_ready_correct_version_outside_maintenance(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(upgrade.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(upgrade.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    calls = []
+
+    class FakeDocker:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+
+        def run(self, args, *, check, timeout):
+            calls.append(args)
+            assert args[:3] == ["exec", "hub", "python"]
+            assert not check and 0 < timeout <= 5
+            code, health = next(self.responses)
+            return SimpleNamespace(returncode=code, stdout=json.dumps(health))
+
+    ready = {"status": "ok", "version": "1.0", "panel_update": {"maintenance": False}}
+    wrong = {**ready, "version": "0.9"}
+    draining = {**ready, "panel_update": {"maintenance": True}}
+    assert upgrade.confirm_hub_ready(
+        FakeDocker([(1, {}), (0, wrong), (0, draining), (0, ready)]), "hub", "1.0", timeout=5
+    ) is None
+    assert len(calls) == 4
+    with pytest.raises(RuntimeError, match="readiness"):
+        upgrade.confirm_hub_ready(FakeDocker([(1, {}), (1, {})]), "hub", "1.0", timeout=2)

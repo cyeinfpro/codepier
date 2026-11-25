@@ -10,7 +10,7 @@ databases therefore need no history rewrite and old receipts stay readable.
 from __future__ import annotations
 
 import time
-from hub.operation_history import seal, unseal
+from hub.operation_history import is_archive_pointer, seal, unseal
 
 OUTPUT_LIMIT = 131072
 OUTPUT_STATES = frozenset(
@@ -19,6 +19,9 @@ OUTPUT_STATES = frozenset(
 
 
 def migrate(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(operations)")}
+    if "terminal_output_chars" not in columns:
+        db.execute("ALTER TABLE operations ADD COLUMN terminal_output_chars INTEGER")
     db.execute("""CREATE TABLE IF NOT EXISTS operation_output_tails (
         operation_id TEXT PRIMARY KEY REFERENCES operations(id) ON DELETE CASCADE,
         output_seq INTEGER NOT NULL CHECK(output_seq >= 0),
@@ -87,9 +90,10 @@ class OperationOutput:
                 else ""
             )
             return window(text), live["chars"]
-        from hub.operation_archive import POINTER
-
-        if not include_body and str(row.get("output") or "").startswith(POINTER):
+        pointer = row.get("output")
+        if not include_body and is_archive_pointer(pointer):
+            if pointer != f"archive:v1:{row['id']}:output":
+                raise RuntimeError("Archived output does not belong to this operation")
             archived = self.store.one(
                 "SELECT output_chars FROM operation_payload_archives WHERE operation_id=?",
                 (row["id"],),
@@ -97,6 +101,12 @@ class OperationOutput:
             if archived is None:
                 raise RuntimeError("Archived output is missing")
             return None, archived["output_chars"]
+        if not (include_body and limit):
+            chars = row.get("terminal_output_chars")
+            if chars is not None:
+                if row.get("history_pruned_at") is not None:
+                    chars = 0
+                return ("" if include_body else None), chars
         legacy = unseal(self.store, row.get("output") or "")
         return window(legacy), len(legacy)
 
@@ -133,7 +143,7 @@ class OperationOutput:
             # Keep the hot parent row small. A legacy active tail is moved only
             # when that operation receives output, never by a bulk migration.
             self.store.execute(
-                "UPDATE operations SET output='',output_seq=?,updated=?,last_output_at=? WHERE id=?",
+                "UPDATE operations SET output='',terminal_output_chars=NULL,output_seq=?,updated=?,last_output_at=? WHERE id=?",
                 (sequence, now, now, identifier),
             )
         return True

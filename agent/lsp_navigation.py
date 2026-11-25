@@ -10,6 +10,7 @@ import asyncio, contextlib, hashlib, json, os, shutil, time, weakref
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
+from agent.async_work import disk_call as owned_disk_call
 from agent.owned_subprocess import OwnedProcess, create_owned_process
 from agent.resource_queue import finish_cleanup
 from shared.config import env_float, env_int
@@ -38,6 +39,7 @@ MAX_MESSAGE = 4 * 1024 * 1024
 DEFAULT_IDLE_TTL = 300.0
 DEFAULT_MAX_INSTANCES = 3
 MAX_OPEN_DOCUMENTS = 64
+MAX_TRACKED_DOCUMENT_URIS = 4096
 MAX_DIAGNOSTIC_REPORTS = 16
 PoolKey = tuple[str, str, int, int]
 _LIVE_POOLS: weakref.WeakSet[LspPool] = weakref.WeakSet()
@@ -125,6 +127,7 @@ class Peer:
         self.capabilities = {}
         self.documents = OrderedDict()
         self.document_counter = 0
+        self.opened_uris: set[str] = set()
         self.write_lock = asyncio.Lock()
         self.close_lock = asyncio.Lock()
         self.closed = False
@@ -338,7 +341,10 @@ class Peer:
         version = report.get("version")
         # An explicitly versioned report must match. Once content changes or
         # a document is reopened, an unversioned report cannot prove freshness.
-        if version != doc["version"] and not (version is None and doc["accept_unversioned"]):
+        if version is None:
+            if not doc["accept_unversioned"]:
+                return
+        elif type(version) is not int or version != doc["version"]:
             return
         self.diagnostics[uri] = report
         self.diagnostics.move_to_end(uri)
@@ -432,6 +438,13 @@ class Peer:
         version = self.document_counter
         self.diagnostics.pop(uri, None)
         if existing is None:
+            # Version sequence is peer-wide; first-open eligibility is per URI.
+            # Never evict this history while old server notifications can arrive.
+            first_open = (
+                uri not in self.opened_uris and len(self.opened_uris) < MAX_TRACKED_DOCUMENT_URIS
+            )
+            if first_open:
+                self.opened_uris.add(uri)
             if len(self.documents) >= MAX_OPEN_DOCUMENTS:
                 await self._close_document(next(iter(self.documents)))
             self.documents[uri] = {
@@ -440,7 +453,7 @@ class Peer:
                 "language_id": language_id,
                 "mtime_ns": mtime_ns,
                 "size": size,
-                "accept_unversioned": version <= MAX_OPEN_DOCUMENTS,
+                "accept_unversioned": first_open,
             }
             await self.notify(
                 "textDocument/didOpen",
@@ -507,7 +520,7 @@ class Peer:
             return None
 
     async def refresh_other_documents(self, active_uri: str | None):
-        disk_call = getattr(self.agent, "disk_call", asyncio.to_thread)
+        disk_call = getattr(self.agent, "disk_call", owned_disk_call)
         changed = False
         for open_uri, doc in list(self.documents.items()):
             if open_uri == active_uri:
@@ -576,6 +589,7 @@ class Peer:
         finally:
             self.reader = self.stderr = self.process = None
             self.documents.clear()
+            self.opened_uris.clear()
             self.diagnostics.clear()
             if process is not None:
                 for key, current in list(self.agent.processes.items()):
@@ -972,7 +986,17 @@ class LspPool:
                     self._ensure_reaper()
 
     async def _run_peer_request(
-        self, entry, agent, identifier, project, root, config, spec_fp, runner, reused
+        self,
+        entry,
+        agent,
+        identifier,
+        project,
+        root,
+        config,
+        spec_fp,
+        runner,
+        reused,
+        admission=None,
     ):
         _raise_if_stopped(agent, identifier)
         entry.peer.notifications = 0
@@ -983,6 +1007,8 @@ class LspPool:
             if reused and exc.code == "LSP_DISCONNECTED":
                 _raise_if_stopped(agent, identifier)
                 await entry.close()
+                if admission is not None:
+                    await admission()
                 peer = await self._spawn_peer(
                     entry, agent, identifier, project, root, config, spec_fp
                 )
@@ -992,7 +1018,9 @@ class LspPool:
 
     async def _ensure_query_peer(self, entry, agent, identifier, project, root, config, spec_fp):
         if entry.peer is not None and (
-            not entry.peer.is_alive() or entry.spec_fingerprint != spec_fp
+            not entry.peer.is_alive()
+            or entry.spec_fingerprint != spec_fp
+            or len(entry.peer.opened_uris) >= MAX_TRACKED_DOCUMENT_URIS
         ):
             await entry.close()
         reused = entry.peer is not None
@@ -1011,6 +1039,8 @@ class LspPool:
         key: PoolKey,
         config: dict,
         runner,
+        *,
+        admission=None,
     ):
         spec_fp = _spec_fingerprint(config)
         phase = getattr(agent, "phase", None)
@@ -1032,12 +1062,23 @@ class LspPool:
                         continue
                     if reported_waiting:
                         phase(identifier, "executing")
+                    if admission is not None:
+                        await admission()
                     reused = await self._ensure_query_peer(
                         entry, agent, identifier, project, root, config, spec_fp
                     )
                     try:
                         return await self._run_peer_request(
-                            entry, agent, identifier, project, root, config, spec_fp, runner, reused
+                            entry,
+                            agent,
+                            identifier,
+                            project,
+                            root,
+                            config,
+                            spec_fp,
+                            runner,
+                            reused,
+                            admission,
                         )
                     except DevError as exc:
                         if exc.code in _FATAL_POOL_ERRORS or (
@@ -1127,11 +1168,15 @@ async def shutdown_all(agent=None) -> int:
     return total
 
 
-async def _query_locations(peer, projector, action, params):
-    items = []
+async def _query_locations(peer, projector, action, params, disk):
     if action == "references":
         params["context"] = {"includeDeclaration": True}
     result = await peer.request("textDocument/" + action, params)
+    return await disk(_project_locations, projector, result)
+
+
+def _project_locations(projector, result):
+    items = []
     if result is None:
         result = []
     if isinstance(result, dict):
@@ -1149,8 +1194,7 @@ async def _query_locations(peer, projector, action, params):
     return items
 
 
-async def _query_diagnostics(peer, projector, args, uri, doc_version, capabilities, config):
-    items = []
+async def _query_diagnostics(peer, projector, args, uri, doc_version, capabilities, config, disk):
     if capabilities.get("diagnosticProvider"):
         response = await peer.request("textDocument/diagnostic", {"textDocument": {"uri": uri}})
         rawitems = response.get("items", []) if isinstance(response, dict) else []
@@ -1161,19 +1205,7 @@ async def _query_diagnostics(peer, projector, args, uri, doc_version, capabiliti
         )
         fresh = reported is not None
         rawitems = reported.get("diagnostics", []) if reported else []
-    for item in rawitems:
-        try:
-            row = {
-                "path": args["path"],
-                "range": projector.range(args["path"], item["range"]),
-                "message": str(item.get("message", ""))[:2000],
-                "severity": item.get("severity"),
-                "code": str(item.get("code", ""))[:100],
-            }
-            if projector.take(row):
-                items.append(row)
-        except (TypeError, ValueError, KeyError, DevError):
-            projector.omitted += 1
+    items = await disk(_project_diagnostics, projector, args["path"], rawitems)
     extra = {
         "diagnostics_fresh": fresh,
         "diagnostics_state": "observed" if fresh else "not_received",
@@ -1182,7 +1214,25 @@ async def _query_diagnostics(peer, projector, args, uri, doc_version, capabiliti
     return items, fresh, extra
 
 
-async def _query_calls(peer, projector, action, params):
+def _project_diagnostics(projector, path, rawitems):
+    items = []
+    for item in rawitems:
+        try:
+            row = {
+                "path": path,
+                "range": projector.range(path, item["range"]),
+                "message": str(item.get("message", ""))[:2000],
+                "severity": item.get("severity"),
+                "code": str(item.get("code", ""))[:100],
+            }
+            if projector.take(row):
+                items.append(row)
+        except (TypeError, ValueError, KeyError, DevError):
+            projector.omitted += 1
+    return items
+
+
+async def _query_calls(peer, projector, action, params, disk):
     items = []
     prepared = await peer.request("textDocument/prepareCallHierarchy", params)
     if prepared is None:
@@ -1190,7 +1240,7 @@ async def _query_calls(peer, projector, action, params):
     if not isinstance(prepared, list):
         raise DevError("LSP_PROTOCOL", "调用层级响应无效")
     for item in prepared[:8]:
-        if not projector.location(item):
+        if not await disk(projector.location, item):
             continue
         method = (
             "callHierarchy/incomingCalls"
@@ -1200,17 +1250,26 @@ async def _query_calls(peer, projector, action, params):
         calls = await peer.request(method, {"item": item}) or []
         if not isinstance(calls, list):
             raise DevError("LSP_PROTOCOL", "调用层级数据格式错误")
-        for call in calls:
-            target = call.get("from" if action == "incoming_calls" else "to", {})
-            loc = projector.location(target)
-            if loc and projector.take(loc):
-                items.append(
-                    {
-                        **loc,
-                        "name": str(target.get("name", ""))[:300],
-                        "kind": target.get("kind"),
-                    }
-                )
+        items.extend(await disk(_project_calls, projector, action, calls))
+    return items
+
+
+def _project_calls(projector, action, calls):
+    items = []
+    for call in calls:
+        if not isinstance(call, dict):
+            projector.omitted += 1
+            continue
+        target = call.get("from" if action == "incoming_calls" else "to", {})
+        loc = projector.location(target)
+        if loc and projector.take(loc):
+            items.append(
+                {
+                    **loc,
+                    "name": str(target.get("name", ""))[:300],
+                    "kind": target.get("kind"),
+                }
+            )
     return items
 
 
@@ -1228,6 +1287,7 @@ async def _execute_query(
     config: dict,
 ):
     projector = Projector(agent.engine, root, args["limit"])
+    disk = getattr(agent, "disk_call", owned_disk_call)
     action = args["action"]
     fresh = True
     capabilities = peer.capabilities
@@ -1254,14 +1314,13 @@ async def _execute_query(
             "workspace_completeness": "language-server reported; not a proof of complete repository coverage",
         }
     if action == "workspace_symbols":
-        items = projector.symbols(await peer.request("workspace/symbol", {"query": args["query"]}))
+        result = await peer.request("workspace/symbol", {"query": args["query"]})
+        items = await disk(projector.symbols, result)
     elif action == "symbols":
-        items = projector.symbols(
-            await peer.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}),
-            args["path"],
-        )
+        result = await peer.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        items = await disk(projector.symbols, result, args["path"])
     elif action in {"definition", "references"}:
-        items = await _query_locations(peer, projector, action, params)
+        items = await _query_locations(peer, projector, action, params, disk)
     elif action == "hover":
         result = await peer.request("textDocument/hover", params)
         content = result.get("contents", []) if isinstance(result, dict) else []
@@ -1273,13 +1332,21 @@ async def _execute_query(
         extra = {"text": text[:16000], "text_truncated": len(text) > 16000}
     elif action == "diagnostics":
         items, fresh, extra = await _query_diagnostics(
-            peer, projector, args, uri, doc_version, capabilities, config
+            peer, projector, args, uri, doc_version, capabilities, config, disk
         )
     else:
-        items = await _query_calls(peer, projector, action, params)
+        items = await _query_calls(peer, projector, action, params, disk)
     if source is not None:
-        current = agent.engine.read_bytes(agent.engine.path(root, args["path"], False))
-        fresh = fresh and hashlib.sha256(current).hexdigest() == sha
+
+        def current_sha():
+            return hashlib.sha256(
+                agent.engine.read_bytes(
+                    agent.engine.path(root, args["path"], False), verify_path=True
+                )
+            ).hexdigest()
+
+        latest = await disk(current_sha)
+        fresh = fresh and latest == sha
     return {
         "action": action,
         "language": language,
@@ -1295,10 +1362,16 @@ async def _execute_query(
     }
 
 
-async def query(agent, identifier, project, args, *, pool: LspPool | None = None):
+def _authorized_query_root(agent, project):
     root, spec = agent.engine.root(project)
     if not project.get("allow_tasks") or not spec.get("allow_tasks"):
         raise DevError("TASKS_DISABLED", "语义查询需本机与项目执行许可", 403)
+    info = root.stat()
+    return root, (info.st_dev, info.st_ino)
+
+
+def _prepare_query(agent, project, args):
+    root, identity = _authorized_query_root(agent, project)
     path_arg = args.get("path", "")
     language = args.get("language") or LANGUAGES.get(Path(path_arg).suffix.lower())
     config = selected(agent.config, project, language)
@@ -1332,7 +1405,7 @@ async def query(agent, identifier, project, args, *, pool: LspPool | None = None
             )
     if path_arg:
         path = agent.engine.path(root, path_arg, False)
-        raw = agent.engine.read_bytes(path)
+        raw = agent.engine.read_bytes(path, verify_path=True)
         stat_info = path.lstat()
         source = agent.engine.text(raw)
         sha = hashlib.sha256(raw).hexdigest()
@@ -1352,32 +1425,37 @@ async def query(agent, identifier, project, args, *, pool: LspPool | None = None
         **args,
         "path": path_arg,
     }
-    active_pool = pool or get_pool(agent)
-    disk_call = getattr(agent, "disk_call", asyncio.to_thread)
-    root_stat = await disk_call(root.stat)
-    key = (str(root), _server_language(agent.config, language), root_stat.st_dev, root_stat.st_ino)
+    return root, identity, normalized_args, language, source, sha, uri, position, stat_info, config
+
+
+async def query(agent, identifier, project, args, *, pool: LspPool | None = None):
+    # Start the outer budget before disk work. The owned disk helper shields
+    # resource cleanup; no cancelled thread can outlive the query's ownership.
+    path = args.get("path", "")
+    requested_language = args.get("language") or LANGUAGES.get(Path(path).suffix.lower())
+    candidate = selected(agent.config, project, requested_language) or {}
+    disk = getattr(agent, "disk_call", owned_disk_call)
+    budget = min(candidate.get("timeout_seconds", 20) * 3, 120)
     try:
-        async with asyncio.timeout(min(config.get("timeout_seconds", 20) * 3, 120)):
+        async with asyncio.timeout(budget):
+            prepared = await disk(_prepare_query, agent, project, args)
+            root, identity, normalized, language, source, sha, uri, pos, info, config = prepared
+            _raise_if_stopped(agent, identifier)
+            key = (str(root), _server_language(agent.config, language), *identity)
+            active_pool = pool or get_pool(agent)
+
+            async def admission():
+                if await disk(_authorized_query_root, agent, project) != (root, identity):
+                    raise DevError("LSP_SOURCE_CHANGED", "项目目录已变化，请重新定位", 409)
+                _raise_if_stopped(agent, identifier)
+
+            async def execute(peer):
+                return await _execute_query(
+                    peer, agent, root, normalized, language, source, sha, uri, pos, info, config
+                )
+
             return await active_pool.run_query(
-                agent,
-                identifier,
-                project,
-                root,
-                key,
-                config,
-                lambda peer: _execute_query(
-                    peer,
-                    agent,
-                    root,
-                    normalized_args,
-                    language,
-                    source,
-                    sha,
-                    uri,
-                    position,
-                    stat_info,
-                    config,
-                ),
+                agent, identifier, project, root, key, config, execute, admission=admission
             )
     except asyncio.TimeoutError as exc:
         raise DevError("LSP_TIMEOUT", "语义查询超过总期限，已回收语言服务", 409) from exc

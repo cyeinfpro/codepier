@@ -570,18 +570,27 @@ def build(destination, *, public=False, panel_update=False):
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, manifest)
         with zipfile.ZipFile(temporary) as archive:
-            if archive.testzip() is not None:
-                raise RuntimeError("ZIP CRC verification failed")
             for name, item in inventory.items():
-                if digest(archive.read(name)) != item["sha256"]:
+                checksum = hashlib.sha256()
+                with archive.open(name) as stream:
+                    # Reading to EOF checks the member CRC in ZipExtFile.
+                    for chunk in iter(lambda: stream.read(128 * 1024), b""):
+                        checksum.update(chunk)
+                if checksum.hexdigest() != item["sha256"]:
                     raise RuntimeError("ZIP content SHA mismatch: " + name)
+            if archive.read("MANIFEST.sha256") != manifest:
+                raise RuntimeError("ZIP manifest mismatch")
+        archive_checksum = hashlib.sha256()
+        with open(temporary, "rb") as stream:
+            for chunk in iter(lambda: stream.read(128 * 1024), b""):
+                archive_checksum.update(chunk)
         os.replace(temporary, destination)
     finally:
         Path(temporary).unlink(missing_ok=True)
     result = {
         "path": str(destination.relative_to(ROOT)),
         "bytes": destination.stat().st_size,
-        "sha256": digest(destination.read_bytes()),
+        "sha256": archive_checksum.hexdigest(),
         "files": len(files) + 1,
         "source_bytes": total,
         "verified": True,

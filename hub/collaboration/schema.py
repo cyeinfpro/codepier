@@ -262,6 +262,24 @@ def migrate(db):
     from hub.collaboration.room_event_migration import migrate as migrate_room_events
 
     migrate_room_events(db)
+    # Match the archive's guarded JSON predicates. Malformed old argument
+    # records do not prevent index initialization or retire unrelated routes.
+    for relation in ("conversation_id", "goal_id", "policy_id"):
+        db.execute(
+            f"CREATE INDEX IF NOT EXISTS event_archive_{relation} ON mcp_event_subscriptions("
+            f"json_extract(CASE WHEN json_valid(arguments) THEN arguments ELSE '{{}}' END, '$.{relation}'))"
+        )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS archive_monitor_bindings_room ON monitor_plan_bindings(room_id)"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS archive_jobs_goal ON collaboration_jobs(goal_id)")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS archive_goals_source ON collaboration_goals(source_message_id)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS archive_jobs_origin ON collaboration_jobs("
+        "json_extract(CASE WHEN json_valid(context) THEN context ELSE '{}' END,'$.origin_message_id'))"
+    )
     from hub.collaboration.rooms import migrate as migrate_rooms
     from hub.collaboration.room_runtime import migrate as migrate_room_runtime
     from hub.collaboration.room_channels import migrate as migrate_room_channels

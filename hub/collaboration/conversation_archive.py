@@ -93,20 +93,26 @@ class ConversationArchive:
             ORDER BY s.id""",
             (cid, cid),
         )
+        exclusive_rooms = json.dumps(exclusive)
+        seen_slots = set(self.ids(slots))
         slots += [
-            s
-            for s in self.store.all(
-                "SELECT id,room_id,version,state FROM collaboration_join_slots ORDER BY id"
+            row
+            for row in self.store.all(
+                """SELECT id,room_id,version,state FROM collaboration_join_slots
+                WHERE room_id IN (SELECT value FROM json_each(?)) ORDER BY id""",
+                (exclusive_rooms,),
             )
-            if s["room_id"] in exclusive and s["id"] not in self.ids(slots)
+            if row["id"] not in seen_slots
         ]
         # A legacy slot can serve more than one conversation. Revoke only this
         # relationship's policy/routes; never revoke the shared slot itself.
         shared_slot_ids = {
             r["slot_id"]
             for r in self.store.all(
-                "SELECT slot_id FROM delegation_policies WHERE conversation_id!=? AND state='active'",
-                (cid,),
+                """SELECT slot_id FROM delegation_policies
+                WHERE conversation_id!=? AND state='active'
+                  AND slot_id IN (SELECT value FROM json_each(?))""",
+                (cid, json.dumps(self.ids(slots))),
             )
         }
         slots = [s for s in slots if s["id"] not in shared_slot_ids]
@@ -122,38 +128,60 @@ class ConversationArchive:
             (cid,),
         )
         goal_ids = self.ids(goals)
-        subscriptions = []
-        routes = self.store.all("SELECT subscription_id,slot_id FROM collaboration_join_routes")
-        route_ids = {r["subscription_id"] for r in routes if r["slot_id"] in slot_ids}
-        for sub in self.store.all(
-            "SELECT id,room_id,version,state,name,arguments FROM mcp_event_subscriptions ORDER BY id"
-        ):
-            filters = json.loads(sub["arguments"])
-            if (
-                sub["room_id"] in exclusive
-                or filters.get("conversation_id") == cid
-                or sub["id"] in route_ids
-                or filters.get("goal_id") in goal_ids
-                or filters.get("policy_id") in policy_ids
-                or sub["name"] == MESSAGE_EVENT
-                and sub["room_id"] == cid
-                and not filters.get("conversation_id")
-            ):
-                subscriptions.append({k: sub[k] for k in ("id", "version", "state")})
-        jobs = self.store.all(
-            """SELECT j.id,j.room_id,j.version,j.state FROM collaboration_jobs j
-            LEFT JOIN collaboration_goals g ON g.id=j.goal_id
-            LEFT JOIN collaboration_messages m
-                ON m.id=COALESCE(json_extract(j.context,'$.origin_message_id'),g.source_message_id)
-            WHERE m.conversation_id=? ORDER BY j.id""",
-            (cid,),
-        )
-        jobs += [
-            j
-            for j in self.store.all(
-                "SELECT id,room_id,version,state FROM collaboration_jobs ORDER BY id"
+        subscriptions = self.store.all(
+            """WITH scoped_subscriptions AS (
+                SELECT id,version,state,name,room_id,
+                       CASE WHEN json_valid(arguments) THEN arguments ELSE '{}' END AS filters
+                FROM mcp_event_subscriptions
             )
-            if j["room_id"] in exclusive and j["id"] not in self.ids(jobs)
+            SELECT s.id,s.version,s.state FROM scoped_subscriptions s
+            WHERE s.room_id IN (SELECT value FROM json_each(?))
+              OR json_extract(s.filters,'$.conversation_id')=?
+              OR s.id IN (
+                  SELECT subscription_id FROM collaboration_join_routes
+                  WHERE slot_id IN (SELECT value FROM json_each(?))
+              )
+              OR json_extract(s.filters,'$.goal_id') IN (SELECT value FROM json_each(?))
+              OR json_extract(s.filters,'$.policy_id') IN (SELECT value FROM json_each(?))
+              OR (s.name=? AND s.room_id=? AND COALESCE(
+                    json_extract(s.filters,'$.conversation_id'), ''
+                  ) IN ('', 0))
+            ORDER BY s.id""",
+            (
+                exclusive_rooms,
+                cid,
+                json.dumps(sorted(slot_ids)),
+                json.dumps(goal_ids),
+                json.dumps(sorted(policy_ids)),
+                MESSAGE_EVENT,
+                cid,
+            ),
+        )
+        jobs = self.store.all(
+            """SELECT j.id,j.room_id,j.version,j.state FROM collaboration_messages m
+            JOIN collaboration_jobs j
+                ON json_extract(CASE WHEN json_valid(j.context) THEN j.context ELSE '{}' END,
+                                '$.origin_message_id')=m.id
+            WHERE m.conversation_id=?
+            UNION
+            SELECT j.id,j.room_id,j.version,j.state FROM collaboration_messages m
+            JOIN collaboration_goals g ON g.source_message_id=m.id
+            JOIN collaboration_jobs j ON j.goal_id=g.id
+            WHERE m.conversation_id=?
+              AND json_extract(CASE WHEN json_valid(j.context) THEN j.context ELSE '{}' END,
+                               '$.origin_message_id') IS NULL
+            ORDER BY 1""",
+            (cid, cid),
+        )
+        seen_jobs = set(self.ids(jobs))
+        jobs += [
+            row
+            for row in self.store.all(
+                """SELECT id,room_id,version,state FROM collaboration_jobs
+                WHERE room_id IN (SELECT value FROM json_each(?)) ORDER BY id""",
+                (exclusive_rooms,),
+            )
+            if row["id"] not in seen_jobs
         ]
         bindings = {
             channel: self.store.all(
@@ -198,20 +226,16 @@ class ConversationArchive:
             ORDER BY o.id""",
             (cid,),
         )
-        monitors = [
-            r
-            for r in self.store.all(
-                "SELECT id,room_id,state,version FROM monitor_plan_bindings ORDER BY id"
-            )
-            if r["room_id"] in exclusive
-        ]
-        agents = [
-            r
-            for r in self.store.all(
-                "SELECT id,room_id,enabled,version FROM collaboration_agents ORDER BY id"
-            )
-            if r["room_id"] in exclusive
-        ]
+        monitors = self.store.all(
+            """SELECT id,room_id,state,version FROM monitor_plan_bindings
+            WHERE room_id IN (SELECT value FROM json_each(?)) ORDER BY id""",
+            (exclusive_rooms,),
+        )
+        agents = self.store.all(
+            """SELECT id,room_id,enabled,version FROM collaboration_agents
+            WHERE room_id IN (SELECT value FROM json_each(?)) ORDER BY id""",
+            (exclusive_rooms,),
+        )
         messages = self.store.one(
             "SELECT COUNT(*) AS n FROM collaboration_messages WHERE conversation_id=?", (cid,)
         )["n"]

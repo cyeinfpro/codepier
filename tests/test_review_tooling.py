@@ -123,3 +123,50 @@ def test_complete_coverage_combines_explicit_files_and_keeps_originals(tmp_path)
     assert all(path.exists() for path in inputs)
     with pytest.raises(ValueError): combine([inputs[0],inputs[0]],tmp_path/'duplicate')
     with pytest.raises(ValueError): combine([tmp_path/'missing'],tmp_path/'missing-output')
+
+
+def test_regression_snapshot_prunes_dependencies_before_scandir(tmp_path, monkeypatch):
+    from scripts import check_full_regression as regression
+
+    root = tmp_path
+    omitted = root / "web" / "node_modules" / "large"
+    omitted.mkdir(parents=True)
+    (omitted / "package.js").write_text("dependency")
+    (root / "web" / "fixture.js").write_text("source")
+    monkeypatch.setattr(regression, "ROOT", root)
+    scanned = []
+    scandir = os.scandir
+    def tracked(path):
+        scanned.append(Path(path))
+        return scandir(path)
+    monkeypatch.setattr(os, "scandir", tracked)
+    assert regression.snapshot() == {
+        "web/fixture.js": hashlib.sha256(b"source").hexdigest()
+    }
+    assert all("node_modules" not in path.parts for path in scanned)
+
+
+def test_source_bundle_reads_each_source_once_to_verify(tmp_path, monkeypatch):
+    from scripts import build_source_bundle as bundle
+
+    source = tmp_path / "shared"
+    source.mkdir()
+    raw = b"fixture" * 5000
+    (source / "sample.py").write_bytes(raw)
+    monkeypatch.setattr(bundle, "ROOT", tmp_path)
+    monkeypatch.setattr(bundle, "REQUIRED_FILES", {"shared/sample.py"})
+    recovered = []
+    opened = zipfile.ZipFile.open
+
+    def counted(self, name, mode="r", *args, **kwargs):
+        if mode == "r" and name == "shared/sample.py":
+            recovered.append(name)
+        return opened(self, name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", counted)
+    path1, path2 = (tmp_path / "dist" / name for name in ("one.zip", "two.zip"))
+    a = bundle.build(path1)
+    b = bundle.build(path2)
+    assert a["verified"] and b["verified"]
+    assert a["sha256"] == b["sha256"] == hashlib.sha256(path1.read_bytes()).hexdigest()
+    assert recovered == ["shared/sample.py"] * 2

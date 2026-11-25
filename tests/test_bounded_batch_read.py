@@ -235,7 +235,7 @@ def test_os_denial_is_not_retried_and_keeps_other_items(files, monkeypatch):
     api, _, root = files
     (root / 'safe').write_text('readable')
     attempts = []
-    original = api.engine.read_bytes
+    original = api.engine.read_chunks
 
     def read(path, *args, **kwargs):
         attempts.append(path.name)
@@ -243,7 +243,7 @@ def test_os_denial_is_not_retried_and_keeps_other_items(files, monkeypatch):
             raise PermissionError('private absolute path must not leak')
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(api.engine, 'read_bytes', read)
+    monkeypatch.setattr(api.engine, 'read_chunks', read)
     result = batch(files, [{'path': 'denied'}, {'path': 'safe'}])
     assert attempts == ['denied', 'safe']
     assert result['files'][0]['error'] == {

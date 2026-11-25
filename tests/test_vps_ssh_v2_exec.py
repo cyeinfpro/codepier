@@ -288,7 +288,7 @@ async def test_t22_budget_exhausted_after_auth_hung_close_terminal_monotonic_sig
             self._wait_delay = wait_delay
             self.terminated = False
 
-        async def wait(self):
+        async def wait_closed(self):
             if self._wait_delay > 0:
                 await asyncio.sleep(self._wait_delay)
 
@@ -534,7 +534,7 @@ async def test_interleaved_streams_decode_and_redact_independently():
         stderr = Stream(1, 3)
         exit_status = 0
 
-        async def wait(self):
+        async def wait_closed(self):
             await ready[-1].wait()
 
     class Connection:
@@ -574,6 +574,16 @@ async def test_interleaved_streams_decode_and_redact_independently():
     assert snapshots[-1] == (expected, True)
     assert all(secret not in output for output, _final in snapshots)
     raw = b"".join(raw_chunks)
+    assert result["output_capture"] == {
+        "complete": True,
+        "streams": {
+            name: {"bytes": len(data), "state": "eof", "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in {
+                "stdout": b"".join(raw_chunks[i] for i in (0, 2, 4)),
+                "stderr": b"".join(raw_chunks[i] for i in (1, 3)),
+            }.items()
+        },
+    }
     assert result["output_total_bytes"] == len(raw)
     assert result["output_total_sha256"] == hashlib.sha256(raw).hexdigest()
 

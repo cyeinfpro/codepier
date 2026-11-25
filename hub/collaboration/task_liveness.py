@@ -72,7 +72,7 @@ class TaskLiveness:
     def __init__(self, collaboration):
         self.c, self.store = collaboration, collaboration.store
 
-    def record_receipt(self, dot, args, kind, message):
+    def record_receipt(self, dot, args, kind, message, *, legacy_args=None):
         """Called inside the same transaction as the actual accepted publication."""
         key_hash, fingerprint = digest(args["idempotency_key"]), digest(args)
         old = self.store.one(
@@ -81,9 +81,24 @@ class TaskLiveness:
             (dot["id"], kind, key_hash),
         )
         if old:
-            if old["request_digest"] != fingerprint or old["message_id"] != message["id"]:
-                raise DevError("IDEMPOTENCY_CONFLICT", "原投递键不能替换已确认内容", 409)
-            return
+            if old["request_digest"] == fingerprint and old["message_id"] == message["id"]:
+                return
+            if (
+                kind in {"message", "message_v2"}
+                and legacy_args is not None
+                and old["message_id"] == message["id"]
+                and old["message_version"] == message["version"]
+                and old["request_digest"] == digest(legacy_args)
+            ):
+                # The publisher only supplies legacy_args after verifying the
+                # committed message and durable question context in this transaction.
+                self.store.execute(
+                    """UPDATE dot_delivery_receipts SET request_digest=?
+                       WHERE dot_id=? AND kind=? AND request_key_hash=? AND request_digest=?""",
+                    (fingerprint, dot["id"], kind, key_hash, old["request_digest"]),
+                )
+                return
+            raise DevError("IDEMPOTENCY_CONFLICT", "原投递键不能替换已确认内容", 409)
         self.store.execute(
             "INSERT INTO dot_delivery_receipts VALUES (?,?,?,?,?,?,?)",
             (

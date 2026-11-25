@@ -1041,6 +1041,7 @@ def build_core_output_schemas(legacy, *, include_queries=False):
             "transport_contract": STR,
             "host_identity_verification_applied": STR,
             "remote_execution_state": STR,
+            "output_capture": OBJ,
             "exit_signal": nullable(STR),
             "runtime": OBJ,
             "failure_context": OBJ,

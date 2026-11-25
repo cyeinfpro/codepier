@@ -1576,7 +1576,7 @@ class Agent:
                 project = await self.disk_call(self.integrations.project, project, args)
             self.integration_projects[id] = project
             self.integration_tool_names[id] = tool
-            self.integrations.control.guard(tool, project)
+            await self.disk_call(self.integrations.control.guard, tool, project)
             if not_after is not None and (
                 type(not_after) not in {int, float} or not math.isfinite(not_after)
             ):
@@ -1742,7 +1742,7 @@ class Agent:
                         async with self._read_execution_worker(
                             id, tool, args, root, existing=admission_worker
                         ) as read_worker:
-                            self.integrations.control.guard(tool, project)
+                            await self.disk_call(self.integrations.control.guard, tool, project)
                             if args.get("workspace_id"):
                                 project = await self.disk_call(
                                     self.integrations.project, project, args
@@ -2262,7 +2262,8 @@ class Agent:
         }
         if saved_transport:
             log = self._execution_logs[id]
-            log.finish()
+            if result.get("output_capture", {}).get("complete", True):
+                log.finish()
             await self._snapshot_io(log.close)
             result["output_log"] = log.receipt(id)
         return {
@@ -2719,7 +2720,9 @@ class Agent:
                     "ROOT_CHANGED", "Workspace mapping changed before workload launch", 409
                 )
             tool = self.integration_tool_names.get(id, "shell_exec" if full_access else "tasks_run")
-            self.integrations.control.guard(tool, execution_project)
+            await self.disk_call(self.integrations.control.guard, tool, execution_project)
+            if id in self.cancelled or self.stop_event.is_set():
+                raise DevError("CANCELLED", "Operation was cancelled before workload launch", 409)
             if full_access:
                 from agent.shell import shell_denial
 
@@ -2864,6 +2867,7 @@ class Agent:
         output_truncated = False
         output_total_bytes = 0
         output_total_hash = hashlib.sha256()
+        output_eof = False
         start = time.monotonic()
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         decoded_output = ""
@@ -2905,7 +2909,7 @@ class Agent:
             decoded_output = (decoded_output + text)[-131072:]
 
         async def drain():
-            nonlocal output_total_bytes
+            nonlocal output_total_bytes, output_eof
             while True:
                 # Read available bytes in larger batches; StreamReader.read does not wait to fill n.
                 chunk = await process.stdout.read(65536)
@@ -2917,6 +2921,7 @@ class Agent:
                     log = getattr(self, "_execution_logs", {}).get(id)
                     if log is not None:
                         log.finish()
+                    output_eof = True
                     return
                 # Fingerprint received pipe bytes before decoding/redaction/tail
                 # limits. No raw log or credential-bearing byte buffer is kept.
@@ -2994,10 +2999,31 @@ class Agent:
         await snapshot(True)
         return {
             "exit_code": process.returncode,
+            **(
+                {
+                    "runtime_cleanup": {
+                        "pending": not process.cleanup_confirmed,
+                        "confirmed": process.cleanup_confirmed,
+                        "state": "confirmed" if process.cleanup_confirmed else "unconfirmed",
+                    }
+                }
+                if getattr(process, "cleanup_confirmed", None) is not None
+                else {}
+            ),
             "output": decoded_output,
             "output_truncated": output_truncated,
             "output_total_bytes": output_total_bytes,
             "output_total_sha256": output_total_hash.hexdigest(),
+            "output_capture": {
+                "complete": output_eof,
+                "streams": {
+                    "stdout": {
+                        "bytes": output_total_bytes,
+                        "sha256": output_total_hash.hexdigest(),
+                        "state": "eof" if output_eof else "interrupted",
+                    }
+                },
+            },
             "timed_out": timed_out,
             "cancelled": id in self.cancelled or self.journal.is_cancelled(id),
             "duration_ms": round((time.monotonic() - start) * 1000),

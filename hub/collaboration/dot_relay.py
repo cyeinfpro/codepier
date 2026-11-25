@@ -472,14 +472,14 @@ class DotRelay:
             )
         return result
 
-    def recover(self):
+    def recover(self, *, max_wakes=4):
         """Bounded, fair scan of unconsumed messages. Never reissue business work.
 
         Three coalesced wake attempts (30/120/600 seconds) cover no-subscription,
         rate-limited and accepted-but-unconsumed gaps. Read/partial replies delay
         recovery; completed messages never wake. Paused/revoked routes stay so.
         """
-        if not self.c.config.enabled or not self.c.config.events_enabled:
+        if max_wakes <= 0 or not self.c.config.enabled or not self.c.config.events_enabled:
             return 0
         with self.store.transaction():
             rows = self.store.all(
@@ -581,7 +581,8 @@ class DotRelay:
                     (now, dot["id"], now),
                 )
                 awakened.add(dot["id"])
-                if len(awakened) >= 4:
+                if len(awakened) >= max_wakes:
+                    self._after = row["sequence"]
                     break
             return len(awakened)
 

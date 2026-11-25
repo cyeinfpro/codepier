@@ -847,7 +847,13 @@ function chatEnsureOutputManager(v) {
                   item.body.textContent = st.text;
                   chatSyncToolTruncatedNotice(item, st);
                 }
-                if (!st.running) ac.abort();
+                const totalBytes = payload.total_bytes;
+                if (
+                  !st.running &&
+                  Number.isSafeInteger(totalBytes) &&
+                  st.toOffset >= totalBytes
+                )
+                  ac.abort();
               },
               ac.signal,
             );
@@ -2811,55 +2817,31 @@ function chatSyncV2ToView(
   const state = v.v2State;
   if (!state) return;
   const proj = state.projection;
-  for (const pItem of proj.items.values()) {
-    if (pItem.body && typeof pItem.body === "object") {
-      if (
-        pItem.body.kind === "inline" &&
-        pItem.body.text !== pItem._seenBodyText
-      ) {
-        pItem.text = pItem.body.text ?? "";
-        pItem._seenBodyText = pItem.text;
-      } else if (pItem.body.kind === "ref" && pItem.partial !== false) {
-        pItem.body_ref = pItem.body_ref ?? pItem.body.body_ref ?? null;
-        pItem.content_generation =
-          pItem.content_generation ?? pItem.body.content_generation ?? 1;
-        pItem.total_bytes = pItem.total_bytes ?? pItem.body.byte_length ?? null;
-        pItem.partial = true;
-      }
-    }
-  }
-  let orderChanged = v.order.length !== proj.order.length;
-  if (!orderChanged) {
-    for (let i = 0; i < proj.order.length; i += 1) {
-      if (v.order[i] !== proj.order[i]) {
-        orderChanged = true;
-        break;
-      }
-    }
-  }
-  if (orderChanged) {
+  const fullReconcile = dirtyOverride === null || structureOverride;
+  if (fullReconcile) {
     v.order = [...proj.order];
+    for (const oldKey of v.items.keys()) {
+      if (proj.items.has(oldKey)) continue;
+      v.items.get(oldKey)?.node?.remove();
+      v.items.delete(oldKey);
+      v.approvalKeys?.delete(oldKey);
+    }
     v.v2StructureDirty = true;
     v.structureDirty = true;
   }
-  for (const oldKey of [...v.items.keys()]) {
-    if (!proj.items.has(oldKey)) {
-      const removed = v.items.get(oldKey);
-      removed?.node?.remove();
-      v.items.delete(oldKey);
-      v.approvalKeys?.delete(oldKey);
-      v.v2StructureDirty = true;
-      v.structureDirty = true;
-    }
-  }
-  const sourceDirty = dirtyOverride || state.dirtyKeys;
-  const keysToSync =
-    orderChanged || v.items.size !== proj.items.size || !sourceDirty?.size
-      ? proj.order
-      : [...sourceDirty];
+  const keysToSync = fullReconcile ? proj.order : dirtyOverride;
   for (const key of keysToSync) {
-    const pItem = proj.items.get(key);
-    if (!pItem) continue;
+    const source = proj.items.get(key);
+    if (!source) continue;
+    const pItem = { ...source };
+    if (pItem.body?.kind === "inline") {
+      pItem.text = pItem.body.text ?? "";
+    } else if (pItem.body?.kind === "ref" && pItem.partial !== false) {
+      pItem.body_ref ??= pItem.body.body_ref ?? null;
+      pItem.content_generation ??= pItem.body.content_generation ?? 1;
+      pItem.total_bytes ??= pItem.body.byte_length ?? null;
+      pItem.partial = true;
+    }
     const nextText = chatV2ItemText(pItem);
     const nextData = {
       ...pItem,
@@ -2909,7 +2891,7 @@ function chatSyncV2ToView(
     c.dirty.add(key);
     v.v2DirtyKeys.add(key);
   }
-  if (structureOverride || state.structureDirty) {
+  if (fullReconcile) {
     v.v2StructureDirty = true;
     v.structureDirty = true;
   }
@@ -3097,16 +3079,22 @@ async function chatConnectV2(c, gen, id, v) {
   v.v2Scope = scope;
   c.v2ActiveScope = scope;
   const io = {
-    commitApplied: (sc, next, owner, summaryPatches) => {
+    commitApplied: (sc, next, owner, summaryPatches, delta) => {
       if (sc.owner !== owner || !chatCurrent(gen, v)) return false;
       sc.authoritative = next;
       v.v2State = next;
-      chatSyncV2ToView(v);
+      chatSyncV2ToView(
+        v,
+        null,
+        delta?.dirtyKeys ?? null,
+        delta?.structureDirty ?? false,
+      );
       for (const patch of summaryPatches) chatApplyV2ExtraMeta(c, v, patch);
       sc.authoritative = v.v2State;
       sc.cache?.enqueue(
         sc.authoritative,
         () => sc.owner === owner && chatCurrent(gen, v),
+        { immutableRevision: true },
       );
       sc.scheduleRender?.();
       return true;
@@ -3214,13 +3202,13 @@ async function chatConnectV2(c, gen, id, v) {
           { signal },
         );
         if (signal.aborted || sc.owner !== owner || !chatCurrent(gen, v))
-          return false;
+          return "superseded";
         const projState = snap?.sync?.projection_state;
         if (projState === "projection_building" || projState === "building") {
           v.v2ProjectionState = projState;
           sc.stopNative?.();
           chatConnectV1(c, gen, id, v);
-          return false;
+          return "fallback_v1";
         }
         const normalized = chatNormalizeV2Snapshot(snap);
         const applied = CP.nativeRuntime.applyBoundedSnapshotReplacement(
@@ -3234,9 +3222,24 @@ async function chatConnectV2(c, gen, id, v) {
           chatSyncV2ToView(v, snap);
           chatRenderHistory(false);
         }
-        return applied;
-      } catch {
-        return false;
+        return applied ? "replaced" : "superseded";
+      } catch (error) {
+        if (signal.aborted || sc.owner !== owner || !chatCurrent(gen, v))
+          return "superseded";
+        const status = Number(error?.status ?? error?.response?.status ?? 0);
+        if ([401, 403, 404, 410].includes(status)) {
+          return {
+            kind: "blocked",
+            status,
+            message:
+              status === 401 || status === 403
+                ? "会话访问权限已变化，请重新登录或检查权限"
+                : "此会话已不存在或不再可访问",
+          };
+        }
+        return status >= 400 && status < 500 && ![408, 429].includes(status)
+          ? "terminal_failure"
+          : "retryable_failure";
       }
     },
     publishResetHalted: (sc, outcome) => {
@@ -3254,7 +3257,9 @@ async function chatConnectV2(c, gen, id, v) {
           ? "本机记录存在缺口，草稿与待确认操作已保留；请检查电脑连接"
           : outcome.reason === "SOURCE_CORRUPT"
             ? "本机记录校验异常，草稿已保留；请检查电脑记录"
-            : "视图重置次数过多，草稿已保留；请刷新后重试",
+            : outcome.reason === "SNAPSHOT_RECOVERY_FAILED"
+              ? "暂时无法重新加载会话，草稿已保留；请刷新后重试"
+              : "视图重置次数过多，草稿已保留；请刷新后重试",
         true,
       );
       chatSyncChrome();

@@ -51,6 +51,9 @@ export class TerminalStore {
     this.creationIntents = new Map();
     this.creating = new Map();
     this.remoteSessions = [];
+    this.activeRemoteSessions = [];
+    this.sessionReadIssued = 0;
+    this.sessionReadApplied = 0;
     this.vpsCatalog = [];
     this.activeId = null;
     this.secondaryId = null;
@@ -67,7 +70,7 @@ export class TerminalStore {
     return !!record && ENDED.has(record.state);
   }
   count() {
-    return this.list().filter((session) => !ENDED.has(session.state)).length;
+    return this.list().filter((session) => !this.isEnded(session) && session.state !== "close_unknown").length;
   }
   list() {
     const sessions = new Map();
@@ -78,7 +81,7 @@ export class TerminalStore {
         state: record.state,
       });
     }
-    for (const session of this.remoteSessions) {
+    for (const session of [...this.activeRemoteSessions, ...this.remoteSessions]) {
       const id = session.session_id || session.id;
       if (id && !sessions.has(id)) sessions.set(id, session);
     }
@@ -87,7 +90,7 @@ export class TerminalStore {
   activeCountsByVPS() {
     const counts = Object.create(null);
     for (const session of this.list()) {
-      if (session.vps_id && !ENDED.has(session.state))
+      if (session.vps_id && !this.isEnded(session) && session.state !== "close_unknown")
         counts[session.vps_id] = (counts[session.vps_id] || 0) + 1;
     }
     return counts;
@@ -147,14 +150,21 @@ export class TerminalStore {
 
   async refreshSessions() {
     const version = this.version;
+    const sequence = ++this.sessionReadIssued;
     try {
       const result = await this.api("/api/vps-terminal/sessions");
       if (this.disposed || version !== this.version) return [];
-      this.remoteSessions = (result.sessions || []).slice(0, 100);
+      if (sequence < this.sessionReadApplied) return this.remoteSessions;
+      this.sessionReadApplied = sequence;
+      this.remoteSessions = result.sessions || [];
+      this.activeRemoteSessions = result.active_sessions || [];
       this.changed();
       return this.remoteSessions;
     } catch (error) {
       if (
+        !this.disposed &&
+        version === this.version &&
+        sequence === this.sessionReadIssued &&
         [
           "AUTH_REQUIRED",
           "LOGIN_REQUIRED",
@@ -679,6 +689,7 @@ export class TerminalStore {
     this.creationIntents.clear();
     this.creating.clear();
     this.remoteSessions = [];
+    this.activeRemoteSessions = [];
     this.vpsCatalog = [];
     this.activeId = null;
     this.secondaryId = null;

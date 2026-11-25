@@ -19,6 +19,7 @@ from hub.native_projection import (
     clear_or_delete_projection_tx,
     commit_projection_step,
     ensure_projection_schema,
+    ingested_cursor,
     prepare_projection_step,
     read_tombstone,
 )
@@ -635,10 +636,7 @@ class NativeService:
                         )
                     if row["status"] in {"cleared", "deleted"}:
                         self._sync_clear_or_delete(db, sid, row)
-                    offsets[sid] = db.execute(
-                        "SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?",
-                        (sid,),
-                    ).fetchone()[0]
+                    offsets[sid] = ingested_cursor(db, sid)
                 except (KeyError, ValueError, TypeError, AttributeError):
                     if isinstance(sid, str):
                         rejected[sid] = "invalid"
@@ -661,10 +659,11 @@ class NativeService:
                     ):
                         continue
                     # Cache quota is explicit; withhold ACK so the Agent retains and retries data.
-                    # One table scan per packet, not per chunk.
+                    # The spool migration backfills a single counter; SQLite
+                    # triggers keep it consistent with inserts, clears and rollback.
                     if used is None:
                         used = db.execute(
-                            "SELECT COALESCE(sum(length(data)),0) FROM output"
+                            "SELECT bytes FROM native_output_quota WHERE singleton=1"
                         ).fetchone()[0]
                     if used + len(raw) > TOTAL_QUOTA:
                         db.execute(
@@ -673,7 +672,11 @@ class NativeService:
                         )
                         deferred[sid] = "cache_quota"
                         continue
-                    db.execute("INSERT OR IGNORE INTO output VALUES (?,?,?)", (sid, offset, raw))
+                    inserted = db.execute(
+                        "INSERT OR IGNORE INTO output VALUES (?,?,?)", (sid, offset, raw)
+                    )
+                    if not inserted.rowcount:
+                        continue
                     offsets[sid] += len(raw)
                     used += len(raw)
                     changed = True
@@ -904,10 +907,7 @@ def make_native_router(auth, runtime):
             page = []
             with closing(database(service.directory)) as db:
                 for row in rows[position : position + limit]:
-                    cached = db.execute(
-                        "SELECT COALESCE(MAX(offset+length(data)),0) FROM output WHERE session=?",
-                        (row["id"],),
-                    ).fetchone()[0]
+                    cached = ingested_cursor(db, row["id"])
                     page.append(
                         {
                             **public(row),

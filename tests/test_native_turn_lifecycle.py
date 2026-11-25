@@ -200,7 +200,7 @@ def test_v4_to_v5_migration_and_retained_bytes(tmp_path, monkeypatch):
         ).fetchall() == before_schema
 
     with closing(database(native_dir)) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
         assert {"provider_instance_id", "worker_epoch", "workspace_version"} <= cols
         tables = {
@@ -793,3 +793,24 @@ def test_joint_restore_partial_failure_holds_barrier_and_hidden_git_checkpoint(t
                     workspace_version=0,
                     now=1004.0,
                 )
+
+
+def test_native_retention_ledger_tracks_committed_changes_and_rollback(tmp_path):
+    with closing(database(tmp_path / "native")), closing(database(tmp_path / "native")) as db:
+        assert retained_bytes(db) == 0
+        with db:
+            db.execute(
+                "INSERT INTO commands (id, session, kind, payload, created) VALUES (?,?,?,?,?)",
+                ("id", "session", "fixture", "abc", 0),
+            )
+        assert retained_bytes(db) == 3
+        with pytest.raises(RuntimeError), db:
+            db.execute("UPDATE commands SET payload=? WHERE id='id'", ("沪",))
+            assert retained_bytes(db) == 3
+            db.execute("DELETE FROM commands WHERE id='id'")
+            assert retained_bytes(db) == 0
+            raise RuntimeError("fixture rollback")
+        assert retained_bytes(db) == 3
+        with db:
+            db.execute("DELETE FROM commands WHERE id='id'")
+        assert retained_bytes(db) == 0

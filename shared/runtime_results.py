@@ -126,6 +126,10 @@ def failure_context(*, data=None, error=None, operation_id=None, source="agent_o
         }
         or cleanup.get("pending")
         or outcome.get("state") == "unconfirmed"
+        or (
+            isinstance(data.get("output_capture"), dict)
+            and data["output_capture"].get("complete") is False
+        )
     ):
         category = "outcome_unconfirmed"
     elif data.get("cancelled") or code in {"CANCELLED", "INTERRUPTED"}:
