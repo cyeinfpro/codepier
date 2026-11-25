@@ -2684,8 +2684,7 @@ class Runtime:
                 if maintenance is not None:
                     request["knowledge_maintenance"] = list(maintenance)
                 if name == "exec" and args["target"].startswith("vps:"):
-                    vps_args = {**args, "vps": args["target"][4:]}
-                    request["vps_ref"] = self.vps.reference(vps_args, project)
+                    self.vps.prepare_exec_request(self, args, project, principal, request)
                 if project.get("id"):
                     from hub.project_runtimes import attach_requirement
 
@@ -2942,6 +2941,13 @@ class Runtime:
             denied = self.vps.permission_error(request, op["project_id"])
             if denied:
                 return denied
+        if request.get("artifact_stage_record") is not None:
+            try:
+                current = self.vps.artifact_stage_record(self, request["args"], project, caller)
+                if current != request["artifact_stage_record"]:
+                    return "构建产物已经变化，传包未下发"
+            except DevError as exc:
+                return exc.message
         if (
             op["tool"] in MUTATING
             and op["tool"] not in PANEL_RUNTIME_TOOLS | {"computer_session_close"}
@@ -3695,13 +3701,8 @@ class Runtime:
             }
         return result
 
-    def complete(self, op, result):
-        # Callers may hold an old row while a newer result/output was committed.
-        op = self.store.one("SELECT * FROM operations WHERE id=?", (op["id"],))
-        if not op:
-            return
-        if op["state"] in {"succeeded", "failed", "cancelled"}:
-            return
+    @staticmethod
+    def _normalize_agent_completion(result):
         if (
             not isinstance(result, dict)
             or type(result.get("ok")) is not bool
@@ -3722,8 +3723,9 @@ class Runtime:
                     "message": "Agent 返回的结果格式无效，请检查本机执行结果",
                 },
             }
-        result = self._annotate_completion_result(op, result)
-        self.integrations.complete(op, result)
+        return result
+
+    def _register_artifact_completion(self, op, result):
         if op["tool"] == "artifacts_register" and result["ok"]:
             try:
                 self.artifacts.register_result(op, result.get("data") or {})
@@ -3732,6 +3734,21 @@ class Runtime:
                     "ok": False,
                     "error": {"code": exc.code, "message": exc.message, **exc.details},
                 }
+        return result
+
+    def complete(self, op, result):
+        # Callers may hold an old row while a newer result/output was committed.
+        op = self.store.one("SELECT * FROM operations WHERE id=?", (op["id"],))
+        if not op:
+            return
+        if op["state"] in {"succeeded", "failed", "cancelled"}:
+            return
+        result = self._normalize_agent_completion(result)
+        result = self._annotate_completion_result(op, result)
+        artifact_stage = self.vps.is_artifact_stage(op)
+        result = self.vps.validate_artifact_receipt(op, result, artifact_stage)
+        self.integrations.complete(op, result)
+        result = self._register_artifact_completion(op, result)
         self.diagnostics.ingest(op["id"], result.get("trace"))
         encoded = json.dumps(result, ensure_ascii=False)
         from hub.operation_history import seal, unseal
@@ -3755,6 +3772,7 @@ class Runtime:
             "DURABILITY_UNCONFIRMED",
             "WRITE_OUTCOME_UNCONFIRMED",
             "STAGING_CLEANUP_UNCONFIRMED",
+            "VPS_STAGE_COMMIT_UNKNOWN",
             "COMPUTER_ACTION_UNCERTAIN",
             "BROWSER_ACTION_UNCERTAIN",
             "RUNTIME_CONTROL_UNCERTAIN",
@@ -3779,6 +3797,7 @@ class Runtime:
                 "git_log",
             }
             and result["ok"]
+            and not artifact_stage
         ):
             if not data.get("command_ok", False):
                 state = "failed"

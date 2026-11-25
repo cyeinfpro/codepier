@@ -10,6 +10,8 @@ from __future__ import annotations
 from hub.db_worker import database_endpoint
 
 import ipaddress
+import json
+import re
 import sqlite3
 import time
 import unicodedata
@@ -877,6 +879,84 @@ class VPSService:
             return exc.message
         return None
 
+    @staticmethod
+    def is_artifact_stage(op):
+        if op["tool"] != "exec":
+            return False
+        try:
+            return (
+                json.loads(op.get("args_summary") or "{}").get("_log", {}).get("operation_shape")
+                == "vps_artifact_stage"
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    def validate_artifact_receipt(self, op, result, stage):
+        if not stage or not result["ok"]:
+            return result
+        if self._valid_artifact_receipt(op, result.get("data") or {}):
+            return result
+        return {
+            "ok": False,
+            "error": {
+                "code": "VPS_STAGE_COMMIT_UNKNOWN",
+                "message": "没有拿到与原产物和目标一致的传包回执；不要重新上传或安装",
+            },
+        }
+
+    def _valid_artifact_receipt(self, op, data):
+        try:
+            request = json.loads(self.store.decrypt(op["payload"]))
+            record = request["artifact_stage_record"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        path = data.get("remote_path")
+        return (
+            all(data.get(key) == record[key] for key in ("artifact_id", "sha256", "bytes"))
+            and data.get("stage_state") == "verified"
+            and data.get("install_state") == "not_started"
+            and data.get("operation_id") == op["id"]
+            and data.get("target") == request["args"]["target"]
+            and isinstance(path, str)
+            and re.fullmatch(r"/tmp/\.codepier-stage-[a-f0-9]{32}/artifact\.bin", path) is not None
+        )
+
+    def prepare_exec_request(self, runtime, args, project, caller, request):
+        vps_args = {**args, "vps": args["target"][4:]}
+        request["vps_ref"] = self.reference(vps_args, project)
+        if args.get("stage_artifact") is not None:
+            request["artifact_stage_record"] = self.artifact_stage_record(
+                runtime, args, project, caller
+            )
+
+    def artifact_stage_record(self, runtime, args, project, caller):
+        if "read" not in caller.scopes:
+            raise DevError("INSUFFICIENT_SCOPE", "传包同时需要产物读取权限", 403)
+        artifact = args["stage_artifact"]
+        row, _ = runtime.artifacts.row(artifact["artifact_id"], caller)
+        if row["project_id"] != project["id"] or row["device_id"] != project["device_id"]:
+            raise DevError("ARTIFACT_WRONG_PROJECT", "只能传输此 VPS 所属项目的产物", 403)
+        if row["expires"] <= time.time():
+            raise DevError("ARTIFACT_EXPIRED", "构建产物已过期，请重新登记", 410)
+        if row["sha256"] != artifact["sha256"] or not 0 < row["bytes"] <= 512 * 1024 * 1024:
+            raise DevError("ARTIFACT_CHANGED", "指定产物大小或 SHA-256 不匹配", 409)
+        return {"artifact_id": row["id"], "sha256": row["sha256"], "bytes": row["bytes"]}
+
+    def _artifact_transport(self, request, plan, password, agent):
+        caps = getattr(agent, "agent_vps_ssh", None)
+        if not isinstance(caps, dict) or caps.get("artifact_stage") is not True:
+            raise DevError("VPS_ARTIFACT_UPGRADE_REQUIRED", "关联 Agent 尚不支持 VPS 传包", 409)
+        return {
+            **{k: v for k, v in request.items() if k not in {"vps_ref", "artifact_stage_record"}},
+            "core_ssh": {
+                "host": plan.target.host,
+                "port": plan.target.port,
+                "username": plan.target.username,
+                "password": password,
+                "artifact": request["artifact_stage_record"],
+            },
+        }
+
     def transport(self, request, project_id, *, agent=None):
         plan = resolve_vps_connection_plan(
             self,
@@ -896,6 +976,8 @@ class VPSService:
                 "VPS 凭据无法解密，请检查 Hub 数据库与 master.key 是否配套",
                 409,
             ) from exc
+        if request.get("artifact_stage_record") is not None:
+            return self._artifact_transport(request, plan, password, agent)
         args = decode_legacy_ssh_request(request["args"])
         command = SSHExec(
             project=args["project"],

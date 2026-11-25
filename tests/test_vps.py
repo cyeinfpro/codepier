@@ -677,3 +677,152 @@ def test_vps_check_requires_managed_probe_and_never_falls_back(tmp_path, monkeyp
         assert edited["host_identity_verification"] == "disabled"
         assert edited["legacy_host_trust"]["ignored"] is True
         assert edited["connection_revision"] == existing["connection_revision"]
+
+
+@pytest.mark.asyncio
+async def test_stage_admission_binds_project_artifact_target_and_recovers_original_receipt(inventory):
+    runtime, owner, (alpha, beta, _) = inventory
+    target = runtime.vps.save(body([alpha, beta]), owner)
+    project = runtime.project(alpha, owner)
+    sha, artifact_id = "1" * 64, "2" * 32
+    now = time.time()
+    runtime.store.execute(
+        """INSERT INTO artifacts(id,project_id,device_id,grant_id,actor,root,name,bytes,sha256,created,
+        expires,source_operation_id,space_id,owner_user_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            artifact_id, alpha, project["device_id"], None, owner.actor, project["root"],
+            "synthetic.tar.gz", 4096, sha, now, now + 600, "", owner.space_id, owner.user_id,
+        ),
+    )
+    intent = {
+        "project": alpha, "target": "vps:" + target["id"], "yield_seconds": 0,
+        "timeout_seconds": 60, "idempotency_key": "test-stage-" + uuid.uuid4().hex,
+        "stage_artifact": {"artifact_id": artifact_id, "sha256": sha},
+    }
+    with pytest.raises(DevError) as mismatch:
+        await runtime.invoke(
+            "exec", {**intent, "stage_artifact": {**intent["stage_artifact"], "sha256": "3" * 64}},
+            owner,
+        )
+    assert mismatch.value.code == "ARTIFACT_CHANGED"
+    with pytest.raises(DevError) as cross:
+        await runtime.invoke("exec", {**intent, "project": beta}, owner)
+    assert cross.value.code == "ARTIFACT_WRONG_PROJECT"
+    accepted = await runtime.invoke("exec", intent, owner)
+    duplicate = await runtime.invoke("exec", intent, owner)
+    assert accepted["operation_id"] == duplicate["operation_id"]
+    op = runtime.store.one("SELECT * FROM operations WHERE id=?", (accepted["operation_id"],))
+    request = json.loads(runtime.store.decrypt(op["payload"]))
+    assert PASSWORD not in json.dumps(request)
+    old_agent = SimpleNamespace(agent_vps_ssh={
+        "protocol": "vps_ssh_v2", "host_identity_verification": "disabled", "exec": True,
+    })
+    with pytest.raises(DevError) as old:
+        runtime.vps.transport(request, alpha, agent=old_agent)
+    assert old.value.code == "VPS_ARTIFACT_UPGRADE_REQUIRED"
+    old_agent.agent_vps_ssh["artifact_stage"] = True
+    packet = runtime.vps.transport(request, alpha, agent=old_agent)
+    assert packet["core_ssh"]["artifact"]["artifact_id"] == artifact_id
+    assert "command" not in packet["core_ssh"]
+    assert "artifact_stage_record" not in packet
+    runtime.store.execute("UPDATE artifacts SET expires=? WHERE id=?", (now - 1, artifact_id))
+    denied = runtime._delivery_project_denial(op, request, project, owner, "execute")
+    assert denied and "过期" in denied
+
+
+def test_mcp_stages_local_artifact_and_explicitly_installs_it_in_isolated_fixture(vps_stack, tmp_path):
+    import hashlib
+    import re
+
+    ssh = pytest.importorskip("asyncssh")
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "tmp").chmod(0o1777)
+    started = Future()
+    commands = []
+    raw = b"synthetic deployment archive\x00" * 15000
+    sha = hashlib.sha256(raw).hexdigest()
+
+    class IsolatedSftp(ssh.SFTPServer):
+        def __init__(self, channel):
+            super().__init__(channel, chroot=str(tmp_path))
+
+        def lstat(self, path):
+            attrs = super().lstat(path)
+            if path == b"/tmp":
+                attrs = ssh.SFTPAttrs.from_local(attrs)
+                attrs.uid = 0
+            return attrs
+
+    async def handle(process):
+        command = process.command
+        commands.append(command)
+        match = re.fullmatch(r"install-fixture (/tmp/\.codepier-stage-[a-f0-9]{32}/artifact\.bin)", command)
+        if not match or (tmp_path / match[1].lstrip("/")).read_bytes() != raw:
+            process.exit(2)
+            return
+        (tmp_path / "installed-fixture").write_text(sha)
+        process.stdout.write(b"fixture installed\n")
+        process.exit(0)
+
+    async def serve():
+        stop = asyncio.Event()
+        server = await ssh.create_server(
+            _make_exec_server(ssh, users={"root": PASSWORD}, handler=None),
+            "127.0.0.1", 0, server_host_keys=[ssh.generate_private_key("ssh-ed25519")],
+            sftp_factory=IsolatedSftp, process_factory=handle, encoding=None,
+        )
+        started.set_result((server.get_port(), asyncio.get_running_loop(), stop))
+        try:
+            await stop.wait()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    def run():
+        try:
+            asyncio.run(serve())
+        except BaseException as exc:
+            if not started.done():
+                started.set_exception(exc)
+            else:
+                raise
+
+    worker = Thread(target=run, daemon=True)
+    worker.start()
+    port, loop, stop = started.result(timeout=15)
+    stack = vps_stack
+    try:
+        vps = create_remote(stack, host="127.0.0.1", port=port)
+        name = "stage-fixture-" + uuid.uuid4().hex + ".tar.gz"
+        (stack.projectalpha / name).write_bytes(raw)
+        registered = stack.mcp("write", {
+            "project": "ProjectAlpha", "operation": "artifact",
+            "options": {"path": name}, "idempotency_key": uuid.uuid4().hex,
+        })["structuredContent"]
+        if registered.get("pending"):
+            registered = stack.poll(registered["operation_id"])["result"]["data"]
+        assert registered["sha256"] == sha
+        intent = {
+            "project": "ProjectAlpha", "target": "vps:" + vps["id"],
+            "stage_artifact": {"artifact_id": registered["artifact_id"], "sha256": sha},
+            "timeout_seconds": 20, "yield_seconds": 0, "idempotency_key": uuid.uuid4().hex,
+        }
+        receipt = stack.mcp("exec", intent)["structuredContent"]
+        staged = stack.poll(receipt["operation_id"], timeout=25)
+        assert staged["state"] == "succeeded", (staged.get("result"), staged.get("error"), staged.get("stage"))
+        result = staged["result"]["data"]
+        assert result["sha256"] == sha and result["bytes"] == len(raw)
+        assert result["stage_state"] == "verified" and result["install_state"] == "not_started"
+        assert not commands and not (tmp_path / "installed-fixture").exists()
+        replay = stack.mcp("exec", intent)["structuredContent"]
+        assert replay["operation_id"] == receipt["operation_id"]
+        assert len(list((tmp_path / "tmp").iterdir())) == 1
+        install = stack.mcp("exec", execute_args(
+            "ProjectAlpha", vps["id"], command="install-fixture " + result["remote_path"],
+        ))["structuredContent"]
+        installed = stack.poll(install["operation_id"], timeout=25)
+        assert installed["result"]["data"]["exit_code"] == 0, (installed.get("result"), commands)
+        assert (tmp_path / "installed-fixture").read_text() == sha and len(commands) == 1
+    finally:
+        loop.call_soon_threadsafe(stop.set)
+        worker.join(10)

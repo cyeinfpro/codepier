@@ -420,11 +420,12 @@ class Agent:
 
         terminal_caps = self.ssh_terminal.capabilities()
         terminal_ready = bool(terminal_caps.get("protocol"))
-        return agent_vps_ssh_capabilities(
+        caps = agent_vps_ssh_capabilities(
             exec_supported=True,
             terminal_supported=terminal_ready,
             probe_supported=terminal_ready,
         )
+        return {**caps, "artifact_stage": caps["exec"] is True}
 
     def phase(self, id, stage, **detail):
         if not self.telemetry.record(id, stage, **detail):
@@ -2278,6 +2279,29 @@ class Agent:
             return await self.execute(id, tool, project, args, not_after=not_after)
         return await self.execute(id, tool, project, args)
 
+    async def _execute_vps_target(self, operation_id, project, args, not_after):
+        if args.get("stage_artifact") is not None:
+            from agent.vps_artifact_stage import stage_for_operation
+
+            return await stage_for_operation(self, operation_id, project, args, not_after)
+        from shared.contracts import SSHExec
+
+        if not isinstance(project.get("_core_ssh"), dict):
+            raise DevError("VPS_TRANSPORT_MISSING", "缺少 Hub 验证的 VPS 连接，未执行命令", 409)
+        forwarded = SSHExec.model_validate(project["_core_ssh"]).model_dump()
+        result = await self.execute(
+            operation_id,
+            "ssh_exec",
+            project,
+            forwarded,
+            saved_vps_target=args["target"],
+            not_after=not_after,
+        )
+        result.setdefault("warnings", []).append(
+            "Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory."
+        )
+        return result
+
     async def execute(self, id, tool, project, args, *, saved_vps_target=None, not_after=None):
         if workspace_probe.eligible(tool, args):
             entry = self._read_workers.get(id)
@@ -2326,29 +2350,11 @@ class Agent:
                     ).model_dump()
                     result = await self.execute(id, "shell_exec", project, forwarded)
                 else:
-                    from shared.contracts import SSHExec
-
-                    if not isinstance(project.get("_core_ssh"), dict):
-                        raise DevError(
-                            "VPS_TRANSPORT_MISSING", "缺少 Hub 验证的 VPS 连接，未执行命令", 409
-                        )
-                    forwarded = SSHExec.model_validate(project["_core_ssh"]).model_dump()
-                    result = await self.execute(
-                        id,
-                        "ssh_exec",
-                        project,
-                        forwarded,
-                        saved_vps_target=args["target"],
-                        not_after=not_after,
-                    )
+                    result = await self._execute_vps_target(id, project, args, not_after)
                 if holder:
                     await self._finalize_snapshot_execution(holder, args, run_dir, result)
                 if run_dir is not None:
                     await self._attach_execution_log(id, root, args, result)
-                elif not local:
-                    result.setdefault("warnings", []).append(
-                        "Remote execution does not provide CODEPIER_RUN_DIR; use a target-local unique output directory."
-                    )
                 output = result.get("output", "")
                 tail = (
                     "\n".join(output.split("\n")[-2000:])

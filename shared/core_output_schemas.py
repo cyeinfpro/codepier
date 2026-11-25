@@ -1214,7 +1214,34 @@ def build_core_output_schemas(legacy, *, include_queries=False):
         # An initial exec wait returns the full durable operation, not only
         # its execution payload or the compact pending receipt. Share the same
         # typed journal contract as task_query (including null/string errors).
-        "exec": union([execution, {**OPERATION, "required": ["id", "tool", "state"]}]),
+        "exec": union(
+            [
+                execution,
+                obj(
+                    {
+                        "artifact_id": STR,
+                        "sha256": STR,
+                        "bytes": INT,
+                        "remote_path": STR,
+                        "stage_state": {**STR, "const": "verified"},
+                        "install_state": {**STR, "const": "not_started"},
+                        "operation_id": STR,
+                        "target": STR,
+                    },
+                    (
+                        "artifact_id",
+                        "sha256",
+                        "bytes",
+                        "remote_path",
+                        "stage_state",
+                        "install_state",
+                        "operation_id",
+                        "target",
+                    ),
+                ),
+                {**OPERATION, "required": ["id", "tool", "state"]},
+            ]
+        ),
         "process": union(process),
         "browser": union(browser),
         "computer": union(computer),

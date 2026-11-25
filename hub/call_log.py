@@ -336,6 +336,8 @@ def operation_summary(args: dict, *, maintenance=False, source_effect="possible"
     meta = {"version": 2, "trigger_source": "system_maintenance" if maintenance else "request"}
     if maintenance:
         meta["trigger_reason"] = "automatic_refresh"
+    if isinstance(args.get("stage_artifact"), dict):
+        meta["operation_shape"] = "vps_artifact_stage"
     if isinstance(args.get("command"), str):
         meta["command_chars"] = len(args["command"])
     if isinstance(args.get("edits"), list):

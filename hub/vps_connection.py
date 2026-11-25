@@ -45,7 +45,9 @@ def parse_agent_vps_ssh(hello: dict[str, Any] | None) -> dict[str, Any] | None:
             or raw.get("host_identity_verification") != VPS_HOST_IDENTITY_VERIFICATION
         ):
             return None
-        return agent_vps_ssh_capability(
+        return (
+            {"artifact_stage": True} if raw.get("artifact_stage") is True else {}
+        ) | agent_vps_ssh_capability(
             available=True,
             exec_supported=raw.get("exec") is True,
             terminal_supported=raw.get("terminal") is True,

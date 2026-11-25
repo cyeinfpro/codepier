@@ -5,6 +5,10 @@ SSH_STAGES = {
     "ssh_attempt": "正在建立 SSH 连接",
     "ssh_attempt_finished": "本次 SSH 尝试已结束",
     "ssh_retry_wait": "等待下一次 SSH 连接尝试",
+    "vps_artifact_connect": "正在建立 VPS 传包连接",
+    "vps_artifact_write": "正在写入 VPS 临时区",
+    "vps_artifact_verify": "正在回读 VPS 文件并核对 SHA-256",
+    "vps_artifact_commit": "正在提交已校验的 VPS 产物",
 }
 SSH_ERRORS = frozenset(
     {
