@@ -70,7 +70,9 @@ export class TerminalStore {
     return !!record && ENDED.has(record.state);
   }
   count() {
-    return this.list().filter((session) => !this.isEnded(session) && session.state !== "close_unknown").length;
+    return this.list().filter(
+      (session) => !this.isEnded(session) && session.state !== "close_unknown",
+    ).length;
   }
   list() {
     const sessions = new Map();
@@ -81,7 +83,10 @@ export class TerminalStore {
         state: record.state,
       });
     }
-    for (const session of [...this.activeRemoteSessions, ...this.remoteSessions]) {
+    for (const session of [
+      ...this.activeRemoteSessions,
+      ...this.remoteSessions,
+    ]) {
       const id = session.session_id || session.id;
       if (id && !sessions.has(id)) sessions.set(id, session);
     }
@@ -90,7 +95,11 @@ export class TerminalStore {
   activeCountsByVPS() {
     const counts = Object.create(null);
     for (const session of this.list()) {
-      if (session.vps_id && !this.isEnded(session) && session.state !== "close_unknown")
+      if (
+        session.vps_id &&
+        !this.isEnded(session) &&
+        session.state !== "close_unknown"
+      )
         counts[session.vps_id] = (counts[session.vps_id] || 0) + 1;
     }
     return counts;

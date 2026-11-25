@@ -520,7 +520,12 @@ async function chatConnectV2(c, gen, id, v) {
       if (sc.owner !== owner || !chatCurrent(gen, v)) return false;
       sc.authoritative = next;
       v.v2State = next;
-      chatSyncV2ToView(v, null, delta?.dirtyKeys ?? null, delta?.structureDirty ?? false);
+      chatSyncV2ToView(
+        v,
+        null,
+        delta?.dirtyKeys ?? null,
+        delta?.structureDirty ?? false,
+      );
       for (const patch of summaryPatches) chatApplyV2ExtraMeta(c, v, patch);
       sc.authoritative = v.v2State;
       sc.cache?.enqueue(

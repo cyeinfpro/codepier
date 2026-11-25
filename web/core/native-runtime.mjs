@@ -428,8 +428,14 @@ export function startNativeTransport(scope, io, options = {}) {
           }
           let replaced = false;
           for (let attempt = 0; attempt < 4 && owns(); attempt += 1) {
-            const result = await io.replaceSnapshotBounded(scope, owner, life.signal, outcome);
-            if (!owns() || result === "superseded" || result === "fallback_v1") return;
+            const result = await io.replaceSnapshotBounded(
+              scope,
+              owner,
+              life.signal,
+              outcome,
+            );
+            if (!owns() || result === "superseded" || result === "fallback_v1")
+              return;
             if (result?.kind === "blocked") {
               io.publishBlocked?.(scope, result);
               return;
@@ -439,11 +445,15 @@ export function startNativeTransport(scope, io, options = {}) {
               break;
             }
             if (result === "terminal_failure") break;
-            if (attempt < 3) await wait(retryDelay(attempt + 1, prevDelay), life.signal);
+            if (attempt < 3)
+              await wait(retryDelay(attempt + 1, prevDelay), life.signal);
           }
           if (!owns()) return;
           if (!replaced) {
-            io.publishResetHalted?.(scope, { ...outcome, reason: "SNAPSHOT_RECOVERY_FAILED" });
+            io.publishResetHalted?.(scope, {
+              ...outcome,
+              reason: "SNAPSHOT_RECOVERY_FAILED",
+            });
             return;
           }
           if (fp) seenResets.add(fp);

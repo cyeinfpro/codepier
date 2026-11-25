@@ -422,7 +422,11 @@ function chatEnsureOutputManager(v) {
                   chatSyncToolTruncatedNotice(item, st);
                 }
                 const totalBytes = payload.total_bytes;
-                if (!st.running && Number.isSafeInteger(totalBytes) && st.toOffset >= totalBytes)
+                if (
+                  !st.running &&
+                  Number.isSafeInteger(totalBytes) &&
+                  st.toOffset >= totalBytes
+                )
                   ac.abort();
               },
               ac.signal,

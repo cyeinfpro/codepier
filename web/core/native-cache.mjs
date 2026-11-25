@@ -283,14 +283,16 @@ export class NativeSnapshotCache {
 
   enqueue(stateOrEnvelope, ownerCheck = null, options = {}) {
     if (typeof ownerCheck === "function" && !ownerCheck()) return false;
-    const defer = options.immutableRevision === true && !stateOrEnvelope.snapshot;
+    const defer =
+      options.immutableRevision === true && !stateOrEnvelope.snapshot;
     const core = defer ? null : serializeStateSnapshot(stateOrEnvelope);
     const envelope = core && { ...core, savedAt: this.now() };
     if (envelope) assertSerializableValue(envelope);
     const key = NativeSnapshotCache.makeKey({
       scopeKey: envelope?.snapshot.scope_key ?? stateOrEnvelope.scopeKey,
       sessionId: envelope?.snapshot.session_id ?? stateOrEnvelope.sessionId,
-      schemaVersion: envelope?.snapshot.schema_version ?? stateOrEnvelope.schemaVersion ?? 2,
+      schemaVersion:
+        envelope?.snapshot.schema_version ?? stateOrEnvelope.schemaVersion ?? 2,
     });
     this.pendingWrites.set(key, {
       envelope,
@@ -302,7 +304,9 @@ export class NativeSnapshotCache {
         this.scheduledFlush = null;
         this.flush();
       };
-      this.scheduledFlush = defer ? setTimeout(flush, 24) : Promise.resolve().then(flush);
+      this.scheduledFlush = defer
+        ? setTimeout(flush, 24)
+        : Promise.resolve().then(flush);
     }
     return true;
   }
@@ -318,7 +322,10 @@ export class NativeSnapshotCache {
       let envelope = entry.envelope;
       if (!envelope) {
         try {
-          envelope = { ...serializeStateSnapshot(entry.revisionState), savedAt: this.now() };
+          envelope = {
+            ...serializeStateSnapshot(entry.revisionState),
+            savedAt: this.now(),
+          };
           assertSerializableValue(envelope);
         } catch {
           // Snapshot persistence is best effort; never cache an invalid revision.
