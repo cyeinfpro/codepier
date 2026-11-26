@@ -1690,6 +1690,23 @@ function devicesHTML() {
     `<section class="cards device-cards workspace-device-collection">${cards || empty("还没有电脑。")}</section>`
   );
 }
+async function openProjectCollaboration(projectId) {
+  const login = S.session,
+    space = S.space_id,
+    page = S.page,
+    intent = S.modalIntent || 0;
+  await window.CodePierAssets.load("collaboration");
+  if (
+    login === S.session &&
+    space === S.space_id &&
+    page === S.page &&
+    intent === (S.modalIntent || 0)
+  )
+    await CodePierCollaboration.open(projectId);
+}
+function projectChatButton(projectId) {
+  return `<button class="btn small" data-action="project-chat" data-id="${esc(projectId)}">对话</button>`;
+}
 function projectsHTML() {
   let layout = "cards";
   try {
@@ -1701,7 +1718,7 @@ function projectsHTML() {
   const rows = S.projects
     .map(
       (p) =>
-        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + " " + p.root + " " + p.device_name + " " + (p.description || "")).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon("folder")}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ""}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code><button type="button" class="icon-btn workspace-copy-path" data-copy="${esc(p.root)}" aria-label="复制本机路径" title="复制路径">${icon("copy")}</button></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === "write" ? "purple" : "neutral"}">${p.mode === "write" ? "可编辑" : "只读"}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? "已授权" : "未授权"}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开工作台 ${icon("arrow")}</button>${typeof chatProjectButtons === "function" ? chatProjectButtons(p.id) : ""}${uiMenu("更多", `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-vps-action="project" data-project="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
+        `<article class="panel workspace-project-row" data-cp-key="project:${esc(p.id)}" data-project-row data-project-search="${esc((p.alias + " " + p.root + " " + p.device_name + " " + (p.description || "")).toLocaleLowerCase())}"><header class="workspace-project-head"><span class="project-index" aria-hidden="true">${icon("folder")}</span><div><h2>${esc(p.alias)}</h2>${p.description ? `<p>${esc(p.description)}</p>` : ""}</div>${onlineBadge(p.online)}</header><div class="workspace-project-path"><span>本机路径</span><code title="${esc(p.root)}">${esc(p.root)}</code><button type="button" class="icon-btn workspace-copy-path" data-copy="${esc(p.root)}" aria-label="复制本机路径" title="复制路径">${icon("copy")}</button></div><dl class="workspace-project-facts"><div><dt>设备</dt><dd>${esc(p.device_name)}</dd></div><div><dt>文件权限</dt><dd><span class="badge ${p.mode === "write" ? "purple" : "neutral"}">${p.mode === "write" ? "可编辑" : "只读"}</span></dd></div><div><dt>任务执行</dt><dd><span class="badge neutral">${p.allow_tasks ? "已授权" : "未授权"}</span></dd></div></dl><footer class="workspace-project-actions"><button class="btn primary small" data-action="open-project" data-id="${esc(p.id)}">打开工作台 ${icon("arrow")}</button>${projectChatButton(p.id)}${uiMenu("更多", `<button class="btn small" data-action="project-collaboration" data-id="${esc(p.id)}">协作</button><button class="btn ghost small" data-runtime-project="${esc(p.id)}">执行环境</button><button class="btn ghost small" data-action="project-vps" data-id="${esc(p.id)}">VPS</button><button class="btn ghost small" data-devtools="overview" data-project="${esc(p.id)}">开发工具</button><button class="btn ghost small" data-devtools="validation" data-project="${esc(p.id)}">测试</button><button class="btn ghost small" data-devtools="handoff" data-project="${esc(p.id)}">任务交接</button><button class="btn ghost small" data-action="edit-project" data-id="${esc(p.id)}">编辑</button>`)}</footer></article>`,
     )
     .join("");
   return (
@@ -2148,7 +2165,7 @@ function workbenchHTML() {
   const more = `<button class="btn ghost" data-devtools="worktrees">${icon("folder")}隔离工作目录</button><button class="btn ghost" data-devtools="handoff">${icon("history")}任务衔接</button><button class="btn ghost" data-insight="symbols">${icon("code")}代码结构</button><button class="btn ghost" data-wf-action="context">${icon("file")}项目上下文</button><button class="btn ghost" data-action="checkpoint">${icon("history")}建立源码检查点</button>`;
   return (
     // One IDE header bar: title, project, status and every workbench tool.
-    `<header class="page-head workbench-head"><h1>远程工作台</h1>${mainPathContext().previous && mainPathContext().previous !== "workbench" && CodePierIdentity.canNavigate(mainPathContext().previous) ? `<button class="btn ghost" data-nav="${esc(mainPathContext().previous)}">返回 ${esc(nav.find((n) => n[0] === mainPathContext().previous)?.[2] || "上页")}</button>` : ""}<div class="work-controls ide-toolbar" role="toolbar" aria-label="工作台工具"><select id="work-project" aria-label="选择项目"${p ? ` title="${esc(p.device_name || "")} / ${p.mode === "write" ? "可编辑" : "只读"}"` : ""}><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? "selected" : ""}>${esc(p.alias)} · ${p.online ? "在线" : "离线"}</option>`).join("")}</select>${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ""}<span class="muted tiny work-target" aria-label="当前工作目标">${esc(p?.device_name || "")} ${esc(p?.root || "")} ${p ? `/ ${p.mode === "write" ? "可编辑" : "只读"}` : ""}</span><div class="actions">${S.work.project && !S.work.workspace_id && typeof chatProjectButtons === "function" ? chatProjectButtons(S.work.project) : ""}${uiMenu("检索与 Git", `<button class="btn ghost small" data-insight="search">${icon("search")}项目检索</button><button class="btn ghost small" data-action="git-status">${icon("git")}Git 状态</button><button class="btn ghost small" data-action="git-diff">查看差异</button>`)}${uiMenu("文件与验收", `<button class="btn ghost small" data-action="history">${icon("history")}文件备份</button><button class="btn ghost small" data-devtools="validation">${icon("check")}测试验收</button><button class="btn ghost small" data-local-skills>${icon("file")}本地技能</button>`)}${uiMenu("更多工具", more)}</div></div></header>
+    `<header class="page-head workbench-head"><h1>远程工作台</h1>${mainPathContext().previous && mainPathContext().previous !== "workbench" && CodePierIdentity.canNavigate(mainPathContext().previous) ? `<button class="btn ghost" data-nav="${esc(mainPathContext().previous)}">返回 ${esc(nav.find((n) => n[0] === mainPathContext().previous)?.[2] || "上页")}</button>` : ""}<div class="work-controls ide-toolbar" role="toolbar" aria-label="工作台工具"><select id="work-project" aria-label="选择项目"${p ? ` title="${esc(p.device_name || "")} / ${p.mode === "write" ? "可编辑" : "只读"}"` : ""}><option value="">选择项目</option>${S.projects.map((p) => `<option value="${esc(p.id)}" ${p.id === w.project ? "selected" : ""}>${esc(p.alias)} · ${p.online ? "在线" : "离线"}</option>`).join("")}</select>${w.workspace_id ? `<span class="badge neutral" title="${esc(w.workspace_id)}">隔离目录 ${esc(w.workspace_id.slice(0, 8))}</span><button class="btn ghost small" data-devtools="worktrees">管理工作目录</button>` : ""}<span class="muted tiny work-target" aria-label="当前工作目标">${esc(p?.device_name || "")} ${esc(p?.root || "")} ${p ? `/ ${p.mode === "write" ? "可编辑" : "只读"}` : ""}</span><div class="actions">${S.work.project && !S.work.workspace_id ? projectChatButton(S.work.project) : ""}${uiMenu("检索与 Git", `<button class="btn ghost small" data-insight="search">${icon("search")}项目检索</button><button class="btn ghost small" data-action="git-status">${icon("git")}Git 状态</button><button class="btn ghost small" data-action="git-diff">查看差异</button>`)}${uiMenu("文件与验收", `<button class="btn ghost small" data-action="history">${icon("history")}文件备份</button><button class="btn ghost small" data-devtools="validation">${icon("check")}测试验收</button><button class="btn ghost small" data-local-skills>${icon("file")}本地技能</button>`)}${uiMenu("更多工具", more)}</div></div></header>
     <div class="tabs mobile-work-tabs" role="group" aria-label="工作区视图"><button data-ui-pane="files">${icon("folder")} 文件</button><button data-ui-pane="editor">${icon("code")} 编辑器</button><button data-ui-pane="output">${icon("terminal")} 输出</button></div>
     <section class="panel workspace ${w.explorerCollapsed ? "is-explorer-collapsed" : ""}" data-pane="${w.pane === "editor" ? "editor" : "files"}"${w.explorerWidth ? ` style="--explorer-width:${w.explorerWidth}px"` : ""}><aside class="explorer"><div class="explorer-top"><span>文件目录</span><div><button class="icon-btn" data-action="new-file" aria-label="新建文件">${icon("plus")}</button><button class="icon-btn" data-action="tree-refresh" aria-label="刷新目录">${icon("refresh")}</button></div></div><form id="search-form" class="explorer-tools"><input name="query" placeholder="搜索文件内容" aria-label="搜索项目" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search"><button class="icon-btn" aria-label="执行搜索">${icon("search")}</button></form><div id="file-tree" class="file-tree">${treeHTML()}</div></aside><div class="workspace-resizer" id="workspace-resizer" role="separator" aria-orientation="vertical" aria-label="调节文件树宽度，双击折叠" aria-valuemin="170" aria-valuemax="420" aria-valuenow="${w.explorerCollapsed ? 0 : w.explorerWidth || 240}" tabindex="0"></div><div class="editor-wrap" id="editor-wrap">${editorHTML()}</div></section>
     <div class="taskbar"><select id="task-select" aria-label="选择本机任务"><option value="">选择本机任务</option></select><button class="btn ghost" data-action="load-tasks">刷新任务</button><button class="btn primary" data-action="run-task">${icon("play")}运行</button><button class="btn ghost" data-action="cancel-task">${icon("stop")}停止</button></div><section class="terminal" id="work-terminal" data-size="${esc(w.terminalSize || "compact")}"><div class="terminal-head"><span>${icon("terminal")}运行输出</span><div class="terminal-controls" role="group" aria-label="输出高度">${[
@@ -3928,11 +3945,39 @@ panelActions.register(["edit-project"], async (b, e) => {
   await projectModal(b.dataset.id);
   return;
 });
-panelActions.register(["project-collaboration"], async (b) => {
-  await window.CodePierAssets.load("collaboration");
-  if (!S.session) return;
-  await CodePierCollaboration.open(b.dataset.id);
-});
+panelActions.register(["project-collaboration"], (b) =>
+  openProjectCollaboration(b.dataset.id),
+);
+panelActions.register(["project-vps"], (b) =>
+  busy(b, async () => {
+    const login = S.session,
+      space = S.space_id,
+      page = S.page,
+      intent = (S.vpsIntent = (S.vpsIntent || 0) + 1);
+    await window.CodePierAssets.load("vps");
+    if (
+      login === S.session &&
+      space === S.space_id &&
+      page === S.page &&
+      intent === S.vpsIntent
+    )
+      await vpsAssignProject(b.dataset.id);
+  }),
+);
+panelActions.register(["project-chat"], (b) =>
+  busy(b, async () => {
+    const login = S.session,
+      space = S.space_id;
+    if (S.page !== "native") await navigate("native");
+    if (
+      login === S.session &&
+      space === S.space_id &&
+      S.page === "native" &&
+      $("#chat-root")
+    )
+      chatNewSession(b.dataset.id);
+  }),
+);
 panelActions.register(["open-project"], async (b, e) => {
   if (
     S.work.dirty &&

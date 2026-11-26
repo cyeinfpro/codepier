@@ -1802,9 +1802,6 @@ document.addEventListener("click", async (e) => {
       case "edit":
         await vpsEdit(button.dataset.id);
         break;
-      case "project":
-        await vpsAssignProject(button.dataset.project);
-        break;
       case "readiness-backfill":
         await vpsReadinessBackfillStart();
         break;

@@ -1,5 +1,26 @@
 "use strict";
 window.CodePierAccess = (() => {
+  const roleActionLabels = {
+    read: "读取",
+    write: "写入",
+    execute: "执行",
+    computer: "浏览器 / 桌面",
+    "devices.read": "查看设备",
+    "projects.create": "创建项目",
+  };
+  const names = (ids, items) =>
+    ids
+      .map(
+        (id) =>
+          items.find((p) => p.id === id)?.alias ||
+          items.find((p) => p.id === id)?.name ||
+          id,
+      )
+      .join("、");
+  function roleSummary(role) {
+    if (!role) return '<p class="form-note">角色已不存在。</p>';
+    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled ? "已启用" : "已暂停"}</p>${role.project_rules.map((rule) => `<p>${esc(rule.actions.map((a) => roleActionLabels[a]).join(" / "))} → ${esc(rule.all_projects ? "全部现有及未来项目" : names(rule.projects, S.projects) || "")}${rule.created_projects ? " + 本角色创建的项目" : ""}${rule.excluded_projects.length ? "；此规则排除 " + esc(names(rule.excluded_projects, S.projects)) : ""}</p>`).join("")}${role.device_rules.map((rule) => `<p>${esc(rule.actions.map((a) => roleActionLabels[a]).join(" / "))} → ${esc(names(rule.devices, S.devices))}${rule.actions.includes("projects.create") ? `；新项目上限 ${esc(rule.max_project_mode)}${rule.allow_tasks ? " + 任务" : ""}；${esc(rule.root_prefixes.length ? rule.root_prefixes.join("、") : "Agent 本机允许的目录")}` : ""}</p>`).join("")}${role.connector_rules?.length ? `<p>MCP 工具规则：${esc(role.connector_rules.map((rule) => rule.binding_id + " → " + rule.tools.join(", ")).join("；"))}。请在 MCP 网关管理。</p>` : ""}</div>`;
+  }
   function projectFields(projects, all = false, selected = []) {
     return `<div class="field"><label>允许访问的项目</label><label class="check"><input type="checkbox" name="all_projects" ${all ? "checked" : ""}>全部现有及未来新增项目</label><small>开启后，新建项目会自动加入此连接。</small><div class="check-list" data-project-choices>${projects.map((p) => `<label class="check"><input type="checkbox" name="project" value="${esc(p.id)}" ${selected.includes(p.id) ? "checked" : ""} ${all ? "disabled" : ""}><span>${esc(p.alias)} <small> · ${esc(p.device_name || "")}</small></span></label>`).join("") || "<small>暂无项目。</small>"}</div></div>`;
   }
@@ -188,5 +209,12 @@ window.CodePierAccess = (() => {
       });
     };
   }
-  return { projectFields, bindProjects, selection, editGrant };
+  return {
+    projectFields,
+    bindProjects,
+    selection,
+    editGrant,
+    roleActionLabels,
+    roleSummary,
+  };
 })();

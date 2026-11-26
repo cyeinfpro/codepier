@@ -68,6 +68,12 @@ def test_explicit_role_oauth_and_live_new_project_without_reconnect(role_page,st
     page,errors=role_page;label='OAuthRole '+uuid.uuid4().hex[:10]
     r=role(stack.client,label=label,project_rules=[{'actions':['read'],'projects':[stack.project['id']]}])
     p=profile(stack.client,r,label)
+    page.goto(stack.url + '/?direct=profiles#profiles')
+    expect(page.locator('#profile-create')).to_be_visible()
+    expect(page.locator('script[src*="/static/roles.js?"]')).to_have_count(0)
+    page.locator('[data-profile-edit="' + p['id'] + '"]').click()
+    expect(page.locator('[data-role-summary]')).to_contain_text(label)
+    page.get_by_role('dialog', name='编辑访问 Profile').get_by_role('button', name='取消').click()
     registration=must(stack.client.post('/oauth/register',json={'redirect_uris':['http://localhost:12345/callback']}),201)
     verifier='v'*64;challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
     response=stack.client.get('/oauth/authorize',params={'response_type':'code','client_id':registration['client_id'],

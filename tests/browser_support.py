@@ -18,7 +18,7 @@ def open_project_collaboration(page, project_id):
 
 
 def open_project_codex(page, project_id):
-    page.locator(f'[data-native-launch][data-project="{project_id}"]').click()
+    page.locator(f'[data-action="project-chat"][data-id="{project_id}"]').click()
     dialog = page.locator('#chat-project-dialog')
     dialog.locator('[name="cli"][value="codex"]').check()
     dialog.locator(f'#chat-project-results [data-project-id="{project_id}"]').click()

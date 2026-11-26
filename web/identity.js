@@ -464,7 +464,7 @@ window.CodePierIdentity = (() => {
     $('[name="user_id"]', dialog).required = true;
     choice.onchange = () => {
       $("[data-assignment-policy]", dialog).innerHTML = choice.value
-        ? CodePierRoles.summary(roles.find((r) => r.id === choice.value))
+        ? CodePierAccess.roleSummary(roles.find((r) => r.id === choice.value))
         : notice(
             "请明确选择角色，核对其中的项目及读取、写入、执行、桌面能力。未选择时不会授予权限。",
           );

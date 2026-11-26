@@ -145,7 +145,7 @@ function chatInspectorRender() {
     if (c.project) {
       const links = chatSection(holder, "项目");
       chatPanelButton(links, "协作中心", () =>
-        CodePierCollaboration.open(c.project),
+        openProjectCollaboration(c.project),
       );
       chatPanelButton(links, "任务进度", () => {
         Object.assign(workflowState(), {

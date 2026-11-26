@@ -117,6 +117,62 @@ def update_data(v, **changes):
     return {**{k:v[k] for k in keys if k in v},'expected_version':v['version'],**changes}
 
 
+def test_project_vps_assignment_on_first_panel_visit(browser, ui_stack):
+    engine, _ = browser
+    s = ui_stack
+    project, other = s.projects[:2]
+    assigned = create_vps(s, project_ids=[project['id'], other['id']])
+    unassigned = create_vps(s, project_ids=[])
+    page = engine.new_page()
+    try:
+        page.goto(s.url + '/#projects')
+        page.fill('#username', 'admin')
+        page.fill('#password', s.password)
+        page.click('#login-form button')
+        row = page.locator('[data-project-row]').filter(has=page.get_by_role('heading', name=project['alias'], exact=True))
+        expect(row).to_be_visible()
+        expect(page.locator('script[src*="/static/vps.js?"]')).to_have_count(0)
+        row.locator('summary').click()
+        row.get_by_role('button', name='VPS', exact=True).click()
+        dialog = page.get_by_role('dialog', name='项目 VPS · ' + project['alias'])
+        expect(dialog).to_be_visible()
+        before = dialog.locator(f'input[value="{assigned["id"]}"]')
+        after = dialog.locator(f'input[value="{unassigned["id"]}"]')
+        expect(before).to_be_checked()
+        expect(after).not_to_be_checked()
+        before.uncheck()
+        after.check()
+        dialog.get_by_role('button', name='保存分配').click()
+        expect(dialog).to_have_count(0)
+        assert s.must(s.client.get('/api/vps/' + assigned['id']))['project_ids'] == [other['id']]
+        assert s.must(s.client.get('/api/vps/' + unassigned['id']))['project_ids'] == [project['id']]
+        expect(page.locator('#page h1')).to_have_text('项目')
+    finally:
+        page.close()
+
+
+def test_quick_navigation_finds_vps_before_opening_inventory(browser, ui_stack):
+    engine, _ = browser
+    s = ui_stack
+    saved = create_vps(s, enabled=False)
+    page = engine.new_page()
+    try:
+        page.goto(s.url + '/#overview')
+        page.fill('#username', 'admin')
+        page.fill('#password', s.password)
+        page.click('#login-form button')
+        expect(page.locator('#page h1')).to_have_text('总览')
+        expect(page.locator('script[src*="/static/vps.js?"]')).to_have_count(0)
+        page.locator('[data-ui="command"]:visible').first.click()
+        page.locator('#command-query').fill(saved['name'])
+        page.get_by_role('option', name=re.compile(saved['name'])).click()
+        expect(page.locator('#page h1')).to_have_text('VPS')
+        expect(page.locator('#vps-query')).to_have_value(saved['name'])
+        expect(page.locator(f'[data-vps-card="{saved["id"]}"]')).to_be_visible()
+    finally:
+        page.close()
+
+
 @pytest.mark.parametrize('width',[1440,390])
 def test_create_edit_search_and_responsive_layout(browser,ui_stack,width,managed_probe_peer):
     endpoint, commands = managed_probe_peer
@@ -188,7 +244,7 @@ def test_project_and_vps_assignment_both_directions(browser,ui_stack):
         assert set(current['project_ids'])=={s.projects[0]['id'],s.projects[2]['id']}
         page.locator('[data-nav="projects"]').first.click()
         expect(page.locator('#page h1')).to_have_text('项目')
-        assignment = page.locator(f'#page [data-vps-action="project"][data-project="{s.projects[0]["id"]}"]')
+        assignment = page.locator(f'#page [data-action="project-vps"][data-id="{s.projects[0]["id"]}"]')
         assignment.locator('xpath=ancestor::details').locator('summary').click()
         assignment.click()
         page.locator(f'.modal [name="vps_ids"][value="{v["id"]}"]').uncheck()

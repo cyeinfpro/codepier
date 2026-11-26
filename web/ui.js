@@ -1003,7 +1003,9 @@ async function uiCommand() {
   if ($("#chat-root") && typeof chatPalette === "function")
     return chatPalette();
   uiSetMenu(false, false);
-  const session = S.session;
+  const session = S.session,
+    space = S.space_id;
+  const inScope = () => session === S.session && space === S.space_id;
   const dialog = modal(
     "快速前往",
     `<div class="command-search">${icon("search")}<input id="command-query" autofocus role="combobox" aria-expanded="true" aria-autocomplete="list" aria-label="搜索页面或项目" placeholder="搜索页面或项目" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-controls="command-results"></div><div class="command-results" id="command-results" role="listbox" aria-label="页面与项目"></div><p class="command-hint">↑ ↓ 选择 · Enter 打开 · Esc 关闭</p>`,
@@ -1012,11 +1014,11 @@ async function uiCommand() {
   const input = $("#command-query", dialog),
     results = $("#command-results", dialog);
   let projects = [...S.projects],
+    vpsList = CodePierIdentity.canNavigate("vps") ? S.vps || [] : [],
     filtered = [],
     active = -1;
   const entries = () => {
     const canVps = CodePierIdentity.canNavigate("vps");
-    const vpsList = canVps && Array.isArray(S.vps) ? S.vps : [];
     const activeSessions =
       canVps && typeof window !== "undefined"
         ? (window.CodePierVpsTerminal?.list?.() || []).filter(
@@ -1078,7 +1080,11 @@ async function uiCommand() {
             v.username ? `${v.username}@${v.host}` : v.host,
             v.region,
             v.provider,
-            v.enabled === false ? "VPS · 已停用" : "VPS · 打开终端",
+            v.enabled === false
+              ? "VPS · 已停用"
+              : canTerminal
+                ? "VPS · 打开终端"
+                : "VPS · 查看连接",
           ]
             .filter(Boolean)
             .join(" · "),
@@ -1152,7 +1158,7 @@ async function uiCommand() {
   }
   async function choose(index) {
     const item = filtered[index];
-    if (!item || session !== S.session || !dialog.isConnected) return;
+    if (!item || !inScope() || !dialog.isConnected) return;
     if (
       item.kind === "project" &&
       S.work.dirty &&
@@ -1164,7 +1170,7 @@ async function uiCommand() {
       }))
     )
       return;
-    if (session !== S.session || !dialog.isConnected) return;
+    if (!inScope() || !dialog.isConnected) return;
     closeModal(dialog);
     if (item.kind === "project") {
       resetWork(item.id);
@@ -1180,9 +1186,10 @@ async function uiCommand() {
       return;
     }
     if (item.kind === "vps") {
-      if (item.canTerminal && typeof vpsOpenTerminal === "function") {
+      if (item.canTerminal) {
         if (S.page !== "vps") await navigate("vps");
-        await vpsOpenTerminal(item.id);
+        if (inScope() && S.page === "vps" && $(".vps-grid, #vps-terminal-host"))
+          await vpsOpenTerminal(item.id);
       } else {
         S.vpsQuery = item.label;
         await navigate("vps");
@@ -1230,16 +1237,35 @@ async function uiCommand() {
   };
   render();
   input.focus();
-  try {
-    const r = await api("/api/projects");
-    if (dialog.isConnected && session === S.session) {
-      projects = r.projects;
-      S.projects = r.projects;
+  const load = async (request, update) => {
+    try {
+      const value = await request();
+      if (!dialog.isConnected || !inScope()) return;
+      update(value);
       render(false);
+    } catch (error) {
+      if (dialog.isConnected && inScope()) toast(error.message, true);
     }
-  } catch (error) {
-    if (dialog.isConnected && session === S.session) toast(error.message, true);
-  }
+  };
+  await Promise.all([
+    load(
+      () => api("/api/projects"),
+      (r) => {
+        projects = r.projects;
+        S.projects = r.projects;
+      },
+    ),
+    CodePierIdentity.canNavigate("vps") &&
+      load(
+        async () => {
+          await window.CodePierAssets.load("vps");
+          if (dialog.isConnected && inScope()) return vpsInventory();
+        },
+        (items) => {
+          vpsList = items;
+        },
+      ),
+  ]);
 }
 document.addEventListener("click", (e) => {
   const button = e.target.closest("[data-ui]");
