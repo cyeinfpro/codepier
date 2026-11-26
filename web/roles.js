@@ -1,28 +1,8 @@
 "use strict";
 window.CodePierRoles = (() => {
-  const labels = {
-    read: "读取",
-    write: "写入",
-    execute: "执行",
-    computer: "浏览器 / 桌面",
-    "devices.read": "查看设备",
-    "projects.create": "创建项目",
-  };
+  const { roleActionLabels: labels, roleSummary: summary } = CodePierAccess;
   const note =
     "动态角色的能力和项目范围会影响所有已同意该角色的连接，无需重新 OAuth。旧固定授权保持原状，角色设置由你管理。";
-  const names = (ids, items) =>
-    ids
-      .map(
-        (id) =>
-          items.find((p) => p.id === id)?.alias ||
-          items.find((p) => p.id === id)?.name ||
-          id,
-      )
-      .join("、");
-  function summary(role) {
-    if (!role) return '<p class="form-note">角色已不存在。</p>';
-    return `<div class="role-policy-summary"><p><strong>${esc(role.label)}</strong> · 版本 ${role.version} · ${role.enabled ? "已启用" : "已暂停"}</p>${role.project_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(" / "))} → ${esc(rule.all_projects ? "全部现有及未来项目" : names(rule.projects, S.projects) || "")}${rule.created_projects ? " + 本角色创建的项目" : ""}${rule.excluded_projects.length ? "；此规则排除 " + esc(names(rule.excluded_projects, S.projects)) : ""}</p>`).join("")}${role.device_rules.map((rule) => `<p>${esc(rule.actions.map((a) => labels[a]).join(" / "))} → ${esc(names(rule.devices, S.devices))}${rule.actions.includes("projects.create") ? `；新项目上限 ${esc(rule.max_project_mode)}${rule.allow_tasks ? " + 任务" : ""}；${esc(rule.root_prefixes.length ? rule.root_prefixes.join("、") : "Agent 本机允许的目录")}` : ""}</p>`).join("")}${role.connector_rules?.length ? `<p>MCP 工具规则：${esc(role.connector_rules.map((rule) => rule.binding_id + " → " + rule.tools.join(", ")).join("；"))}。请在 MCP 网关管理。</p>` : ""}</div>`;
-  }
   async function html() {
     const result = await api("/api/access-roles");
     return `<div id="roles-page">${heading("访问角色", "LIVE ROLE POLICY", "", `<button class="btn primary" id="role-create">新建角色</button>`)}${notice(note, true)}<section class="panel"><div class="panel-head"><h2>共用政策 · 独立身份</h2><span class="badge neutral">${result.roles.length} / ${result.limit}</span></div><div class="panel-body">${result.roles.map((role) => `<div class="grant-row"><div>${summary(role)}<small>${role.bound_profiles} 个身份 · ${role.active_grants} 个未撤销角色授权</small><p class="mono">${esc(role.id)}</p></div><button class="btn small" data-role-edit="${esc(role.id)}">编辑 / 暂停</button></div>`).join("") || empty("先建立 secretary 等角色，再将主秘书、小秘书 Profile 绑定到它。")}</div></section><div class="actions"><button class="btn" data-nav="profiles">管理身份 Profiles</button><button class="btn ghost" data-nav="connect">查看角色 MCP 地址</button></div></div>`;
@@ -247,5 +227,5 @@ window.CodePierRoles = (() => {
       if (login === S.session) toast(error.message, true);
     }
   }
-  return { html, bind, edit, summary };
+  return { html, bind, edit };
 })();

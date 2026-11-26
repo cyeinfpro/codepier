@@ -6,11 +6,34 @@ they do not stand in for every domain's empty/permission state.
 import json
 import pytest
 from playwright.sync_api import expect
+from tests.browser_support import open_chat_inspector, open_project_codex
 from tests.test_ui_unification import _login, _navigate, _prepare_native_fixture
 
 ROUTES = ('overview','native','projects','workbench','workflows','collaboration',
           'artifacts','devices','vps','diagnostics','audit','connect','profiles',
           'roles','members','identity-admin','mcp-gateway','integrations','identity','settings')
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_project_chat_and_inspector_collaboration_on_first_visit(stack, chat_browser_pool, engine):
+    _prepare_native_fixture(stack)
+    context = chat_browser_pool(engine).new_context(viewport={"width": 1440, "height": 960})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    try:
+        _login(page, stack)
+        _navigate(page, "projects")
+        expect(page.locator('script[src*="/static/chat.js?"]')).to_have_count(0)
+        open_project_codex(page, stack.project["id"])
+        expect(page.locator("#chat-project")).to_have_value(stack.project["id"])
+        expect(page.locator('script[src*="/static/collaboration-room.js?"]')).to_have_count(0)
+        open_chat_inspector(page)
+        page.locator("#chat-inspector").get_by_role("button", name="协作中心").click()
+        expect(page.locator('#page h1')).to_have_text('协作中心')
+        assert not errors, errors
+    finally:
+        context.close()
 
 @pytest.mark.parametrize("width", [320, 390, 1440])
 def test_twenty_routes_text_200_percent_and_keyboard(stack, chat_browser_pool, width):

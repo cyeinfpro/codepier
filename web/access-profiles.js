@@ -67,7 +67,7 @@ window.CodePierProfiles = (() => {
         fixed.hidden = !!roleSelect.value;
         $("[data-role-policy]", dialog).hidden = !roleSelect.value;
         $("[data-role-summary]", dialog).innerHTML = roleSelect.value
-          ? CodePierRoles.summary(
+          ? CodePierAccess.roleSummary(
               roles.find((role) => role.id === roleSelect.value),
             )
           : "";
@@ -180,7 +180,7 @@ window.CodePierProfiles = (() => {
       const profile = profiles.find((p) => p.id === select.value);
       if (profile?.role_id && requested.includes(roleScope)) {
         fields.innerHTML =
-          CodePierRoles.summary(profile.role) +
+          CodePierAccess.roleSummary(profile.role) +
           `<label class="check"><input type="checkbox" name="confirm_dynamic_role">我同意连接跟随角色权限，包括未来新增的能力和项目。</label><label class="check"><input type="checkbox" name="confirm_external_mcp">同时允许此角色使用已审阅并授权的外部 MCP 帐户与工具，包括后续明确配置到角色的外部能力。</label><p class="form-note">外部帐户须先在 MCP 网关连接。此选项不会共享其他人的私有帐户，可随时在网关撤回。</p>`;
       } else if (roleOnly) {
         fields.innerHTML =

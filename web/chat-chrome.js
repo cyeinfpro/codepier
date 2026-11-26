@@ -850,18 +850,3 @@ function chatPalette() {
   render();
   input.focus();
 }
-function chatProjectButtons(project) {
-  return `<button class="btn small" data-native-launch data-project="${esc(project)}">对话</button>`;
-}
-document.addEventListener("click", (e) => {
-  const b = e.target.closest("[data-native-launch]");
-  if (!b) return;
-  (async () => {
-    if (S.page !== "native") await navigate("native");
-    if (S.page === "native") chatNewSession(b.dataset.project);
-  })().catch((err) =>
-    typeof toast === "function"
-      ? toast(err.message, true)
-      : chatStatus(err.message, true),
-  );
-});
