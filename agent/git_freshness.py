@@ -87,8 +87,10 @@ def working_changes(root, *, offset, limit):
         return _unavailable(reason)
     try:
         status = _read(
-            root, ["status", "--porcelain=v1", "--untracked-files=normal"],
-            trim=False, timeout=_CHANGES_TIMEOUT,
+            root,
+            ["status", "--porcelain=v1", "--untracked-files=normal"],
+            trim=False,
+            timeout=_CHANGES_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         return _unavailable("git_status_timeout")
@@ -138,7 +140,8 @@ def freshness(root):
     }
     try:
         status = _read(
-            root, ["status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
+            root,
+            ["status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
             timeout=_OPEN_STATUS_TIMEOUT,
         )
         dirty = 0
@@ -157,12 +160,16 @@ def freshness(root):
         result["dirty"] = dirty
     except subprocess.TimeoutExpired:
         return _partial_freshness(
-            root, result, "git_status_timeout",
+            root,
+            result,
+            "git_status_timeout",
             "Git repository detected; reading working-tree changes timed out. Changes are unknown.",
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return _partial_freshness(
-            root, result, "git_status_unavailable",
+            root,
+            result,
+            "git_status_unavailable",
             "Git repository detected; working-tree changes could not be read.",
         )
 
