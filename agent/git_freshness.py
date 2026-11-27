@@ -123,6 +123,23 @@ def _partial_freshness(root, result, reason, warning):
     return result
 
 
+def _parse_status(status, result):
+    dirty = 0
+    for line in status.splitlines():
+        if line.startswith("# branch.head "):
+            result["branch"] = line[len("# branch.head ") :]
+        elif line.startswith("# branch.oid "):
+            result["head"] = line[len("# branch.oid ") :]
+        elif line.startswith("# branch.upstream "):
+            result["upstream"] = line[len("# branch.upstream ") :]
+        elif line.startswith("# branch.ab "):
+            ahead, behind = line.split()[2:4]
+            result["ahead"], result["behind"] = int(ahead), -int(behind)
+        elif line and not line.startswith("#"):
+            dirty += 1
+    result["dirty"] = dirty
+
+
 def freshness(root):
     root = Path(root)
     if reason := _root_error(root):
@@ -144,20 +161,7 @@ def freshness(root):
             ["status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
             timeout=_OPEN_STATUS_TIMEOUT,
         )
-        dirty = 0
-        for line in status.splitlines():
-            if line.startswith("# branch.head "):
-                result["branch"] = line[len("# branch.head ") :]
-            elif line.startswith("# branch.oid "):
-                result["head"] = line[len("# branch.oid ") :]
-            elif line.startswith("# branch.upstream "):
-                result["upstream"] = line[len("# branch.upstream ") :]
-            elif line.startswith("# branch.ab "):
-                ahead, behind = line.split()[2:4]
-                result["ahead"], result["behind"] = int(ahead), -int(behind)
-            elif line and not line.startswith("#"):
-                dirty += 1
-        result["dirty"] = dirty
+        _parse_status(status, result)
     except subprocess.TimeoutExpired:
         return _partial_freshness(
             root,

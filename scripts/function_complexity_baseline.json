@@ -69,7 +69,6 @@
   "agent/filesystem.py::FileEngine.tree::PLR0915": 55,
   "agent/filesystem.py::FileEngine.walk::C901": 20,
   "agent/filesystem.py::FileEngine.walk::PLR0915": 62,
-  "agent/git_freshness.py::freshness::C901": 12,
   "agent/incoming_artifacts.py::AnchoredDestination.__exit__::C901": 15,
   "agent/incoming_artifacts.py::AnchoredDestination.publish::C901": 14,
   "agent/incoming_uploads.py::IncomingUploads.finish::C901": 11,
