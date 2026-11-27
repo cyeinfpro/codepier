@@ -2,7 +2,7 @@
 
 **让 AI 在你的真实开发环境中工作。**
 
-[![Version](https://img.shields.io/badge/version-1.34.15-2563eb)](RELEASE.json)
+[![Version](https://img.shields.io/badge/version-1.34.16-2563eb)](RELEASE.json)
 [![License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
 CodePier 是一个自托管的 AI 开发与远程运维工作台。将 ChatGPT 等 MCP 客户端、Pi / Codex / Claude Code 原生会话、开发电脑、VPS 和团队协作接入同一个面板，在明确授权的范围内读取项目、修改代码、运行测试、交付任务并核对结果。
@@ -137,10 +137,11 @@ https://你的域名/mcp
 
 ## 最近版本
 
-当前 `main` 源码版本为 **v1.34.15**（2026-11-26）。
+当前 `main` 源码版本为 **v1.34.16**（2026-11-27）。
 
 | 版本 | 变化 |
 | --- | --- |
+| **1.34.16** | 修复 NAS 工作区扫描超时时被误报为没有 Git；保留分支与提交，明确区分改动未知。 |
 | **1.34.15** | 修复项目内 VPS 绑定管理、全局 VPS 搜索、项目与任务对话入口、协作入口以及首次打开角色政策摘要的问题。 |
 | **1.34.14** | 增加受授权的 VPS 发布包 SFTP 暂存与 SHA-256 校验，支持后续命令从已暂存包读取标准输入。 |
 | **1.34.13** | 区分命令退出和日志收集状态，限制大文件及会话快照开销；改进终端恢复、协作事件交付及缓存清理。 |
@@ -199,9 +200,9 @@ https://你的域名/mcp
 
 ## 版本与许可
 
-当前仓库的 `RELEASE.json` 标记为 **1.34.15 / prepared / source-and-image**，其中 `published` 和 `deployed` 均为 `false`。可下载的正式版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，实际部署版本以对应 Hub / Agent 的运行状态为准。
+当前仓库的 `RELEASE.json` 标记为 **1.34.16 / prepared / source-and-image**，其中 `published` 和 `deployed` 均为 `false`。可下载的正式版本以 [Releases](https://github.com/cyeinfpro/codepier/releases/latest) 为准，实际部署版本以对应 Hub / Agent 的运行状态为准。
 
-- **Version:** 1.34.15
+- **Version:** 1.34.16
 - **License:** [MIT](LICENSE)
 
 第三方依赖保留各自许可证，见 `web/vendor/` 与 [MCP Apps 声明](web/mcp-apps/THIRD_PARTY_NOTICES.txt)。

@@ -650,6 +650,7 @@ def _open(value, args):
                 "dirty",
                 "network_checked",
                 "last_fetch_age_seconds",
+                "status_reason",
                 "warning",
             },
         )

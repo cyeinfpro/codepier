@@ -195,6 +195,48 @@ def test_public_open_keeps_freshness_but_drops_unknown_git_fields():
     assert result['git'] == {'available': True, 'behind': 3, 'network_checked': False}
 
 
+def test_status_timeout_preserves_repo_and_unknown_changes(repos, monkeypatch):
+    from agent import git_freshness
+    from shared.mcp_presentation import _open
+
+    root, _, first, _ = repos
+    read = git_freshness._read
+    calls = []
+
+    def slow_status(root, args, **kwargs):
+        if args[0] == 'status':
+            calls.append(kwargs['timeout'])
+            raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+        return read(root, args, **kwargs)
+
+    monkeypatch.setattr(git_freshness, '_read', slow_status)
+    git = _open({'git': freshness(root)}, {})['git']
+    assert git['available'] and git['head'] == first and git['branch'] == 'main'
+    assert git['dirty'] is None and git['ahead'] is None
+    assert git['status_reason'] == 'git_status_timeout' and 'timed out' in git['warning']
+    assert git_freshness.working_changes(root, offset=0, limit=5) == {
+        'available': False, 'reason': 'git_status_timeout', 'network_checked': False}
+    assert calls == [3, 10]
+
+
+def test_fetch_metadata_timeout_does_not_erase_observed_status(repos, monkeypatch):
+    from agent import git_freshness
+
+    root, _, first, _ = repos
+    (root / 'new.txt').write_text('untracked')
+    read = git_freshness._read
+
+    def slow_fetch_path(root, args, **kwargs):
+        if args[-1] == 'FETCH_HEAD':
+            raise subprocess.TimeoutExpired(args, 3)
+        return read(root, args, **kwargs)
+
+    monkeypatch.setattr(git_freshness, '_read', slow_fetch_path)
+    result = freshness(root)
+    assert result['available'] and result['head'] == first and result['dirty'] == 1
+    assert result['last_fetch_age_seconds'] is None and 'status_reason' not in result
+
+
 def test_non_repository_freshness_is_explicit(tmp_path):
     assert freshness(tmp_path) == {
         'available': False, 'reason': 'not_a_git_root', 'network_checked': False}
